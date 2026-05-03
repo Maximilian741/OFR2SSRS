@@ -1,0 +1,68 @@
+<?xml version="1.0" encoding="WINDOWS-1252" ?>
+<report name="SIMPLE_LOOKUP" DTDVersion="9.0.2.0.10">
+  <xmlSettings xmlTag="SIMPLE_LOOKUP" xmlPrologType="text">
+  <![CDATA[<?xml version="1.0" encoding="&Encoding"?>]]>
+  </xmlSettings>
+  <data>
+    <userParameter name="P_DEPT_ID" datatype="number" width="10"
+     precision="10" label="Department Id" defaultWidth="0" defaultHeight="0"/>
+    <dataSource name="Q_EMP">
+      <select>
+      <![CDATA[SELECT
+	emp_id,
+	emp_name,
+	salary
+FROM
+	employees
+WHERE
+	dept_id = :P_DEPT_ID
+ORDER BY
+	emp_name]]>
+      </select>
+      <displayInfo x="0.50000" y="0.50000" width="1.50000" height="0.25000"/>
+      <group name="G_EMP">
+        <displayInfo x="0.50000" y="1.00000" width="1.50000" height="2.00000"/>
+        <dataItem name="Emp_Id" oracleDatatype="number" columnOrder="1"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Emp Id" breakOrder="none">
+          <dataDescriptor expression="emp_id"
+           descriptiveExpression="EMP_ID" order="1" oracleDatatype="number"
+           width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="Emp_Name" datatype="vchar2" columnOrder="2"
+         width="100" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Emp Name" breakOrder="none">
+          <dataDescriptor expression="emp_name"
+           descriptiveExpression="EMP_NAME" order="2" width="100"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="Salary" oracleDatatype="number" columnOrder="3"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Salary" breakOrder="none">
+          <dataDescriptor expression="salary"
+           descriptiveExpression="SALARY" order="3" oracleDatatype="number"
+           width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_Salary_Formatted_F" source="cf_salary_formatted_f"
+         datatype="character" width="20" precision="10" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="16" defaultLabel="Cf Salary Formatted"
+         breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000" height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+  </data>
+  <programUnits>
+    <function name="cf_salary_formatted_f" returnType="character">
+      <textSource>
+      <![CDATA[FUNCTION CF_Salary_Formatted_F
+RETURN VARCHAR2 IS
+BEGIN
+	RETURN(TO_CHAR(:Salary, 'FM$999,999.00')) ;
+END ;]]>
+      </textSource>
+    </function>
+  </programUnits>
+</report>

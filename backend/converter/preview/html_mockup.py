@@ -7,9 +7,9 @@ The frontend injects this fragment into the "HTML Mockup" tab.
 
 All styling is inline so the fragment can be embedded anywhere safely.
 
-Real Oracle Reports / SSRS output is on plain white paper with black/dark
-gray text and minimal color, so we render against white with a thin
-border that mimics a printed page.
+Real Oracle Reports / SSRS output is on plain white paper with pure black
+ink and no color. We render strictly in black and white -- no tan, no
+cream, no navy -- like a printed government form.
 """
 from __future__ import annotations
 
@@ -119,28 +119,29 @@ def _format_param_summary(report):
             break
     if not parts:
         return "Renewal Year = '<b>2026</b>'"
-    return " &nbsp; • &nbsp; ".join(parts)
+    return " &nbsp; * &nbsp; ".join(parts)
 
 
 # ---------------------------------------------------------------------------
-# Section builders -- white background, near-black text, government-form vibe
+# Section builders -- pure black ink on white paper, no color.
 # ---------------------------------------------------------------------------
 
-# Color palette (kept in one place so the whole mockup stays consistent)
-INK         = "#111111"   # near-black ink
-INK_SOFT    = "#3a3a3a"   # body text
-INK_MUTED   = "#6a6a6a"   # captions / metadata
-RULE        = "#222222"   # dark page rules (heavy)
-RULE_LIGHT  = "#cfcfcf"   # light dividers
-ROW_ALT     = "#f5f7fa"   # zebra stripe (subtle blue-gray)
-TH_BG       = "#1c2030"   # header strip background
-TH_FG       = "#ffffff"   # header text
+# Strict black-and-white palette. NO blue, navy, tan, cream, brown.
+PAPER       = "#ffffff"   # paper
+INK         = "#000000"   # pure black ink
+INK_SOFT    = "#333333"   # body text
+INK_MUTED   = "#666666"   # captions / metadata
+RULE        = "#888888"   # standard rule
+RULE_LIGHT  = "#d0d0d0"   # light dividers
+ROW_ALT     = "#f2f2f2"   # zebra alt row
+TH_BG       = "#000000"   # table header background (solid black)
+TH_FG       = "#ffffff"   # table header text
 
 
 def _render_header():
     return (
         '<div style="text-align:center; padding-bottom:14px; '
-        f'border-bottom:2px solid {RULE}; margin-bottom:18px;">'
+        f'border-bottom:2px solid {INK}; margin-bottom:18px;">'
         f'<div style="font-size:11px; letter-spacing:2px; color:{INK_MUTED}; '
         'text-transform:uppercase;">State of Montana</div>'
         f'<div style="font-size:20px; font-weight:bold; letter-spacing:1px; '
@@ -179,8 +180,8 @@ def _render_param_form(report):
             f'width:35%; border-bottom:1px dotted {RULE_LIGHT};">{label}</td>'
             f'<td style="padding:6px 10px; border-bottom:1px dotted {RULE_LIGHT};">'
             f'<span style="display:inline-block; min-width:160px; padding:3px 8px; '
-            f'background:#ffffff; border:1px solid {INK_SOFT}; '
-            'font-family:Consolas,monospace; font-size:12px;">'
+            f'background:{PAPER}; border:1px solid {INK}; color:{INK}; '
+            'font-family:Georgia,\'Times New Roman\',Times,serif; font-size:12px;">'
             f'{val}</span>'
             f'<span style="color:{INK_MUTED}; font-size:10px; margin-left:10px;">'
             f'({dtype})</span></td>'
@@ -189,8 +190,8 @@ def _render_param_form(report):
     if not rows:
         return ""
     return (
-        '<div style="margin-bottom:20px; background:#ffffff; '
-        f'border:1px solid {RULE_LIGHT}; padding:12px 16px;">'
+        f'<div style="margin-bottom:20px; background:{PAPER}; '
+        f'border:1px solid {RULE}; padding:12px 16px;">'
         f'<div style="font-size:13px; font-weight:bold; color:{INK}; '
         'margin-bottom:8px; text-transform:uppercase; letter-spacing:1px;">'
         'Parameter Form</div>'
@@ -216,7 +217,7 @@ def _render_data_table(report):
     )
     body = []
     for i, r in enumerate(rows):
-        bg = "#ffffff" if i % 2 == 0 else ROW_ALT
+        bg = PAPER if i % 2 == 0 else ROW_ALT
         cells = "".join(
             f'<td style="padding:7px 10px; border:1px solid {RULE_LIGHT}; '
             f'background:{bg}; font-size:12px; color:{INK};">{_esc(c)}</td>'
@@ -229,7 +230,7 @@ def _render_data_table(report):
         f'<div style="font-size:12px; font-weight:bold; color:{INK}; '
         f'margin-bottom:6px;">Data: {qname}</div>'
         '<table style="width:100%; border-collapse:collapse; '
-        f'border:1px solid {RULE}; font-family:Georgia,serif;">'
+        f'border:1px solid {INK}; font-family:Georgia,\'Times New Roman\',Times,serif;">'
         f'<thead><tr>{head_cells}</tr></thead>'
         f'<tbody>{"".join(body)}</tbody>'
         '</table>'
@@ -243,7 +244,7 @@ def _render_data_table(report):
 def _render_signature_block():
     return (
         '<div style="margin-top:36px; padding-top:18px; '
-        f'border-top:1px solid {RULE};">'
+        f'border-top:1px solid {INK};">'
         '<table style="width:100%;">'
         '<tr>'
         '<td style="width:55%; vertical-align:bottom;">'
@@ -281,12 +282,11 @@ def render_mockup(report):
         _render_signature_block(),
     ])
 
-    # White paper, dark text, light page-edge shadow to suggest a printed sheet.
+    # Pure black-and-white paper. Thin gray border to suggest a printed sheet.
     return (
         '<div style="font-family:Georgia,\'Times New Roman\',Times,serif; '
-        'background:#ffffff; color:#111111; padding:48px 56px; '
+        f'background:{PAPER}; color:{INK}; padding:48px 56px; '
         f'border:1px solid {RULE_LIGHT}; '
-        'box-shadow:0 1px 2px rgba(0,0,0,0.04), 0 6px 24px rgba(20,24,40,0.06); '
         'max-width:900px; margin:0 auto; line-height:1.45;">'
         f'{body}'
         '</div>'

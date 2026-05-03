@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Oracle2SSRS — Drag, drop, deploy.</title>
-<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v={{ asset_version }}">
 <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
 </head>
 <body>
@@ -93,6 +93,10 @@
       <button class="tab" data-tab="deploy" role="tab">
         <span class="tab-dot dot-deploy"></span> Deploy Checklist
         <span class="tab-badge" id="badge-deploy" hidden></span>
+      </button>
+      <button class="tab" data-tab="extras" role="tab">
+        <span class="tab-dot dot-extras"></span> Extras
+        <span class="tab-badge" id="badge-extras" hidden></span>
       </button>
     </nav>
 
@@ -188,6 +192,16 @@
         </div>
       </div>
 
+      <!-- Tab: Extras (audit trail, AI prompts, bursting / DDS) -->
+      <div id="tab-extras" class="tab-panel" hidden>
+        <div class="panel-card">
+          <div class="panel-toolbar">
+            <div class="panel-title">Extras &mdash; audit trail, AI prompts, bursting</div>
+          </div>
+          <div id="extras-host" class="extras-host"></div>
+        </div>
+      </div>
+
     </section>
 
     <footer id="warnings-footer" class="warnings-footer" hidden>
@@ -207,6 +221,6 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js"></script>
-<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>

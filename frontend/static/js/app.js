@@ -171,6 +171,7 @@ function onConverted(data) {
   renderLiveTab(data);
   renderValidationTab(data);
   renderDeploymentTab(data);
+  renderExtrasTab(data);
   renderWarnings(data);
   if (window.Prism) Prism.highlightAll();
   // Show whatever tab was active
@@ -459,6 +460,120 @@ function setBadge(id, n) {
   if (n > 0) { node.textContent = String(n); node.hidden = false; }
   else { node.hidden = true; node.textContent = ""; }
 }
+
+
+// ----- Tab 7: Extras (audit trail, AI prompts, bursting / DDS) -----
+function renderExtrasTab(data) {
+  const host = document.getElementById("extras-host");
+  if (!host) return;
+  host.innerHTML = "";
+
+  // Section: Bursting
+  const burst = (data && data.bursting) || {};
+  const burstSection = document.createElement("section");
+  burstSection.className = "extras-section";
+  const burstTitle = burst.is_bursting ? "Bursting / Data-Driven Subscriptions DETECTED" : "Bursting / DDS — not detected";
+  burstSection.innerHTML = "<h3>" + burstTitle + "</h3>";
+  if (burst.is_bursting) {
+    const ev = (burst.evidence || []).map(e => "<li>" + escapeHtml(e) + "</li>").join("");
+    burstSection.innerHTML +=
+      "<div class='extras-meta'>" +
+      "<b>Burst key:</b> " + escapeHtml(burst.burst_key_field || "?") +
+      " &nbsp;|&nbsp; <b>Filename pattern:</b> " + escapeHtml(burst.filename_pattern || "?") +
+      "</div>" +
+      "<details open><summary>Evidence (" + (burst.evidence || []).length + ")</summary><ul>" + ev + "</ul></details>";
+    if (burst.burst_query) {
+      burstSection.innerHTML +=
+        "<details><summary>Burst query (T-SQL) <button class='btn btn-ghost btn-copy' data-copy='burst_query'>Copy</button></summary>" +
+        "<pre class='code-block'><code class='language-sql'>" + escapeHtml(burst.burst_query) + "</code></pre></details>";
+    }
+    if (burst.powershell_script) {
+      burstSection.innerHTML +=
+        "<details><summary>PowerShell DDS emulator (for SSRS Standard) <button class='btn btn-ghost btn-copy' data-copy='powershell_script'>Copy</button></summary>" +
+        "<pre class='code-block'><code>" + escapeHtml(burst.powershell_script) + "</code></pre></details>";
+    }
+  } else {
+    burstSection.innerHTML += "<p class='extras-meta'>This report does not appear to use Oracle Reports distribution. No DDS skeleton generated.</p>";
+  }
+  host.appendChild(burstSection);
+
+  // Section: AI prompts
+  const prompts = data.ai_prompts || [];
+  const promptSection = document.createElement("section");
+  promptSection.className = "extras-section";
+  promptSection.innerHTML = "<h3>AI-assist prompts (" + prompts.length + ")</h3>" +
+    "<p class='extras-meta'>Paste any of these into Claude / Copilot / ChatGPT to get a working translation for the trickier PL/SQL. We don't call any LLM here.</p>";
+  prompts.forEach((p, idx) => {
+    const card = document.createElement("details");
+    card.className = "extras-prompt diff-" + (p.difficulty || "medium");
+    card.innerHTML =
+      "<summary>" +
+      "<span class='extras-tag'>" + escapeHtml(p.scope || "") + "</span> " +
+      "<b>" + escapeHtml(p.name || ("prompt #" + (idx+1))) + "</b>" +
+      " <span class='extras-difficulty'>" + escapeHtml(p.difficulty || "medium") + "</span>" +
+      " <button class='btn btn-ghost btn-copy' data-copy-prompt='" + idx + "'>Copy prompt</button>" +
+      "</summary>" +
+      "<div class='extras-meta'>" + escapeHtml(p.context_hint || "") + "</div>" +
+      "<pre class='code-block'><code>" + escapeHtml(p.prompt_template || "") + "</code></pre>";
+    promptSection.appendChild(card);
+  });
+  host.appendChild(promptSection);
+
+  // Section: Audit trail (table)
+  const trail = data.audit_trail || [];
+  const auditSection = document.createElement("section");
+  auditSection.className = "extras-section";
+  auditSection.innerHTML = "<h3>Translation audit trail (" + trail.length + " entries)</h3>" +
+    "<p class='extras-meta'>Every translation decision recorded for review.</p>";
+  if (trail.length) {
+    let table = "<div class='extras-table-wrap'><table class='extras-table'><thead><tr>" +
+      "<th>#</th><th>Stage</th><th>Scope</th><th>Rule</th><th>Before</th><th>After</th>" +
+      "</tr></thead><tbody>";
+    trail.forEach(e => {
+      table += "<tr>" +
+        "<td>" + escapeHtml(String(e.step || "")) + "</td>" +
+        "<td>" + escapeHtml(e.stage || "") + "</td>" +
+        "<td>" + escapeHtml(e.scope || "") + "</td>" +
+        "<td><code>" + escapeHtml(e.rule || "") + "</code></td>" +
+        "<td><code class='audit-snippet'>" + escapeHtml(e.before || "") + "</code></td>" +
+        "<td><code class='audit-snippet'>" + escapeHtml(e.after || "") + "</code></td>" +
+        "</tr>";
+    });
+    table += "</tbody></table></div>";
+    auditSection.innerHTML += table;
+  }
+  host.appendChild(auditSection);
+
+  // Wire up Copy buttons
+  host.querySelectorAll(".btn-copy").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const key = btn.dataset.copy;
+      const promptIdx = btn.dataset.copyPrompt;
+      let text = "";
+      if (key && data.bursting && data.bursting[key]) text = data.bursting[key];
+      else if (promptIdx != null && data.ai_prompts && data.ai_prompts[+promptIdx]) text = data.ai_prompts[+promptIdx].prompt_template || "";
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(
+        () => toast("Copied", "ok"),
+        () => toast("Copy failed", "err")
+      );
+    });
+  });
+
+  // Set badge: count items needing attention (= AI prompts > 0 OR bursting detected)
+  const extrasCount = prompts.length + (burst.is_bursting ? 1 : 0);
+  setBadge("badge-extras", extrasCount);
+}
+
+function escapeHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
 
 // ============================================================
 // Wire everything up after DOM is ready

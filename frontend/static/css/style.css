@@ -689,3 +689,23 @@ button { font-family: inherit; cursor: pointer; }
   overflow: auto;
 }
 .deploy-body pre.md-code code { background: transparent; padding: 0; }
+
+/* ---------- Extras tab (audit, AI prompts, bursting) ---------- */
+.dot-extras { background: #2bb673; }
+.extras-host { display: flex; flex-direction: column; gap: 18px; padding: 4px; }
+.extras-section { background: #fff; border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+.extras-section h3 { margin: 0 0 8px 0; font-size: 14px; color: var(--text); }
+.extras-meta { font-size: 12px; color: var(--text-muted); margin: 6px 0; }
+.extras-prompt { margin-bottom: 8px; border-left: 3px solid #ccc; padding-left: 10px; }
+.extras-prompt.diff-hard   { border-left-color: var(--bad); }
+.extras-prompt.diff-medium { border-left-color: var(--warn); }
+.extras-prompt.diff-easy   { border-left-color: var(--good); }
+.extras-prompt summary { cursor: pointer; padding: 6px 0; font-size: 13px; }
+.extras-tag { display: inline-block; padding: 2px 6px; background: var(--panel-2); color: var(--text-muted); border-radius: 4px; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+.extras-difficulty { display: inline-block; padding: 1px 8px; background: #f3f3f3; color: #555; border-radius: 999px; font-size: 10px; text-transform: uppercase; }
+.extras-table-wrap { max-height: 400px; overflow: auto; border: 1px solid var(--border); border-radius: 6px; }
+.extras-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.extras-table th { position: sticky; top: 0; background: #1c2030; color: #fff; padding: 6px 8px; text-align: left; font-weight: 600; }
+.extras-table td { padding: 5px 8px; border-bottom: 1px solid #eee; vertical-align: top; }
+.audit-snippet { font-size: 11px; color: #666; white-space: pre-wrap; word-break: break-word; max-width: 240px; display: inline-block; }
+.btn-copy { font-size: 10px; padding: 2px 8px; margin-left: 8px; }

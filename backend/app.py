@@ -34,10 +34,20 @@ app = Flask(
 _LAST = {"report": None, "rdl_xml": "", "oracle_xml": "", "mockup_html": ""}
 
 
+
+
+def _asset_version():
+    """Return a cache-busting token. We use the mtime of app.js so any change
+    forces a fresh fetch in the browser."""
+    try:
+        return str(int((ROOT / "frontend" / "static" / "js" / "app.js").stat().st_mtime))
+    except Exception:
+        return "0"
+
 @app.route("/")
 def index():
     sample_files = sorted(p.name for p in SAMPLES.glob("*.xml")) if SAMPLES.exists() else []
-    return render_template("index.html", samples=sample_files)
+    return render_template("index.html", samples=sample_files, asset_version=_asset_version())
 
 
 @app.post("/api/convert")

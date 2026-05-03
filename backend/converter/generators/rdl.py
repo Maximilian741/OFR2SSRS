@@ -131,6 +131,46 @@ def _pick_main_query(report: ParsedReport) -> Optional[DataQuery]:
     return None
 
 
+def _pick_detail_query(report: ParsedReport, main_name: str) -> Optional[DataQuery]:
+    """Pick a master-detail secondary query (Q_ORG preferred)."""
+    if not report.queries:
+        return None
+    main_upper = (main_name or "").upper()
+    # Prefer Q_ORG explicitly
+    for q in report.queries:
+        if q.name.upper() == "Q_ORG" and q.name.upper() != main_upper:
+            return q
+    # Otherwise the next non-primary query
+    for q in report.queries:
+        if q.name.upper() != main_upper:
+            return q
+    return None
+
+
+def _pick_signature_query(report: ParsedReport) -> Optional[DataQuery]:
+    """Pick a query for signature/image binding (Q_SIGNATURE)."""
+    for q in (report.queries or []):
+        if q.name.upper() == "Q_SIGNATURE":
+            return q
+    return None
+
+
+def _layout_format_triggers(report: ParsedReport) -> List[Tuple[str, str]]:
+    """Find LayoutGroups with format triggers; returns [(group_name, trigger_name)]."""
+    out: List[Tuple[str, str]] = []
+
+    def walk(group: LayoutGroup) -> None:
+        trigger = getattr(group, "format_trigger", None) or getattr(group, "ft", None)
+        if trigger:
+            out.append((group.name or group.source_query or "Group", str(trigger)))
+        for child in group.children:
+            walk(child)
+
+    for g in report.layout or []:
+        walk(g)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # DataSources
 # ---------------------------------------------------------------------------
@@ -281,6 +321,18 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
     return tb
 
 
+def _pick_group_key(query: DataQuery, candidates: Iterable[str]) -> Optional[str]:
+    """Pick a reasonable group expression field from a query's items."""
+    if not query.items:
+        return None
+    item_names = {it.name.upper(): it.name for it in query.items}
+    for c in candidates:
+        if c.upper() in item_names:
+            return item_names[c.upper()]
+    # Default to first field
+    return query.items[0].name
+
+
 def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     columns = _column_names_for_main(report, main)
     if not columns:
@@ -288,6 +340,10 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
 
     tablix = ET.Element(_q("Tablix"))
     tablix.set("Name", "Tablix_Main")
+
+    # Determine if a master-detail nested group should be emitted.
+    detail_query = _pick_detail_query(report, main.name)
+    triggers = _layout_format_triggers(report)
 
     # TablixBody
     body = _sub(tablix, "TablixBody")
@@ -338,10 +394,64 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     # Header member (static)
     hdr_mem = _sub(row_members, "TablixMember")
     _sub(hdr_mem, "KeepWithGroup", "After")
-    # Detail member
-    detail_mem = _sub(row_members, "TablixMember")
-    _sub(detail_mem, "Group").set("Name", "Details_Main")
-    # (no GroupExpressions == the detail group)
+
+    # Master-detail nested group pattern when a secondary query exists.
+    if detail_query is not None:
+        # Outer (permit) group
+        permit_mem = _sub(row_members, "TablixMember")
+        permit_group = _sub(permit_mem, "Group")
+        permit_group.set("Name", "GroupPermit")
+        permit_grp_exprs = _sub(permit_group, "GroupExpressions")
+        permit_key = _pick_group_key(
+            main, ["Perm_Num", "Permit", "Perm_Name", "Permit_Id"]
+        )
+        _sub(
+            permit_grp_exprs,
+            "GroupExpression",
+            f"=Fields!{_safe(permit_key)}.Value" if permit_key else "=1",
+        )
+        # Conditional visibility hint based on first format trigger (placeholder).
+        if triggers:
+            grp_name, trig_name = triggers[0]
+            permit_mem.append(
+                ET.Comment(
+                    f" original PL/SQL format trigger: {trig_name} (group {grp_name}) "
+                )
+            )
+            visibility = _sub(permit_mem, "Visibility")
+            _sub(visibility, "Hidden", "false")
+        # Nested children: inner Org group + detail
+        inner_members = _sub(permit_mem, "TablixMembers")
+        org_mem = _sub(inner_members, "TablixMember")
+        org_group = _sub(org_mem, "Group")
+        org_group.set("Name", "GroupOrg")
+        org_grp_exprs = _sub(org_group, "GroupExpressions")
+        org_key = _pick_group_key(
+            detail_query, ["Org_Id", "Organization_Id", "Org", "Org_Code"]
+        )
+        _sub(
+            org_grp_exprs,
+            "GroupExpression",
+            f"=Fields!{_safe(org_key)}.Value" if org_key else "=1",
+        )
+        # Detail leaf inside inner group
+        detail_inner = _sub(org_mem, "TablixMembers")
+        det = _sub(detail_inner, "TablixMember")
+        _sub(det, "Group").set("Name", "Detail")
+    else:
+        # Detail member (no master-detail)
+        detail_mem = _sub(row_members, "TablixMember")
+        _sub(detail_mem, "Group").set("Name", "Details_Main")
+        # (no GroupExpressions == the detail group)
+        if triggers:
+            grp_name, trig_name = triggers[0]
+            detail_mem.append(
+                ET.Comment(
+                    f" original PL/SQL format trigger: {trig_name} (group {grp_name}) "
+                )
+            )
+            visibility = _sub(detail_mem, "Visibility")
+            _sub(visibility, "Hidden", "false")
 
     # DataSet binding
     _sub(tablix, "DataSetName", _safe(main.name))
@@ -423,10 +533,26 @@ def _build_page(report: ParsedReport) -> ET.Element:
 
     # Optional PageFooter
     pf = _sub(page, "PageFooter")
-    _sub(pf, "Height", "0.3in")
+    _sub(pf, "Height", "0.6in")
     _sub(pf, "PrintOnFirstPage", "true")
     _sub(pf, "PrintOnLastPage", "true")
     pf_items = _sub(pf, "ReportItems")
+
+    sig_q = _pick_signature_query(report)
+    if sig_q is not None:
+        sf = sig_q.items[0].name if sig_q.items else "Sig"
+        img = _sub(pf_items, "Image")
+        img.set("Name", "Img_Sig")
+        _sub(img, "Source", "Database")
+        _sub(img, "Value", '=First(Fields!' + _safe(sf) + '.Value)')
+        _sub(img, "MIMEType", "image/png")
+        _sub(img, "Sizing", "FitProportional")
+        _sub(img, "Top", "0.05in")
+        _sub(img, "Left", "0.25in")
+        _sub(img, "Width", "2in")
+        _sub(img, "Height", "0.5in")
+        _sub(img, "Style")
+
     pf_tb = _sub(pf_items, "Textbox")
     pf_tb.set("Name", "Ftr_Page")
     paragraphs = _sub(pf_tb, "Paragraphs")
@@ -443,7 +569,6 @@ def _build_page(report: ParsedReport) -> ET.Element:
     _sub(pf_tb, "CanGrow", "true")
     _sub(pf_tb, "Style")
 
-    # Page geometry
     _sub(page, "PageHeight", "11in")
     _sub(page, "PageWidth", "8.5in")
     _sub(page, "LeftMargin", "0.5in")
@@ -454,23 +579,7 @@ def _build_page(report: ParsedReport) -> ET.Element:
     return page
 
 
-# ---------------------------------------------------------------------------
-# Code (helper VB functions)
-# ---------------------------------------------------------------------------
-
-CODE_BLOCK = """\
-Public Function FormatDateSafe(d As Object) As String
-    If IsNothing(d) OrElse IsDBNull(d) Then
-        Return ""
-    End If
-    Try
-        Return CDate(d).ToString("MMMM d, yyyy")
-    Catch
-        Return d.ToString()
-    End Try
-End Function
-
-Public Function NullToEmpty(s As Object) As String
+CODE_BLOCK = """Public Function NullToEmpty(s As Object) As String
     If IsNothing(s) OrElse IsDBNull(s) Then
         Return ""
     End If
@@ -485,44 +594,22 @@ def _build_code() -> ET.Element:
     return code
 
 
-# ---------------------------------------------------------------------------
-# Top-level assembly
-# ---------------------------------------------------------------------------
-
 def _build_report_root(report: ParsedReport) -> ET.Element:
     root = ET.Element(_q("Report"))
-
-    # Required descriptive metadata first
     _rdsub(root, "ReportID", "00000000-0000-0000-0000-000000000000")
-    _sub(root, "Description", report.name or "Converted Oracle Report")
+    _sub(root, "Description", report.name or "Converted")
     _sub(root, "Author", "Oracle2SSRS")
     _sub(root, "AutoRefresh", "0")
-
-    # DataSources, DataSets
     root.append(_build_data_sources())
     root.append(_build_data_sets(report))
-
-    # ReportParameters (optional)
     rps = _build_report_parameters(report)
     if rps is not None:
         root.append(rps)
-
-    # ReportParametersLayout - omitted (optional)
-
-    # Body
     main = _pick_main_query(report)
     root.append(_build_body(report, main))
-
-    # Page-level sizing on Report root
     _sub(root, "Width", "8.5in")
-
-    # Page (header/footer + size)
     root.append(_build_page(report))
-
-    # Code section
     root.append(_build_code())
-
-    # Language (helps Report Builder open silently)
     _sub(root, "Language", "en-US")
     _rdsub(root, "DrawGrid", "true")
     _rdsub(root, "GridSpacing", "0.083333in")
@@ -532,43 +619,9 @@ def _build_report_root(report: ParsedReport) -> ET.Element:
 def generate_rdl(report: ParsedReport) -> str:
     """Return a complete RDL XML document as a string."""
     root = _build_report_root(report)
-
-    # Pretty-print (Python 3.9+)
     try:
         ET.indent(root, space="  ")
     except AttributeError:
         pass
-
     body = ET.tostring(root, encoding="unicode")
     return '<?xml version="1.0" encoding="utf-8"?>\n' + body
-
-
-# ---------------------------------------------------------------------------
-# Self-test (runs only when invoked directly)
-# ---------------------------------------------------------------------------
-
-if __name__ == "__main__":
-    sample = ParsedReport(
-        name="MVWF_PERMIT",
-        parameters=[
-            ReportParameter(name="P_RENEWAL_YEAR", label="Renewal Year",
-                            datatype="number"),
-            ReportParameter(name="P_PERM_NAME", label="Permit",
-                            datatype="character"),
-        ],
-        queries=[
-            DataQuery(
-                name="Q_PERMIT",
-                tsql="SELECT * FROM Permit WHERE Perm_Name = @P_PERM_NAME",
-                items=[
-                    DataItem(name="Permit", datatype="character"),
-                    DataItem(name="Renewal_Year", datatype="number"),
-                    DataItem(name="Site_Name", datatype="character"),
-                ],
-            )
-        ],
-    )
-    out = generate_rdl(sample)
-    print(out[:1200])
-    ET.fromstring(out)
-    print("OK,", len(out), "chars")

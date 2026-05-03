@@ -811,36 +811,401 @@ def _rewrite_package_calls(text: str) -> Tuple[str, List[str]]:
 
 
 # ---------------------------------------------------------------------------
+# Additional Oracle pattern rewriters (Agent 9 extensions)
+# ---------------------------------------------------------------------------
+
+def _rewrite_listagg(text: str) -> Tuple[str, List[str]]:
+    """LISTAGG(col, ',') WITHIN GROUP (ORDER BY x) -> STRING_AGG(col, ',') WITHIN GROUP (ORDER BY x)."""
+    warnings: List[str] = []
+    while True:
+        ns, po, pc = _find_function_call(text, 'LISTAGG')
+        if ns < 0:
+            break
+        inner = text[po + 1:pc]
+        args = _split_top_level_commas(inner)
+        if len(args) == 2:
+            replacement = f"STRING_AGG({args[0]}, {args[1]})"
+        elif len(args) == 1:
+            replacement = f"STRING_AGG({args[0]}, ',')"
+            warnings.append("LISTAGG without separator defaulted to ','.")
+        else:
+            warnings.append("LISTAGG with unexpected arg count left as-is.")
+            break
+        text = text[:ns] + replacement + text[pc + 1:]
+        warnings.append("LISTAGG rewritten as STRING_AGG; review WITHIN GROUP (ORDER BY).")
+    return text, warnings
+
+
+def _rewrite_rownum(text: str) -> Tuple[str, List[str]]:
+    """WHERE ROWNUM <= N (or <) -> SELECT TOP N ... (best-effort).
+
+    Only handles the common simple `WHERE ROWNUM <= n` (with optional AND'd preds)
+    against a SELECT that doesn't already contain TOP. If ORDER BY is present,
+    we leave a hint to consider OFFSET/FETCH.
+    """
+    warnings: List[str] = []
+    pat = re.compile(
+        r'(?P<sel>\bSELECT\b)(?P<rest>\s+(?!\s*TOP\b))',
+        re.IGNORECASE,
+    )
+    # Look for `ROWNUM\s*(<=|<)\s*N` predicates at top level.
+    rn_pat = re.compile(
+        r'(?P<pre>\bWHERE\b\s+|\bAND\b\s+)?ROWNUM\s*(?P<op><=|<)\s*(?P<n>\d+)\s*(?P<post>\bAND\b\s+|(?=\bGROUP\b|\bORDER\b|\bHAVING\b|\bUNION\b|$|\)))',
+        re.IGNORECASE,
+    )
+    m = rn_pat.search(text)
+    if not m:
+        return text, warnings
+    op = m.group('op')
+    n = int(m.group('n'))
+    if op == '<':
+        n = n - 1
+    # Find the SELECT preceding this match.
+    sel_match = None
+    for sm in pat.finditer(text[:m.start()]):
+        sel_match = sm
+    if not sel_match:
+        warnings.append("ROWNUM predicate detected but no preceding SELECT found; left as-is.")
+        return text, warnings
+    # Splice TOP N after SELECT (and any DISTINCT).
+    after_sel = sel_match.end()
+    distinct_m = re.match(r'\s*DISTINCT\b', text[after_sel:], re.IGNORECASE)
+    insert_at = after_sel + (distinct_m.end() if distinct_m else 0)
+    # Remove the ROWNUM predicate (and a trailing AND if it was the first).
+    pre = m.group('pre') or ''
+    post = m.group('post') or ''
+    if pre.strip().upper().startswith('WHERE') and post.strip().upper().startswith('AND'):
+        # WHERE ROWNUM <= N AND ...   -> WHERE ...
+        rep_text = text[:m.start()] + 'WHERE ' + text[m.end():]
+    elif pre.strip().upper().startswith('WHERE'):
+        # WHERE ROWNUM <= N (only predicate)  -> drop entire WHERE
+        rep_text = text[:m.start()] + text[m.end():]
+    elif pre.strip().upper().startswith('AND'):
+        # ... AND ROWNUM <= N ...   -> drop the AND ROWNUM
+        rep_text = text[:m.start()] + (post if post.strip().upper().startswith('AND') else '') + text[m.end():]
+    else:
+        rep_text = text[:m.start()] + text[m.end():]
+    rep_text = rep_text[:insert_at] + f' TOP ({n})' + rep_text[insert_at:]
+    has_order = bool(re.search(r'\bORDER\s+BY\b', rep_text, re.IGNORECASE))
+    if has_order:
+        warnings.append(
+            f"ROWNUM <= {m.group('n')} rewritten as TOP ({n}); query has ORDER BY, "
+            "consider OFFSET 0 ROWS FETCH NEXT N ROWS ONLY for paging semantics."
+        )
+    else:
+        warnings.append(f"ROWNUM <= {m.group('n')} rewritten as SELECT TOP ({n}).")
+    return rep_text, warnings
+
+
+def _rewrite_from_dual(text: str) -> Tuple[str, List[str]]:
+    """Remove `FROM DUAL` (T-SQL doesn't need a dummy table).
+
+    Handles `FROM DUAL` at end of statement or before WHERE/GROUP/ORDER/UNION/etc.
+    """
+    warnings: List[str] = []
+    pat = re.compile(r'\s+FROM\s+DUAL\b', re.IGNORECASE)
+    if pat.search(text):
+        new = pat.sub('', text)
+        warnings.append("Removed `FROM DUAL` (T-SQL allows SELECT without a FROM).")
+        return new, warnings
+    return text, warnings
+
+
+def _rewrite_nulls_first_last(text: str) -> Tuple[str, List[str]]:
+    """NULLS FIRST / NULLS LAST -> emit warning, recommend CASE WHEN col IS NULL."""
+    warnings: List[str] = []
+    pat = re.compile(r'\bNULLS\s+(FIRST|LAST)\b', re.IGNORECASE)
+    if pat.search(text):
+        new = pat.sub(lambda m: f'/* NULLS {m.group(1).upper()} */', text)
+        warnings.append(
+            "NULLS FIRST/LAST is not supported in T-SQL ORDER BY. "
+            "Add `CASE WHEN col IS NULL THEN 0 ELSE 1 END` (or 1/0) as a leading sort key."
+        )
+        return new, warnings
+    return text, warnings
+
+
+def _rewrite_to_number(text: str) -> Tuple[str, List[str]]:
+    """TO_NUMBER(s) -> TRY_CONVERT(decimal(18,4), s)."""
+    warnings: List[str] = []
+    while True:
+        ns, po, pc = _find_function_call(text, 'TO_NUMBER')
+        if ns < 0:
+            break
+        args = _split_top_level_commas(text[po + 1:pc])
+        if len(args) >= 1:
+            replacement = f"TRY_CONVERT(decimal(18,4), {args[0]})"
+            warnings.append("TO_NUMBER rewritten as TRY_CONVERT(decimal(18,4), x); adjust precision/scale as needed.")
+        else:
+            warnings.append("TO_NUMBER with no args left as-is.")
+            break
+        text = text[:ns] + replacement + text[pc + 1:]
+    return text, warnings
+
+
+def _rewrite_add_months(text: str) -> Tuple[str, List[str]]:
+    """ADD_MONTHS(d, n) -> DATEADD(month, n, d)."""
+    warnings: List[str] = []
+    while True:
+        ns, po, pc = _find_function_call(text, 'ADD_MONTHS')
+        if ns < 0:
+            break
+        args = _split_top_level_commas(text[po + 1:pc])
+        if len(args) == 2:
+            replacement = f"DATEADD(month, {args[1]}, {args[0]})"
+            warnings.append("ADD_MONTHS rewritten as DATEADD(month, n, d).")
+        else:
+            warnings.append("ADD_MONTHS with unexpected arg count left as-is.")
+            break
+        text = text[:ns] + replacement + text[pc + 1:]
+    return text, warnings
+
+
+def _rewrite_months_between(text: str) -> Tuple[str, List[str]]:
+    """MONTHS_BETWEEN(a, b) -> DATEDIFF(month, b, a) (note arg order swap)."""
+    warnings: List[str] = []
+    while True:
+        ns, po, pc = _find_function_call(text, 'MONTHS_BETWEEN')
+        if ns < 0:
+            break
+        args = _split_top_level_commas(text[po + 1:pc])
+        if len(args) == 2:
+            replacement = f"DATEDIFF(month, {args[1]}, {args[0]})"
+            warnings.append(
+                "MONTHS_BETWEEN rewritten as DATEDIFF(month, b, a); note Oracle returns "
+                "fractional months while DATEDIFF returns an integer count of month boundaries."
+            )
+        else:
+            warnings.append("MONTHS_BETWEEN with unexpected arg count left as-is.")
+            break
+        text = text[:ns] + replacement + text[pc + 1:]
+    return text, warnings
+
+
+_DAY_NAME_TO_NUM = {
+    'SUNDAY': 1, 'SUN': 1,
+    'MONDAY': 2, 'MON': 2,
+    'TUESDAY': 3, 'TUE': 3, 'TUES': 3,
+    'WEDNESDAY': 4, 'WED': 4,
+    'THURSDAY': 5, 'THU': 5, 'THUR': 5, 'THURS': 5,
+    'FRIDAY': 6, 'FRI': 6,
+    'SATURDAY': 7, 'SAT': 7,
+}
+
+
+def _rewrite_next_day(text: str) -> Tuple[str, List[str]]:
+    """NEXT_DAY(d, 'MONDAY') -> DATEADD-based formula. Emit warning."""
+    warnings: List[str] = []
+    while True:
+        ns, po, pc = _find_function_call(text, 'NEXT_DAY')
+        if ns < 0:
+            break
+        args = _split_top_level_commas(text[po + 1:pc])
+        if len(args) == 2:
+            d = args[0]
+            day_arg = args[1].strip()
+            target_num = None
+            if day_arg.startswith("'") and day_arg.endswith("'"):
+                key = day_arg[1:-1].strip().upper()
+                target_num = _DAY_NAME_TO_NUM.get(key)
+            if target_num is not None:
+                replacement = (
+                    f"DATEADD(day, ((({target_num} + 7 - DATEPART(weekday, {d})) % 7) "
+                    f"+ CASE WHEN ((({target_num} + 7 - DATEPART(weekday, {d})) % 7) = 0) "
+                    f"THEN 7 ELSE 0 END), {d})"
+                )
+                warnings.append(
+                    f"NEXT_DAY({d}, '{key}') rewritten with DATEADD/DATEPART; "
+                    "result depends on @@DATEFIRST - verify against expected weekday."
+                )
+            else:
+                replacement = f"/* TODO NEXT_DAY({d}, {day_arg}) */"
+                warnings.append("NEXT_DAY with non-literal day name left as TODO; rewrite manually.")
+        else:
+            warnings.append("NEXT_DAY with unexpected arg count left as-is.")
+            break
+        text = text[:ns] + replacement + text[pc + 1:]
+    return text, warnings
+
+
+def _rewrite_last_day(text: str) -> Tuple[str, List[str]]:
+    """LAST_DAY(d) -> EOMONTH(d)."""
+    warnings: List[str] = []
+    while True:
+        ns, po, pc = _find_function_call(text, 'LAST_DAY')
+        if ns < 0:
+            break
+        args = _split_top_level_commas(text[po + 1:pc])
+        if len(args) >= 1:
+            replacement = f"EOMONTH({args[0]})"
+            warnings.append("LAST_DAY rewritten as EOMONTH().")
+        else:
+            warnings.append("LAST_DAY with no args left as-is.")
+            break
+        text = text[:ns] + replacement + text[pc + 1:]
+    return text, warnings
+
+
+def _rewrite_regexp_like(text: str) -> Tuple[str, List[str]]:
+    """REGEXP_LIKE(s, p) -> s LIKE pattern hint with /* TODO */."""
+    warnings: List[str] = []
+    while True:
+        ns, po, pc = _find_function_call(text, 'REGEXP_LIKE')
+        if ns < 0:
+            break
+        args = _split_top_level_commas(text[po + 1:pc])
+        if len(args) >= 2:
+            replacement = f"({args[0]} LIKE {args[1]} /* TODO regex_like rewrite: Oracle regex != T-SQL LIKE */)"
+            warnings.append(
+                "REGEXP_LIKE rewritten as LIKE with TODO; Oracle regex syntax does not "
+                "translate directly. Consider PATINDEX or a CLR regex UDF."
+            )
+        else:
+            warnings.append("REGEXP_LIKE with unexpected arg count left as-is.")
+            break
+        text = text[:ns] + replacement + text[pc + 1:]
+    return text, warnings
+
+
+def _rewrite_regexp_replace(text: str) -> Tuple[str, List[str]]:
+    """REGEXP_REPLACE(s, p, r) -> /* TODO */ + warning. T-SQL has no native regex replace."""
+    warnings: List[str] = []
+    while True:
+        ns, po, pc = _find_function_call(text, 'REGEXP_REPLACE')
+        if ns < 0:
+            break
+        args = _split_top_level_commas(text[po + 1:pc])
+        if len(args) >= 2:
+            joined = ', '.join(args)
+            replacement = f"/* TODO regex_replace rewrite ({joined}) - no native T-SQL regex */ NULL"
+            warnings.append(
+                "REGEXP_REPLACE has no native T-SQL equivalent; left as TODO. "
+                "Use multiple REPLACE() calls or a CLR regex UDF."
+            )
+        else:
+            warnings.append("REGEXP_REPLACE with unexpected arg count left as-is.")
+            break
+        text = text[:ns] + replacement + text[pc + 1:]
+    return text, warnings
+
+
+def _rewrite_substr_negative(text: str) -> Tuple[str, List[str]]:
+    """SUBSTR(s, -n) -> RIGHT(s, n) when negative-index detected."""
+    warnings: List[str] = []
+    pat = re.compile(
+        r'(?<![A-Za-z0-9_$.])SUBSTRING\s*\(\s*([^,()]+?)\s*,\s*-\s*(\d+)\s*,\s*8000\s*\)',
+        re.IGNORECASE,
+    )
+    new, n = pat.subn(lambda m: f"RIGHT({m.group(1).strip()}, {m.group(2)})", text)
+    if n > 0:
+        warnings.append(f"Converted {n} SUBSTR(s, -n) call(s) with negative offset to RIGHT(s, n).")
+    return new, warnings
+
+
+def _rewrite_lpad_rpad(text: str) -> Tuple[str, List[str]]:
+    """LPAD(s, len, pad) / RPAD(s, len, pad) -> custom expression with warning."""
+    warnings: List[str] = []
+    for fn in ('LPAD', 'RPAD'):
+        while True:
+            ns, po, pc = _find_function_call(text, fn)
+            if ns < 0:
+                break
+            args = _split_top_level_commas(text[po + 1:pc])
+            if len(args) >= 2:
+                s = args[0]
+                length = args[1]
+                pad = args[2] if len(args) >= 3 else "' '"
+                if fn == 'LPAD':
+                    replacement = f"RIGHT(REPLICATE({pad}, {length}) + {s}, {length})"
+                else:
+                    replacement = f"LEFT({s} + REPLICATE({pad}, {length}), {length})"
+                warnings.append(
+                    f"{fn} rewritten using REPLICATE/LEFT/RIGHT; verify when input length "
+                    "exceeds target (Oracle truncates differently)."
+                )
+            else:
+                warnings.append(f"{fn} with unexpected arg count left as-is.")
+                break
+            text = text[:ns] + replacement + text[pc + 1:]
+    return text, warnings
+
+
+_CONNECT_BY_RE = re.compile(r'\bCONNECT\s+BY\b', re.IGNORECASE)
+_START_WITH_RE = re.compile(r'\bSTART\s+WITH\b', re.IGNORECASE)
+
+
+def _rewrite_connect_by(text: str) -> Tuple[str, List[str]]:
+    """CONNECT BY ... START WITH ... -> emit /* TODO */ comment + warning."""
+    warnings: List[str] = []
+    if not _CONNECT_BY_RE.search(text):
+        return text, warnings
+
+    template = (
+        "/* TODO CONNECT BY ... START WITH ... -> rewrite as a recursive CTE:\n"
+        "     WITH cte AS (\n"
+        "       SELECT ... FROM <tbl> WHERE <START WITH predicate>\n"
+        "       UNION ALL\n"
+        "       SELECT ... FROM <tbl> t JOIN cte c ON <CONNECT BY predicate without PRIOR>\n"
+        "     )\n"
+        "     SELECT * FROM cte;\n"
+        "   PRIOR x = y becomes c.x = t.y (or t.x = c.y) in the recursive part.\n"
+        "*/\n"
+    )
+    new_text = template + text
+    warnings.append(
+        "Oracle CONNECT BY / START WITH detected. T-SQL has no direct equivalent; "
+        "convert to a recursive CTE (WITH cte AS (anchor UNION ALL recursive)). "
+        "Replace PRIOR refs with explicit cte/parent aliases."
+    )
+    return new_text, warnings
+
+
+# ---------------------------------------------------------------------------
 # Top-level translate_sql
 # ---------------------------------------------------------------------------
 
 def translate_sql(oracle_sql: str) -> Tuple[str, List[str]]:
-    """Translate one Oracle SQL statement to (best-effort) T-SQL.
-    Returns the translated SQL and a list of human-readable warnings.
-    """
+    """Translate one Oracle SQL statement to (best-effort) T-SQL."""
     if not oracle_sql or not oracle_sql.strip():
         return "", []
 
     text = oracle_sql
     warnings: List[str] = []
 
-    # Step 1 - outer-join rewrite (do this BEFORE bind-var conversion so the
-    # alias detection isn't confused by `@`).
+    # Step 1 - outer-join rewrite (do this BEFORE bind-var conversion).
     text, w = _rewrite_outer_join(text)
     warnings.extend(w)
 
-    # Step 2 - function rewrites.  Order matters: NVL2 before NVL.
+    # Step 1b - CONNECT BY / START WITH guidance wrapper.
+    text, w = _rewrite_connect_by(text)
+    warnings.extend(w)
+
+    # Step 2 - function rewrites.  Order matters: NVL2 before NVL,
+    # _rewrite_substr before _rewrite_substr_negative.
     for fn in (_rewrite_decode,
                _rewrite_nvl,
+               _rewrite_listagg,
                _rewrite_to_char,
                _rewrite_to_date,
+               _rewrite_to_number,
+               _rewrite_add_months,
+               _rewrite_months_between,
+               _rewrite_next_day,
+               _rewrite_last_day,
                _rewrite_round_date,   # before TRUNC, harmless
                _rewrite_trunc,
                _rewrite_sysdate,
                _rewrite_instr,
                _rewrite_substr,
+               _rewrite_substr_negative,   # after _rewrite_substr
+               _rewrite_lpad_rpad,
+               _rewrite_regexp_like,
+               _rewrite_regexp_replace,
                _rewrite_chr,
                _rewrite_concat,
+               _rewrite_rownum,
+               _rewrite_from_dual,
+               _rewrite_nulls_first_last,
                _rewrite_lexicals,
                _rewrite_bind_vars,
                _rewrite_package_calls,
@@ -873,19 +1238,15 @@ def translate_plsql_body(plsql: str) -> Tuple[str, List[str]]:
     text = plsql
     warnings: List[str] = ["PL/SQL formula body translated heuristically; review carefully."]
 
-    # Reuse SQL-level rewrites for expressions inside the body.
     text, w = translate_sql(text)
-    # translate_sql adds its own warnings - keep them.
     warnings.extend(w)
 
-    # PL/SQL keywords.
     text = re.sub(r'\bRETURN\b', 'RETURN', text, flags=re.IGNORECASE)
     text = re.sub(r'\bELSIF\b', 'ELSE IF', text, flags=re.IGNORECASE)
     text = re.sub(r'\bEND\s+IF\b', 'END', text, flags=re.IGNORECASE)
     text = re.sub(r'\bIS NULL\b', 'IS NULL', text, flags=re.IGNORECASE)
     text = re.sub(r'\bIS NOT NULL\b', 'IS NOT NULL', text, flags=re.IGNORECASE)
 
-    # Dedup warnings.
     seen, unique = set(), []
     for w2 in warnings:
         if w2 not in seen:
