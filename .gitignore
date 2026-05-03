@@ -1,0 +1,53 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# OS / mount artifacts that bit us all session
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Logs
+*.log
+flask.log
+
+# Don't commit user-uploaded artifacts (only the bundled samples)
+backend/uploads/
+
+# Local Flask runtime
+instance/
+
+# Optional: ignore generated RDL outputs (keep the canonical sample)
+samples/expected_rdl/*.rdl
+!samples/expected_rdl/MVWF_PERMIT.rdl

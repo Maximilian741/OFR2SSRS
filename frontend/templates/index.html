@@ -1,0 +1,212 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Oracle2SSRS — Drag, drop, deploy.</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+<link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <div class="brand-logo">O2S</div>
+    <div class="brand-text">
+      <div class="brand-name">Oracle2SSRS</div>
+      <div class="brand-tag">Drag, drop, deploy.</div>
+    </div>
+  </div>
+  <div class="topbar-meta">
+    <span class="topbar-pill" id="status-pill">Ready</span>
+  </div>
+</header>
+
+<div class="layout">
+
+  <aside class="sidebar">
+
+    <section class="side-section">
+      <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop or browse Oracle artifacts">
+        <input type="file" id="file-input" multiple webkitdirectory directory hidden>
+        <input type="file" id="file-input-files" multiple hidden>
+        <div class="drop-icon">&#x2913;</div>
+        <div class="drop-title">Drop Oracle artifacts (XML, SQL, DOCX, RDF, screenshots) &mdash; folders OK</div>
+        <div class="drop-sub">XML &middot; SQL &middot; DOCX &middot; RDF &middot; PNG/JPG &middot; or click to browse a folder</div>
+        <div class="drop-sub-alt"><a href="#" id="pick-files-link">pick individual files instead</a></div>
+      </div>
+    </section>
+
+    <section class="side-section">
+      <div class="side-heading">Sample reports</div>
+      <div id="samples-list" class="samples-list">
+        {% for s in samples %}
+          <button class="sample-chip" data-sample="{{ s }}">{{ s }}</button>
+        {% else %}
+          <div class="muted-note">No samples found.</div>
+        {% endfor %}
+      </div>
+    </section>
+
+    <section class="side-section" id="summary-section" hidden>
+      <div class="side-heading">Report summary</div>
+      <div class="summary-card">
+        <div class="summary-row"><span>Name</span><b id="sum-name">—</b></div>
+        <div class="summary-row"><span>DTD</span><b id="sum-dtd">—</b></div>
+        <div class="summary-row"><span>Parameters</span><b id="sum-params">0</b></div>
+        <div class="summary-row"><span>Queries</span><b id="sum-queries">0</b></div>
+        <div class="summary-row"><span>Formulas</span><b id="sum-formulas">0</b></div>
+        <div class="summary-row warn-row"><span>Warnings</span><b id="sum-warnings">0</b></div>
+      </div>
+      <button id="download-rdl" class="btn btn-primary">
+        <span>&#x2913;</span> Download .rdl
+      </button>
+    </section>
+
+    <div class="side-foot">
+      <div class="muted-note">Hackathon build &middot; v0.1</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <nav class="tabbar" role="tablist">
+      <button class="tab active" data-tab="mockup" role="tab">
+        <span class="tab-dot dot-mockup"></span> HTML Mockup
+        <span class="tab-badge" id="badge-mockup" hidden></span>
+      </button>
+      <button class="tab" data-tab="rdl" role="tab">
+        <span class="tab-dot dot-rdl"></span> RDL XML
+        <span class="tab-badge" id="badge-rdl" hidden></span>
+      </button>
+      <button class="tab" data-tab="side" role="tab">
+        <span class="tab-dot dot-side"></span> Side-by-Side
+        <span class="tab-badge" id="badge-side" hidden></span>
+      </button>
+      <button class="tab" data-tab="live" role="tab">
+        <span class="tab-dot dot-live"></span> Live Data
+        <span class="tab-badge" id="badge-live" hidden></span>
+      </button>
+      <button class="tab" data-tab="validate" role="tab">
+        <span class="tab-dot dot-validate"></span> Validation
+        <span class="tab-badge" id="badge-validate" hidden></span>
+      </button>
+      <button class="tab" data-tab="deploy" role="tab">
+        <span class="tab-dot dot-deploy"></span> Deploy Checklist
+        <span class="tab-badge" id="badge-deploy" hidden></span>
+      </button>
+    </nav>
+
+    <section class="tab-panels">
+
+      <!-- Ingest summary (shown after a multi-file/bundle upload) -->
+      <section id="ingest-summary" class="ingest-summary" hidden>
+        <div class="ingest-head">
+          <span class="ingest-head-dot"></span>
+          <span class="ingest-head-title">Ingest Summary</span>
+          <span class="ingest-head-totals" id="ingest-totals"></span>
+        </div>
+        <div class="ingest-body" id="ingest-body"></div>
+        <div class="ingest-banner" id="ingest-banner" hidden></div>
+      </section>
+
+      <!-- Empty / loading hero -->
+      <div id="empty-state" class="empty-state">
+        <div class="empty-glyph">&#x21BB;</div>
+        <h2>Convert an Oracle Report</h2>
+        <p>Drop an XML/RDF file in the sidebar or pick a sample to get started.</p>
+      </div>
+
+      <!-- Tab: HTML Mockup -->
+      <div id="tab-mockup" class="tab-panel" hidden>
+        <div class="panel-card mockup-card">
+          <div id="mockup-host" class="mockup-host"></div>
+        </div>
+      </div>
+
+      <!-- Tab: RDL XML -->
+      <div id="tab-rdl" class="tab-panel" hidden>
+        <div class="panel-card">
+          <div class="panel-toolbar">
+            <div class="panel-title">Generated RDL</div>
+            <button id="copy-rdl" class="btn btn-ghost">Copy</button>
+          </div>
+          <pre class="code-block"><code id="rdl-code" class="language-xml"></code></pre>
+        </div>
+      </div>
+
+      <!-- Tab: Side-by-Side -->
+      <div id="tab-side" class="tab-panel" hidden>
+        <div class="panel-card">
+          <div class="panel-toolbar">
+            <div class="panel-title">Oracle XML &nbsp;&rarr;&nbsp; RDL XML</div>
+            <label class="switch">
+              <input type="checkbox" id="sync-scroll" checked>
+              <span>Sync scrolling</span>
+            </label>
+          </div>
+          <div class="side-by-side">
+            <div class="sxs-col">
+              <div class="sxs-head">Oracle XML (source)</div>
+              <div class="sxs-scroll" id="sxs-left-scroll">
+                <pre class="code-block"><code id="oracle-code" class="language-xml"></code></pre>
+              </div>
+            </div>
+            <div class="sxs-col">
+              <div class="sxs-head">RDL XML (target)</div>
+              <div class="sxs-scroll" id="sxs-right-scroll">
+                <pre class="code-block"><code id="rdl-code-2" class="language-xml"></code></pre>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+
+      <!-- Tab: Live Data -->
+      <div id="tab-live" class="tab-panel" hidden>
+        <div id="live-host" class="live-host"></div>
+      </div>
+
+      <!-- Tab: Validation -->
+      <div id="tab-validate" class="tab-panel" hidden>
+        <div class="panel-card">
+          <div class="panel-toolbar">
+            <div class="panel-title">T-SQL Validation</div>
+            <div class="validation-summary" id="validation-summary"></div>
+          </div>
+          <div id="validation-host" class="validation-host"></div>
+        </div>
+      </div>
+
+      <!-- Tab: Deploy Checklist -->
+      <div id="tab-deploy" class="tab-panel" hidden>
+        <div class="panel-card">
+          <div class="panel-toolbar">
+            <div class="panel-title">Post-download SSRS Deployment Checklist</div>
+          </div>
+          <ol id="deploy-host" class="deploy-host"></ol>
+        </div>
+      </div>
+
+    </section>
+
+    <footer id="warnings-footer" class="warnings-footer" hidden>
+      <div class="wf-head">
+        <span class="wf-dot"></span>
+        <span>Conversion warnings</span>
+        <span class="wf-count" id="wf-count">0</span>
+      </div>
+      <ul id="wf-list" class="wf-list"></ul>
+    </footer>
+
+  </main>
+</div>
+
+<div id="toast" class="toast" hidden></div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js"></script>
+<script src="{{ url_for('static', filename='js/app.js') }}"></script>
+</body>
+</html>
