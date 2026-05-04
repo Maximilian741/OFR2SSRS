@@ -1,4 +1,11 @@
 @echo off
+REM Load .env if present (for ANTHROPIC_API_KEY etc.)
+if exist .env (
+    for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
+        if not "%%a"=="" if not "%%a:~0,1%"=="#" set "%%a=%%b"
+    )
+)
+
 REM Oracle -> SSRS Converter launcher (Windows)
 cd /d "%~dp0"
 where py >nul 2>nul

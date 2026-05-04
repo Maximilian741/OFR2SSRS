@@ -1,0 +1,5 @@
+{
+  "tests/test_malformed.py::test_broken_xml_variants[<?xml version=\"1.0\"?><report-decl + tag start]": true,
+  "tests/test_malformed.py::test_broken_xml_variants[<?xml version=\"1.0\"?><report>-no closing tag]": true,
+  "tests/test_malformed.py::test_broken_xml_variants[<?xml version=\"1.0\"?><report>&undef;</report>-undefined entity]": true
+}

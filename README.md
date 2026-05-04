@@ -1,91 +1,133 @@
 # Oracle Reports → SSRS Converter
 
-Hackathon project. Drag-and-drop tool that takes an Oracle Reports artifact
-(`.xml` / `.rdf`-exported XML) and outputs a valid **SSRS 2008+ RDL** plus a
-live preview of how the report will render.
+Drag-and-drop tool that takes an Oracle Reports artifact (`.xml` or `.rdf`-exported XML) and outputs a deployable **SSRS 2008+ RDL** file plus a 4-pane preview, deployment checklist, T-SQL validation, and (optionally) **fully-automated AI translation** of the trickier PL/SQL.
 
 ## Quick start
 
 ```bat
-:: From this folder
 run.bat              (Windows)
 ```
-
 ```bash
 ./run.sh             (Linux / macOS / WSL)
 ```
 
-Then open <http://127.0.0.1:5057>. Drag `samples\oracle\MVWF_PERMIT.xml` onto
-the drop zone, or click the sample chip in the sidebar.
+Then open <http://127.0.0.1:5057>. Drop an XML on the page, or click `MVWF_PERMIT.xml` in the sidebar.
 
-Requires Python 3.9+. The launcher pip-installs Flask + lxml + python-docx on
-first run.
+Requires Python 3.9+. The launcher pip-installs Flask + lxml + python-docx + (optional) anthropic on first run.
+
+## Auto-fix with AI (optional but recommended)
+
+For tricky PL/SQL the deterministic translator can't handle, the app can call **Claude** directly to fill in the body, validate it, and patch the RDL — no copy-paste.
+
+**Setup:**
+1. Get an Anthropic API key at <https://console.anthropic.com/settings/keys>
+2. Copy `.env.example` to `.env`
+3. Paste your key:
+   ```
+   ANTHROPIC_API_KEY=sk-ant-...
+   ```
+4. Restart `run.bat`. The app loads the `.env` automatically.
+
+**Use it:**
+After a conversion, click the **Extras** tab → at the top you'll see a purple **"Fix all with AI"** button → click → Claude is called once per AI prompt, each result is validated (no DROP/EXEC etc.), and applied to the RDL. Bundle download then includes all the fixes.
+
+**Without a key** the app still works fully — you just see the prompt templates in the Extras tab to paste into Claude/Copilot manually.
 
 ## What it does
 
-1. **Parse.** Reads the Oracle Reports XML (DTD 9.0.2.0.10) into a normalized
-   in-memory model: parameters, queries, data items, formula columns, layout
-   groups, triggers.
-2. **Translate.** Converts Oracle SQL & PL/SQL to T-SQL. Handles `DECODE`,
-   `NVL`, `TO_CHAR`, `TO_DATE`, `TRUNC`, `SYSDATE`, `INSTR`, `SUBSTR`, `CHR`,
-   `||`, `(+)` outer joins, bind variables, lexical refs, and any
-   `Pkg_*.F_*` package call (which gets stubbed as a `dbo.fn_*` T-SQL UDF).
-3. **Generate.** Emits a well-formed RDL document with `DataSources`,
-   `DataSets`, `ReportParameters`, a `Tablix` bound to the main query, page
-   header/footer, and code helpers — opens directly in Report Builder.
-4. **Preview.** Four side-by-side views: HTML mockup, RDL XML (Prism
-   highlighted), Oracle ↔ SSRS diff, and **live data** running the translated
-   query against a seeded SQLite sample DB with Python UDFs that mimic the
-   Oracle package functions.
+1. **Parse.** Reads Oracle Reports XML (DTD 9.0.2.0.10) into a normalized model.
+2. **Translate.** Oracle SQL/PL-SQL → T-SQL: DECODE/NVL/TO_CHAR/TO_DATE/TRUNC/SYSDATE/INSTR/SUBSTR/CHR/||/(+)/CONNECT BY/LISTAGG/ROWNUM, bind vars, lexical refs, package-function stubs.
+3. **Generate.** Emits well-formed RDL with DataSources, DataSets, ReportParameters, master-detail Tablix, page numbering, image control for signatures.
+4. **Validate.** T-SQL static checks + RDL structural checks (catches "won't open in Report Builder" before download).
+5. **Audit.** Records every translation decision with before/after snippets.
+6. **Bursting.** Detects distribution patterns (P_AS_PATH, CF_File_F) and emits a burst-query SQL stub + PowerShell DDS emulator script for SSRS Standard.
+7. **Preview.** 7 tabs: HTML Mockup, RDL XML, Side-by-Side, Live Data (against seeded SQLite), T-SQL Validation, Deploy Checklist, Extras (audit + AI prompts + bursting + Auto-fix button).
+8. **Compare.** Drop two reports, see structured diff + complexity delta.
+9. **Bundle.** One-click `.zip` of RDL + validation + checklist + audit + prompts + burst SQL + DDS script + README.
+
+## API endpoints
+
+| Method | Path | What |
+|---|---|---|
+| GET | `/` | UI |
+| POST | `/api/convert` | Single XML → full conversion JSON |
+| POST | `/api/convert-bundle` | Multi-file/folder → conversion + ingest report |
+| POST | `/api/convert-sample/<name>` | Bundled sample shortcut |
+| POST | `/api/compare` | Two XMLs → structured diff |
+| POST | `/api/run-query` | T-SQL → live SQLite results |
+| GET  | `/api/download/rdl` | Most recent .rdl |
+| GET  | `/api/download/bundle` | 8-file zip |
+| GET  | `/api/mockup/<print\|compact>` | Print or compact mockup variant |
+| GET  | `/api/ai/status` | Auto-AI configured? |
+| POST | `/api/auto-fix` | Run Claude on every prompt, apply each |
+| POST | `/api/apply-fix` | Apply one pasted UDF body |
+| GET  | `/api/health` | Health + sample list |
 
 ## Layout
 
 ```
 backend/
-  app.py                          Flask entry point (port 5057)
+  app.py                          Flask routes
+  cli.py                          Batch CLI conversion
   converter/
-    models.py                     Shared dataclasses (the contract between modules)
-    parsers/oracle_xml.py         Agent 1 — Oracle Reports XML parser
+    models.py                     Shared dataclasses
+    parsers/oracle_xml.py
     translators/
-      plsql_to_tsql.py            Agent 2 — Oracle SQL/PLSQL → T-SQL translator
-      udf_stubs.py                Agent 2 — Pkg_WUTM_Util.F_* UDF stubs
-    generators/rdl.py             Agent 3 — SSRS RDL XML generator
+      plsql_to_tsql.py            Oracle SQL → T-SQL
+      udf_stubs.py                Pkg_*.F_* → dbo.fn_*
+      registry.py                 Plugin system for org-specific rules
+    generators/rdl.py             RDL XML emitter
+    validators/
+      tsql_check.py               Static T-SQL checks
+      rdl_check.py                RDL structural checks
     preview/
-      html_mockup.py              Agent 4 — printed-form HTML preview
-      live_data.py                Agent 5 — T-SQL→SQLite + UDF runtime
+      html_mockup.py              B&W rendered preview
+      mockup_variants.py          Print + compact variants
+      live_data.py                T-SQL → SQLite + Python UDFs
+    deployment.py                 9-step migration checklist
+    audit.py                      Translation audit trail
+    ai_assist.py                  Paste-into-LLM prompt templates
+    ai_apply.py                   Apply one fix back into RDL
+    ai_runner.py                  Auto-call Claude API
+    bursting.py                   DDS detection + scripts
+    bundle_export.py              Build the 8-file .zip
+    ingest.py                     Multi-file/folder auto-classification
+    cache.py                      SHA-256 memoize
+    compare.py                    Two-report diff + complexity
   db/
-    seed_sample_db.py             Run once to (re)build sample.sqlite
-    sample.sqlite                 Seeded DEQ schema with 5 sample MVWF permits
+    seed_sample_db.py             Seeds sample.sqlite
 frontend/
-  templates/index.html            Drag-drop UI shell
+  templates/index.html
   static/
-    css/style.css                 Polished styling
-    js/app.js                     Tab logic, fetch, Prism highlighting
-samples/
-  oracle/MVWF_PERMIT.xml          Real Montana DEQ Oracle Report
-  oracle/*.docx                   Backend/frontend screenshots, SQL queries
-  expected_rdl/MVWF_PERMIT.rdl    Pre-generated RDL output (42 KB)
-docs/DEMO_SCRIPT.md               Talking points for Monday
+    css/style.css
+    js/
+      app.js                      Main UI
+      demo_mode.js                "Take a tour" walkthrough
+      compare_mode.js             Compare two reports modal
+      ai_apply.js                 Paste-back textareas
+      ai_auto.js                  Auto-AI button
+samples/oracle/                   MVWF_PERMIT + 3 synthetic test reports
+tests/                            112 pytest tests
+docs/
+  ARCHITECTURE.md
+  API.md
+  COWORKER_DEMO.md
+  DEMO_SCRIPT.md
+  AGENT_RULES.md                  Mount-corruption guardrail for any future agent edits
+.env.example                      Copy to .env, paste your ANTHROPIC_API_KEY
 ```
 
-## Endpoints
-
-| Method | Path                           | What it does                          |
-| ------ | ------------------------------ | ------------------------------------- |
-| GET    | `/`                            | Render the drag-drop UI               |
-| POST   | `/api/convert`                 | Multipart upload → conversion JSON    |
-| POST   | `/api/convert-sample/<name>`   | Convert a bundled sample file         |
-| POST   | `/api/run-query`               | Run translated T-SQL against SQLite   |
-| GET    | `/api/download/rdl`            | Download the most recent .rdl         |
-| GET    | `/api/health`                  | Sanity check + sample list            |
-
-## Adding more sample reports
-
-Drop another `.xml` into `samples/oracle/` and restart the app — the sidebar
-picks it up automatically.
-
-## Re-seeding the sample database
+## Development
 
 ```bash
-python backend/db/seed_sample_db.py
+# install deps
+pip install -r requirements.txt
+
+# run tests
+pytest
+
+# batch conversion
+python backend/cli.py samples/oracle --out ./out --strict
 ```
+
+See `docs/ARCHITECTURE.md` for module-by-module deep-dive, `docs/AGENT_RULES.md` for the file-write protocol any contributor (human or AI) must follow.
