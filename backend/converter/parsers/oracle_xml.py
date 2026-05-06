@@ -20,6 +20,7 @@ from lxml import etree
 from converter.models import (
     DataItem,
     DataQuery,
+    EmbeddedImage,
     FormulaColumn,
     LayoutField,
     LayoutGroup,
@@ -111,6 +112,34 @@ def _text_of(el) -> str:
         if child.tail:
             parts.append(child.tail)
     return "".join(parts).strip()
+
+
+def _safe_id(s: str) -> str:
+    if not s:
+        return "_"
+    out = []
+    for ch in s:
+        if ch.isalnum() or ch == "_":
+            out.append(ch)
+        else:
+            out.append("_")
+    result = "".join(out)
+    if result and result[0].isdigit():
+        result = "_" + result
+    return result or "_"
+
+
+def _guess_image_mime(hex_str: str, fallback: str = "image/gif") -> str:
+    if not hex_str:
+        return fallback
+    cleaned = "".join(hex_str.split()).lower()
+    if cleaned.startswith("47494638"):
+        return "image/gif"
+    if cleaned.startswith("89504e47"):
+        return "image/png"
+    if cleaned.startswith("ffd8ff"):
+        return "image/jpeg"
+    return fallback
 
 
 # ---------------------------------------------------------------------------
@@ -302,8 +331,37 @@ def _parse_program_units(root, warnings: List[str]) -> (List[TriggerCode], dict)
 # Layout
 # ---------------------------------------------------------------------------
 
+def _apply_geometry(target, el) -> None:
+    geom = _find(el, "geometryInfo")
+    if geom is None:
+        return
+    target.x = _float_attr(geom, "x")
+    target.y = _float_attr(geom, "y")
+    target.width = _float_attr(geom, "width")
+    target.height = _float_attr(geom, "height")
+
+
+def _apply_visual_settings(target, el) -> None:
+    vs = _find(el, "visualSettings")
+    if vs is None:
+        return
+    target.border_width = _float_attr(vs, "lineWidth")
+    target.border_pattern = _attr(vs, "linePattern")
+
+
+def _format_trigger_of(el) -> str:
+    direct = _attr(el, "formatTrigger")
+    if direct:
+        return direct
+    al = _find(el, "advancedLayout")
+    if al is not None:
+        return _attr(al, "formatTrigger")
+    return ""
+
+
 def _layout_field_from_element(el) -> LayoutField:
     """Build a LayoutField from a <field> or <text> element."""
+    tag = _localname(el)
     name = _attr(el, "name")
     source = _attr(el, "source")
     geom = _find(el, "geometryInfo")
@@ -312,95 +370,190 @@ def _layout_field_from_element(el) -> LayoutField:
     width = _float_attr(geom, "width") if geom is not None else 0.0
     height = _float_attr(geom, "height") if geom is not None else 0.0
 
-    # If <text>, pull boilerplate text from textSegment/string CDATA
     text_value = source
     bold = False
+    italic = False
     font_size = 10
-    if _localname(el) == "text":
+    font_family = ""
+    color = ""
+    align = _attr(el, "alignment")
+    text_settings = _find(el, "textSettings")
+    if text_settings is not None and not align:
+        align = _attr(text_settings, "justify")
+
+    if tag == "text":
         segs: List[str] = []
+        first_font = None
         for ts in _iter_descendants(el, "textSegment"):
+            if first_font is None:
+                first_font = _find(ts, "font")
             for s in _findall(ts, "string"):
                 if s.text:
                     segs.append(s.text)
         text_value = "".join(segs).strip()
-    # Pick up font info if present
+        if first_font is not None:
+            font_size = _int_attr(first_font, "size", 10) or 10
+            font_family = _attr(first_font, "face")
+            bold = _attr(first_font, "weight").lower() == "bold" or _attr(first_font, "bold").lower() == "yes"
+            style = _attr(first_font, "style").lower()
+            italic = style == "italic" or _attr(first_font, "italic").lower() == "yes"
+            color = _attr(first_font, "color") or _attr(first_font, "foreground")
+
     font = _find(el, "font")
     if font is not None:
-        font_size = _int_attr(font, "size", 10) or 10
-        bold = _attr(font, "bold").lower() == "yes"
+        font_size = _int_attr(font, "size", font_size) or font_size
+        if not font_family:
+            font_family = _attr(font, "face")
+        if not bold:
+            bold = _attr(font, "bold").lower() == "yes" or _attr(font, "weight").lower() == "bold"
+        if not italic:
+            italic = _attr(font, "italic").lower() == "yes" or _attr(font, "style").lower() == "italic"
+        if not color:
+            color = _attr(font, "color") or _attr(font, "foreground")
+
+    kind = "text" if tag == "text" else "field"
 
     return LayoutField(
         name=name,
         source=source,
         text=text_value or source,
+        kind=kind,
         bold=bold,
+        italic=italic,
         font_size=font_size,
+        font_family=font_family,
+        color=color,
+        align=align,
         x=x,
         y=y,
         width=width,
         height=height,
+        format_trigger=_format_trigger_of(el),
     )
 
 
 def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                      groups_by_name: dict, root_groups: List[LayoutGroup],
-                     warnings: List[str]) -> None:
-    """Walk the layout subtree, attaching fields to the most specific group.
-
-    Whenever we encounter a <repeatingFrame>, we open a new LayoutGroup keyed
-    by its @source (the data group / query name). Fields/texts inside go into
-    that group. <field> / <text> outside any repeatingFrame go into a default
-    group keyed by the section name passed via current_group.
-    """
+                     warnings: List[str],
+                     embedded_images: List[EmbeddedImage]) -> None:
+    """Walk the layout subtree, attaching fields to the most specific group."""
     for child in node:
         tag = _localname(child)
         if tag == "repeatingFrame":
-            rf_name = _attr(child, "name")
-            rf_source = _attr(child, "source")
-            # Group key uses the data source name when available
-            key = rf_source or rf_name
-            grp = groups_by_name.get(key)
-            if grp is None:
-                grp = LayoutGroup(name=rf_name or rf_source or "group",
-                                  source_query=rf_source)
-                groups_by_name[key] = grp
+            try:
+                rf_name = _attr(child, "name")
+                rf_source = _attr(child, "source")
+                key = rf_source or rf_name
+                grp = groups_by_name.get(key)
+                if grp is None:
+                    grp = LayoutGroup(
+                        name=rf_name or rf_source or "group",
+                        kind="repeating_frame",
+                        source_query=rf_source,
+                        format_trigger=_format_trigger_of(child),
+                    )
+                    _apply_geometry(grp, child)
+                    _apply_visual_settings(grp, child)
+                    groups_by_name[key] = grp
+                    if current_group is None:
+                        root_groups.append(grp)
+                    else:
+                        current_group.children.append(grp)
+                _walk_layout_node(child, grp, groups_by_name, root_groups,
+                                  warnings, embedded_images)
+            except Exception as exc:  # pragma: no cover - defensive
+                warnings.append(f"failed to parse repeatingFrame: {exc}")
+        elif tag == "frame":
+            try:
+                fr_name = _attr(child, "name") or "frame"
+                grp = LayoutGroup(
+                    name=fr_name,
+                    kind="frame",
+                    format_trigger=_format_trigger_of(child),
+                )
+                _apply_geometry(grp, child)
+                _apply_visual_settings(grp, child)
                 if current_group is None:
                     root_groups.append(grp)
                 else:
                     current_group.children.append(grp)
-            _walk_layout_node(child, grp, groups_by_name, root_groups, warnings)
+                _walk_layout_node(child, grp, groups_by_name, root_groups,
+                                  warnings, embedded_images)
+            except Exception as exc:  # pragma: no cover - defensive
+                warnings.append(f"failed to parse frame: {exc}")
         elif tag in ("field", "text"):
             try:
                 lf = _layout_field_from_element(child)
                 target = current_group
                 if target is None:
-                    # Fall back to a synthetic group named after the section
                     key = "_default"
                     target = groups_by_name.get(key)
                     if target is None:
-                        target = LayoutGroup(name="_default", source_query="")
+                        target = LayoutGroup(name="_default", kind="_default",
+                                             source_query="")
                         groups_by_name[key] = target
                         root_groups.append(target)
                 target.fields.append(lf)
             except Exception as exc:  # pragma: no cover - defensive
                 warnings.append(f"failed to parse layout field: {exc}")
-            # Fields can themselves contain nested elements (rare); keep walking
-            _walk_layout_node(child, current_group, groups_by_name, root_groups, warnings)
+            _walk_layout_node(child, current_group, groups_by_name, root_groups,
+                              warnings, embedded_images)
         elif tag == "image":
-            # Treat images as fields with empty source so they show up in mockups
             try:
-                lf = _layout_field_from_element(child)
-                if current_group is not None:
-                    current_group.fields.append(lf)
-            except Exception:
-                pass
-            _walk_layout_node(child, current_group, groups_by_name, root_groups, warnings)
+                name = _attr(child, "name")
+                geom = _find(child, "geometryInfo")
+                x = _float_attr(geom, "x") if geom is not None else 0.0
+                y = _float_attr(geom, "y") if geom is not None else 0.0
+                width = _float_attr(geom, "width") if geom is not None else 0.0
+                height = _float_attr(geom, "height") if geom is not None else 0.0
+                bin_data = _find(child, "binaryData")
+                image_id = ""
+                if bin_data is not None and (bin_data.text or "").strip():
+                    raw_hex = (bin_data.text or "").strip()
+                    declared_mime = _attr(bin_data, "format")
+                    mime = declared_mime or _guess_image_mime(raw_hex)
+                    image_id = _safe_id(name or f"image_{len(embedded_images)}")
+                    embedded_images.append(
+                        EmbeddedImage(
+                            id=image_id,
+                            mime_type=mime,
+                            hex_data=raw_hex,
+                        )
+                    )
+                    lf = LayoutField(
+                        name=name,
+                        kind="image",
+                        image_id=image_id,
+                        x=x, y=y, width=width, height=height,
+                        format_trigger=_format_trigger_of(child),
+                    )
+                else:
+                    lf = LayoutField(
+                        name=name,
+                        kind="image",
+                        source=name,
+                        x=x, y=y, width=width, height=height,
+                        format_trigger=_format_trigger_of(child),
+                    )
+                target = current_group
+                if target is None:
+                    key = "_default"
+                    target = groups_by_name.get(key)
+                    if target is None:
+                        target = LayoutGroup(name="_default", kind="_default",
+                                             source_query="")
+                        groups_by_name[key] = target
+                        root_groups.append(target)
+                target.fields.append(lf)
+            except Exception as exc:  # pragma: no cover - defensive
+                warnings.append(f"failed to parse image: {exc}")
         else:
-            # Recurse through containers (section, body, frame, etc.)
-            _walk_layout_node(child, current_group, groups_by_name, root_groups, warnings)
+            _walk_layout_node(child, current_group, groups_by_name, root_groups,
+                              warnings, embedded_images)
 
 
-def _parse_layout(root, warnings: List[str]) -> List[LayoutGroup]:
+def _parse_layout(root, warnings: List[str],
+                  embedded_images: List[EmbeddedImage]) -> List[LayoutGroup]:
     layout_el = _find(root, "layout")
     if layout_el is None:
         return []
@@ -409,17 +562,16 @@ def _parse_layout(root, warnings: List[str]) -> List[LayoutGroup]:
     for section in _findall(layout_el, "section"):
         section_name = _attr(section, "name") or "section"
         repeat_on = _attr(section, "repeatOn")
-        # Open a synthetic top-level group for each section so loose
-        # boilerplate has a home.
         section_group = LayoutGroup(
             name=f"section_{section_name}",
+            kind=f"section_{section_name}",
             source_query=repeat_on,
+            repeat_on=repeat_on,
         )
         groups_by_name[f"__section__{section_name}"] = section_group
         root_groups.append(section_group)
         _walk_layout_node(section, section_group, groups_by_name,
-                          root_groups, warnings)
-    # Drop empty synthetic groups that got nothing attached
+                          root_groups, warnings, embedded_images)
     pruned: List[LayoutGroup] = []
     for g in root_groups:
         if g.fields or g.children:
@@ -464,7 +616,8 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
     parameters = _parse_parameters(data_el, warnings)
     queries = _parse_queries(data_el, warnings)
     formulas = _parse_formulas(data_el, program_units_index, warnings)
-    layout = _parse_layout(root, warnings)
+    embedded_images: List[EmbeddedImage] = []
+    layout = _parse_layout(root, warnings, embedded_images)
 
     return ParsedReport(
         name=name,
@@ -474,6 +627,7 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
         formulas=formulas,
         layout=layout,
         triggers=triggers,
+        embedded_images=embedded_images,
         raw_xml=raw_xml,
         warnings=warnings,
     )

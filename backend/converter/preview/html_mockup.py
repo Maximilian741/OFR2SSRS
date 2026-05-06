@@ -13,10 +13,12 @@ cream, no navy -- like a printed government form.
 """
 from __future__ import annotations
 
+import base64
 import html
-from typing import List
+import re
+from typing import Dict, List, Optional
 
-from ..models import ParsedReport, DataQuery, ReportParameter
+from ..models import EmbeddedImage, LayoutField, LayoutGroup, ParsedReport
 
 
 # ---------------------------------------------------------------------------
@@ -270,6 +272,180 @@ def _render_signature_block():
 
 
 # ---------------------------------------------------------------------------
+# Certificate (positioned layout) renderer
+# ---------------------------------------------------------------------------
+
+_TOKEN_RE = re.compile(r"&([A-Z][A-Z0-9_]*)", re.IGNORECASE)
+
+# Canned values used to fill in &TOKEN substitutions for the preview.
+_TOKEN_PREVIEW = {
+    "PERMIT": "MV-2026-0117",
+    "PERM_TYPE": "MOTOR VEHICLE WRECKING FACILITY LICENSE",
+    "RENEWAL_YEAR": "2026",
+    "SITE_NAME": "City Auto Wreckers - Bozeman",
+    "SITE_ADDR": "1442 Industrial Dr, Bozeman, MT 59715",
+    "PERM_DATES": "JANUARY 5, 2026 TO DECEMBER 31, 2026",
+    "EXP_DATE": "12/31/2026",
+    "PERM_EFF_DATE": "01/05/2026",
+    "CP_OPERATE_U": "OPERATING AS",
+    "CP_OPERATE_L": "operating as",
+    "CP_JV_ADDR": "PO Box 200901, Helena MT 59620-0901",
+    "CF_PERMITTEES": "Joseph T. Reilly",
+    "CF_WUTMB_CHIEF": "Bureau Chief, Waste & Underground Tank Management Bureau",
+    "CF_MVWF_PERMIT": "MVWF Permit(s)",
+}
+
+
+def _resolve_tokens(text: str) -> str:
+    def sub(m):
+        key = m.group(1).upper()
+        return _TOKEN_PREVIEW.get(key, m.group(0))
+    return _TOKEN_RE.sub(sub, text or "")
+
+
+def _img_data_uri(img: EmbeddedImage) -> str:
+    if not img or not img.hex_data:
+        return ""
+    try:
+        b = bytes.fromhex(img.hex_data.strip())
+    except Exception:
+        return ""
+    return f"data:{img.mime_type or 'image/gif'};base64,{base64.b64encode(b).decode('ascii')}"
+
+
+def _find_section(layout: List[LayoutGroup], kind: str) -> Optional[LayoutGroup]:
+    for g in layout or []:
+        if g.kind == kind:
+            return g
+    return None
+
+
+def _embedded_index(report: ParsedReport) -> Dict[str, EmbeddedImage]:
+    return {img.id: img for img in (report.embedded_images or [])}
+
+
+def _render_field(lf: LayoutField, frame_x: float, frame_y: float,
+                  embedded: Dict[str, EmbeddedImage]) -> str:
+    rel_x = max(0.0, lf.x - frame_x)
+    rel_y = max(0.0, lf.y - frame_y)
+    style_pos = (
+        f"position:absolute; left:{rel_x:.2f}in; top:{rel_y:.2f}in; "
+        f"width:{lf.width:.2f}in; height:{lf.height:.2f}in; "
+    )
+    if lf.kind == "image":
+        img = embedded.get(lf.image_id)
+        uri = _img_data_uri(img) if img else ""
+        if uri:
+            return (
+                f'<img src="{uri}" style="{style_pos}'
+                'opacity:0.18; object-fit:contain;" alt="seal" />'
+            )
+        return (
+            f'<div style="{style_pos}border:1px dashed {RULE}; '
+            f'color:{INK_MUTED}; font-size:10px; display:flex; '
+            'align-items:center; justify-content:center;">[seal]</div>'
+        )
+
+    if lf.kind == "text":
+        content = _resolve_tokens(lf.text or "")
+    elif lf.kind == "field":
+        if lf.source.upper() in _TOKEN_PREVIEW:
+            content = _TOKEN_PREVIEW[lf.source.upper()]
+        elif lf.source.lower() == "currentdate":
+            content = "01/05/2026"
+        else:
+            content = _resolve_tokens(lf.text or lf.source or "")
+    else:
+        content = lf.text or lf.source or ""
+
+    if not content.strip():
+        return ""
+
+    weight = "bold" if lf.bold else "normal"
+    italic = "italic" if lf.italic else "normal"
+    align = lf.align if lf.align in ("left", "center", "right") else "left"
+    color = lf.color or INK
+    family = lf.font_family or "Arial, sans-serif"
+    size = max(7, min(int(lf.font_size or 10), 28))
+    style_text = (
+        f"font-family:{family}; font-size:{size}px; "
+        f"font-weight:{weight}; font-style:{italic}; "
+        f"color:{_esc(color)}; text-align:{align}; "
+        "line-height:1.15; white-space:pre-wrap; overflow:hidden;"
+    )
+    return (
+        f'<div style="{style_pos}{style_text}">{_esc(content)}</div>'
+    )
+
+
+def _render_frame(frame: LayoutGroup, embedded: Dict[str, EmbeddedImage]) -> str:
+    border = ""
+    if frame.border_width and frame.border_width > 0:
+        border = f"border:{max(1, int(frame.border_width))}px solid {INK};"
+    inner = []
+    for lf in frame.fields:
+        inner.append(_render_field(lf, frame.x, frame.y, embedded))
+    for child in frame.children:
+        if child.kind in ("frame", "repeating_frame"):
+            inner.append(
+                f'<div style="position:absolute; '
+                f'left:{max(0.0, child.x - frame.x):.2f}in; '
+                f'top:{max(0.0, child.y - frame.y):.2f}in; '
+                f'width:{child.width:.2f}in; height:{child.height:.2f}in;">'
+                f'{_render_frame(child, embedded)}'
+                '</div>'
+            )
+        else:
+            for lf in child.fields:
+                inner.append(_render_field(lf, frame.x, frame.y, embedded))
+    return (
+        f'<div style="position:relative; width:{frame.width:.2f}in; '
+        f'height:{frame.height:.2f}in; {border}">'
+        f'{"".join(inner)}'
+        '</div>'
+    )
+
+
+def _render_certificate(report: ParsedReport) -> str:
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return ""
+    frames = [c for c in main.children if c.kind == "frame"]
+    if not frames:
+        return ""
+    embedded = _embedded_index(report)
+
+    max_x = max((f.x + f.width for f in frames), default=8.0)
+    max_y = max((f.y + f.height for f in frames), default=11.0)
+    page_w = max(8.0, max_x + 0.2)
+    page_h = max(10.5, max_y + 0.2)
+
+    children = []
+    for f in frames:
+        children.append(
+            f'<div style="position:absolute; left:{f.x:.2f}in; top:{f.y:.2f}in; '
+            f'width:{f.width:.2f}in; height:{f.height:.2f}in;">'
+            f'{_render_frame(f, embedded)}'
+            '</div>'
+        )
+
+    label = (
+        f'<div style="font-size:11px; color:{INK_MUTED}; '
+        'text-transform:uppercase; letter-spacing:1px; margin:24px 0 8px;">'
+        'Page 2 &mdash; Certificate (one per permit)</div>'
+    )
+    sheet = (
+        f'<div style="position:relative; width:{page_w:.2f}in; '
+        f'height:{page_h:.2f}in; background:{PAPER}; '
+        f'border:1px solid {RULE_LIGHT}; margin:0 auto; '
+        'box-shadow:0 1px 3px rgba(0,0,0,0.08);">'
+        f'{"".join(children)}'
+        '</div>'
+    )
+    return label + sheet
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -279,6 +455,7 @@ def render_mockup(report):
         _render_subtitle(report),
         _render_param_form(report),
         _render_data_table(report),
+        _render_certificate(report),
         _render_signature_block(),
     ])
 

@@ -97,30 +97,80 @@ class FormulaColumn:
 
 
 # ---------------------------------------------------------------------------
+# Embedded images (binaryData blobs from Oracle layout)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class EmbeddedImage:
+    """A hex-encoded image (state seal etc.) extracted from <image><binaryData>.
+
+    The generator emits these into <EmbeddedImages> at the RDL report root and
+    references them from <Image Source="Embedded" Value="<id>">.
+    """
+    id: str                         # safe identifier (also the RDL EmbeddedImage Name)
+    mime_type: str = "image/gif"    # gif | png | jpeg
+    hex_data: str = ""              # raw hex string from <binaryData>
+
+
+# ---------------------------------------------------------------------------
 # Layout tree (groups / repeating frames / fields)
 # ---------------------------------------------------------------------------
+
+# LayoutField.kind values:
+#   "text"  - boilerplate text (literal, may contain &TOKEN substitutions)
+#   "field" - data-bound field (source = column / formula / placeholder)
+#   "image" - embedded image (image_id refers to an EmbeddedImage on the report)
+#   "line"  - decorative line/rule
 
 @dataclass
 class LayoutField:
     """A boilerplate or printed field on the layout."""
     name: str
     source: str = ""                # column / formula referenced
-    text: str = ""                  # static text if any
+    text: str = ""                  # static text if any (for kind="text")
+    kind: str = "field"             # text | field | image | line
+    image_id: str = ""              # EmbeddedImage.id when kind="image"
     bold: bool = False
+    italic: bool = False
     font_size: int = 10
+    font_family: str = ""
+    color: str = ""                 # text color (e.g. "Red")
+    align: str = ""                 # left | center | right
     x: float = 0.0
     y: float = 0.0
     width: float = 0.0
     height: float = 0.0
+    format_trigger: str = ""        # name of PL/SQL format trigger function
 
+
+# LayoutGroup.kind values:
+#   "section_header"     - <section name="header">
+#   "section_main"       - <section name="main">
+#   "section_trailer"    - <section name="trailer">
+#   "frame"              - <frame> container (positioned, may have a border)
+#   "repeating_frame"    - <repeatingFrame> bound to a data source
+#   "_default"           - synthetic catch-all bucket
 
 @dataclass
 class LayoutGroup:
     """A repeating frame + its fields. Maps to an RDL Tablix or List."""
     name: str
+    kind: str = "_default"
     source_query: str = ""
     fields: List[LayoutField] = field(default_factory=list)
     children: List["LayoutGroup"] = field(default_factory=list)
+    # Geometry (frames carry x/y/w/h for positioned RDL emission)
+    x: float = 0.0
+    y: float = 0.0
+    width: float = 0.0
+    height: float = 0.0
+    # Border attributes from <visualSettings lineWidth="N" linePattern="solid"/>
+    border_width: float = 0.0
+    border_pattern: str = ""
+    # Section repeat-on (e.g. main repeats per G_PERMIT row)
+    repeat_on: str = ""
+    # Format trigger name (PL/SQL function controlling visibility)
+    format_trigger: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -147,6 +197,7 @@ class ParsedReport:
     formulas: List[FormulaColumn] = field(default_factory=list)
     layout: List[LayoutGroup] = field(default_factory=list)
     triggers: List[TriggerCode] = field(default_factory=list)
+    embedded_images: List[EmbeddedImage] = field(default_factory=list)
     raw_xml: str = ""               # for the side-by-side view
     warnings: List[str] = field(default_factory=list)
 
@@ -171,6 +222,10 @@ class ParsedReport:
             "formulas": [f.__dict__ for f in self.formulas],
             "layout": [_layout_to_dict(g) for g in self.layout],
             "triggers": [t.__dict__ for t in self.triggers],
+            "embedded_images": [
+                {"id": img.id, "mime_type": img.mime_type, "size": len(img.hex_data) // 2}
+                for img in self.embedded_images
+            ],
             "warnings": self.warnings,
         }
 
@@ -178,7 +233,11 @@ class ParsedReport:
 def _layout_to_dict(g: LayoutGroup) -> Dict[str, Any]:
     return {
         "name": g.name,
+        "kind": g.kind,
         "source_query": g.source_query,
+        "x": g.x, "y": g.y, "width": g.width, "height": g.height,
+        "border_width": g.border_width,
+        "repeat_on": g.repeat_on,
         "fields": [f.__dict__ for f in g.fields],
         "children": [_layout_to_dict(c) for c in g.children],
     }
