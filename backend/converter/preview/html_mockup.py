@@ -276,23 +276,61 @@ def _render_signature_block():
 # ---------------------------------------------------------------------------
 
 _TOKEN_RE = re.compile(r"&([A-Z][A-Z0-9_]*)", re.IGNORECASE)
+_WS_COLLAPSE = re.compile(r"\s*\n\s*\n\s*", re.MULTILINE)
 
-# Canned values used to fill in &TOKEN substitutions for the preview.
+# Canned values used to fill in &TOKEN substitutions and bound fields when no
+# real data source is available. These are FALLBACK placeholders only — when
+# the user runs against real data via the Live Data tab, those values win.
 _TOKEN_PREVIEW = {
-    "PERMIT": "MV-2026-0117",
-    "PERM_TYPE": "MOTOR VEHICLE WRECKING FACILITY LICENSE",
-    "RENEWAL_YEAR": "2026",
-    "SITE_NAME": "City Auto Wreckers - Bozeman",
-    "SITE_ADDR": "1442 Industrial Dr, Bozeman, MT 59715",
-    "PERM_DATES": "JANUARY 5, 2026 TO DECEMBER 31, 2026",
-    "EXP_DATE": "12/31/2026",
-    "PERM_EFF_DATE": "01/05/2026",
-    "CP_OPERATE_U": "OPERATING AS",
-    "CP_OPERATE_L": "operating as",
-    "CP_JV_ADDR": "PO Box 200901, Helena MT 59620-0901",
-    "CF_PERMITTEES": "Joseph T. Reilly",
-    "CF_WUTMB_CHIEF": "Bureau Chief, Waste & Underground Tank Management Bureau",
-    "CF_MVWF_PERMIT": "MVWF Permit(s)",
+    # Q_PERMIT columns / common &TOKEN references
+    "PERMIT":          "MV-2026-0117",
+    "PERM_TYPE":       "MOTOR VEHICLE WRECKING FACILITY LICENSE",
+    "RENEWAL_YEAR":    "2026",
+    "SITE_NAME":       "City Auto Wreckers - Bozeman",
+    "SITE_ADDR":       "1442 Industrial Dr, Bozeman, MT 59715",
+    "PERM_DATES":      "JANUARY 5, 2026 TO DECEMBER 31, 2026",
+    "EXP_DATE":        "12/31/2026",
+    "PERM_EFF_DATE":   "01/05/2026",
+    "PERM_EXP_DATE":   "12/31/2026",
+    "PERM_NUM":        "0117",
+    "SITE_ID":         "S-2026-0117",
+    "COL_SORT":        "A-001",
+    # Q_ORG columns (master-detail child)
+    "PERMITTEE_ADDR":  "Joseph T. Reilly\n1442 Industrial Dr\nBozeman, MT 59715",
+    "PERMITTEE":       "Joseph T. Reilly",
+    "SA_SITE_ID":      "S-2026-0117",
+    "ORG_ID":          "ORG-1170",
+    # Placeholders / formulas
+    "CP_OPERATE_U":    "OPERATING AS",
+    "CP_OPERATE_L":    "operating as",
+    "CP_JV_ADDR":      "PO Box 200901, Helena MT 59620-0901",
+    "CP_SORT_DESCR":   "Permit",
+    "CP_PERMIT_DTL":   "Renewal Year = '2026'",
+    "CP_JV_ENVELOPE":  "JV Standard 12 x 9 Envelope",
+    "CP_URL_ALL_ENVELOPE": "(envelope generation URL)",
+    "CF_PERMITTEES":   "Joseph T. Reilly",
+    "CF_WUTMB_CHIEF":  "Bureau Chief, Waste & Underground Tank Management Bureau",
+    "CF_MVWF_PERMIT":  "MVWF Permit(s)",
+    "CF_FILE":         "MVWF-2026.RDL",
+    "CF_URL_ENVELOPE": "(envelope hyperlink)",
+    # Parameter-form-style references
+    "P_RENEWAL_YEAR":  "2026",
+    "P_AS_PATH":       "ALL",
+    "P_ENVELOPE":      "JV_ENVELOPE_12",
+    "P_PERM_NAME":     "ALL",
+    "P_REPORT_SERVER": "ALL",
+    "P_SITE_NAME":     "ALL",
+    "P_STATUS_DT_BEGIN": "01/01/2026",
+    "P_STATUS_DT_END":   "01/01/2026",
+    "P_SUBTITLE":      "Renewal Year = '2026'",
+    "P_SORT":          "Permit",
+    "P_PERMITTEE":     "ALL",
+    "P_PERM_NUM":      "0117",
+    "P_DISTR_ABBR":    "(distribution)",
+    # Built-ins
+    "CURRENTDATE":     "01/05/2026",
+    "DATE":            "01/05/2026",
+    "SIGNATURE":       "",   # blob, omit
 }
 
 
@@ -301,6 +339,15 @@ def _resolve_tokens(text: str) -> str:
         key = m.group(1).upper()
         return _TOKEN_PREVIEW.get(key, m.group(0))
     return _TOKEN_RE.sub(sub, text or "")
+
+
+def _clean_text(text: str) -> str:
+    """Collapse Oracle's verbose `\\n            \\n` whitespace runs."""
+    if not text:
+        return ""
+    cleaned = _WS_COLLAPSE.sub("\n", text)
+    cleaned = "\n".join(line.strip() for line in cleaned.split("\n"))
+    return cleaned.strip()
 
 
 def _img_data_uri(img: EmbeddedImage) -> str:
@@ -324,13 +371,32 @@ def _embedded_index(report: ParsedReport) -> Dict[str, EmbeddedImage]:
     return {img.id: img for img in (report.embedded_images or [])}
 
 
+def _resolve_field_value(lf: LayoutField) -> str:
+    """Map a `kind=field` LayoutField to its display value for the mockup."""
+    src_up = (lf.source or "").upper()
+    if src_up and src_up in _TOKEN_PREVIEW:
+        return _TOKEN_PREVIEW[src_up]
+    if src_up == "CURRENTDATE":
+        return _TOKEN_PREVIEW["CURRENTDATE"]
+    # Some Oracle reports embed &TOKEN inside the field's text segment too
+    if lf.text and "&" in lf.text:
+        resolved = _resolve_tokens(lf.text)
+        if resolved != lf.text:
+            return resolved
+    # Last resort: a clearly-marked placeholder so the user can spot bindings
+    # that don't have canned data, instead of seeing the raw column name.
+    if lf.source:
+        return f"<{lf.source}>"
+    return ""
+
+
 def _render_field(lf: LayoutField, frame_x: float, frame_y: float,
                   embedded: Dict[str, EmbeddedImage]) -> str:
     rel_x = max(0.0, lf.x - frame_x)
     rel_y = max(0.0, lf.y - frame_y)
     style_pos = (
         f"position:absolute; left:{rel_x:.2f}in; top:{rel_y:.2f}in; "
-        f"width:{lf.width:.2f}in; height:{lf.height:.2f}in; "
+        f"width:{lf.width:.2f}in; min-height:{lf.height:.2f}in; "
     )
     if lf.kind == "image":
         img = embedded.get(lf.image_id)
@@ -338,7 +404,8 @@ def _render_field(lf: LayoutField, frame_x: float, frame_y: float,
         if uri:
             return (
                 f'<img src="{uri}" style="{style_pos}'
-                'opacity:0.18; object-fit:contain;" alt="seal" />'
+                'opacity:0.20; object-fit:contain; pointer-events:none;" '
+                'alt="seal" />'
             )
         return (
             f'<div style="{style_pos}border:1px dashed {RULE}; '
@@ -349,29 +416,27 @@ def _render_field(lf: LayoutField, frame_x: float, frame_y: float,
     if lf.kind == "text":
         content = _resolve_tokens(lf.text or "")
     elif lf.kind == "field":
-        if lf.source.upper() in _TOKEN_PREVIEW:
-            content = _TOKEN_PREVIEW[lf.source.upper()]
-        elif lf.source.lower() == "currentdate":
-            content = "01/05/2026"
-        else:
-            content = _resolve_tokens(lf.text or lf.source or "")
+        content = _resolve_field_value(lf)
     else:
         content = lf.text or lf.source or ""
 
-    if not content.strip():
+    content = _clean_text(content)
+    if not content:
         return ""
 
     weight = "bold" if lf.bold else "normal"
     italic = "italic" if lf.italic else "normal"
     align = lf.align if lf.align in ("left", "center", "right") else "left"
     color = lf.color or INK
-    family = lf.font_family or "Arial, sans-serif"
-    size = max(7, min(int(lf.font_size or 10), 28))
+    family = lf.font_family or "Arial, Helvetica, sans-serif"
+    size = max(7, min(int(lf.font_size or 10), 32))
+    # No overflow:hidden — multi-line captions (FOR THE PERIOD + dates) need
+    # to flow past the Oracle-declared box height when our font metrics differ.
     style_text = (
         f"font-family:{family}; font-size:{size}px; "
         f"font-weight:{weight}; font-style:{italic}; "
         f"color:{_esc(color)}; text-align:{align}; "
-        "line-height:1.15; white-space:pre-wrap; overflow:hidden;"
+        "line-height:1.18; white-space:pre-wrap;"
     )
     return (
         f'<div style="{style_pos}{style_text}">{_esc(content)}</div>'
