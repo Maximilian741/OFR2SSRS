@@ -32,8 +32,11 @@
   }
 
   class ShaderRunner {
-    constructor({ canvas, fragmentSource, onClick }) {
+    constructor({ canvas, fragmentSource, onClick, pixelScale }) {
       this.canvas = canvas;
+      // pixelScale < 1 downsamples the internal framebuffer for a chunky
+      // pixel-art look when the canvas is upscaled via CSS image-rendering.
+      this.pixelScale = (typeof pixelScale === 'number' && pixelScale > 0) ? pixelScale : null;
       const gl = canvas.getContext('webgl', { antialias: true, premultipliedAlpha: false });
       if (!gl) throw new Error('WebGL not supported');
       this.gl = gl;
@@ -103,11 +106,13 @@
     }
 
     _resize() {
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const scale = this.pixelScale != null
+        ? this.pixelScale
+        : Math.min(window.devicePixelRatio || 1, 2);
       const w = this.canvas.clientWidth;
       const h = this.canvas.clientHeight;
-      this.canvas.width = Math.max(1, Math.floor(w * dpr));
-      this.canvas.height = Math.max(1, Math.floor(h * dpr));
+      this.canvas.width = Math.max(1, Math.floor(w * scale));
+      this.canvas.height = Math.max(1, Math.floor(h * scale));
       this.gl.viewport(0, 0, this.canvas.width, this.canvas.height);
     }
 
