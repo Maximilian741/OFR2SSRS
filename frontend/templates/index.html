@@ -8,12 +8,11 @@
 <link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Press+Start+2P&family=VT323&family=Silkscreen:wght@400;700&family=Pixelify+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@500;600;700&family=Press+Start+2P&display=swap" rel="stylesheet">
 </head>
 <body>
 
 <canvas id="bg-stage" aria-hidden="true"></canvas>
-<div id="bg-scanlines" aria-hidden="true"></div>
 
 <header class="topbar">
   <div class="brand">
@@ -296,8 +295,6 @@ void main(){
       new ShaderRunner({
         canvas: document.getElementById('bg-stage'),
         fragmentSource: document.getElementById('bg-frag').textContent,
-        // Downsample heavily so CSS upscale produces chunky pixel-art bg.
-        pixelScale: 0.32,
       });
     } catch (e) {
       // WebGL unavailable — fall back to static gradient via CSS
