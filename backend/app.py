@@ -52,9 +52,24 @@ def _asset_version():
         return "0"
 
 
+def _valid_sample(p):
+    """Only show a file in the sidebar if it's a non-trivial, well-formed
+    Oracle Reports XML (has <report> root). Empty/junk files are hidden."""
+    try:
+        if p.stat().st_size < 200:
+            return False
+        head = p.read_bytes()[:600].decode("utf-8", "replace")
+        return "<report" in head
+    except Exception:
+        return False
+
+
 @app.route("/")
 def index():
-    sample_files = sorted(p.name for p in SAMPLES.glob("*.xml") if p.stat().st_size > 100) if SAMPLES.exists() else []
+    sample_files = (
+        sorted(p.name for p in SAMPLES.glob("*.xml") if _valid_sample(p))
+        if SAMPLES.exists() else []
+    )
     return render_template("index.html", samples=sample_files, asset_version=_asset_version())
 
 
@@ -177,7 +192,7 @@ def api_run_query():
 
 @app.get("/api/health")
 def api_health():
-    return jsonify({"ok": True, "samples": [p.name for p in SAMPLES.glob("*.xml") if p.stat().st_size > 100] if SAMPLES.exists() else []})
+    return jsonify({"ok": True, "samples": [p.name for p in SAMPLES.glob("*.xml") if _valid_sample(p)] if SAMPLES.exists() else []})
 
 
 @app.get("/api/ai/test")

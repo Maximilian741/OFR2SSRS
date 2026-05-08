@@ -176,6 +176,7 @@ function onConverted(data) {
   renderWarnings(data);
   if (window.Prism) Prism.highlightAll();
   showMockupCTA();
+  pushRecent(data);
   // Show whatever tab was active
   activateTab(state.activeTab);
 }
@@ -680,12 +681,26 @@ function renderBurstingTab(data) {
     host.appendChild(pb);
   }
 
+  // Config template block
+  if (burst.email_config_template) {
+    const cb = document.createElement("details");
+    cb.className = "burst-block";
+    cb.innerHTML =
+      '<summary><b>3. <code>burst.config.json</code></b> — sits next to burst.ps1, edit values for your env ' +
+      '<button class="btn btn-ghost btn-copy" data-copy="email_config_template">Copy</button></summary>' +
+      '<pre class="code-block"><code>' +
+      escHtml(burst.email_config_template) + '</code></pre>' +
+      '<div class="burst-hint">The PowerShell script reads this file at runtime, so the same burst.ps1 ' +
+      'works for every report. Only the SQL inside the script changes per report.</div>';
+    host.appendChild(cb);
+  }
+
   // Service-account checklist
   const checklist = burst.service_account_checklist || [];
   if (checklist.length) {
     const cb = document.createElement("section");
     cb.className = "burst-section";
-    cb.innerHTML = '<h3>3. Service-account setup checklist</h3>';
+    cb.innerHTML = '<h3>4. Service-account setup checklist</h3>';
     const ol = document.createElement("ol");
     ol.className = "burst-checklist";
     checklist.forEach(s => {
@@ -721,6 +736,80 @@ function escHtml(s) {
   return String(s == null ? "" : s)
     .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
     .replace(/"/g, "&quot;");
+}
+
+
+
+
+// ----- Recent reports (localStorage) -----
+const RECENT_KEY = "o2s_recent_reports_v1";
+const RECENT_MAX = 12;
+
+function loadRecent() {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    return Array.isArray(arr) ? arr : [];
+  } catch (e) { return []; }
+}
+function saveRecent(arr) {
+  try { localStorage.setItem(RECENT_KEY, JSON.stringify(arr.slice(0, RECENT_MAX))); }
+  catch (e) {}
+}
+function pushRecent(data) {
+  if (!data || !data.report) return;
+  const r = data.report;
+  const entry = {
+    name:    r.name || "Untitled",
+    dtd:     r.dtd_version || "",
+    params:  (r.parameters || []).length,
+    queries: (r.queries || []).length,
+    formulas:(r.formulas || []).length,
+    rdl_size:(data.rdl_xml || "").length,
+    ts:      Date.now(),
+  };
+  let list = loadRecent();
+  // De-dupe by name (latest wins)
+  list = list.filter(e => e.name !== entry.name);
+  list.unshift(entry);
+  saveRecent(list);
+  renderRecentList();
+}
+function clearRecent() {
+  try { localStorage.removeItem(RECENT_KEY); } catch (e) {}
+  renderRecentList();
+}
+function relTime(ts) {
+  const s = Math.max(0, (Date.now() - ts) / 1000);
+  if (s < 60) return Math.round(s) + "s ago";
+  if (s < 3600) return Math.round(s/60) + "m ago";
+  if (s < 86400) return Math.round(s/3600) + "h ago";
+  return Math.round(s/86400) + "d ago";
+}
+function renderRecentList() {
+  const host = document.getElementById("recent-list");
+  if (!host) return;
+  const empty = document.getElementById("recent-empty");
+  const list = loadRecent();
+  // Remove all chips except the empty-note placeholder
+  Array.from(host.querySelectorAll(".recent-chip")).forEach(n => n.remove());
+  if (!list.length) {
+    if (empty) empty.style.display = "";
+    return;
+  }
+  if (empty) empty.style.display = "none";
+  list.forEach(e => {
+    const chip = document.createElement("div");
+    chip.className = "sample-chip recent-chip";
+    chip.style.cursor = "default";
+    chip.innerHTML =
+      '<div style="font-weight:600; color:#fff;">' + escHtml(e.name) + '</div>' +
+      '<div style="font-size:10.5px; color:#9aa0c2; margin-top:2px;">' +
+      e.params + ' params · ' + e.queries + ' queries · ' + e.formulas + ' formulas' +
+      ' &middot; ' + relTime(e.ts) + '</div>';
+    host.appendChild(chip);
+  });
 }
 
 
@@ -867,6 +956,9 @@ function wireEverything() {
   activateTab("mockup");
   setStatus("Ready");
   wireSimplifiedUI();
+  renderRecentList();
+  const clearBtn = document.getElementById("recent-clear");
+  if (clearBtn) clearBtn.addEventListener("click", clearRecent);
   console.log("[Oracle2SSRS] ready");
 }
 

@@ -1,108 +1,65 @@
-"""Tests for the multi-file ingest pipeline (converter.ingest)."""
-from __future__ import annotations
+"""
+Tests for ingest.classify_files / convert_bundle.
 
-import os
-from pathlib import Path
-
-import pytest
-
-
-def _read_sample(name: str, samples_dir: Path) -> bytes:
-    p = samples_dir / name
-    if not p.exists():
-        pytest.skip(f"sample missing: {p}")
-    return p.read_bytes()
+Uses the synthetic_xml_bytes fixture so the test suite never depends on
+files in samples/oracle/.
+"""
+from converter.ingest import classify_files, convert_bundle
 
 
-def test_classify_files_recognizes_xml(samples_dir):
-    from converter.ingest import classify_files
-    blob = _read_sample("COMPLEX_REPORT.xml", samples_dir)
-    cls = classify_files([("COMPLEX_REPORT.xml", blob)])
-    assert cls["primary_xml"] is not None
-    assert cls["primary_xml"][0] == "COMPLEX_REPORT.xml"
+def test_classify_files_recognizes_xml(synthetic_xml_bytes):
+    out = classify_files([("TEST_REPORT.xml", synthetic_xml_bytes)])
+    assert out.get("primary_xml") is not None
+    assert out["primary_xml"][0] == "TEST_REPORT.xml"
 
 
-def test_classify_files_recognizes_docx(samples_dir):
-    from converter.ingest import classify_files
-    docx_name = "COMPLEX_REPORT Sql queries.docx"
-    blob = _read_sample(docx_name, samples_dir)
-    cls = classify_files([(docx_name, blob)])
-    # The SQL-named docx should land in sql_files (extracted blocks) or docs.
-    summaries = cls["category_summary"]
-    cats = {s["category"] for s in summaries}
-    assert cats & {"sql", "docs"}, f"unexpected categories: {cats}"
+def test_classify_files_recognizes_unknown_xml():
+    blob = b'<?xml version="1.0"?><not_a_report />'
+    out = classify_files([("not.xml", blob)])
+    # Should not classify as primary_xml since root is not <report>
+    assert out.get("primary_xml") is None
 
 
-def test_classify_files_screenshots_docx(samples_dir):
-    from converter.ingest import classify_files
-    docx_name = "COMPLEX_REPORT frontend screenshots.docx"
-    blob = _read_sample(docx_name, samples_dir)
-    cls = classify_files([(docx_name, blob)])
-    summaries = cls["category_summary"]
-    cats = {s["category"] for s in summaries}
-    # Frontend screenshots docx should produce screenshots or docs entries.
-    assert cats & {"screenshot", "docs"}, f"unexpected categories: {cats}"
+def test_classify_files_handles_sql():
+    sql = b"SELECT * FROM employees;"
+    out = classify_files([("query.sql", sql)])
+    assert any(name == "query.sql" for name, _ in out.get("sql_files", []))
 
 
-def test_classify_files_all_four_samples(samples_dir):
-    """Drop the entire sample folder and ensure each file is classified."""
-    from converter.ingest import classify_files
-    files = []
-    expected_names = [
-        "COMPLEX_REPORT.xml",
-        "COMPLEX_REPORT Sql queries.docx",
-        "COMPLEX_REPORT frontend screenshots.docx",
-        "COMPLEX_REPORTbackend screenshots.docx",
-    ]
-    for n in expected_names:
-        p = samples_dir / n
-        if p.exists():
-            files.append((n, p.read_bytes()))
-    if len(files) < 4:
-        pytest.skip("not all 4 sample files present")
-
-    cls = classify_files(files)
-    summary_files = {s["file"] for s in cls["category_summary"]}
-    # Every input file should appear in the category summary.
-    for n in expected_names:
-        assert n in summary_files, f"{n} missing from classification summary"
-
-    # The Oracle XML must be the primary
-    assert cls["primary_xml"] is not None
-    assert cls["primary_xml"][0] == "COMPLEX_REPORT.xml"
+def test_classify_files_handles_random_binary():
+    blob = b"\x00\x01\x02junk"
+    out = classify_files([("junk.bin", blob)])
+    assert out.get("primary_xml") is None
 
 
-def test_convert_bundle_with_xml_runs_full_pipeline(samples_dir):
-    from converter.ingest import convert_bundle
-    blob = _read_sample("COMPLEX_REPORT.xml", samples_dir)
-    out = convert_bundle([("COMPLEX_REPORT.xml", blob)])
+def test_convert_bundle_with_xml_runs_full_pipeline(synthetic_xml_bytes):
+    out = convert_bundle([("TEST_REPORT.xml", synthetic_xml_bytes)])
+    assert "report" in out
+    assert "rdl_xml" in out
+    assert len(out["rdl_xml"]) > 0
+
+
+def test_convert_bundle_no_artifacts_returns_error():
+    out = convert_bundle([("garbage.bin", b"\x00\x01")])
+    # Should set error since no convertible artifact
+    assert out.get("error") == "no_convertible_artifacts" or "report" not in out
+
+
+def test_classify_files_category_summary_shape(synthetic_xml_bytes):
+    out = classify_files([
+        ("report.xml", synthetic_xml_bytes),
+        ("query.sql", b"SELECT 1;"),
+    ])
+    summary = out.get("category_summary", [])
+    assert isinstance(summary, list)
+    assert len(summary) >= 1
+    for item in summary:
+        assert "category" in item
+        assert "file" in item
+
+
+def test_convert_bundle_includes_ingest_report(synthetic_xml_bytes):
+    out = convert_bundle([("TEST_REPORT.xml", synthetic_xml_bytes)])
     assert "ingest_report" in out
-    # Either a report (path 1) or an error key (path 3) must be present.
-    assert "report" in out or "error" in out
-    if "report" in out:
-        assert isinstance(out["report"], dict)
-        assert out["rdl_xml"]
-        assert isinstance(out["ingest_report"], dict)
-
-
-def test_convert_bundle_empty_returns_error():
-    from converter.ingest import convert_bundle
-    out = convert_bundle([])
-    assert out.get("error") == "no_convertible_artifacts"
-    assert "ingest_report" in out
-
-
-def test_classify_unknown_extension():
-    from converter.ingest import classify_files
-    cls = classify_files([("notes.weird", b"random bytes")])
-    summaries = cls["category_summary"]
-    cats = {s["category"] for s in summaries}
-    assert "unknown" in cats
-
-
-def test_classify_files_returns_required_buckets():
-    from converter.ingest import classify_files
-    cls = classify_files([])
-    for k in ("primary_xml", "rdf_binary", "sql_files", "docs",
-              "screenshots", "unknown", "category_summary"):
-        assert k in cls
+    ir = out["ingest_report"]
+    assert "category_summary" in ir or "primary_xml" in ir

@@ -43,13 +43,12 @@
     </section>
 
     <section class="side-section">
-      <div class="side-heading">Sample reports</div>
-      <div id="samples-list" class="samples-list">
-        {% for s in samples %}
-          <button class="sample-chip" data-sample="{{ s }}">{{ s }}</button>
-        {% else %}
-          <div class="muted-note">No samples found.</div>
-        {% endfor %}
+      <div class="side-heading" style="display:flex; justify-content:space-between; align-items:center;">
+        <span>Recent reports</span>
+        <button id="recent-clear" class="btn-tiny" title="Clear history">Clear</button>
+      </div>
+      <div id="recent-list" class="samples-list">
+        <div class="muted-note" id="recent-empty">No conversions yet — drop a file above.</div>
       </div>
     </section>
 

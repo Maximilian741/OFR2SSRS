@@ -1206,3 +1206,19 @@ body.show-advanced .advanced-toggle { background: var(--panel-2); color: var(--t
   background: rgba(0,0,0,0.4); padding: 1px 6px; border-radius: 4px;
   color: var(--accent-2); font-family: var(--font-mono); font-size: 11px;
 }
+
+/* ---------- Recent-reports tweaks ---------- */
+.btn-tiny {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid var(--border);
+  color: var(--text-muted);
+  padding: 3px 9px;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  border-radius: 6px;
+  cursor: pointer;
+  font-family: var(--font-display);
+}
+.btn-tiny:hover { color: #fff; background: rgba(184,125,255,0.18); }
+.recent-chip { padding: 9px 12px; line-height: 1.4; }

@@ -591,3 +591,386 @@ def build_service_account_checklist(report, info):
                  "to log every send. Forward logs to your SIEM. Keep at least 7 years per "
                  "DEQ retention policy."},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Production-grade email bursting helpers — ecosystem-specific (DEQ + SSRS)
+# These replace the earlier stub versions (later defs win in Python).
+# ---------------------------------------------------------------------------
+
+def build_email_burst_query(report, info):
+    """The burst query the PowerShell driver loops over.
+
+    One row per email recipient. The driver reads each row, binds the report
+    parameter, renders to PDF, sends via SMTP, and logs the outcome.
+
+    The query is intentionally written to FAIL CLOSED (no spam): rows with
+    no email are skipped, not sent to a fallback. Production deploys MUST
+    replace the placeholders with the org's actual contact source.
+    """
+    burst_key = (info or {}).get("burst_key_field") or "Perm_Num"
+
+    return f"""-- =============================================================
+-- {(report.name if hasattr(report, 'name') else 'report')} — Email Burst Query
+-- One row per recipient. Driver loops this and emails each row.
+-- =============================================================
+-- Required columns (the driver references them by name):
+--   Burst_Key       value bound to the report's per-recipient parameter
+--   EmailTo         primary recipient address (REQUIRED — rows without this are skipped)
+--   EmailCc         optional cc list (semicolon-separated)
+--   Subject         email subject line
+--   Recipient_Name  for logging only (helps trace failures)
+--   Render_Format   PDF | EXCELOPENXML | WORDOPENXML  (default PDF)
+
+SELECT
+    CAST(p.{burst_key} AS NVARCHAR(64))                         AS Burst_Key,
+    -- TODO replace with your real email column / UDF.
+    -- Common DEQ patterns:
+    --   o.Email_Addr                                            (direct column)
+    --   dbo.fn_F_Get_Permittee_Email(p.{burst_key})             (UDF; port the
+    --                                                            Oracle Pkg_*.F_*)
+    o.Email_Addr                                                AS EmailTo,
+    NULL                                                        AS EmailCc,
+    CONCAT(
+        '[DEQ] ',
+        '<ReportTitle>',
+        ' — ',
+        CAST(p.{burst_key} AS NVARCHAR(64))
+    )                                                           AS Subject,
+    p.Site_Name                                                 AS Recipient_Name,
+    'PDF'                                                       AS Render_Format
+FROM dbo.<MainTable> AS p
+LEFT JOIN dbo.<EmailTable> AS o
+    ON o.{burst_key} = p.{burst_key}
+WHERE o.Email_Addr IS NOT NULL          -- fail-closed: never email '[unknown]'
+  AND p.<active_flag> = 1               -- never email retired/inactive permittees
+ORDER BY p.{burst_key};
+"""
+
+
+# Production PowerShell template. Reads its config from a sibling JSON file so
+# the same script can drive every report. Has structured logging, retries on
+# transient SMTP errors, send-history tracking to prevent duplicate emails on
+# rerun, and a hard test-mode redirect that is impossible to forget about.
+_EMAIL_PS_TEMPLATE = r"""<#
+=================================================================================
+__REPORT_NAME__ — Email Burst Driver
+=================================================================================
+
+Run AS the service account (Task Scheduler > Run whether user logged on / no).
+
+Config:    burst.config.json (sibling file — see template below)
+Log:       %ProgramData%\Oracle2SSRS\__REPORT_NAME__\YYYYMMDD.jsonl
+History:   %ProgramData%\Oracle2SSRS\__REPORT_NAME__\sent_keys.txt
+            (one Burst_Key per line; rerunning the script skips already-sent
+             keys so a Task Scheduler retry is safe.)
+
+The script never crashes the runbook on a single failed email. It logs the
+error and moves on. End of run prints a summary and exits non-zero only if
+ALL rows failed (so monitoring fires only on systemic problems, not on a
+single bad email address).
+=================================================================================
+#>
+
+#requires -Version 5.1
+#requires -Modules ReportingServicesTools, SqlServer
+
+[CmdletBinding()]
+param(
+    [string]$ConfigPath = (Join-Path $PSScriptRoot 'burst.config.json'),
+    [switch]$DryRun
+)
+
+$ErrorActionPreference = 'Stop'
+
+# -------------------------------------------------------------------------
+# Load config
+# -------------------------------------------------------------------------
+if (-not (Test-Path $ConfigPath)) {
+    throw "Config not found: $ConfigPath. Copy burst.config.example.json to burst.config.json and fill it in."
+}
+$cfg = Get-Content -Raw $ConfigPath | ConvertFrom-Json
+
+# Required keys
+foreach ($k in 'ReportPath','ReportServer','DbServer','DbName','SmtpServer','SmtpFrom','SmtpCredentialTarget') {
+    if (-not $cfg.$k) { throw "burst.config.json missing required key: $k" }
+}
+
+# -------------------------------------------------------------------------
+# Logging — one JSON line per event (consumable by your SIEM)
+# -------------------------------------------------------------------------
+$LogRoot   = Join-Path $env:ProgramData ('Oracle2SSRS\' + $cfg.ReportName)
+New-Item -ItemType Directory -Force -Path $LogRoot | Out-Null
+$LogFile   = Join-Path $LogRoot ((Get-Date -Format 'yyyyMMdd') + '.jsonl')
+$HistFile  = Join-Path $LogRoot 'sent_keys.txt'
+if (-not (Test-Path $HistFile)) { New-Item -ItemType File -Path $HistFile | Out-Null }
+
+function Write-Event {
+    param([string]$Level, [string]$Event, [hashtable]$Extra = @{})
+    $rec = @{
+        ts    = (Get-Date).ToString('o')
+        level = $Level
+        event = $Event
+        report= $cfg.ReportName
+        host  = $env:COMPUTERNAME
+        user  = $env:USERNAME
+    }
+    foreach ($k in $Extra.Keys) { $rec[$k] = $Extra[$k] }
+    ($rec | ConvertTo-Json -Compress) | Add-Content -Path $LogFile
+    Write-Host ("[{0}] {1} — {2}" -f $Level, $Event, ($Extra.Keys | ForEach-Object { "$_=$($Extra[$_])" } | Out-String))
+}
+
+# -------------------------------------------------------------------------
+# Get SMTP credential from the service account's Credential Manager.
+# (Stored once via: New-StoredCredential -Target $cfg.SmtpCredentialTarget …)
+# -------------------------------------------------------------------------
+$cred = $null
+try {
+    Import-Module CredentialManager -ErrorAction Stop
+    $stored = Get-StoredCredential -Target $cfg.SmtpCredentialTarget -ErrorAction Stop
+    if (-not $stored) { throw "No stored credential under target '$($cfg.SmtpCredentialTarget)'" }
+    $cred = $stored
+} catch {
+    Write-Event 'ERROR' 'smtp_credential_missing' @{ msg = $_.Exception.Message }
+    throw
+}
+
+# -------------------------------------------------------------------------
+# 1. Run the burst query
+# -------------------------------------------------------------------------
+Write-Event 'INFO' 'run_start' @{ dry_run = $DryRun.IsPresent; config = $ConfigPath }
+
+$BurstSql = @"
+__BURST_SQL__
+"@
+$rows = Invoke-Sqlcmd -ServerInstance $cfg.DbServer -Database $cfg.DbName -Query $BurstSql `
+                       -QueryTimeout 600 -ErrorAction Stop
+$total = if ($rows -is [array]) { $rows.Count } else { if ($rows) { 1 } else { 0 } }
+Write-Event 'INFO' 'burst_rows_loaded' @{ count = $total }
+
+if ($total -eq 0) {
+    Write-Event 'WARN' 'no_recipients' @{}
+    return
+}
+
+# Skip keys we've already emailed (Task Scheduler retry-safety)
+$alreadySent = @{}
+Get-Content $HistFile | Where-Object { $_ } | ForEach-Object { $alreadySent[$_] = $true }
+
+# -------------------------------------------------------------------------
+# 2. Loop and send
+# -------------------------------------------------------------------------
+$ok = 0; $fail = 0; $skip = 0
+foreach ($row in $rows) {
+    $key = [string]$row.Burst_Key
+    $to  = if ($cfg.TestRedirect) { $cfg.TestRedirect } else { [string]$row.EmailTo }
+    $sub = [string]$row.Subject
+    $fmt = if ($row.Render_Format) { [string]$row.Render_Format } else { 'PDF' }
+    $cc  = [string]$row.EmailCc
+    $rname = [string]$row.Recipient_Name
+
+    if (-not $to) { $skip++; Write-Event 'WARN' 'skip_no_email' @{ key=$key }; continue }
+    if (-not $cfg.TestRedirect -and $alreadySent.ContainsKey($key)) {
+        $skip++; Write-Event 'INFO' 'skip_already_sent' @{ key=$key, to=$to }; continue
+    }
+
+    if ($DryRun) {
+        Write-Event 'INFO' 'dry_run' @{ key=$key, to=$to, recipient=$rname, subject=$sub }
+        $ok++; continue
+    }
+
+    # 2a. Render the SSRS report bound to $key
+    $tempDir = Join-Path $env:TEMP ('o2s_burst_' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $tempDir | Out-Null
+    $rendered = $null
+    try {
+        # Render a tablix-bound parameter — name must match a ReportParameter on the .rdl.
+        # cfg.BindParameter is e.g. "P___KEY__" (default) or "P_PERM_NUM" etc.
+        $bindParam = if ($cfg.BindParameter) { $cfg.BindParameter } else { 'P___KEY__' }
+        $params = @{ $bindParam = $key }
+
+        # Retry transient errors up to 3x with backoff
+        $attempt = 0; $renderOk = $false
+        while (-not $renderOk -and $attempt -lt 3) {
+            $attempt++
+            try {
+                Export-RsReport -ReportServerUri $cfg.ReportServer `
+                                -ReportPath     $cfg.ReportPath `
+                                -OutPath        $tempDir `
+                                -Format         $fmt `
+                                -Parameters     $params `
+                                -ErrorAction    Stop | Out-Null
+                $renderOk = $true
+            } catch {
+                if ($attempt -ge 3) { throw }
+                Start-Sleep -Seconds (5 * $attempt)
+            }
+        }
+
+        $rendered = Get-ChildItem $tempDir -File | Select-Object -First 1
+        if (-not $rendered) { throw "Render produced no file" }
+    } catch {
+        $fail++
+        Write-Event 'ERROR' 'render_failed' @{ key=$key, msg=$_.Exception.Message }
+        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+        continue
+    }
+
+    # 2b. Send the email
+    try {
+        $sendArgs = @{
+            SmtpServer  = $cfg.SmtpServer
+            Port        = if ($cfg.SmtpPort) { $cfg.SmtpPort } else { 587 }
+            UseSsl      = $true
+            Credential  = $cred
+            From        = $cfg.SmtpFrom
+            To          = $to
+            Subject     = $sub
+            Body        = $cfg.BodyTemplate -replace '__KEY__', $key -replace '__NAME__', $rname
+            BodyAsHtml  = [bool]$cfg.BodyIsHtml
+            Attachments = $rendered.FullName
+            Encoding    = [System.Text.Encoding]::UTF8
+        }
+        if ($cc) { $sendArgs.Cc = ($cc -split ';' | Where-Object { $_ }) }
+
+        Send-MailMessage @sendArgs -ErrorAction Stop
+        $ok++
+        Write-Event 'INFO' 'email_sent' @{ key=$key, to=$to, recipient=$rname, attempt=$attempt }
+        if (-not $cfg.TestRedirect) { Add-Content $HistFile $key }
+    } catch {
+        $fail++
+        Write-Event 'ERROR' 'smtp_failed' @{ key=$key, to=$to, msg=$_.Exception.Message }
+    } finally {
+        Remove-Item $tempDir -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
+# -------------------------------------------------------------------------
+# 3. Summary
+# -------------------------------------------------------------------------
+Write-Event 'INFO' 'run_complete' @{ total=$total; ok=$ok; failed=$fail; skipped=$skip; dry_run=$DryRun.IsPresent }
+
+if ($fail -gt 0 -and $ok -eq 0) {
+    Write-Error "All $fail recipients failed. Check log: $LogFile"
+    exit 1
+}
+exit 0
+"""
+
+
+_EMAIL_CONFIG_TEMPLATE = """{
+  "_comment": "burst.config.json — sits beside burst.ps1. Service account reads this at run.",
+
+  "ReportName":            "__REPORT_NAME__",
+  "ReportPath":            "/MTDEQ/__REPORT_NAME__",
+  "ReportServer":          "https://ssrs.deq.mt.gov/ReportServer",
+
+  "DbServer":              "sql-prod.deq.mt.gov",
+  "DbName":                "DEQ",
+
+  "SmtpServer":            "smtp.deq.mt.gov",
+  "SmtpPort":              587,
+  "SmtpFrom":              "[email protected]",
+  "SmtpCredentialTarget":  "O2S_SMTP",
+
+  "BindParameter":         "P___KEY__",
+  "BodyIsHtml":            false,
+  "BodyTemplate":          "Dear __NAME__,\\n\\nYour report is attached. Reference: __KEY__.\\n\\n— DEQ Reporting",
+
+  "_test_redirect_doc":    "Set this to YOUR address to send EVERY row to you. Leave blank in prod. Cannot be left set accidentally — sent_keys history is NOT updated when redirect is on.",
+  "TestRedirect":          ""
+}
+"""
+
+
+def build_email_powershell_script(report, info, rdl_path):
+    """Production-grade email burst driver. Reads burst.config.json so the
+    same script works for every report; only the SQL is per-report."""
+    rname  = (report.name if hasattr(report, "name") else "") or "report"
+    sql    = build_email_burst_query(report, info).replace("\\", "\\\\")
+    out    = _EMAIL_PS_TEMPLATE
+    out    = out.replace("__REPORT_NAME__", rname)
+    out    = out.replace("__BURST_SQL__", sql)
+    out    = out.replace("__KEY__", "__KEY__")  # keep literal in PS script
+    return out
+
+
+def build_email_config_template(report, info):
+    """Sample burst.config.json for this specific report."""
+    rname = (report.name if hasattr(report, "name") else "") or "report"
+    return _EMAIL_CONFIG_TEMPLATE.replace("__REPORT_NAME__", rname)
+
+
+def build_service_account_checklist(report, info):
+    """Concrete, verifiable steps. No filler."""
+    return [
+        {"step": 1, "title": "Confirm SSRS edition",
+         "body": "Run on the SSRS host: <code>sqlcmd -S . -Q \"SELECT SERVERPROPERTY('Edition')\"</code>. "
+                 "Native Data-Driven Subscriptions require <b>Enterprise</b> or <b>Developer</b>. "
+                 "On <b>Standard</b>, the PowerShell driver below is the supported workaround. "
+                 "There is no other option — don't waste time looking for a license workaround."},
+        {"step": 2, "title": "Provision the service account",
+         "body": "Request from AD team: a Group Managed Service Account (gMSA) named "
+                 "<code>svc_o2s_burst$</code>, with logon-as-batch + logon-as-service rights "
+                 "on the SSRS host. gMSA is preferred over a regular svc account because the "
+                 "password rotates automatically and is never knowable. The Task Scheduler entry "
+                 "uses <code>DOMAIN\\\\svc_o2s_burst$</code> — note the trailing dollar sign."},
+        {"step": 3, "title": "Grant the SQL permissions (verbatim)",
+         "body": "On the report DB, as a sysadmin, run:<br>"
+                 "<pre><code>USE [DEQ];\n"
+                 "CREATE USER [DOMAIN\\\\svc_o2s_burst$] FOR LOGIN [DOMAIN\\\\svc_o2s_burst$];\n"
+                 "ALTER ROLE db_datareader ADD MEMBER [DOMAIN\\\\svc_o2s_burst$];\n"
+                 "GRANT EXECUTE ON SCHEMA::dbo TO [DOMAIN\\\\svc_o2s_burst$];   -- the dbo.fn_F_* UDFs\n"
+                 "</code></pre>"
+                 "If the burst query runs against a view, also grant SELECT on that view."},
+        {"step": 4, "title": "Grant SSRS catalog permissions",
+         "body": "In Report Manager → folder containing the deployed report → "
+                 "<i>Manage → Security</i>: add <code>DOMAIN\\\\svc_o2s_burst$</code> with role "
+                 "<b>Browser</b> (lets it render). Do NOT give Content Manager — render-only is enough."},
+        {"step": 5, "title": "Configure SMTP relay",
+         "body": "Two paths. Pick one before writing the config:<br>"
+                 "&nbsp;&nbsp;<b>Internal Exchange / relay</b>: contact mail admin to allow "
+                 "<code>svc_o2s_burst$</code> to relay; SMTP server is your relay host on port 25 "
+                 "(no TLS) or 587 (TLS). Set <code>SmtpCredentialTarget</code> to a bogus value — "
+                 "the Send-MailMessage call uses Windows auth via the service account.<br>"
+                 "&nbsp;&nbsp;<b>O365 SMTP AUTH</b>: create an account with a license, generate an "
+                 "app password (or OAuth2). Store with: <code>Install-Module CredentialManager; "
+                 "New-StoredCredential -Target 'O2S_SMTP' -UserName "
+                 "'[email protected]' -Password '...'</code>. Run that ONCE while logged "
+                 "in AS the service account so the credential is encrypted to its profile."},
+        {"step": 6, "title": "Drop the files on the SSRS host",
+         "body": "Create <code>C:\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\</code> and put inside:"
+                 "&nbsp;&nbsp;burst.ps1 (from this tab)<br>"
+                 "&nbsp;&nbsp;burst.config.json (from this tab — fill in the values)<br>"
+                 "ACL the folder so only the service account + admins can read/write. "
+                 "The script writes logs to <code>%ProgramData%\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\</code> "
+                 "which the service account can already access."},
+        {"step": 7, "title": "Test in DRY mode first",
+         "body": "From an admin shell:<br>"
+                 "<code>powershell.exe -ExecutionPolicy Bypass -File C:\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\burst.ps1 -DryRun</code><br>"
+                 "It will pull the burst query, log every recipient it WOULD email, but never call "
+                 "SMTP. Confirm the row count matches what you expect. If the query is wrong, "
+                 "fix it before going to step 8."},
+        {"step": 8, "title": "Test in REDIRECT mode",
+         "body": "Edit <code>burst.config.json</code> and set <code>TestRedirect</code> to YOUR "
+                 "address. Run without <code>-DryRun</code>. Every recipient's email goes to YOU "
+                 "instead of the real address. The history file is NOT updated, so production runs "
+                 "later still see all keys as unsent. Verify rendered PDF + email body are correct, "
+                 "then clear <code>TestRedirect</code>."},
+        {"step": 9, "title": "Schedule via Task Scheduler",
+         "body": "<code>schtasks /Create /TN \"O2S Burst &lt;ReportName&gt;\" "
+                 "/TR \"powershell.exe -ExecutionPolicy Bypass -File "
+                 "C:\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\burst.ps1\" "
+                 "/SC WEEKLY /D MON /ST 06:00 "
+                 "/RU \"DOMAIN\\\\svc_o2s_burst$\" /RP * /RL HIGHEST</code><br>"
+                 "Or via the Task Scheduler GUI — make sure <i>Run whether user is logged on or not</i> "
+                 "and <i>Run with highest privileges</i> are both checked. Set <i>Stop the task if it "
+                 "runs longer than: 4 hours</i> as a runaway guard."},
+        {"step": 10, "title": "Wire monitoring",
+         "body": "The driver writes <code>%ProgramData%\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\YYYYMMDD.jsonl</code> "
+                 "— one JSON event per row. Forward this directory to your SIEM via "
+                 "Filebeat / NXLog / Splunk Universal Forwarder. Alert on: "
+                 "<code>event = \"run_complete\" AND failed &gt; 0</code> "
+                 "(any failure), and on absence of a <code>run_start</code> event "
+                 "after the scheduled window closes (silent failure)."},
+    ]

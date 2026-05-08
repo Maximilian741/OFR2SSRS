@@ -17,10 +17,11 @@ from .preview.html_mockup import render_mockup
 from .preview.live_data import run_query
 from .validators.tsql_check import validate_report
 from .validators.rdl_check import validate_rdl
+from .validators.preflight import preflight_audit
 from .deployment import build_checklist
 from .audit import build_audit_trail
 from .ai_assist import build_prompts
-from .bursting import detect_bursting, build_burst_query, build_powershell_dds_script, build_email_burst_query, build_email_powershell_script, build_service_account_checklist
+from .bursting import detect_bursting, build_burst_query, build_powershell_dds_script, build_email_burst_query, build_email_powershell_script, build_service_account_checklist, build_email_config_template
 
 
 def convert(xml_bytes: bytes) -> Dict[str, Any]:
@@ -69,6 +70,7 @@ def convert(xml_bytes: bytes) -> Dict[str, Any]:
             bursting_info["email_burst_query"] = build_email_burst_query(parsed, bursting_info)
             bursting_info["email_powershell_script"] = build_email_powershell_script(parsed, bursting_info, f"{parsed.name or 'report'}.rdl")
             bursting_info["service_account_checklist"] = build_service_account_checklist(parsed, bursting_info)
+            bursting_info["email_config_template"] = build_email_config_template(parsed, bursting_info)
             bursting_info["powershell_script"] = build_powershell_dds_script(
                 parsed, bursting_info, f"{parsed.name or 'report'}.rdl"
             )
@@ -84,6 +86,7 @@ def convert(xml_bytes: bytes) -> Dict[str, Any]:
         "rdl_issues": rdl_issues,
         "deployment_checklist": deployment_checklist,
         "audit_trail": audit_trail,
+        "preflight": preflight_audit(rdl_xml),
         "ai_prompts": ai_prompts,
         "bursting": bursting_info,
     }
