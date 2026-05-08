@@ -16,15 +16,15 @@ def _read_sample(name: str, samples_dir: Path) -> bytes:
 
 def test_classify_files_recognizes_xml(samples_dir):
     from converter.ingest import classify_files
-    blob = _read_sample("MVWF_PERMIT.xml", samples_dir)
-    cls = classify_files([("MVWF_PERMIT.xml", blob)])
+    blob = _read_sample("COMPLEX_REPORT.xml", samples_dir)
+    cls = classify_files([("COMPLEX_REPORT.xml", blob)])
     assert cls["primary_xml"] is not None
-    assert cls["primary_xml"][0] == "MVWF_PERMIT.xml"
+    assert cls["primary_xml"][0] == "COMPLEX_REPORT.xml"
 
 
 def test_classify_files_recognizes_docx(samples_dir):
     from converter.ingest import classify_files
-    docx_name = "MVWF_PERMIT Sql queries.docx"
+    docx_name = "COMPLEX_REPORT Sql queries.docx"
     blob = _read_sample(docx_name, samples_dir)
     cls = classify_files([(docx_name, blob)])
     # The SQL-named docx should land in sql_files (extracted blocks) or docs.
@@ -35,7 +35,7 @@ def test_classify_files_recognizes_docx(samples_dir):
 
 def test_classify_files_screenshots_docx(samples_dir):
     from converter.ingest import classify_files
-    docx_name = "MVWF_PERMIT frontend screenshots.docx"
+    docx_name = "COMPLEX_REPORT frontend screenshots.docx"
     blob = _read_sample(docx_name, samples_dir)
     cls = classify_files([(docx_name, blob)])
     summaries = cls["category_summary"]
@@ -49,10 +49,10 @@ def test_classify_files_all_four_samples(samples_dir):
     from converter.ingest import classify_files
     files = []
     expected_names = [
-        "MVWF_PERMIT.xml",
-        "MVWF_PERMIT Sql queries.docx",
-        "MVWF_PERMIT frontend screenshots.docx",
-        "MVWF_PERMITbackend screenshots.docx",
+        "COMPLEX_REPORT.xml",
+        "COMPLEX_REPORT Sql queries.docx",
+        "COMPLEX_REPORT frontend screenshots.docx",
+        "COMPLEX_REPORTbackend screenshots.docx",
     ]
     for n in expected_names:
         p = samples_dir / n
@@ -69,13 +69,13 @@ def test_classify_files_all_four_samples(samples_dir):
 
     # The Oracle XML must be the primary
     assert cls["primary_xml"] is not None
-    assert cls["primary_xml"][0] == "MVWF_PERMIT.xml"
+    assert cls["primary_xml"][0] == "COMPLEX_REPORT.xml"
 
 
 def test_convert_bundle_with_xml_runs_full_pipeline(samples_dir):
     from converter.ingest import convert_bundle
-    blob = _read_sample("MVWF_PERMIT.xml", samples_dir)
-    out = convert_bundle([("MVWF_PERMIT.xml", blob)])
+    blob = _read_sample("COMPLEX_REPORT.xml", samples_dir)
+    out = convert_bundle([("COMPLEX_REPORT.xml", blob)])
     assert "ingest_report" in out
     # Either a report (path 1) or an error key (path 3) must be present.
     assert "report" in out or "error" in out

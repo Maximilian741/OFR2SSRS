@@ -20,7 +20,7 @@ from .validators.rdl_check import validate_rdl
 from .deployment import build_checklist
 from .audit import build_audit_trail
 from .ai_assist import build_prompts
-from .bursting import detect_bursting, build_burst_query, build_powershell_dds_script
+from .bursting import detect_bursting, build_burst_query, build_powershell_dds_script, build_email_burst_query, build_email_powershell_script, build_service_account_checklist
 
 
 def convert(xml_bytes: bytes) -> Dict[str, Any]:
@@ -66,6 +66,9 @@ def convert(xml_bytes: bytes) -> Dict[str, Any]:
         bursting_info = detect_bursting(parsed)
         if bursting_info.get("is_bursting"):
             bursting_info["burst_query"] = build_burst_query(parsed, bursting_info)
+            bursting_info["email_burst_query"] = build_email_burst_query(parsed, bursting_info)
+            bursting_info["email_powershell_script"] = build_email_powershell_script(parsed, bursting_info, f"{parsed.name or 'report'}.rdl")
+            bursting_info["service_account_checklist"] = build_service_account_checklist(parsed, bursting_info)
             bursting_info["powershell_script"] = build_powershell_dds_script(
                 parsed, bursting_info, f"{parsed.name or 'report'}.rdl"
             )

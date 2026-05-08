@@ -404,3 +404,190 @@ __all__ = [
     "build_burst_query",
     "build_powershell_dds_script",
 ]
+
+
+# ---------------------------------------------------------------------------
+# Email-via-service-account distribution
+# ---------------------------------------------------------------------------
+
+def build_email_burst_query(report, info):
+    """A burst query that includes a recipient EMAIL column. Returns the
+    same shape as build_burst_query but with EmailTo bound from a likely
+    contact source. The user wires the actual email column to whatever
+    their schema has (Pkg_WUTM_Util.F_Get_Permittee_Email or similar)."""
+    burst_key = (info or {}).get("burst_key_field") or "Perm_Num"
+    return f"""-- Email-driven burst query.
+-- This returns ONE ROW per email recipient. The PowerShell driver below
+-- loops these rows, renders the report bound to {burst_key}, and emails
+-- the rendered PDF to EmailTo via the service account's SMTP relay.
+SELECT
+    p.{burst_key}                                         AS Burst_Key,
+    p.Site_Name                                           AS Recipient_Name,
+    -- IMPORTANT: replace with your actual permittee-email lookup. Examples:
+    --   Pkg_WUTM_Util.F_Get_Permittee_Email(p.{burst_key})  -- if you port the UDF
+    --   o.Email_Addr                                          -- direct column
+    COALESCE(o.Email_Addr, '[email protected]')      AS EmailTo,
+    NULL                                                  AS EmailCc,
+    'MVWF Inspection Letter — ' + CAST(p.{burst_key} AS NVARCHAR(64))
+                                                          AS Subject,
+    'PDF'                                                 AS Render_Format
+FROM dbo.Q_PERMIT AS p
+LEFT JOIN dbo.Organization_Email AS o
+    ON o.{burst_key} = p.{burst_key}
+WHERE
+    o.Email_Addr IS NOT NULL  -- only rows we have an email for
+ORDER BY p.{burst_key};
+"""
+
+
+def build_email_powershell_script(report, info, rdl_path):
+    """A PowerShell script that, run by a service account, loops the burst
+    query and emails each row's rendered PDF via SMTP.
+
+    Usage on the SSRS host:
+        1. Service account must have:
+            - DB_DataReader on the report database
+            - 'Browser' role on the SSRS catalog item
+            - SMTP relay rights (or App-password for O365)
+        2. Schedule via Windows Task Scheduler under that service account.
+    """
+    name = (report.name or "report") if hasattr(report, "name") else "report"
+    burst_key = (info or {}).get("burst_key_field") or "Perm_Num"
+
+    return r"""# =============================================================================
+# Oracle2SSRS — Email Burst Driver
+# Loops a burst query, renders the SSRS report once per row, emails the PDF
+# to that row's EmailTo via the service account's SMTP relay.
+#
+# Run AS the service account (Task Scheduler > Run whether user logged on / no).
+# Required PowerShell modules: ReportingServicesTools, SqlServer
+# =============================================================================
+
+#region ====================== CONFIG ==========================================
+$ReportName    = '__REPORT_NAME__'
+$ReportPath    = '/MTDEQ/__REPORT_NAME__'           # SSRS catalog path
+$ReportServer  = 'https://ssrs.deq.mt.gov/ReportServer'
+$DbServer      = 'sql-prod.deq.mt.gov'
+$DbName        = 'DEQ'
+
+# SMTP — point at your relay, or the O365 service account.
+$SmtpServer    = 'smtp.deq.mt.gov'
+$SmtpPort      = 587
+$SmtpFrom      = '[email protected]'
+$SmtpUseTls    = $true
+
+# Credentials. NEVER hard-code. Pull from Windows Credential Manager:
+#   Install-Module CredentialManager -Scope CurrentUser
+#   New-StoredCredential -Target 'O2S_SMTP' -UserName '[email protected]' -Password 'app_password'
+$SmtpCred = (Get-StoredCredential -Target 'O2S_SMTP').GetNetworkCredential() |
+            ForEach-Object { New-Object System.Management.Automation.PSCredential($_.UserName,
+                             (ConvertTo-SecureString $_.Password -AsPlainText -Force)) }
+
+# OPTIONAL test mode: if set, sends every row to this address instead of EmailTo.
+$TestRedirect  = ''  # e.g. '[email protected]' — leave blank in prod.
+#endregion ====================================================================
+
+# 1) Run the burst query — returns one row per recipient.
+$BurstSql = @"
+__BURST_SQL__
+"@
+$rows = Invoke-Sqlcmd -ServerInstance $DbServer -Database $DbName -Query $BurstSql
+
+Write-Host ("Burst rows: {0}" -f $rows.Count)
+
+# 2) For each row, render the report bound to that key, then email it.
+foreach ($row in $rows) {
+    $key = $row.Burst_Key
+    $to  = if ($TestRedirect) { $TestRedirect } else { $row.EmailTo }
+    $sub = $row.Subject
+    Write-Host ("→ {0}  →  {1}" -f $key, $to)
+
+    # 2a — render the SSRS report bound to this Burst_Key as a parameter
+    $tempPdf = Join-Path $env:TEMP ("__REPORT_NAME___{0}.pdf" -f $key)
+    Export-RsReport -ReportServerUri $ReportServer `
+                    -ReportPath      $ReportPath `
+                    -OutPath         (Split-Path $tempPdf) `
+                    -Format          'PDF' `
+                    -Parameters      @{ '__BURST_KEY__' = $key } `
+                    -DestinationName ([IO.Path]::GetFileName($tempPdf)) `
+                    -Force
+
+    if (-not (Test-Path $tempPdf)) {
+        Write-Warning ("  render failed for {0}, skipping" -f $key)
+        continue
+    }
+
+    # 2b — email it
+    try {
+        Send-MailMessage `
+            -SmtpServer  $SmtpServer `
+            -Port        $SmtpPort `
+            -UseSsl:$SmtpUseTls `
+            -Credential  $SmtpCred `
+            -From        $SmtpFrom `
+            -To          $to `
+            -Cc          ($row.EmailCc) `
+            -Subject     $sub `
+            -Body        ("Your MVWF inspection letter is attached. Reference: {0}" -f $key) `
+            -Attachments $tempPdf
+        Write-Host ("  ✓ emailed {0}" -f $to) -ForegroundColor Green
+    } catch {
+        Write-Error ("  email failed for {0}: {1}" -f $to, $_.Exception.Message)
+    } finally {
+        Remove-Item $tempPdf -ErrorAction SilentlyContinue
+    }
+}
+
+Write-Host ("Done. Processed {0} recipients." -f $rows.Count)
+""".replace("__REPORT_NAME__", name)    .replace("__BURST_KEY__", burst_key)    .replace("__BURST_SQL__", build_email_burst_query(report, info).replace("\\", "\\\\"))
+
+
+def build_service_account_checklist(report, info):
+    """Returns a structured list of setup steps for wiring up the email
+    burst on the SSRS host with a service account."""
+    return [
+        {"step": 1, "title": "Create / identify the service account",
+         "body": "Use a domain account dedicated to SSRS bursting. Conventional naming: "
+                 "svc_o2s_burst@deq.mt.gov. Set 'Password never expires' OR use a managed "
+                 "service account (gMSA) for auto-rotation."},
+        {"step": 2, "title": "Grant DB read access",
+         "body": "On the SQL Server hosting the DEQ database: GRANT db_datareader on the "
+                 "DEQ database to [DOMAIN\\svc_o2s_burst]. Also grant EXECUTE on any "
+                 "dbo.fn_F_* UDFs the report calls."},
+        {"step": 3, "title": "Grant SSRS catalog access",
+         "body": "In SSRS Report Manager → site settings → grant the service account the "
+                 "'Browser' role on the deployed report (and 'Content Manager' on its "
+                 "containing folder if your script also deploys updates)."},
+        {"step": 4, "title": "Set up SMTP relay",
+         "body": "Either (a) configure your internal SMTP relay (smtp.deq.mt.gov) to allow "
+                 "the service account to send as deq-reports@deq.mt.gov, or (b) create an "
+                 "O365 app password / OAuth2 client cred for the account. App passwords "
+                 "are simplest; OAuth2 is more secure."},
+        {"step": 5, "title": "Store credential securely",
+         "body": "On the SSRS host, log in AS the service account once and run: "
+                 "<code>Install-Module CredentialManager; "
+                 "New-StoredCredential -Target 'O2S_SMTP' -UserName 'deq-reports@deq.mt.gov' "
+                 "-Password '...'</code>. Credentials are encrypted to that account's profile "
+                 "and only readable when running as that account."},
+        {"step": 6, "title": "Install required PowerShell modules",
+         "body": "<code>Install-Module ReportingServicesTools, SqlServer, CredentialManager "
+                 "-Scope AllUsers -Force</code>"},
+        {"step": 7, "title": "Schedule the script",
+         "body": "Windows Task Scheduler → Create Task → 'Run whether user is logged on or "
+                 "not' → 'Run with highest privileges' → User: DOMAIN\\svc_o2s_burst → "
+                 "Action: <code>powershell.exe -ExecutionPolicy Bypass -File C:\\path\\to\\burst.ps1</code> "
+                 "→ Trigger: weekly / monthly / on-demand."},
+        {"step": 8, "title": "Test with the redirect knob",
+         "body": "Before going live, set <code>$TestRedirect = 'your.email@deq.mt.gov'</code> "
+                 "in burst.ps1 and run it. Every burst row will email to YOU instead of the "
+                 "real recipient. Sanity-check the rendering, then clear the redirect."},
+        {"step": 9, "title": "Add your email lookup",
+         "body": "The burst query has <code>COALESCE(o.Email_Addr, ...)</code> — wire that "
+                 "to whatever table holds permittee emails. Common DEQ patterns: "
+                 "Organization_Email, Address_History.Pri_Email, or a UDF "
+                 "<code>dbo.fn_F_Get_Permittee_Email(@perm_num)</code>."},
+        {"step": 10, "title": "Audit + retention",
+         "body": "Wrap the script with <code>Start-Transcript</code>/<code>Stop-Transcript</code> "
+                 "to log every send. Forward logs to your SIEM. Keep at least 7 years per "
+                 "DEQ retention policy."},
+    ]

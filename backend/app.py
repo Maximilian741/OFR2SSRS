@@ -54,7 +54,7 @@ def _asset_version():
 
 @app.route("/")
 def index():
-    sample_files = sorted(p.name for p in SAMPLES.glob("*.xml")) if SAMPLES.exists() else []
+    sample_files = sorted(p.name for p in SAMPLES.glob("*.xml") if p.stat().st_size > 100) if SAMPLES.exists() else []
     return render_template("index.html", samples=sample_files, asset_version=_asset_version())
 
 
@@ -177,7 +177,7 @@ def api_run_query():
 
 @app.get("/api/health")
 def api_health():
-    return jsonify({"ok": True, "samples": [p.name for p in SAMPLES.glob("*.xml")] if SAMPLES.exists() else []})
+    return jsonify({"ok": True, "samples": [p.name for p in SAMPLES.glob("*.xml") if p.stat().st_size > 100] if SAMPLES.exists() else []})
 
 
 @app.get("/api/ai/test")

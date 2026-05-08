@@ -1,6 +1,6 @@
 """Shared pytest fixtures for the Oracle2SSRS test suite.
 
-The expensive bit is parsing the MVWF_PERMIT.xml sample, so we cache it
+The expensive bit is parsing the COMPLEX_REPORT.xml sample, so we cache it
 once at session scope and hand it out to anyone that asks for
 ``parsed_report``.
 """
@@ -36,7 +36,7 @@ def samples_dir() -> Path:
 
 @pytest.fixture(scope="session")
 def mvwf_xml_path(samples_dir: Path) -> Path:
-    p = samples_dir / "MVWF_PERMIT.xml"
+    p = samples_dir / "COMPLEX_REPORT.xml"
     if not p.exists():
         pytest.skip(f"Sample Oracle XML not present: {p}")
     return p

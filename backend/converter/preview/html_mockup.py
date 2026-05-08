@@ -514,7 +514,157 @@ def _render_certificate(report: ParsedReport) -> str:
 # Public API
 # ---------------------------------------------------------------------------
 
+
+def _is_letter_style(report):
+    """Heuristic: a 'letter' report has many text/paragraph formulas
+    (CF_PARA_*, CF_DIRECTOR, CF_GOVERNOR, etc.) or a name ending in _LTR_*
+    or _LETTER. Tabular reports have a main query with many dataItems
+    and few/no paragraph formulas."""
+    name = (report.name or "").upper()
+    if "_LTR" in name or "_LETTER" in name:
+        return True
+    # Check formulas for letter-shaped names
+    letter_signals = 0
+    for f in report.formulas:
+        fn = (f.name or "").upper()
+        if fn.startswith("CF_PARA") or fn.startswith("CF_DIRECTOR") or            fn.startswith("CF_GOVERNOR") or fn.startswith("CF_SIGN") or            fn.startswith("CF_BODY") or fn.startswith("CF_GREETING") or            fn.startswith("CF_SALUT"):
+            letter_signals += 1
+    if letter_signals >= 1:
+        return True
+    return False
+
+
+def _render_letter_mockup(report):
+    """Render a document/letter-style mockup (header, address block, body
+    paragraphs, signature) instead of the tabular permit mockup."""
+    name = _esc(report.name or "Report")
+
+    # Pull a few sample paragraph sources from the formulas list
+    para_formulas = [f for f in report.formulas
+                     if (f.name or "").upper().startswith("CF_PARA")]
+    para_count = len(para_formulas) or 3
+
+    # Director / Governor / signature formulas (best-effort labels)
+    sign_formulas = [f for f in report.formulas
+                     if any(tok in (f.name or "").upper()
+                            for tok in ("DIRECTOR","GOVERNOR","CHIEF","SIGN"))]
+
+    # Filter formulas list, find a "letter-name" formula like CF_MVWF_LTR_*
+    letter_title_formula = None
+    for f in report.formulas:
+        fn = (f.name or "").upper()
+        if fn.startswith("CF_MVWF_LTR") or fn.startswith("CF_MVWF_LETTER")            or fn.startswith("CF_TITLE"):
+            letter_title_formula = f.name
+            break
+
+    INK = "#000000"; INK_SOFT = "#333333"; INK_MUTED = "#666666"
+    RULE = "#222222"; RULE_LIGHT = "#cccccc"
+
+    body = []
+    # Letterhead
+    body.append(
+        '<div style="text-align:center; padding-bottom:14px; '
+        f'border-bottom:2px solid {RULE}; margin-bottom:24px;">'
+        f'<div style="font-size:11px; letter-spacing:2px; color:{INK_MUTED}; '
+        'text-transform:uppercase;">State of Montana</div>'
+        f'<div style="font-size:18px; font-weight:bold; letter-spacing:0.8px; '
+        f'color:{INK}; margin-top:4px;">DEPARTMENT OF ENVIRONMENTAL QUALITY</div>'
+        f'<div style="font-size:11px; color:{INK_MUTED}; margin-top:4px;">'
+        '1520 E. Sixth Avenue, P.O. Box 200901, Helena, MT 59620-0901</div>'
+        '</div>'
+    )
+    # Date + reference
+    body.append(
+        f'<div style="font-size:12px; color:{INK_SOFT}; margin-bottom:18px;">'
+        '[Run Date]'
+        '</div>'
+    )
+    # Recipient address block (rendered from query placeholders)
+    body.append(
+        f'<div style="font-size:12px; color:{INK}; margin-bottom:24px; line-height:1.45;">'
+        '[Permittee Name]<br>'
+        '[Permittee Address Line 1]<br>'
+        '[Permittee City], [State] [Zip]'
+        '</div>'
+    )
+    # Subject line
+    title_label = f' &nbsp; ({_esc(letter_title_formula)})' if letter_title_formula else ''
+    body.append(
+        f'<div style="font-size:13px; color:{INK}; margin-bottom:18px;">'
+        f'<b>RE:</b> &nbsp; {name} &mdash; Inspection Letter{title_label}'
+        '</div>'
+    )
+    # Greeting
+    body.append(
+        f'<div style="font-size:13px; color:{INK}; margin-bottom:14px;">'
+        'Dear [Permittee],'
+        '</div>'
+    )
+    # Body paragraphs (placeholders, one per CF_PARA_* if present, else 3 generic)
+    if para_formulas:
+        for f in para_formulas[:4]:
+            body.append(
+                f'<p style="font-size:12px; color:{INK_SOFT}; line-height:1.55; margin:0 0 12px;">'
+                f'<span style="color:{INK_MUTED}; font-style:italic;">[{_esc(f.name)}]</span> '
+                'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '
+                'Sed do eiusmod tempor incididunt ut labore et dolore magna aliqua. '
+                'Ut enim ad minim veniam, quis nostrud exercitation ullamco laboris.'
+                '</p>'
+            )
+    else:
+        for i in range(3):
+            body.append(
+                f'<p style="font-size:12px; color:{INK_SOFT}; line-height:1.55; margin:0 0 12px;">'
+                'Lorem ipsum dolor sit amet, consectetur adipiscing elit. '
+                'This paragraph would render content from the source report\'s body queries.'
+                '</p>'
+            )
+    # Closing
+    body.append(
+        f'<div style="font-size:13px; color:{INK}; margin:22px 0 8px;">Sincerely,</div>'
+        f'<div style="height:50px;"></div>'
+    )
+    # Signature line
+    if sign_formulas:
+        sig = sign_formulas[0].name
+        body.append(
+            f'<div style="border-top:1px solid {INK}; width:60%; padding-top:4px;">'
+            f'<div style="font-size:12px; font-weight:bold; color:{INK};">[{_esc(sig)}]</div>'
+            f'<div style="font-size:11px; color:{INK_MUTED};">Director / Bureau Chief</div>'
+            '</div>'
+        )
+    else:
+        body.append(
+            f'<div style="border-top:1px solid {INK}; width:60%; padding-top:4px;">'
+            f'<div style="font-size:12px; font-weight:bold; color:{INK};">[Director]</div>'
+            f'<div style="font-size:11px; color:{INK_MUTED};">Department of Environmental Quality</div>'
+            '</div>'
+        )
+    # Footer note
+    body.append(
+        f'<div style="margin-top:36px; padding-top:12px; '
+        f'border-top:1px dashed {RULE_LIGHT}; font-size:10px; '
+        f'color:{INK_MUTED}; font-style:italic;">'
+        f'Letter-style preview detected from {len(report.formulas)} formula(s) '
+        f'and {len(report.queries)} query(ies). Boilerplate placeholders shown; '
+        'live data is bound at runtime by SSRS.'
+        '</div>'
+    )
+
+    return (
+        '<div style="font-family:Georgia,\'Times New Roman\',Times,serif; '
+        'background:#ffffff; color:#111111; padding:48px 64px; '
+        'border:1px solid #cccccc; '
+        'box-shadow:0 1px 2px rgba(0,0,0,0.04), 0 6px 24px rgba(20,24,40,0.06); '
+        'max-width:780px; margin:0 auto; line-height:1.45;">'
+        + ''.join(body) +
+        '</div>'
+    )
+
+
 def render_mockup(report):
+    if _is_letter_style(report):
+        return _render_letter_mockup(report)
     body = "".join([
         _render_header(),
         _render_subtitle(report),

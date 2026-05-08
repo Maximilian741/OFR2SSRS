@@ -83,6 +83,10 @@
         <span class="tab-dot dot-rdl"></span> RDL XML
         <span class="tab-badge" id="badge-rdl" hidden></span>
       </button>
+      <button class="tab" data-tab="burst" role="tab">
+        <span class="tab-dot dot-burst"></span> Bursting
+        <span class="tab-badge" id="badge-burst" hidden></span>
+      </button>
       <button class="tab" data-tab="side" role="tab">
         <span class="tab-dot dot-side"></span> Side-by-Side
         <span class="tab-badge" id="badge-side" hidden></span>
@@ -103,6 +107,7 @@
         <span class="tab-dot dot-extras"></span> Extras
         <span class="tab-badge" id="badge-extras" hidden></span>
       </button>
+      <button id="advanced-toggle" class="advanced-toggle" title="Show validation, side-by-side, live data, deploy checklist, and extras tabs">Advanced views</button>
     </nav>
 
     <section class="tab-panels">
@@ -127,6 +132,13 @@
 
       <!-- Tab: HTML Mockup -->
       <div id="tab-mockup" class="tab-panel" hidden>
+        <div id="mockup-cta" class="mockup-cta-bar" hidden>
+          <div class="cta-text">
+            <b>Looks good?</b>
+            Click here to download the SSRS-ready <code>.rdl</code> file. Drop it in Report Builder.
+          </div>
+          <button id="cta-download-rdl" class="cta-btn">Download .rdl</button>
+        </div>
         <div class="panel-card mockup-card">
           <div id="mockup-host" class="mockup-host"></div>
         </div>
@@ -141,6 +153,11 @@
           </div>
           <pre class="code-block"><code id="rdl-code" class="language-xml"></code></pre>
         </div>
+      </div>
+
+      <!-- Tab: Bursting / Email Distribution -->
+      <div id="tab-burst" class="tab-panel" hidden>
+        <div id="burst-host" class="burst-host"></div>
       </div>
 
       <!-- Tab: Side-by-Side -->

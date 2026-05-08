@@ -172,8 +172,10 @@ function onConverted(data) {
   renderValidationTab(data);
   renderDeploymentTab(data);
   renderExtrasTab(data);
+  renderBurstingTab(data);
   renderWarnings(data);
   if (window.Prism) Prism.highlightAll();
+  showMockupCTA();
   // Show whatever tab was active
   activateTab(state.activeTab);
 }
@@ -578,6 +580,150 @@ function escapeHtml(s) {
 // ============================================================
 // Wire everything up after DOM is ready
 // ============================================================
+
+
+// ----- Phase 3: simplified UI wiring -----
+function wireSimplifiedUI() {
+  const adv = document.getElementById("advanced-toggle");
+  if (adv) {
+    adv.addEventListener("click", () => {
+      document.body.classList.toggle("show-advanced");
+      adv.textContent = document.body.classList.contains("show-advanced")
+        ? "Simple view"
+        : "Advanced views";
+    });
+  }
+  const cta = document.getElementById("cta-download-rdl");
+  if (cta) {
+    cta.addEventListener("click", () => {
+      if (!state.data) { toast("Convert a report first", "err"); return; }
+      window.location.href = "/api/download/rdl";
+    });
+  }
+}
+// Show the CTA bar after a successful conversion
+function showMockupCTA() {
+  const cta = document.getElementById("mockup-cta");
+  if (cta) cta.hidden = false;
+}
+
+
+
+// ----- Tab: Bursting / Email distribution -----
+function renderBurstingTab(data) {
+  const host = document.getElementById("burst-host");
+  if (!host) return;
+  host.innerHTML = "";
+
+  const burst = (data && data.bursting) || {};
+
+  // ---- Header card ----
+  const header = document.createElement("div");
+  header.className = "burst-header " + (burst.is_bursting ? "burst-yes" : "burst-no");
+  if (burst.is_bursting) {
+    header.innerHTML =
+      '<div class="burst-h-icon">📨</div>' +
+      '<div>' +
+      '<div class="burst-h-title">Bursting / per-recipient distribution detected</div>' +
+      '<div class="burst-h-meta">' +
+        'Burst key: <code>' + escHtml(burst.burst_key_field || "?") + '</code>' +
+        ' &nbsp;|&nbsp; ' +
+        'Filename pattern: <code>' + escHtml(burst.filename_pattern || "?") + '</code>' +
+      '</div>' +
+      '</div>';
+  } else {
+    header.innerHTML =
+      '<div class="burst-h-icon">○</div>' +
+      '<div>' +
+      '<div class="burst-h-title">No bursting detected</div>' +
+      '<div class="burst-h-meta">This report runs once per execution, not once per recipient.</div>' +
+      '</div>';
+  }
+  host.appendChild(header);
+
+  if (!burst.is_bursting) return;
+
+  // ---- Email-via-service-account section ----
+  const emailSection = document.createElement("section");
+  emailSection.className = "burst-section";
+  emailSection.innerHTML = '<h3>Email distribution via service account</h3>' +
+    '<p class="burst-meta">The recipe below sends one email + PDF attachment per row of the burst query, ' +
+    'driven by a Windows service account on your SSRS host. SMTP credentials live in the Windows Credential ' +
+    'Manager so the script never holds a plaintext password.</p>';
+  host.appendChild(emailSection);
+
+  // Burst query block
+  if (burst.email_burst_query) {
+    const qb = document.createElement("details");
+    qb.className = "burst-block";
+    qb.open = true;
+    qb.innerHTML =
+      '<summary><b>1. Burst query (T-SQL)</b> — one row per email recipient ' +
+      '<button class="btn btn-ghost btn-copy" data-copy="email_burst_query">Copy</button></summary>' +
+      '<pre class="code-block"><code class="language-sql">' +
+      escHtml(burst.email_burst_query) + '</code></pre>' +
+      '<div class="burst-hint">Replace <code>o.Email_Addr</code> with your real email-lookup column or UDF.</div>';
+    host.appendChild(qb);
+  }
+
+  // PowerShell driver block
+  if (burst.email_powershell_script) {
+    const pb = document.createElement("details");
+    pb.className = "burst-block";
+    pb.open = true;
+    pb.innerHTML =
+      '<summary><b>2. PowerShell email driver</b> — runs as the service account ' +
+      '<button class="btn btn-ghost btn-copy" data-copy="email_powershell_script">Copy</button></summary>' +
+      '<pre class="code-block"><code>' +
+      escHtml(burst.email_powershell_script) + '</code></pre>' +
+      '<div class="burst-hint">Save as <code>burst.ps1</code> on your SSRS host. Run it AS the service account in Task Scheduler.</div>';
+    host.appendChild(pb);
+  }
+
+  // Service-account checklist
+  const checklist = burst.service_account_checklist || [];
+  if (checklist.length) {
+    const cb = document.createElement("section");
+    cb.className = "burst-section";
+    cb.innerHTML = '<h3>3. Service-account setup checklist</h3>';
+    const ol = document.createElement("ol");
+    ol.className = "burst-checklist";
+    checklist.forEach(s => {
+      const li = document.createElement("li");
+      li.innerHTML =
+        '<div class="burst-step-title">' + escHtml(s.title || "") + '</div>' +
+        '<div class="burst-step-body">' + (s.body || "") + '</div>';
+      ol.appendChild(li);
+    });
+    cb.appendChild(ol);
+    host.appendChild(cb);
+  }
+
+  // Wire up Copy buttons
+  host.querySelectorAll(".btn-copy").forEach(btn => {
+    btn.addEventListener("click", (e) => {
+      e.preventDefault(); e.stopPropagation();
+      const key = btn.dataset.copy;
+      const text = (data.bursting && data.bursting[key]) || "";
+      if (!text) return;
+      navigator.clipboard.writeText(text).then(
+        () => toast("Copied " + key, "ok"),
+        () => toast("Copy failed", "err")
+      );
+    });
+  });
+
+  // Set badge to 1 if bursting was detected (draws the eye)
+  setBadge("badge-burst", burst.is_bursting ? 1 : 0);
+}
+
+function escHtml(s) {
+  return String(s == null ? "" : s)
+    .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+
 function wireEverything() {
   console.log("[Oracle2SSRS] wiring DOM event listeners");
 
@@ -720,6 +866,7 @@ function wireEverything() {
   // Initial state
   activateTab("mockup");
   setStatus("Ready");
+  wireSimplifiedUI();
   console.log("[Oracle2SSRS] ready");
 }
 
