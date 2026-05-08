@@ -118,7 +118,7 @@ if (-not (Test-Path $seedScript)) {
 # ---------------------------------------------------------------------------
 Write-Hdr "Step 4/6: Converter smoke test"
 
-$smokeCode = "import sys; sys.path.insert(0,'backend'); from converter import convert; convert(open('samples/oracle/MVWF_PERMIT.xml','rb').read()); print('OK')"
+$smokeCode = "import sys; sys.path.insert(0,'backend'); from converter import convert; convert(open('samples/oracle/SAMPLE_INSPECTION.xml','rb').read()); print('OK')"
 & $Python -c $smokeCode
 if ($LASTEXITCODE -ne 0) {
     Write-Fail "Converter smoke test failed (exit $LASTEXITCODE)."

@@ -66,7 +66,7 @@ Convert a single uploaded Oracle Reports artifact.
 **Curl**
 
 ```bash
-curl -X POST -F "file=@samples/oracle/MVWF_PERMIT.xml" \
+curl -X POST -F "file=@samples/oracle/SAMPLE_INSPECTION.xml" \
      http://127.0.0.1:5057/api/convert
 ```
 
@@ -99,9 +99,9 @@ feasible.
 
 ```bash
 curl -X POST \
-  -F "files=@samples/oracle/MVWF_PERMIT.xml" \
-  -F "files=@samples/oracle/MVWF_PERMIT Sql queries.docx" \
-  -F "files=@samples/oracle/MVWF_PERMITbackend screenshots.docx" \
+  -F "files=@samples/oracle/SAMPLE_INSPECTION.xml" \
+  -F "files=@samples/oracle/SAMPLE_INSPECTION Sql queries.docx" \
+  -F "files=@samples/oracle/SAMPLE_INSPECTION screenshots.docx" \
   http://127.0.0.1:5057/api/convert-bundle
 ```
 
@@ -117,11 +117,11 @@ curl -X POST \
   "validation_issues":   [ ... ],
   "deployment_checklist":[ ... ],
   "ingest_report": {
-    "primary_xml":  ["MVWF_PERMIT.xml"],
+    "primary_xml":  ["SAMPLE_INSPECTION.xml"],
     "rdf_binary":   [],
     "sql_files":    [],
-    "docs":         ["MVWF_PERMIT Sql queries.docx"],
-    "screenshots":  ["MVWF_PERMITbackend screenshots.docx"],
+    "docs":         ["SAMPLE_INSPECTION Sql queries.docx"],
+    "screenshots":  ["SAMPLE_INSPECTION screenshots.docx"],
     "unknown":      []
   }
 }
@@ -143,7 +143,7 @@ samples dir to prevent path traversal.
 **Curl**
 
 ```bash
-curl -X POST http://127.0.0.1:5057/api/convert-sample/MVWF_PERMIT.xml
+curl -X POST http://127.0.0.1:5057/api/convert-sample/SAMPLE_INSPECTION.xml
 ```
 
 **Response 200** — same conversion payload as `/api/convert`.
@@ -224,7 +224,7 @@ Cheap probe used by the UI on page load.
 ```json
 {
   "ok":      true,
-  "samples": ["MVWF_PERMIT.xml"]
+  "samples": ["SAMPLE_INSPECTION.xml"]
 }
 ```
 
@@ -266,9 +266,9 @@ rather than at a specific source location.
 
 ```json
 {
-  "step":   "Point the DataSource at your DEQ SQL Server",
+  "step":   "Point the DataSource at your target SQL Server",
   "status": "todo",
-  "detail": "Open the .rdl in Report Builder, edit DataSource 'DEQ', set the connection string."
+  "detail": "Open the .rdl in Report Builder, edit DataSource 'SampleDB', set the connection string."
 }
 ```
 
@@ -284,7 +284,7 @@ This is the `report` key in the conversion payload. Top-level shape:
 
 ```json
 {
-  "name":        "MVWF_PERMIT",
+  "name":        "SAMPLE_INSPECTION",
   "dtd_version": "9.0.4.0.33",
   "parameters":  [ ReportParameter, ... ],
   "queries":     [ DataQuery,       ... ],

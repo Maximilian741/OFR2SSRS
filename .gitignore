@@ -50,4 +50,7 @@ instance/
 
 # Optional: ignore generated RDL outputs (keep the canonical sample)
 samples/expected_rdl/*.rdl
-!samples/expected_rdl/MVWF_PERMIT.rdl
+!samples/expected_rdl/SAMPLE_INSPECTION.rdl
+
+# Local-only worktree artifacts
+.claude/worktrees/

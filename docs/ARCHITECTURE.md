@@ -184,7 +184,7 @@ Defines the dataclasses every module reads/writes:
 ### 3.12 `backend/db/seed_sample_db.py` and `backend/db/sample.sqlite`
 
 * Bundled SQLite sample DB pre-seeded with the schema referenced by the
-  primary sample (MVWF\_PERMIT.xml). Lets the live-data tab return real rows
+  primary sample (SAMPLE\_INSPECTION.xml). Lets the live-data tab return real rows
   with zero database setup.
 
 ### 3.13 `frontend/templates/index.html` + `frontend/static/`
@@ -246,7 +246,7 @@ Warnings are written to `DataQuery.notes` and surfaced to the UI's
 
 1. **Skeleton.** Emit `<Report>` with `<DataSources>`, `<DataSets>`, `<ReportParameters>`,
    `<ReportSections>` / `<Body>`, and the standard `<Page>` block.
-2. **DataSource.** A single shared `<DataSource Name="DEQ">` is emitted with a
+2. **DataSource.** A single shared `<DataSource Name="SampleDB">` is emitted with a
    placeholder connection string. The deployment checklist tells the user how
    to point this at their real SQL Server.
 3. **DataSets.** One `<DataSet>` per `DataQuery`. The `<CommandText>` is the
@@ -297,7 +297,7 @@ product. Reviewers don't trust generated SQL until they see rows come back.
 ### Sample DB (`backend/db/sample.sqlite`)
 
 Seeded by `seed_sample_db.py`. Schema mirrors the tables referenced by
-MVWF\_PERMIT.xml (`PERMIT`, `FACILITY`, `CONTACT`, ...). Data is synthetic.
+SAMPLE\_INSPECTION.xml (`Permit`, `Site`, `Org`, `Visit`, ...). Data is synthetic.
 
 ---
 
@@ -311,7 +311,7 @@ Pure-Python lexical / structural checks. No SQL Server connection. Catches:
 
 * Untranslated Oracle constructs (`(+)`, `CONNECT BY`, `:bind` left over).
 * Unbalanced parens / quotes.
-* References to objects that won't exist on a fresh DEQ DB
+* References to objects that won't exist on a fresh SampleDB
   (e.g. `Pkg_X.fn_Y` — caller must port).
 * Missing/unbound report parameters.
 

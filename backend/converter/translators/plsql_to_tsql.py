@@ -10,7 +10,7 @@ Public API:
         Core single-query translator. Returns (tsql_text, list_of_warnings).
 
 This module is intentionally pragmatic: it ships best-effort regex rewrites
-for the patterns we know matter for the hackathon sample (MVWF_PERMIT.xml).
+for the patterns we know matter for the hackathon sample (SAMPLE_INSPECTION.xml).
 Every non-trivial rewrite emits a warning so the UI can flag risky rewrites.
 """
 

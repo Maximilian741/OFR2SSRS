@@ -53,7 +53,7 @@ def test_rdl_has_report_parameters(translated_report):
     rdl = generate_rdl(translated_report)
     root = ET.fromstring(rdl)
     rps = root.find(_q("ReportParameters"))
-    # The MVWF_PERMIT sample has parameters, so this element should be present.
+    # The SAMPLE_INSPECTION sample has parameters, so this element should be present.
     if translated_report.parameters:
         assert rps is not None, "RDL must declare <ReportParameters> when params exist"
         assert len(list(rps)) >= 1

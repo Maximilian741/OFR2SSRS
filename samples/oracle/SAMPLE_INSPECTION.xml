@@ -1,0 +1,175 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE report PUBLIC "-//Oracle//DTD Reports 9.0.2.0.10//EN" "Reports_9_0_2.dtd">
+<report name="SAMPLE_INSPECTION" DTDVersion="9.0.2.0.10">
+  <reportProperties>
+    <orientation>portrait</orientation>
+    <pageSize>letter</pageSize>
+    <unit>inch</unit>
+  </reportProperties>
+  <data>
+    <dataSource name="Q_PERMIT">
+      <select><![CDATA[
+SELECT
+    P.Permit_Id,
+    P.Permit_Code,
+    P.Status,
+    P.Issued_On,
+    P.Expires_On,
+    TO_CHAR(P.Expires_On, 'fmMonth DD, YYYY') AS Exp_Date,
+    TO_CHAR(P.Issued_On,  'fmMonth DD, YYYY')
+        || ' TO '
+        || TO_CHAR(P.Expires_On, 'fmMonth DD, YYYY') AS Permit_Dates,
+    PT.Type_Code,
+    PT.Type_Description,
+    'INSPECTION DIVISION' || CHR(10) || UPPER(PT.Type_Description) || ' LICENSE' AS Permit_Heading,
+    S.Site_Id,
+    S.Site_Name,
+    O.Org_Id,
+    O.Org_Name,
+    DECODE(UPPER(TRIM(:P_SORT)),
+        'ORG',  O.Org_Name || ' - ' || S.Site_Name,
+        'SITE', S.Site_Name,
+        'CODE', P.Permit_Code || ' - ' || S.Site_Name,
+        P.Permit_Code) AS Col_Sort,
+    NVL(A.Street_1, '')
+        || DECODE(A.Street_2, NULL, '', ', ' || A.Street_2)
+        || ', ' || NVL(A.City, '')
+        || ', ' || NVL(A.State, '')
+        || '  ' || NVL(A.Zip, '') AS Site_Addr
+FROM Permit       P,
+     Permit_Type  PT,
+     Site         S,
+     Org          O,
+     Address      A
+WHERE PT.Permit_Type_Id = P.Permit_Type_Id
+  AND S.Site_Id         = P.Site_Id
+  AND O.Org_Id          = S.Org_Id
+  AND A.Org_Id(+)       = O.Org_Id
+  AND (:P_OrgName    IS NULL OR O.Org_Name LIKE '%' || :P_OrgName || '%')
+  AND (:P_PermitCode IS NULL OR P.Permit_Code LIKE '%' || :P_PermitCode || '%')
+  AND (:P_Status     IS NULL OR P.Status = :P_Status)
+  AND (:P_DateFrom   IS NULL OR P.Issued_On  >= :P_DateFrom)
+  AND (:P_DateTo     IS NULL OR P.Expires_On <= :P_DateTo)
+ORDER BY 1
+      ]]></select>
+      <group name="G_PERMIT">
+        <dataItem name="Permit_Id"        datatype="Number" precision="9"  source="Permit_Id"/>
+        <dataItem name="Permit_Code"      datatype="Character" width="40"  source="Permit_Code"/>
+        <dataItem name="Status"           datatype="Character" width="20"  source="Status"/>
+        <dataItem name="Issued_On"        datatype="Date"                  source="Issued_On"/>
+        <dataItem name="Expires_On"       datatype="Date"                  source="Expires_On"/>
+        <dataItem name="Exp_Date"         datatype="Character" width="60"  source="Exp_Date"/>
+        <dataItem name="Permit_Dates"     datatype="Character" width="120" source="Permit_Dates"/>
+        <dataItem name="Type_Code"        datatype="Character" width="10"  source="Type_Code"/>
+        <dataItem name="Type_Description" datatype="Character" width="80"  source="Type_Description"/>
+        <dataItem name="Permit_Heading"   datatype="Character" width="200" source="Permit_Heading"/>
+        <dataItem name="Site_Id"          datatype="Number" precision="9"  source="Site_Id"/>
+        <dataItem name="Site_Name"        datatype="Character" width="80"  source="Site_Name"/>
+        <dataItem name="Org_Id"           datatype="Number" precision="9"  source="Org_Id"/>
+        <dataItem name="Org_Name"         datatype="Character" width="80"  source="Org_Name"/>
+        <dataItem name="Col_Sort"         datatype="Character" width="200" source="Col_Sort"/>
+        <dataItem name="Site_Addr"        datatype="Character" width="200" source="Site_Addr"/>
+      </group>
+    </dataSource>
+    <dataSource name="Q_VISITS">
+      <select><![CDATA[
+SELECT
+    V.Visit_Id,
+    V.Site_Id,
+    V.Visit_Date,
+    V.Notes,
+    VT.Type_Code        AS Visit_Type_Code,
+    VT.Type_Description AS Visit_Type_Description,
+    INS.Org_Name        AS Inspector_Org_Name
+FROM Visit       V,
+     Visit_Type  VT,
+     Org         INS
+WHERE VT.Visit_Type_Id  = V.Visit_Type_Id
+  AND INS.Org_Id(+)     = V.Inspector_Org_Id
+  AND (:P_VisitDateFrom IS NULL OR V.Visit_Date >= :P_VisitDateFrom)
+  AND (:P_VisitDateTo   IS NULL OR V.Visit_Date <= :P_VisitDateTo)
+ORDER BY V.Visit_Date DESC
+      ]]></select>
+      <group name="G_VISIT">
+        <dataItem name="Visit_Id"               datatype="Number" precision="9"  source="Visit_Id"/>
+        <dataItem name="Site_Id"                datatype="Number" precision="9"  source="Site_Id"/>
+        <dataItem name="Visit_Date"             datatype="Date"                  source="Visit_Date"/>
+        <dataItem name="Notes"                  datatype="Character" width="240" source="Notes"/>
+        <dataItem name="Visit_Type_Code"        datatype="Character" width="10"  source="Visit_Type_Code"/>
+        <dataItem name="Visit_Type_Description" datatype="Character" width="80"  source="Visit_Type_Description"/>
+        <dataItem name="Inspector_Org_Name"     datatype="Character" width="80"  source="Inspector_Org_Name"/>
+      </group>
+    </dataSource>
+    <dataSource name="Q_LOGO">
+      <select><![CDATA[
+SELECT
+    IA.Image_Bytes AS Logo,
+    IA.MimeType    AS Logo_Mime
+FROM Image_Asset      IA,
+     Image_Asset_Ref  IAR
+WHERE IAR.Image_Id = IA.Image_Id
+  AND IAR.Context  = 'logo'
+  AND ROWNUM = 1
+      ]]></select>
+      <group name="G_LOGO">
+        <dataItem name="Logo"      datatype="Long Raw"               source="Logo"/>
+        <dataItem name="Logo_Mime" datatype="Character" width="40"   source="Logo_Mime"/>
+      </group>
+    </dataSource>
+    <formula name="CF_RunDateLabel" datatype="Character" width="60">
+      <![CDATA[
+function CF_RunDateLabelFormula return char is
+begin
+  return 'Run: ' || TO_CHAR(SYSDATE, 'YYYY-MM-DD HH24:MI');
+end;
+      ]]>
+    </formula>
+  </data>
+  <userParameters>
+    <userParameter name="P_SORT" datatype="Character" width="20" defaultValue="CODE">
+      <staticValues>
+        <staticValue value="CODE" label="Permit Code"/>
+        <staticValue value="ORG"  label="Organization"/>
+        <staticValue value="SITE" label="Site Name"/>
+      </staticValues>
+    </userParameter>
+    <userParameter name="P_OrgName"      datatype="Character" width="80"/>
+    <userParameter name="P_PermitCode"   datatype="Character" width="40"/>
+    <userParameter name="P_Status"       datatype="Character" width="20">
+      <staticValues>
+        <staticValue value="ACTIVE"  label="Active"/>
+        <staticValue value="EXPIRED" label="Expired"/>
+        <staticValue value="PENDING" label="Pending"/>
+      </staticValues>
+    </userParameter>
+    <userParameter name="P_DateFrom"      datatype="Date"/>
+    <userParameter name="P_DateTo"        datatype="Date"/>
+    <userParameter name="P_VisitDateFrom" datatype="Date"/>
+    <userParameter name="P_VisitDateTo"   datatype="Date"/>
+    <userParameter name="P_ReportTitle"   datatype="Character" width="80" defaultValue="Sample Inspection Report"/>
+  </userParameters>
+  <layout>
+    <header name="Page Header" height="0.6" width="7.5">
+      <field name="F_Title" source="P_ReportTitle" x="0.25" y="0.10" width="5.0" height="0.30">
+        <fontStyle name="Arial" size="14" weight="bold"/>
+      </field>
+      <field name="F_RunDate" source="CF_RunDateLabel" x="5.5" y="0.10" width="2.0" height="0.30">
+        <fontStyle name="Arial" size="9"/>
+      </field>
+    </header>
+    <main name="Main Section" height="9" width="7.5">
+      <repeatingFrame name="R_Permit" source="G_PERMIT" x="0.25" y="0.6" width="7.5" height="0.5">
+        <field name="F_PermitCode"   source="Permit_Code"   x="0.0" y="0.0" width="1.4" height="0.25"/>
+        <field name="F_OrgName"      source="Org_Name"      x="1.4" y="0.0" width="1.6" height="0.25"/>
+        <field name="F_SiteName"     source="Site_Name"     x="3.0" y="0.0" width="2.0" height="0.25"/>
+        <field name="F_Status"       source="Status"        x="5.0" y="0.0" width="1.0" height="0.25"/>
+        <field name="F_Issued"       source="Issued_On"     x="6.0" y="0.0" width="1.4" height="0.25"/>
+        <field name="F_Expires"      source="Expires_On"    x="0.0" y="0.25" width="1.4" height="0.25"/>
+        <field name="F_SiteAddr"     source="Site_Addr"     x="1.4" y="0.25" width="6.0" height="0.25"/>
+      </repeatingFrame>
+    </main>
+    <trailer name="Page Footer" height="0.4" width="7.5">
+      <field name="F_PageNum" source="&amp;PageNumber" x="3.5" y="0.10" width="2.0" height="0.20"/>
+    </trailer>
+  </layout>
+</report>

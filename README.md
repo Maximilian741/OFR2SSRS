@@ -11,7 +11,7 @@ run.bat              (Windows)
 ./run.sh             (Linux / macOS / WSL)
 ```
 
-Then open <http://127.0.0.1:5057>. Drop an XML on the page, or click `MVWF_PERMIT.xml` in the sidebar.
+Then open <http://127.0.0.1:5057>. Drop an XML on the page, or click `SAMPLE_INSPECTION.xml` in the sidebar.
 
 Requires Python 3.9+. The launcher pip-installs Flask + lxml + python-docx + (optional) anthropic on first run.
 
@@ -106,7 +106,7 @@ frontend/
       compare_mode.js             Compare two reports modal
       ai_apply.js                 Paste-back textareas
       ai_auto.js                  Auto-AI button
-samples/oracle/                   MVWF_PERMIT + 3 synthetic test reports
+samples/oracle/                   SAMPLE_INSPECTION + 3 synthetic test reports
 tests/                            112 pytest tests
 docs/
   ARCHITECTURE.md

@@ -45,7 +45,7 @@ _BURST_PARAM_NAMES = {
 
 _BURST_FORMULA_NAME_HINTS = ("CF_FILE", "CF_FILENAME", "CF_PATH", "CF_OUTFILE")
 
-_BURST_BODY_HINTS = ("P_AS_PATH", "P_DISTRIBUTE", "DEQ_IMAGE", "DESNAME")
+_BURST_BODY_HINTS = ("P_AS_PATH", "P_DISTRIBUTE", "DESNAME")
 
 
 # ---------------------------------------------------------------------------
@@ -120,7 +120,7 @@ def detect_bursting(report):
     # ---- 3. Triggers / hyperlink-style references ---------------------------
     for t in getattr(report, "triggers", []):
         body_u = (getattr(t, "body", "") or "").upper()
-        if "P_AS_PATH" in body_u or "DEQ_IMAGE" in body_u:
+        if "P_AS_PATH" in body_u:
             evidence.append("trigger " + str(t.name) + " references distribution path")
             is_bursting = True
 
@@ -428,11 +428,11 @@ SELECT
     --   o.Email_Addr                                          -- direct column
     COALESCE(o.Email_Addr, '[email protected]')      AS EmailTo,
     NULL                                                  AS EmailCc,
-    'MVWF Inspection Letter — ' + CAST(p.{burst_key} AS NVARCHAR(64))
+    'Inspection Letter — ' + CAST(p.{burst_key} AS NVARCHAR(64))
                                                           AS Subject,
     'PDF'                                                 AS Render_Format
 FROM dbo.Q_PERMIT AS p
-LEFT JOIN dbo.Organization_Email AS o
+LEFT JOIN dbo.Org_Email AS o
     ON o.{burst_key} = p.{burst_key}
 WHERE
     o.Email_Addr IS NOT NULL  -- only rows we have an email for
@@ -465,13 +465,13 @@ def build_email_powershell_script(report, info, rdl_path):
 
 #region ====================== CONFIG ==========================================
 $ReportName    = '__REPORT_NAME__'
-$ReportPath    = '/MTDEQ/__REPORT_NAME__'           # SSRS catalog path
-$ReportServer  = 'https://ssrs.deq.mt.gov/ReportServer'
-$DbServer      = 'sql-prod.deq.mt.gov'
-$DbName        = 'DEQ'
+$ReportPath    = '/Reports/__REPORT_NAME__'           # SSRS catalog path
+$ReportServer  = 'https://ssrs.example.com/ReportServer'
+$DbServer      = 'sql-prod.example.com'
+$DbName        = 'AppDb'
 
 # SMTP — point at your relay, or the O365 service account.
-$SmtpServer    = 'smtp.deq.mt.gov'
+$SmtpServer    = 'smtp.example.com'
 $SmtpPort      = 587
 $SmtpFrom      = '[email protected]'
 $SmtpUseTls    = $true
@@ -528,7 +528,7 @@ foreach ($row in $rows) {
             -To          $to `
             -Cc          ($row.EmailCc) `
             -Subject     $sub `
-            -Body        ("Your MVWF inspection letter is attached. Reference: {0}" -f $key) `
+            -Body        ("Your inspection letter is attached. Reference: {0}" -f $key) `
             -Attachments $tempPdf
         Write-Host ("  ✓ emailed {0}" -f $to) -ForegroundColor Green
     } catch {
@@ -548,25 +548,25 @@ def build_service_account_checklist(report, info):
     return [
         {"step": 1, "title": "Create / identify the service account",
          "body": "Use a domain account dedicated to SSRS bursting. Conventional naming: "
-                 "svc_o2s_burst@deq.mt.gov. Set 'Password never expires' OR use a managed "
+                 "svc_o2s_burst@example.com. Set 'Password never expires' OR use a managed "
                  "service account (gMSA) for auto-rotation."},
         {"step": 2, "title": "Grant DB read access",
-         "body": "On the SQL Server hosting the DEQ database: GRANT db_datareader on the "
-                 "DEQ database to [DOMAIN\\svc_o2s_burst]. Also grant EXECUTE on any "
+         "body": "On the SQL Server hosting the report database: GRANT db_datareader on the "
+                 "report database to [DOMAIN\\svc_o2s_burst]. Also grant EXECUTE on any "
                  "dbo.fn_F_* UDFs the report calls."},
         {"step": 3, "title": "Grant SSRS catalog access",
          "body": "In SSRS Report Manager → site settings → grant the service account the "
                  "'Browser' role on the deployed report (and 'Content Manager' on its "
                  "containing folder if your script also deploys updates)."},
         {"step": 4, "title": "Set up SMTP relay",
-         "body": "Either (a) configure your internal SMTP relay (smtp.deq.mt.gov) to allow "
-                 "the service account to send as deq-reports@deq.mt.gov, or (b) create an "
+         "body": "Either (a) configure your internal SMTP relay (smtp.example.com) to allow "
+                 "the service account to send as reports@example.com, or (b) create an "
                  "O365 app password / OAuth2 client cred for the account. App passwords "
                  "are simplest; OAuth2 is more secure."},
         {"step": 5, "title": "Store credential securely",
          "body": "On the SSRS host, log in AS the service account once and run: "
                  "<code>Install-Module CredentialManager; "
-                 "New-StoredCredential -Target 'O2S_SMTP' -UserName 'deq-reports@deq.mt.gov' "
+                 "New-StoredCredential -Target 'O2S_SMTP' -UserName 'reports@example.com' "
                  "-Password '...'</code>. Credentials are encrypted to that account's profile "
                  "and only readable when running as that account."},
         {"step": 6, "title": "Install required PowerShell modules",
@@ -578,23 +578,23 @@ def build_service_account_checklist(report, info):
                  "Action: <code>powershell.exe -ExecutionPolicy Bypass -File C:\\path\\to\\burst.ps1</code> "
                  "→ Trigger: weekly / monthly / on-demand."},
         {"step": 8, "title": "Test with the redirect knob",
-         "body": "Before going live, set <code>$TestRedirect = 'your.email@deq.mt.gov'</code> "
+         "body": "Before going live, set <code>$TestRedirect = '[email protected]'</code> "
                  "in burst.ps1 and run it. Every burst row will email to YOU instead of the "
                  "real recipient. Sanity-check the rendering, then clear the redirect."},
         {"step": 9, "title": "Add your email lookup",
          "body": "The burst query has <code>COALESCE(o.Email_Addr, ...)</code> — wire that "
-                 "to whatever table holds permittee emails. Common DEQ patterns: "
-                 "Organization_Email, Address_History.Pri_Email, or a UDF "
+                 "to whatever table holds permittee emails. Common patterns: "
+                 "Org.Email, Contact.Primary_Email, or a UDF "
                  "<code>dbo.fn_F_Get_Permittee_Email(@perm_num)</code>."},
         {"step": 10, "title": "Audit + retention",
          "body": "Wrap the script with <code>Start-Transcript</code>/<code>Stop-Transcript</code> "
                  "to log every send. Forward logs to your SIEM. Keep at least 7 years per "
-                 "DEQ retention policy."},
+                 "your retention policy."},
     ]
 
 
 # ---------------------------------------------------------------------------
-# Production-grade email bursting helpers — ecosystem-specific (DEQ + SSRS)
+# Production-grade email bursting helpers — ecosystem-specific (SSRS)
 # These replace the earlier stub versions (later defs win in Python).
 # ---------------------------------------------------------------------------
 
@@ -625,14 +625,14 @@ def build_email_burst_query(report, info):
 SELECT
     CAST(p.{burst_key} AS NVARCHAR(64))                         AS Burst_Key,
     -- TODO replace with your real email column / UDF.
-    -- Common DEQ patterns:
+    -- Common patterns:
     --   o.Email_Addr                                            (direct column)
     --   dbo.fn_F_Get_Permittee_Email(p.{burst_key})             (UDF; port the
     --                                                            Oracle Pkg_*.F_*)
     o.Email_Addr                                                AS EmailTo,
     NULL                                                        AS EmailCc,
     CONCAT(
-        '[DEQ] ',
+        '[App] ',
         '<ReportTitle>',
         ' — ',
         CAST(p.{burst_key} AS NVARCHAR(64))
@@ -862,20 +862,20 @@ _EMAIL_CONFIG_TEMPLATE = """{
   "_comment": "burst.config.json — sits beside burst.ps1. Service account reads this at run.",
 
   "ReportName":            "__REPORT_NAME__",
-  "ReportPath":            "/MTDEQ/__REPORT_NAME__",
-  "ReportServer":          "https://ssrs.deq.mt.gov/ReportServer",
+  "ReportPath":            "/Reports/__REPORT_NAME__",
+  "ReportServer":          "https://ssrs.example.com/ReportServer",
 
-  "DbServer":              "sql-prod.deq.mt.gov",
-  "DbName":                "DEQ",
+  "DbServer":              "sql-prod.example.com",
+  "DbName":                "AppDb",
 
-  "SmtpServer":            "smtp.deq.mt.gov",
+  "SmtpServer":            "smtp.example.com",
   "SmtpPort":              587,
   "SmtpFrom":              "[email protected]",
   "SmtpCredentialTarget":  "O2S_SMTP",
 
   "BindParameter":         "P___KEY__",
   "BodyIsHtml":            false,
-  "BodyTemplate":          "Dear __NAME__,\\n\\nYour report is attached. Reference: __KEY__.\\n\\n— DEQ Reporting",
+  "BodyTemplate":          "Dear __NAME__,\\n\\nYour report is attached. Reference: __KEY__.\\n\\n— App Reporting",
 
   "_test_redirect_doc":    "Set this to YOUR address to send EVERY row to you. Leave blank in prod. Cannot be left set accidentally — sent_keys history is NOT updated when redirect is on.",
   "TestRedirect":          ""
@@ -917,7 +917,7 @@ def build_service_account_checklist(report, info):
                  "uses <code>DOMAIN\\\\svc_o2s_burst$</code> — note the trailing dollar sign."},
         {"step": 3, "title": "Grant the SQL permissions (verbatim)",
          "body": "On the report DB, as a sysadmin, run:<br>"
-                 "<pre><code>USE [DEQ];\n"
+                 "<pre><code>USE [AppDb];\n"
                  "CREATE USER [DOMAIN\\\\svc_o2s_burst$] FOR LOGIN [DOMAIN\\\\svc_o2s_burst$];\n"
                  "ALTER ROLE db_datareader ADD MEMBER [DOMAIN\\\\svc_o2s_burst$];\n"
                  "GRANT EXECUTE ON SCHEMA::dbo TO [DOMAIN\\\\svc_o2s_burst$];   -- the dbo.fn_F_* UDFs\n"

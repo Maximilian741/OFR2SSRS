@@ -53,30 +53,30 @@ def _column_labels(query):
 def _sample_rows(columns):
     canned = {
         "permit": ["MV-2026-0117", "MV-2026-0231"],
-        "facility": ["City Auto Wreckers - Bozeman", "Big Sky Salvage Yard - Billings"],
-        "facility name": ["City Auto Wreckers - Bozeman", "Big Sky Salvage Yard - Billings"],
-        "name": ["City Auto Wreckers - Bozeman", "Big Sky Salvage Yard - Billings"],
-        "city": ["Bozeman", "Billings"],
-        "address": ["1442 Industrial Dr", "808 Yellowstone Ave"],
-        "site addr": ["1442 Industrial Dr, Bozeman, MT 59715", "808 Yellowstone Ave, Billings, MT 59101"],
-        "owner": ["Joseph T. Reilly", "Maria L. Hendricks"],
-        "permittee": ["Reilly, Joseph T.", "Hendricks, Maria L."],
+        "facility": ["Acme Holdings - Springfield", "Northwind Industries - Riverside"],
+        "facility name": ["Acme Holdings - Springfield", "Northwind Industries - Riverside"],
+        "name": ["Acme Holdings - Springfield", "Northwind Industries - Riverside"],
+        "city": ["Springfield", "Riverside"],
+        "address": ["100 Main St", "200 Commerce Way"],
+        "site addr": ["100 Main St, Springfield, ST 00000", "200 Commerce Way, Riverside, ST 00000"],
+        "owner": ["Jane Q. Public", "Jordan Sample"],
+        "permittee": ["Public, Jane Q.", "Sample, Jordan"],
         "renewal year": ["2026", "2026"],
         "year": ["2026", "2026"],
         "status": ["Active", "Active"],
-        "phone": ["(406) 555-0144", "(406) 555-0299"],
-        "email": ["permits@cityautowreckers.example", "office@bigskysalvage.example"],
-        "zip": ["59715", "59101"],
-        "state": ["MT", "MT"],
-        "county": ["Gallatin", "Yellowstone"],
+        "phone": ["(000) 555-0144", "(000) 555-0299"],
+        "email": ["[email protected]", "[email protected]"],
+        "zip": ["00000", "00000"],
+        "state": ["ST", "ST"],
+        "county": ["Sample County A", "Sample County B"],
         "expires": ["12/31/2026", "12/31/2026"],
         "issued": ["01/05/2026", "01/12/2026"],
         "fee": ["$250.00", "$250.00"],
         "perm dates": ["JANUARY 5, 2026 TO DECEMBER 31, 2026", "JANUARY 12, 2026 TO DECEMBER 31, 2026"],
-        "perm type": ["MOTOR VEHICLE WRECKING FACILITY LICENSE", "MOTOR VEHICLE WRECKING FACILITY LICENSE"],
+        "perm type": ["<REPORT TITLE>", "<REPORT TITLE>"],
     }
-    fallback_a = ["A-001", "Sample Co. A", "Helena", "Owner A", "2026", "Active"]
-    fallback_b = ["A-002", "Sample Co. B", "Missoula", "Owner B", "2026", "Active"]
+    fallback_a = ["A-001", "Sample Co. A", "Lakeside", "Owner A", "2026", "Active"]
+    fallback_b = ["A-002", "Sample Co. B", "Northport", "Owner B", "2026", "Active"]
 
     row_a, row_b = [], []
     for i, col in enumerate(columns):
@@ -145,13 +145,13 @@ def _render_header():
         '<div style="text-align:center; padding-bottom:14px; '
         f'border-bottom:2px solid {INK}; margin-bottom:18px;">'
         f'<div style="font-size:11px; letter-spacing:2px; color:{INK_MUTED}; '
-        'text-transform:uppercase;">State of Montana</div>'
+        'text-transform:uppercase;"><State / Org></div>'
         f'<div style="font-size:20px; font-weight:bold; letter-spacing:1px; '
-        f'color:{INK}; margin-top:4px;">DEPARTMENT OF ENVIRONMENTAL QUALITY</div>'
+        f'color:{INK}; margin-top:4px;"><AGENCY DEPARTMENT NAME></div>'
         f'<div style="font-size:15px; font-weight:bold; color:{INK}; '
-        'margin-top:6px;">MOTOR VEHICLE WRECKING FACILITY LICENSE</div>'
+        'margin-top:6px;"><REPORT TITLE></div>'
         f'<div style="font-size:11px; color:{INK_MUTED}; margin-top:6px; '
-        'font-style:italic;">Issued under the authority of MCA 75-10-501 et seq.</div>'
+        'font-style:italic;">Issued under the authority of <statutory citation></div>'
         '</div>'
     )
 
@@ -254,16 +254,16 @@ def _render_signature_block():
         f'<div style="font-size:11px; color:{INK}; margin-top:4px; '
         'font-weight:bold; letter-spacing:1px;">_____________, BUREAU CHIEF</div>'
         f'<div style="font-size:10px; color:{INK_MUTED}; font-style:italic;">'
-        'Waste &amp; Underground Tank Management Bureau</div>'
+        '<Bureau></div>'
         '</td>'
         '<td style="width:5%;"></td>'
         f'<td style="vertical-align:bottom; font-size:10px; color:{INK_SOFT}; '
         'line-height:1.5;">'
-        f'<div style="font-weight:bold; color:{INK};">Department of Environmental Quality</div>'
-        '<div>1520 E. Sixth Avenue</div>'
-        '<div>P.O. Box 200901</div>'
-        '<div>Helena, MT 59620-0901</div>'
-        f'<div style="margin-top:4px; color:{INK_MUTED};">(406) 444-2544</div>'
+        f'<div style="font-weight:bold; color:{INK};"><Agency></div>'
+        '<div><street></div>'
+        '<div><PO box></div>'
+        '<div><city, state, zip></div>'
+        f'<div style="margin-top:4px; color:{INK_MUTED};"><phone></div>'
         '</td>'
         '</tr>'
         '</table>'
@@ -284,10 +284,10 @@ _WS_COLLAPSE = re.compile(r"\s*\n\s*\n\s*", re.MULTILINE)
 _TOKEN_PREVIEW = {
     # Q_PERMIT columns / common &TOKEN references
     "PERMIT":          "MV-2026-0117",
-    "PERM_TYPE":       "MOTOR VEHICLE WRECKING FACILITY LICENSE",
+    "PERM_TYPE":       "<REPORT TITLE>",
     "RENEWAL_YEAR":    "2026",
-    "SITE_NAME":       "City Auto Wreckers - Bozeman",
-    "SITE_ADDR":       "1442 Industrial Dr, Bozeman, MT 59715",
+    "SITE_NAME":       "Acme Holdings - Springfield",
+    "SITE_ADDR":       "100 Main St, Springfield, ST 00000",
     "PERM_DATES":      "JANUARY 5, 2026 TO DECEMBER 31, 2026",
     "EXP_DATE":        "12/31/2026",
     "PERM_EFF_DATE":   "01/05/2026",
@@ -296,22 +296,22 @@ _TOKEN_PREVIEW = {
     "SITE_ID":         "S-2026-0117",
     "COL_SORT":        "A-001",
     # Q_ORG columns (master-detail child)
-    "PERMITTEE_ADDR":  "Joseph T. Reilly\n1442 Industrial Dr\nBozeman, MT 59715",
-    "PERMITTEE":       "Joseph T. Reilly",
+    "PERMITTEE_ADDR":  "Jane Q. Public\n100 Main St\nSpringfield, ST 00000",
+    "PERMITTEE":       "Jane Q. Public",
     "SA_SITE_ID":      "S-2026-0117",
     "ORG_ID":          "ORG-1170",
     # Placeholders / formulas
     "CP_OPERATE_U":    "OPERATING AS",
     "CP_OPERATE_L":    "operating as",
-    "CP_JV_ADDR":      "PO Box 200901, Helena MT 59620-0901",
+    "CP_JV_ADDR":      "PO Box 1000, Capital City, ST 00000",
     "CP_SORT_DESCR":   "Permit",
     "CP_PERMIT_DTL":   "Renewal Year = '2026'",
     "CP_JV_ENVELOPE":  "JV Standard 12 x 9 Envelope",
     "CP_URL_ALL_ENVELOPE": "(envelope generation URL)",
-    "CF_PERMITTEES":   "Joseph T. Reilly",
+    "CF_PERMITTEES":   "Jane Q. Public",
     "CF_WUTMB_CHIEF":  "Bureau Chief, Waste & Underground Tank Management Bureau",
-    "CF_MVWF_PERMIT":  "MVWF Permit(s)",
-    "CF_FILE":         "MVWF-2026.RDL",
+    "CF_SAMPLE_PERMIT": "Sample Permit(s)",
+    "CF_FILE":         "SAMPLE_INSPECTION-2026.RDL",
     "CF_URL_ENVELOPE": "(envelope hyperlink)",
     # Parameter-form-style references
     "P_RENEWAL_YEAR":  "2026",
@@ -549,11 +549,11 @@ def _render_letter_mockup(report):
                      if any(tok in (f.name or "").upper()
                             for tok in ("DIRECTOR","GOVERNOR","CHIEF","SIGN"))]
 
-    # Filter formulas list, find a "letter-name" formula like CF_MVWF_LTR_*
+    # Filter formulas list, find a "letter-name" formula like CF_LTR_* / CF_LETTER_*
     letter_title_formula = None
     for f in report.formulas:
         fn = (f.name or "").upper()
-        if fn.startswith("CF_MVWF_LTR") or fn.startswith("CF_MVWF_LETTER")            or fn.startswith("CF_TITLE"):
+        if fn.startswith("CF_LTR_") or fn.startswith("CF_LETTER_")            or fn.startswith("CF_TITLE"):
             letter_title_formula = f.name
             break
 
@@ -566,11 +566,11 @@ def _render_letter_mockup(report):
         '<div style="text-align:center; padding-bottom:14px; '
         f'border-bottom:2px solid {RULE}; margin-bottom:24px;">'
         f'<div style="font-size:11px; letter-spacing:2px; color:{INK_MUTED}; '
-        'text-transform:uppercase;">State of Montana</div>'
+        'text-transform:uppercase;"><State / Org></div>'
         f'<div style="font-size:18px; font-weight:bold; letter-spacing:0.8px; '
-        f'color:{INK}; margin-top:4px;">DEPARTMENT OF ENVIRONMENTAL QUALITY</div>'
+        f'color:{INK}; margin-top:4px;"><AGENCY DEPARTMENT NAME></div>'
         f'<div style="font-size:11px; color:{INK_MUTED}; margin-top:4px;">'
-        '1520 E. Sixth Avenue, P.O. Box 200901, Helena, MT 59620-0901</div>'
+        '<street>, <PO box>, <city, state, zip></div>'
         '</div>'
     )
     # Date + reference
@@ -637,7 +637,7 @@ def _render_letter_mockup(report):
         body.append(
             f'<div style="border-top:1px solid {INK}; width:60%; padding-top:4px;">'
             f'<div style="font-size:12px; font-weight:bold; color:{INK};">[Director]</div>'
-            f'<div style="font-size:11px; color:{INK_MUTED};">Department of Environmental Quality</div>'
+            f'<div style="font-size:11px; color:{INK_MUTED};"><Agency></div>'
             '</div>'
         )
     # Footer note

@@ -79,14 +79,14 @@ _KNOWN_STUBS: Dict[str, Dict] = {
         "complexity": "easy",
         "params": [("@val_name", "NVARCHAR(100)")],
         "return_type": "INT",
-        "note": "Hard-coded constant lookup for K_Prog_Id_* and K_*_Cd values.",
+        "note": "Illustrative constant lookup. Replace with the project's real K_* names and values.",
         "body": (
             "    RETURN CASE @val_name\n"
-            "        WHEN N'K_Prog_Id_JV'   THEN 1\n"
-            "        WHEN N'K_Prog_Id_MVWF' THEN 2\n"
-            "        WHEN N'K_Prog_Id_LNG'  THEN 3\n"
-            "        WHEN N'K_Prog_Id_WUTM' THEN 4\n"
-            "        WHEN N'K_Prog_Id_SLD'  THEN 5\n"
+            "        WHEN N'K_Type_A'       THEN 1\n"
+            "        WHEN N'K_Type_B'       THEN 2\n"
+            "        WHEN N'K_Type_C'       THEN 3\n"
+            "        WHEN N'K_Type_D'       THEN 4\n"
+            "        WHEN N'K_Type_E'       THEN 5\n"
             "        WHEN N'K_Active_Yn'    THEN 1\n"
             "        WHEN N'K_Inactive_Yn'  THEN 0\n"
             "        ELSE NULL END"

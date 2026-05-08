@@ -104,7 +104,7 @@ fi
 # 4. Smoke test the converter
 # ----------------------------------------------------------------------
 hdr "Step 4/6: Converter smoke test"
-SMOKE_CODE="import sys; sys.path.insert(0,'backend'); from converter import convert; convert(open('samples/oracle/MVWF_PERMIT.xml','rb').read()); print('OK')"
+SMOKE_CODE="import sys; sys.path.insert(0,'backend'); from converter import convert; convert(open('samples/oracle/SAMPLE_INSPECTION.xml','rb').read()); print('OK')"
 if "$PYTHON" -c "$SMOKE_CODE"; then
     ok "Converter smoke test passed."
 else

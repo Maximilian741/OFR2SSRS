@@ -13,30 +13,31 @@
 1. **Show the empty page.** "This is the whole UI. Sidebar on the left, four
    preview tabs on the right. There's nothing to learn."
 
-2. **Click `MVWF_PERMIT.xml` in the sample list** (or drag it from your
+2. **Click `SAMPLE_INSPECTION.xml` in the sample list** (or drag it from your
    Documents folder onto the drop zone). The status pill flips to *Converting*
    then *Converted*. The sidebar fills with the report summary: 16 parameters,
    3 queries, 5 formula columns.
 
 3. **Tab 1 — HTML Mockup.** "This is what the SSRS report will look like when
-   it renders. Government letterhead, parameter form, data table, signature
-   block. 100% generated from the Oracle XML — we never wrote any Montana DEQ
-   markup ourselves."
+   it renders. Letterhead, parameter form, data table, signature block.
+   100% generated from the Oracle XML — we never wrote any of this markup
+   ourselves."
 
 4. **Tab 2 — RDL XML.** Scroll the syntax-highlighted RDL. "42 KB of valid
    SSRS 2008+ RDL. You can open this file directly in Report Builder right
-   now, point it at your DEQ database, and it will run."
+   now, point it at any SQL Server, and it will run."
 
 5. **Tab 3 — Side-by-Side.** "Auditors love this. Left pane: the original
    Oracle Reports XML. Right pane: the converted RDL. Click *Sync scrolling*
    and you can see exactly which Oracle construct produced which RDL element."
 
 6. **Tab 4 — Live Data.** "Here's the magic. We translated Oracle SQL —
-   DECODE, NVL, TO_CHAR, package functions like `Pkg_WUTM_Util.F_Format_Address` —
+   DECODE, NVL, TO_CHAR, package functions like `Pkg_Common.F_Format_Address` —
    into T-SQL. The translated query runs against a sample SQLite DB seeded with
-   real-looking Montana data. **Click Run Query.**"
-   - Output shows 5 wrecker yards across Yellowstone, Gallatin, and Missoula
-     counties, with formatted Permit Dates like *MARCH 15, 2025 TO MARCH 14, 2030*.
+   synthetic inspection records. **Click Run Query.**"
+   - Output shows 5 inspection sites belonging to fictional organizations like
+     Acme Holdings, Northwind Industries, and Globex Group, with formatted
+     Permit Dates like *MARCH 15, 2025 TO MARCH 14, 2030*.
    - Warning chips show every translation step so the user can audit what was
      adapted.
 
@@ -61,6 +62,6 @@
 
 ## Backup plan if something breaks
 
-- `samples/expected_rdl/MVWF_PERMIT.rdl` — pre-generated RDL output, 42 KB.
+- `samples/expected_rdl/SAMPLE_INSPECTION.rdl` — pre-generated RDL output, 42 KB.
 - `samples/oracle/` — all four user-provided artifacts in case you need to
   reference them.

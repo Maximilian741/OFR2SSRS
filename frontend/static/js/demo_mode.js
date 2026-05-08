@@ -183,7 +183,7 @@
       cta.scrollIntoView({behavior: "smooth", block: "center"});
       await showTooltip(cta, "4. Get the .rdl",
         "Click here to download the SSRS-ready file. " +
-        "Drop it into Report Builder, point at your DEQ database, deploy.");
+        "Drop it into Report Builder, point it at your SQL Server, and deploy.");
     }
 
     // --- Step 5: bursting tab (NEW) ---

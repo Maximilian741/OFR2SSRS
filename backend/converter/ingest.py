@@ -205,6 +205,7 @@ def classify_files(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
     primary_xml: Optional[Tuple[str, bytes]] = None
     rdf_binary: Optional[Tuple[str, bytes]] = None
     sql_files: List[Tuple[str, str]] = []
+    pdfs: List[Tuple[str, bytes]] = []
     docs: List[Tuple[str, str]] = []
     screenshots: List[Tuple[str, bytes, str]] = []
     unknown: List[Tuple[str, str]] = []
@@ -261,6 +262,12 @@ def classify_files(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
             else:
                 unknown.append((filename, note or "unknown XML root"))
                 _note(base, "unknown", 0.4, note or "XML but not Oracle Reports")
+            continue
+
+        # --- PDF (rendered output, used for cross-validation) ---
+        if ext == ".pdf":
+            pdfs.append((filename, blob))
+            _note(base, "pdf", 0.99, "rendered PDF — cross-validation source")
             continue
 
         # --- RDF binary --------------------------------------------------
@@ -355,6 +362,7 @@ def classify_files(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
         "primary_xml": primary_xml,
         "rdf_binary": rdf_binary,
         "sql_files": sql_files,
+        "pdfs": pdfs,
         "docs": docs,
         "screenshots": screenshots,
         "unknown": unknown,
@@ -459,6 +467,8 @@ def convert_bundle(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
     # Path 1: real Oracle XML present -- run the regular pipeline.
     if primary_xml:
         from . import convert as _convert  # local import to avoid cycles
+        from .cross_validate import cross_validate
+        from .parsers.oracle_xml import parse_oracle_xml
         try:
             data = _convert(primary_xml[1])
         except Exception as e:
@@ -467,6 +477,13 @@ def convert_bundle(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
                 "ingest_report": ingest,
             }
         data["ingest_report"] = ingest
+        # Cross-validation against any supporting artifacts in the bundle
+        try:
+            parsed_for_xv = parse_oracle_xml(primary_xml[1])
+            data["cross_validation"] = cross_validate(
+                parsed_for_xv, classification, data.get("bursting"))
+        except Exception as _e:
+            data["cross_validation"] = {"error": f"{type(_e).__name__}: {_e}"}
         return data
 
     # Path 2: no XML, but we have SQL -- build a synthetic report.

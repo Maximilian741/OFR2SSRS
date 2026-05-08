@@ -122,16 +122,16 @@ def build_checklist(report, rdl_xml: str, validation_issues: List[Dict[str, Any]
     steps.append({
         "step": 2,
         "status": "manual",
-        "title": "Configure the DataSource against your DEQ database",
+        "title": "Configure the DataSource against your report database",
         "body_md": (
-            "The RDL ships with a placeholder shared `DataSource` named **DEQ**. Point it "
-            "at the migrated DEQ database:\n\n"
+            "The RDL ships with a placeholder shared `DataSource` named **AppDb**. Point it "
+            "at the migrated report database:\n\n"
             "1. In Report Builder open **Data Sources** in the Report Data pane.\n"
-            "2. Right-click **DEQ** -> **Data Source Properties**.\n"
-            "3. Change connection string to `Data Source=YOUR_SQL_SERVER;Initial Catalog=DEQ;Integrated Security=SSPI;`\n"
+            "2. Right-click **AppDb** -> **Data Source Properties**.\n"
+            "3. Change connection string to `Data Source=YOUR_SQL_SERVER;Initial Catalog=AppDb;Integrated Security=SSPI;`\n"
             "4. Test connection. **Save** the report.\n\n"
             "If you want to use a shared data source, set **Use a shared connection** and "
-            "pick `/Data Sources/DEQ` from the report server."
+            "pick `/Data Sources/AppDb` from the report server."
         ),
     })
 
@@ -168,7 +168,7 @@ def build_checklist(report, rdl_xml: str, validation_issues: List[Dict[str, Any]
             "preview runs. Before going to prod, port each one against your real schema. "
             "Open `backend/converter/translators/udf_stubs.py` output to see the stubs and "
             "the embedded original PL/SQL hints; deploy them under `dbo.fn_*` in your "
-            "DEQ database.\n\n"
+            "report database.\n\n"
             "**Functions referenced by this report:**\n\n"
             + "\n".join(udf_lines)
             + "\n\n"
@@ -181,7 +181,7 @@ def build_checklist(report, rdl_xml: str, validation_issues: List[Dict[str, Any]
     steps.append({
         "step": 4,
         "status": udf_status,
-        "title": f"Port dbo.fn_* UDFs against the live DEQ schema ({len(pkg_calls)} found)",
+        "title": f"Port dbo.fn_* UDFs against the live target schema ({len(pkg_calls)} found)",
         "body_md": udf_body,
     })
 

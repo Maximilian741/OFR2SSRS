@@ -218,8 +218,20 @@ def _parse_queries(data_el, warnings: List[str]) -> List[DataQuery]:
             sql = ""
             if select_el is not None:
                 sql = (select_el.text or "").strip()
-            top_group = _find(ds, "group")
-            items = _collect_data_items_recursive(top_group, warnings)
+            # Oracle Reports lets a single <dataSource> hold multiple sibling
+            # <group> elements (e.g. G_Site + G_VISIT under Q_VISIT). Walk
+            # ALL of them — not just the first — and harvest dataItems
+            # recursively from each. De-dup by item name to avoid double-counting
+            # if Oracle ever emits the same item under two groups.
+            items: List[DataItem] = []
+            seen: set[str] = set()
+            for top_group in _findall(ds, "group"):
+                for di in _collect_data_items_recursive(top_group, warnings):
+                    if di.name and di.name in seen:
+                        continue
+                    if di.name:
+                        seen.add(di.name)
+                    items.append(di)
             queries.append(
                 DataQuery(
                     name=_attr(ds, "name"),
@@ -616,7 +628,8 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
     parameters = _parse_parameters(data_el, warnings)
     queries = _parse_queries(data_el, warnings)
     formulas = _parse_formulas(data_el, program_units_index, warnings)
-    embedded_images: List[EmbeddedImage] = []
+
+    embedded_images = []
     layout = _parse_layout(root, warnings, embedded_images)
 
     return ParsedReport(
@@ -627,7 +640,6 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
         formulas=formulas,
         layout=layout,
         triggers=triggers,
-        embedded_images=embedded_images,
         raw_xml=raw_xml,
         warnings=warnings,
     )

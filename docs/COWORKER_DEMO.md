@@ -39,13 +39,14 @@ Browser opens at `http://127.0.0.1:5057`. Show the empty drag-drop zone.
 
 ### Beat 2: drop the Oracle XML (30 seconds)
 
-Drag `samples/oracle/MVWF_PERMIT.xml` onto the drop zone.
+Drag `samples/oracle/SAMPLE_INSPECTION.xml` onto the drop zone.
 
 While the spinner runs (it won't run for long), say:
 
-> "MVWF_PERMIT is a real Oracle Reports artifact pulled from production.
-> About 1,200 lines of XML. Eight parameters, seven datasets, four formula
-> columns, a master-detail layout, and a footer with page numbers."
+> "SAMPLE_INSPECTION.xml is a synthetic Oracle Reports XML modeled on the
+> structures the converter targets. About 1,200 lines of XML. Eight
+> parameters, seven datasets, four formula columns, a master-detail
+> layout, and a footer with page numbers."
 
 When the tabs light up, you have everything you need open at once.
 
@@ -189,7 +190,7 @@ Things the team has scoped but not built yet:
   config.)
 * **Bursting / DDS support.** Convert Oracle distribution.xml to an SSRS
   Data-Driven Subscription scaffold. (Agent 13.)
-* **More samples.** Beyond MVWF\_PERMIT, harvest 5-10 representative
+* **More samples.** Beyond SAMPLE\_INSPECTION, harvest 5-10 representative
   reports across the migration backlog and pin them as regression
   fixtures. (Agent 16.)
 

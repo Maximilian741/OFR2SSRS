@@ -43,6 +43,17 @@
     </section>
 
     <section class="side-section">
+      <div class="side-heading">SSRS Connection (optional)</div>
+      <input id="conn-string" type="password" autocomplete="off" spellcheck="false"
+             class="conn-input"
+             placeholder="Data Source=...;Initial Catalog=...;Integrated Security=true">
+      <div class="muted-note conn-note">
+        Pasted here, sent only with the next conversion, never stored.
+        Leave blank to keep the default placeholder in the RDL.
+      </div>
+    </section>
+
+    <section class="side-section">
       <div class="side-heading" style="display:flex; justify-content:space-between; align-items:center;">
         <span>Recent reports</span>
         <button id="recent-clear" class="btn-tiny" title="Clear history">Clear</button>

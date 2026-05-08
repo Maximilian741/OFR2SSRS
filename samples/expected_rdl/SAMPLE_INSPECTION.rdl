@@ -1,0 +1,651 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition" xmlns:rd="http://schemas.microsoft.com/SQLServer/reporting/reportdesigner">
+  <rd:ReportID>00000000-0000-0000-0000-000000000000</rd:ReportID>
+  <Description>SAMPLE_INSPECTION</Description>
+  <Author>Oracle2SSRS</Author>
+  <AutoRefresh>0</AutoRefresh>
+  <DataSources>
+    <DataSource Name="SampleDB">
+      <ConnectionProperties>
+        <DataProvider>SQL</DataProvider>
+        <ConnectString>Data Source=localhost;Initial Catalog=SampleDB</ConnectString>
+      </ConnectionProperties>
+      <rd:SecurityType>Integrated</rd:SecurityType>
+    </DataSource>
+  </DataSources>
+  <DataSets>
+    <DataSet Name="Q_PERMIT">
+      <Query>
+        <DataSourceName>SampleDB</DataSourceName>
+        <CommandText>SELECT
+    P.Permit_Id,
+    P.Permit_Code,
+    P.Status,
+    P.Issued_On,
+    P.Expires_On,
+    CONVERT(NVARCHAR(20), P.Expires_On, 107) AS Exp_Date,
+    CONVERT(NVARCHAR(20), P.Issued_On, 107)
+        + ' TO '
+        + CONVERT(NVARCHAR(20), P.Expires_On, 107) AS Permit_Dates,
+    PT.Type_Code,
+    PT.Type_Description,
+    'INSPECTION DIVISION' + CHAR(10) + UPPER(PT.Type_Description) + ' LICENSE' AS Permit_Heading,
+    S.Site_Id,
+    S.Site_Name,
+    O.Org_Id,
+    O.Org_Name,
+    CASE
+        WHEN UPPER(LTRIM(RTRIM(@P_SORT))) = 'ORG'   THEN O.Org_Name + ' - ' + S.Site_Name
+        WHEN UPPER(LTRIM(RTRIM(@P_SORT))) = 'SITE'  THEN S.Site_Name
+        WHEN UPPER(LTRIM(RTRIM(@P_SORT))) = 'CODE'  THEN P.Permit_Code + ' - ' + S.Site_Name
+        ELSE P.Permit_Code
+    END AS Col_Sort,
+    ISNULL(A.Street_1, '')
+        + CASE WHEN A.Street_2 IS NULL OR A.Street_2 = '' THEN '' ELSE ', ' + A.Street_2 END
+        + ', ' + ISNULL(A.City, '')
+        + ', ' + ISNULL(A.State, '')
+        + '  ' + ISNULL(A.Zip, '') AS Site_Addr
+FROM Permit AS P
+INNER JOIN Permit_Type AS PT  ON PT.Permit_Type_Id = P.Permit_Type_Id
+INNER JOIN Site        AS S   ON S.Site_Id         = P.Site_Id
+INNER JOIN Org         AS O   ON O.Org_Id          = S.Org_Id
+LEFT JOIN  Address     AS A   ON A.Org_Id          = O.Org_Id
+WHERE
+    (@P_OrgName    IS NULL OR O.Org_Name LIKE '%' + @P_OrgName + '%')
+    AND (@P_PermitCode IS NULL OR P.Permit_Code  LIKE '%' + @P_PermitCode + '%')
+    AND (@P_Status     IS NULL OR P.Status        = @P_Status)
+    AND (@P_DateFrom   IS NULL OR P.Issued_On    &gt;= @P_DateFrom)
+    AND (@P_DateTo     IS NULL OR P.Expires_On   &lt;= @P_DateTo)
+ORDER BY 1</CommandText>
+        <QueryParameters>
+          <QueryParameter Name="@P_SORT">
+            <Value>=Parameters!P_SORT.Value</Value>
+          </QueryParameter>
+          <QueryParameter Name="@P_OrgName">
+            <Value>=Parameters!P_OrgName.Value</Value>
+          </QueryParameter>
+          <QueryParameter Name="@P_PermitCode">
+            <Value>=Parameters!P_PermitCode.Value</Value>
+          </QueryParameter>
+          <QueryParameter Name="@P_Status">
+            <Value>=Parameters!P_Status.Value</Value>
+          </QueryParameter>
+          <QueryParameter Name="@P_DateFrom">
+            <Value>=Parameters!P_DateFrom.Value</Value>
+          </QueryParameter>
+          <QueryParameter Name="@P_DateTo">
+            <Value>=Parameters!P_DateTo.Value</Value>
+          </QueryParameter>
+        </QueryParameters>
+      </Query>
+      <Fields>
+        <Field Name="Permit_Id">
+          <DataField>Permit_Id</DataField>
+          <rd:TypeName>System.Int32</rd:TypeName>
+        </Field>
+        <Field Name="Permit_Code">
+          <DataField>Permit_Code</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Status">
+          <DataField>Status</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Issued_On">
+          <DataField>Issued_On</DataField>
+          <rd:TypeName>System.DateTime</rd:TypeName>
+        </Field>
+        <Field Name="Expires_On">
+          <DataField>Expires_On</DataField>
+          <rd:TypeName>System.DateTime</rd:TypeName>
+        </Field>
+        <Field Name="Exp_Date">
+          <DataField>Exp_Date</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Permit_Dates">
+          <DataField>Permit_Dates</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Type_Code">
+          <DataField>Type_Code</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Type_Description">
+          <DataField>Type_Description</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Permit_Heading">
+          <DataField>Permit_Heading</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Site_Id">
+          <DataField>Site_Id</DataField>
+          <rd:TypeName>System.Int32</rd:TypeName>
+        </Field>
+        <Field Name="Site_Name">
+          <DataField>Site_Name</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Org_Id">
+          <DataField>Org_Id</DataField>
+          <rd:TypeName>System.Int32</rd:TypeName>
+        </Field>
+        <Field Name="Org_Name">
+          <DataField>Org_Name</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Col_Sort">
+          <DataField>Col_Sort</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Site_Addr">
+          <DataField>Site_Addr</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+      </Fields>
+    </DataSet>
+    <DataSet Name="Q_VISITS">
+      <Query>
+        <DataSourceName>SampleDB</DataSourceName>
+        <CommandText>SELECT
+    V.Visit_Id,
+    V.Site_Id,
+    V.Visit_Date,
+    V.Notes,
+    VT.Type_Code  AS Visit_Type_Code,
+    VT.Type_Description AS Visit_Type_Description,
+    INS.Org_Name  AS Inspector_Org_Name
+FROM Visit       AS V
+INNER JOIN Visit_Type AS VT  ON VT.Visit_Type_Id = V.Visit_Type_Id
+LEFT JOIN  Org        AS INS ON INS.Org_Id       = V.Inspector_Org_Id
+WHERE
+    (@P_VisitDateFrom IS NULL OR V.Visit_Date &gt;= @P_VisitDateFrom)
+    AND (@P_VisitDateTo   IS NULL OR V.Visit_Date &lt;= @P_VisitDateTo)
+ORDER BY V.Visit_Date DESC</CommandText>
+        <QueryParameters>
+          <QueryParameter Name="@P_VisitDateFrom">
+            <Value>=Parameters!P_VisitDateFrom.Value</Value>
+          </QueryParameter>
+          <QueryParameter Name="@P_VisitDateTo">
+            <Value>=Parameters!P_VisitDateTo.Value</Value>
+          </QueryParameter>
+        </QueryParameters>
+      </Query>
+      <Fields>
+        <Field Name="Visit_Id">
+          <DataField>Visit_Id</DataField>
+          <rd:TypeName>System.Int32</rd:TypeName>
+        </Field>
+        <Field Name="Site_Id">
+          <DataField>Site_Id</DataField>
+          <rd:TypeName>System.Int32</rd:TypeName>
+        </Field>
+        <Field Name="Visit_Date">
+          <DataField>Visit_Date</DataField>
+          <rd:TypeName>System.DateTime</rd:TypeName>
+        </Field>
+        <Field Name="Notes">
+          <DataField>Notes</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Visit_Type_Code">
+          <DataField>Visit_Type_Code</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Visit_Type_Description">
+          <DataField>Visit_Type_Description</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+        <Field Name="Inspector_Org_Name">
+          <DataField>Inspector_Org_Name</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+      </Fields>
+    </DataSet>
+    <DataSet Name="Q_LOGO">
+      <Query>
+        <DataSourceName>SampleDB</DataSourceName>
+        <CommandText>SELECT TOP 1
+    IA.Image_Bytes AS Logo,
+    IA.MimeType    AS Logo_Mime
+FROM Image_Asset      AS IA
+INNER JOIN Image_Asset_Ref AS IAR ON IAR.Image_Id = IA.Image_Id
+WHERE IAR.Context = 'logo'
+ORDER BY IAR.Image_Id</CommandText>
+      </Query>
+      <Fields>
+        <Field Name="Logo">
+          <DataField>Logo</DataField>
+          <rd:TypeName>System.Byte[]</rd:TypeName>
+        </Field>
+        <Field Name="Logo_Mime">
+          <DataField>Logo_Mime</DataField>
+          <rd:TypeName>System.String</rd:TypeName>
+        </Field>
+      </Fields>
+    </DataSet>
+  </DataSets>
+  <ReportParameters>
+    <ReportParameter Name="P_SORT">
+      <DataType>String</DataType>
+      <Prompt>Sort By</Prompt>
+      <Nullable>true</Nullable>
+      <AllowBlank>true</AllowBlank>
+      <DefaultValue>
+        <Values>
+          <Value>CODE</Value>
+        </Values>
+      </DefaultValue>
+      <ValidValues>
+        <ParameterValues>
+          <ParameterValue>
+            <Value>CODE</Value>
+            <Label>Permit Code</Label>
+          </ParameterValue>
+          <ParameterValue>
+            <Value>ORG</Value>
+            <Label>Organization</Label>
+          </ParameterValue>
+          <ParameterValue>
+            <Value>SITE</Value>
+            <Label>Site Name</Label>
+          </ParameterValue>
+        </ParameterValues>
+      </ValidValues>
+    </ReportParameter>
+    <ReportParameter Name="P_OrgName">
+      <DataType>String</DataType>
+      <Prompt>Organization (contains)</Prompt>
+      <Nullable>true</Nullable>
+      <AllowBlank>true</AllowBlank>
+    </ReportParameter>
+    <ReportParameter Name="P_PermitCode">
+      <DataType>String</DataType>
+      <Prompt>Permit Code</Prompt>
+      <Nullable>true</Nullable>
+      <AllowBlank>true</AllowBlank>
+    </ReportParameter>
+    <ReportParameter Name="P_Status">
+      <DataType>String</DataType>
+      <Prompt>Status</Prompt>
+      <Nullable>true</Nullable>
+      <AllowBlank>true</AllowBlank>
+      <ValidValues>
+        <ParameterValues>
+          <ParameterValue>
+            <Value>ACTIVE</Value>
+            <Label>Active</Label>
+          </ParameterValue>
+          <ParameterValue>
+            <Value>EXPIRED</Value>
+            <Label>Expired</Label>
+          </ParameterValue>
+          <ParameterValue>
+            <Value>PENDING</Value>
+            <Label>Pending</Label>
+          </ParameterValue>
+        </ParameterValues>
+      </ValidValues>
+    </ReportParameter>
+    <ReportParameter Name="P_DateFrom">
+      <DataType>DateTime</DataType>
+      <Prompt>Issued On - From</Prompt>
+      <Nullable>true</Nullable>
+    </ReportParameter>
+    <ReportParameter Name="P_DateTo">
+      <DataType>DateTime</DataType>
+      <Prompt>Expires On - To</Prompt>
+      <Nullable>true</Nullable>
+    </ReportParameter>
+    <ReportParameter Name="P_VisitDateFrom">
+      <DataType>DateTime</DataType>
+      <Prompt>Visit Date - From</Prompt>
+      <Nullable>true</Nullable>
+    </ReportParameter>
+    <ReportParameter Name="P_VisitDateTo">
+      <DataType>DateTime</DataType>
+      <Prompt>Visit Date - To</Prompt>
+      <Nullable>true</Nullable>
+    </ReportParameter>
+    <ReportParameter Name="P_ReportTitle">
+      <DataType>String</DataType>
+      <Prompt>Report Title</Prompt>
+      <Nullable>true</Nullable>
+      <AllowBlank>true</AllowBlank>
+      <DefaultValue>
+        <Values>
+          <Value>Sample Inspection Report</Value>
+        </Values>
+      </DefaultValue>
+    </ReportParameter>
+  </ReportParameters>
+  <Body>
+    <ReportItems>
+      <Tablix Name="Tablix_Permits">
+        <TablixBody>
+          <TablixColumns>
+            <TablixColumn><Width>1.4in</Width></TablixColumn>
+            <TablixColumn><Width>1.6in</Width></TablixColumn>
+            <TablixColumn><Width>2.0in</Width></TablixColumn>
+            <TablixColumn><Width>1.0in</Width></TablixColumn>
+            <TablixColumn><Width>1.4in</Width></TablixColumn>
+            <TablixColumn><Width>1.4in</Width></TablixColumn>
+          </TablixColumns>
+          <TablixRows>
+            <TablixRow>
+              <Height>0.3in</Height>
+              <TablixCells>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="hdr_PermitCode">
+                      <CanGrow>true</CanGrow>
+                      <KeepTogether>true</KeepTogether>
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun>
+                              <Value>Permit Code</Value>
+                              <Style><FontWeight>Bold</FontWeight></Style>
+                            </TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="hdr_Org">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun>
+                              <Value>Organization</Value>
+                              <Style><FontWeight>Bold</FontWeight></Style>
+                            </TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="hdr_Site">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun>
+                              <Value>Site</Value>
+                              <Style><FontWeight>Bold</FontWeight></Style>
+                            </TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="hdr_Status">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun>
+                              <Value>Status</Value>
+                              <Style><FontWeight>Bold</FontWeight></Style>
+                            </TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="hdr_Issued">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun>
+                              <Value>Issued</Value>
+                              <Style><FontWeight>Bold</FontWeight></Style>
+                            </TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="hdr_Expires">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun>
+                              <Value>Expires</Value>
+                              <Style><FontWeight>Bold</FontWeight></Style>
+                            </TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+              </TablixCells>
+            </TablixRow>
+            <TablixRow>
+              <Height>0.25in</Height>
+              <TablixCells>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="t_PermitCode">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun><Value>=Fields!Permit_Code.Value</Value></TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="t_Org">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun><Value>=Fields!Org_Name.Value</Value></TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="t_Site">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun><Value>=Fields!Site_Name.Value &amp; " - " &amp; Fields!Site_Addr.Value</Value></TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="t_Status">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun><Value>=Fields!Status.Value</Value></TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="t_Issued">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun>
+                              <Value>=Fields!Issued_On.Value</Value>
+                              <Style><Format>d</Format></Style>
+                            </TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+                <TablixCell>
+                  <CellContents>
+                    <Textbox Name="t_Expires">
+                      <Paragraphs>
+                        <Paragraph>
+                          <TextRuns>
+                            <TextRun>
+                              <Value>=Fields!Expires_On.Value</Value>
+                              <Style><Format>d</Format></Style>
+                            </TextRun>
+                          </TextRuns>
+                        </Paragraph>
+                      </Paragraphs>
+                    </Textbox>
+                  </CellContents>
+                </TablixCell>
+              </TablixCells>
+            </TablixRow>
+          </TablixRows>
+        </TablixBody>
+        <TablixColumnHierarchy>
+          <TablixMembers>
+            <TablixMember />
+            <TablixMember />
+            <TablixMember />
+            <TablixMember />
+            <TablixMember />
+            <TablixMember />
+          </TablixMembers>
+        </TablixColumnHierarchy>
+        <TablixRowHierarchy>
+          <TablixMembers>
+            <TablixMember><KeepWithGroup>After</KeepWithGroup></TablixMember>
+            <TablixMember>
+              <Group Name="Details_Permit" />
+            </TablixMember>
+          </TablixMembers>
+        </TablixRowHierarchy>
+        <DataSetName>Q_PERMIT</DataSetName>
+        <SortExpressions>
+          <SortExpression>
+            <Value>=Fields!Col_Sort.Value</Value>
+          </SortExpression>
+        </SortExpressions>
+        <Top>0.6in</Top>
+        <Left>0.25in</Left>
+        <Height>0.55in</Height>
+        <Width>8.8in</Width>
+        <ZIndex>1</ZIndex>
+      </Tablix>
+      <Textbox Name="Title">
+        <CanGrow>true</CanGrow>
+        <Paragraphs>
+          <Paragraph>
+            <TextRuns>
+              <TextRun>
+                <Value>=Parameters!P_ReportTitle.Value</Value>
+                <Style>
+                  <FontSize>16pt</FontSize>
+                  <FontWeight>Bold</FontWeight>
+                </Style>
+              </TextRun>
+            </TextRuns>
+          </Paragraph>
+        </Paragraphs>
+        <Top>0.1in</Top>
+        <Left>0.25in</Left>
+        <Height>0.4in</Height>
+        <Width>6in</Width>
+      </Textbox>
+    </ReportItems>
+    <Height>9in</Height>
+  </Body>
+  <Page>
+    <PageHeader>
+      <Height>0.6in</Height>
+      <ReportItems>
+        <Textbox Name="HeaderTitle">
+          <Paragraphs>
+            <Paragraph>
+              <TextRuns>
+                <TextRun>
+                  <Value>=Parameters!P_ReportTitle.Value</Value>
+                  <Style>
+                    <FontSize>11pt</FontSize>
+                    <FontWeight>Bold</FontWeight>
+                  </Style>
+                </TextRun>
+              </TextRuns>
+            </Paragraph>
+          </Paragraphs>
+          <Top>0.1in</Top>
+          <Left>0.25in</Left>
+          <Height>0.3in</Height>
+          <Width>5in</Width>
+        </Textbox>
+        <Textbox Name="HeaderRunDate">
+          <Paragraphs>
+            <Paragraph>
+              <TextRuns>
+                <TextRun>
+                  <Value>="Run: " &amp; Format(Globals!ExecutionTime, "yyyy-MM-dd HH:mm")</Value>
+                </TextRun>
+              </TextRuns>
+            </Paragraph>
+          </Paragraphs>
+          <Top>0.1in</Top>
+          <Left>6in</Left>
+          <Height>0.3in</Height>
+          <Width>2.5in</Width>
+        </Textbox>
+      </ReportItems>
+    </PageHeader>
+    <PageFooter>
+      <Height>0.4in</Height>
+      <ReportItems>
+        <Textbox Name="FooterPage">
+          <Paragraphs>
+            <Paragraph>
+              <TextRuns>
+                <TextRun>
+                  <Value>="Page " &amp; Globals!PageNumber &amp; " of " &amp; Globals!TotalPages</Value>
+                </TextRun>
+              </TextRuns>
+            </Paragraph>
+          </Paragraphs>
+          <Top>0.1in</Top>
+          <Left>3.5in</Left>
+          <Height>0.2in</Height>
+          <Width>2in</Width>
+        </Textbox>
+      </ReportItems>
+    </PageFooter>
+    <PageHeight>11in</PageHeight>
+    <PageWidth>8.5in</PageWidth>
+    <LeftMargin>0.5in</LeftMargin>
+    <RightMargin>0.5in</RightMargin>
+    <TopMargin>0.5in</TopMargin>
+    <BottomMargin>0.5in</BottomMargin>
+    <Style />
+  </Page>
+</Report>

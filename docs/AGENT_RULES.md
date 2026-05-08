@@ -57,7 +57,7 @@ python3 -c "import json; json.load(open('path/to/file.json'))"
 PYTHONDONTWRITEBYTECODE=1 python3 -c "
 import sys; sys.path.insert(0,'backend')
 from converter import convert
-out = convert(open('samples/oracle/MVWF_PERMIT.xml','rb').read())
+out = convert(open('samples/oracle/SAMPLE_INSPECTION.xml','rb').read())
 assert out['rdl_xml'], 'pipeline broken'
 print('OK')
 "

@@ -4,7 +4,7 @@ Lightweight, pure-Python T-SQL validator for the Oracle->SSRS pipeline.
 We are NOT allowed to phone home to a real SQL Server. Instead, we run a
 collection of static, lexical checks designed to catch the things that will
 prevent the generated RDL from running once the user opens it in Report
-Builder against a live DEQ database.
+Builder against a live target database.
 
 Public API:
     validate_tsql(sql: str) -> list[dict]

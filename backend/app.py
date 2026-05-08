@@ -29,6 +29,7 @@ sys.path.insert(0, str(HERE))
 from converter import convert, run_query  # noqa: E402
 from converter.ingest import convert_bundle  # noqa: E402
 from converter.bundle_export import build_bundle_zip  # noqa: E402
+from converter.rdl_postprocess import inject_connection_string  # noqa: E402
 
 ROOT = HERE.parent
 SAMPLES = ROOT / "samples" / "oracle"
@@ -81,6 +82,12 @@ def api_convert():
         return jsonify({"error": "no file uploaded"}), 400
     try:
         data = convert(f.read())
+        # Optional: caller-supplied connection string injected into the RDL
+        # before download. We never log or store it (it stays in request memory
+        # only for this one substitution).
+        cs = (request.form.get("connection_string") or "").strip()
+        if cs:
+            data["rdl_xml"] = inject_connection_string(data["rdl_xml"], cs)
         global _LAST
         _LAST = data
         return jsonify(data)
@@ -120,6 +127,9 @@ def api_convert_bundle():
         return jsonify({"error": "no files uploaded"}), 400
     try:
         data = convert_bundle(files)
+        cs = (request.form.get("connection_string") or "").strip()
+        if cs and data.get("rdl_xml"):
+            data["rdl_xml"] = inject_connection_string(data["rdl_xml"], cs)
         if "report" in data:
             global _LAST
             _LAST = data
@@ -137,6 +147,9 @@ def api_convert_sample(name):
         abort(404)
     try:
         data = convert(safe.read_bytes())
+        cs = (request.values.get("connection_string") or "").strip()
+        if cs:
+            data["rdl_xml"] = inject_connection_string(data["rdl_xml"], cs)
         global _LAST
         _LAST = data
         return jsonify(data)

@@ -65,11 +65,21 @@ function activateTab(name) {
   if (panels) panels.scrollTop = 0;
 }
 
+
+
+// Read the user-supplied connection string. Returned as-is (the backend
+// XML-escapes it). Never logged.
+function getConnString() {
+  const el = document.getElementById("conn-string");
+  return el ? (el.value || "").trim() : "";
+}
+
 // ----- API calls -----
 async function uploadFile(file) {
   setStatus("Converting…", "busy");
   const fd = new FormData();
   fd.append("file", file);
+  const _cs = getConnString(); if (_cs) fd.append("connection_string", _cs);
   try {
     const res = await fetch("/api/convert", { method: "POST", body: fd });
     const json = await res.json();
@@ -86,6 +96,7 @@ async function uploadBundle(list) {
   setStatus("Ingesting " + list.length + " file(s)…", "busy");
   const fd = new FormData();
   list.forEach(f => fd.append("files", f, f._relPath || f.name));
+  const _cs = getConnString(); if (_cs) fd.append("connection_string", _cs);
   try {
     const res = await fetch("/api/convert-bundle", { method: "POST", body: fd });
     const json = await res.json();
@@ -109,7 +120,9 @@ async function runSample(name, btn) {
   setStatus("Loading sample…", "busy");
   if (btn) btn.classList.add("busy");
   try {
-    const res = await fetch("/api/convert-sample/" + encodeURIComponent(name), { method: "POST" });
+    const _cs = getConnString();
+    const _qs = _cs ? ("?connection_string=" + encodeURIComponent(_cs)) : "";
+    const res = await fetch("/api/convert-sample/" + encodeURIComponent(name) + _qs, { method: "POST" });
     const json = await res.json();
     if (!res.ok || json.error) throw new Error(json.error || "Sample failed");
     onConverted(json);
@@ -165,6 +178,7 @@ function onConverted(data) {
   if ($("#empty-state")) $("#empty-state").hidden = true;
   renderSummary(data);
   if (data.ingest_report) renderIngestSummary(data.ingest_report);
+  renderCrossValidation(data);
   renderMockupTab(data);
   renderRdlTab(data);
   renderSideBySideTab(data);
@@ -196,6 +210,81 @@ function renderSummary(data) {
 }
 
 // ----- Ingest summary panel (above tabs) -----
+
+
+// ----- Cross-validation panel (inside the ingest summary) -----
+function renderCrossValidation(data) {
+  const xv = data && data.cross_validation;
+  const wrap = document.getElementById("ingest-summary");
+  if (!xv || !wrap) return;
+
+  // Remove a stale render
+  const old = document.getElementById("xv-block");
+  if (old) old.remove();
+
+  const block = document.createElement("div");
+  block.id = "xv-block";
+  block.className = "xv-block";
+
+  const sum = xv.summary || {};
+  const total = (sum.error||0) + (sum.warning||0) + (sum.info||0);
+  let cls = "xv-clean";
+  if ((sum.error||0) > 0) cls = "xv-error";
+  else if ((sum.warning||0) > 0) cls = "xv-warn";
+
+  block.innerHTML =
+    '<div class="xv-head ' + cls + '">' +
+      '<b>Cross-validation</b> — ' +
+      'XML parser vs supporting artifacts. ' +
+      '<span class="xv-counts">' +
+        (sum.error   ? '<span class="xv-count xv-e">' + sum.error   + ' errors</span>'   : '') +
+        (sum.warning ? '<span class="xv-count xv-w">' + sum.warning + ' warnings</span>' : '') +
+        (sum.info    ? '<span class="xv-count xv-i">' + sum.info    + ' info</span>'     : '') +
+        (total === 0 ? '<span class="xv-count xv-ok">all clean</span>' : '') +
+      '</span>' +
+    '</div>';
+
+  // Per-section detail
+  const sections = [
+    ["sql_doc",     "SQL doc"],
+    ["pdf",         "Rendered PDF"],
+    ["screenshots", "Screenshots"],
+  ];
+  sections.forEach(([key, label]) => {
+    const sec = xv[key] || {};
+    if (!sec.checked && (!sec.findings || !sec.findings.length)) return;
+    const card = document.createElement("details");
+    card.className = "xv-section";
+    if ((sec.findings || []).some(f => f.severity !== "info")) card.open = true;
+    const stats = sec.stats || {};
+    const statBits = Object.keys(stats).map(k =>
+      '<code>' + k + ':' + (typeof stats[k] === "object" ? JSON.stringify(stats[k]) : stats[k]) + '</code>'
+    ).join(" &nbsp; ");
+    let html = '<summary><b>' + label + '</b> ' +
+               (sec.checked ? '' : '<span class="xv-skip">(not checked)</span>') +
+               '</summary>';
+    if (statBits) html += '<div class="xv-stats">' + statBits + '</div>';
+    if (sec.findings && sec.findings.length) {
+      html += '<ul class="xv-findings">';
+      sec.findings.forEach(f => {
+        html += '<li class="xv-' + (f.severity || "info") + '">' +
+                '<span class="xv-sev">' + (f.severity||"") + '</span>' +
+                '<code class="xv-rule">' + (f.rule||"") + '</code>' +
+                ' <span class="xv-subj">' + (f.subject ? '(' + f.subject + ')' : '') + '</span>' +
+                '<div class="xv-msg">' + (f.message || "") + '</div>' +
+                '</li>';
+      });
+      html += '</ul>';
+    }
+    card.innerHTML = html;
+    block.appendChild(card);
+  });
+
+  wrap.appendChild(block);
+  wrap.hidden = false;
+}
+
+
 function renderIngestSummary(report) {
   const wrap = $("#ingest-summary");
   if (!wrap) return;

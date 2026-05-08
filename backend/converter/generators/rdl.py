@@ -197,7 +197,7 @@ def _build_data_sources() -> ET.Element:
     ds.set("Name", "DS_Main")
     cp = _sub(ds, "ConnectionProperties")
     _sub(cp, "DataProvider", "SQL")
-    _sub(cp, "ConnectString", "Data Source=localhost;Initial Catalog=DEQ")
+    _sub(cp, "ConnectString", "Data Source=localhost;Initial Catalog=AppDb")
     _rdsub(ds, "SecurityType", "Integrated")
     return ds_root
 
