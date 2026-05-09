@@ -2,6 +2,8 @@
 
 Drag-and-drop tool that takes an Oracle Reports artifact (`.xml` or `.rdf`-exported XML) and outputs a deployable **SSRS 2008+ RDL** file plus a 4-pane preview, deployment checklist, T-SQL validation, and (optionally) **fully-automated AI translation** of the trickier PL/SQL.
 
+> **Project site:** see `docs/index.html` for the landing page. Once GitHub Pages is enabled (Settings → Pages → Source: `main` branch, `/docs` folder), it will be live at `https://<your-org>.github.io/<repo-name>/`.
+
 ## Quick start
 
 ```bat

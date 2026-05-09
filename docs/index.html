@@ -1,0 +1,1060 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Oracle2SSRS — Migrate Oracle Reports to SSRS in seconds</title>
+<meta name="description" content="An open-source pipeline that converts Oracle Reports XML into deployment-ready SSRS RDL — with PL/SQL to T-SQL translation, live previews, cross-validation, and pre-flight audit." />
+<meta name="theme-color" content="#0a2540" />
+
+<!-- Open Graph -->
+<meta property="og:title" content="Oracle2SSRS — Migrate Oracle Reports to SSRS in seconds" />
+<meta property="og:description" content="Drag-and-drop converter that emits deployment-ready SSRS RDL from Oracle Reports XML. PL/SQL to T-SQL translation, live previews, pre-flight audit." />
+<meta property="og:type" content="website" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+<style>
+:root {
+  --navy:        #0a2540;
+  --navy-soft:   #1a365d;
+  --slate-900:   #0f172a;
+  --slate-700:   #334155;
+  --slate-500:   #64748b;
+  --slate-400:   #94a3b8;
+  --slate-200:   #e2e8f0;
+  --slate-100:   #f1f5f9;
+  --slate-50:    #f8fafc;
+  --white:       #ffffff;
+  --accent:      #2563eb;
+  --accent-soft: #dbeafe;
+  --accent-dark: #1e40af;
+  --teal:        #0d9488;
+  --teal-soft:   #ccfbf1;
+  --amber:       #d97706;
+  --amber-soft:  #fef3c7;
+  --green:       #059669;
+  --green-soft:  #d1fae5;
+  --shadow-sm:   0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-md:   0 4px 6px -1px rgba(15, 23, 42, 0.08), 0 2px 4px -2px rgba(15, 23, 42, 0.06);
+  --shadow-lg:   0 10px 15px -3px rgba(15, 23, 42, 0.08), 0 4px 6px -4px rgba(15, 23, 42, 0.05);
+  --radius-sm:   6px;
+  --radius-md:   10px;
+  --radius-lg:   16px;
+  --container:   1180px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--slate-900);
+  background: var(--white);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-dark); }
+
+code, pre {
+  font-family: 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 0.9em;
+}
+
+.container {
+  max-width: var(--container);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ============== NAV ============== */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(255,255,255,0.92);
+  backdrop-filter: saturate(180%) blur(12px);
+  -webkit-backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--slate-200);
+}
+.nav-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 17px;
+  color: var(--navy);
+  letter-spacing: -0.01em;
+}
+.brand-mark {
+  width: 30px;
+  height: 30px;
+  border-radius: 7px;
+  background: linear-gradient(135deg, var(--navy) 0%, var(--accent) 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: -0.5px;
+}
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 32px;
+}
+.nav-links a {
+  color: var(--slate-700);
+  font-size: 14px;
+  font-weight: 500;
+  transition: color 0.15s;
+}
+.nav-links a:hover { color: var(--navy); }
+.nav-cta {
+  background: var(--navy);
+  color: white !important;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  transition: background 0.15s;
+}
+.nav-cta:hover { background: var(--navy-soft); color: white !important; }
+
+@media (max-width: 720px) {
+  .nav-links a:not(.nav-cta) { display: none; }
+}
+
+/* ============== HERO ============== */
+.hero {
+  position: relative;
+  padding: 100px 0 80px;
+  background:
+    radial-gradient(ellipse 800px 600px at 50% 0%, rgba(37, 99, 235, 0.08), transparent 60%),
+    linear-gradient(180deg, var(--white) 0%, var(--slate-50) 100%);
+  overflow: hidden;
+}
+.hero-grid {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  gap: 64px;
+  align-items: center;
+}
+.hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  padding: 6px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+  margin-bottom: 24px;
+}
+.hero-eyebrow-dot {
+  width: 6px; height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+}
+.hero h1 {
+  font-size: clamp(36px, 5vw, 56px);
+  font-weight: 800;
+  line-height: 1.08;
+  letter-spacing: -0.025em;
+  color: var(--navy);
+  margin-bottom: 20px;
+}
+.hero h1 .grad {
+  background: linear-gradient(90deg, var(--accent) 0%, var(--teal) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero-sub {
+  font-size: 18px;
+  line-height: 1.55;
+  color: var(--slate-700);
+  margin-bottom: 32px;
+  max-width: 560px;
+}
+.hero-ctas {
+  display: flex;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 32px;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 20px;
+  border-radius: var(--radius-sm);
+  font-size: 15px;
+  font-weight: 600;
+  transition: all 0.15s;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.btn-primary {
+  background: var(--navy);
+  color: white !important;
+}
+.btn-primary:hover {
+  background: var(--navy-soft);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+  color: white !important;
+}
+.btn-secondary {
+  background: var(--white);
+  color: var(--navy) !important;
+  border-color: var(--slate-200);
+}
+.btn-secondary:hover {
+  border-color: var(--slate-400);
+  background: var(--slate-50);
+}
+.hero-meta {
+  display: flex;
+  gap: 24px;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--slate-500);
+}
+.hero-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hero-meta-item svg {
+  width: 14px;
+  height: 14px;
+  color: var(--green);
+}
+
+/* hero visual: terminal mockup */
+.terminal {
+  background: var(--navy);
+  border-radius: var(--radius-md);
+  box-shadow:
+    0 24px 48px -12px rgba(15, 23, 42, 0.25),
+    0 0 0 1px rgba(15, 23, 42, 0.08);
+  overflow: hidden;
+}
+.terminal-header {
+  background: #112e51;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+}
+.terminal-dot {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+}
+.terminal-dot.r { background: #ff5f57; }
+.terminal-dot.y { background: #febc2e; }
+.terminal-dot.g { background: #28c840; }
+.terminal-title {
+  margin-left: 12px;
+  color: rgba(255,255,255,0.55);
+  font-size: 12px;
+  font-family: 'JetBrains Mono', monospace;
+}
+.terminal-body {
+  padding: 20px 22px;
+  color: #e2e8f0;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.7;
+}
+.terminal-body .prompt { color: #5eead4; }
+.terminal-body .cmd { color: #f8fafc; }
+.terminal-body .out { color: #94a3b8; }
+.terminal-body .ok { color: #4ade80; }
+.terminal-body .em { color: #60a5fa; }
+.terminal-body .warn { color: #fbbf24; }
+
+@media (max-width: 920px) {
+  .hero-grid { grid-template-columns: 1fr; gap: 48px; }
+}
+
+/* ============== SECTION BASE ============== */
+section { padding: 96px 0; }
+.section-header {
+  text-align: center;
+  max-width: 720px;
+  margin: 0 auto 64px;
+}
+.section-eyebrow {
+  display: inline-block;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 12px;
+}
+.section-title {
+  font-size: clamp(28px, 3.5vw, 40px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--navy);
+  margin-bottom: 16px;
+  line-height: 1.15;
+}
+.section-sub {
+  font-size: 17px;
+  color: var(--slate-500);
+  line-height: 1.6;
+}
+
+/* ============== PROBLEM ============== */
+.problem { background: var(--white); }
+.problem-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+.problem-card {
+  padding: 32px;
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-lg);
+  background: var(--white);
+  transition: all 0.2s;
+}
+.problem-card:hover {
+  border-color: var(--slate-400);
+  transform: translateY(-2px);
+  box-shadow: var(--shadow-md);
+}
+.problem-icon {
+  width: 44px; height: 44px;
+  border-radius: var(--radius-sm);
+  background: var(--amber-soft);
+  color: var(--amber);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+.problem-icon svg { width: 22px; height: 22px; }
+.problem-card h3 {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--navy);
+  margin-bottom: 8px;
+}
+.problem-card p {
+  color: var(--slate-500);
+  font-size: 15px;
+  line-height: 1.55;
+}
+@media (max-width: 800px) {
+  .problem-grid { grid-template-columns: 1fr; }
+}
+
+/* ============== HOW IT WORKS ============== */
+.how { background: var(--slate-50); }
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 16px;
+  position: relative;
+}
+.step {
+  background: var(--white);
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-lg);
+  padding: 32px;
+  position: relative;
+}
+.step-num {
+  position: absolute;
+  top: -16px; left: 24px;
+  width: 36px; height: 36px;
+  background: var(--navy);
+  color: white;
+  font-weight: 700;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  box-shadow: var(--shadow-sm);
+}
+.step h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--navy);
+  margin: 12px 0 12px;
+}
+.step p {
+  color: var(--slate-500);
+  font-size: 15px;
+  line-height: 1.55;
+  margin-bottom: 16px;
+}
+.step-tag {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  background: var(--slate-100);
+  color: var(--slate-700);
+  padding: 4px 8px;
+  border-radius: 4px;
+}
+@media (max-width: 800px) {
+  .steps { grid-template-columns: 1fr; gap: 32px; }
+}
+
+/* ============== CAPABILITIES ============== */
+.caps { background: var(--white); }
+.caps-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+.cap {
+  padding: 28px;
+  border-radius: var(--radius-lg);
+  background: var(--slate-50);
+  border: 1px solid transparent;
+  transition: all 0.2s;
+}
+.cap:hover {
+  background: var(--white);
+  border-color: var(--slate-200);
+  box-shadow: var(--shadow-md);
+}
+.cap-icon {
+  width: 40px; height: 40px;
+  border-radius: var(--radius-sm);
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 14px;
+}
+.cap-icon svg { width: 20px; height: 20px; }
+.cap h3 {
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--navy);
+  margin-bottom: 6px;
+}
+.cap p {
+  font-size: 14px;
+  color: var(--slate-500);
+  line-height: 1.55;
+}
+@media (max-width: 800px) {
+  .caps-grid { grid-template-columns: 1fr; }
+}
+
+/* ============== ARCHITECTURE ============== */
+.arch { background: var(--slate-50); }
+.arch-diagram {
+  background: var(--white);
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-lg);
+  padding: 48px 32px;
+  box-shadow: var(--shadow-sm);
+}
+.arch-diagram svg {
+  width: 100%;
+  height: auto;
+  max-height: 480px;
+}
+
+/* ============== QUICK START ============== */
+.quickstart { background: var(--navy); color: white; }
+.quickstart .section-title { color: white; }
+.quickstart .section-sub { color: rgba(255,255,255,0.7); }
+.quickstart .section-eyebrow { color: #5eead4; }
+.qs-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 32px;
+  align-items: stretch;
+}
+.qs-card {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: var(--radius-md);
+  padding: 28px;
+}
+.qs-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 16px;
+  font-weight: 600;
+  color: white;
+  margin-bottom: 16px;
+}
+.qs-card h3 svg { width: 18px; height: 18px; color: #5eead4; }
+.qs-code {
+  background: #06182f;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  color: #e2e8f0;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-x: auto;
+}
+.qs-code .c { color: #94a3b8; }
+.qs-code .k { color: #5eead4; }
+.qs-code .s { color: #fbbf24; }
+@media (max-width: 800px) {
+  .qs-grid { grid-template-columns: 1fr; }
+}
+
+/* ============== STACK ============== */
+.stack { background: var(--white); }
+.stack-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+.stack-item {
+  text-align: center;
+  padding: 20px;
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-md);
+}
+.stack-item-name {
+  font-weight: 600;
+  color: var(--navy);
+  font-size: 15px;
+  margin-bottom: 4px;
+}
+.stack-item-role {
+  font-size: 12px;
+  color: var(--slate-500);
+}
+@media (max-width: 720px) {
+  .stack-grid { grid-template-columns: repeat(2, 1fr); }
+}
+
+/* ============== CTA BAR ============== */
+.cta-bar {
+  background: linear-gradient(135deg, var(--navy) 0%, var(--accent-dark) 100%);
+  color: white;
+  padding: 64px 0;
+  text-align: center;
+}
+.cta-bar h2 {
+  font-size: clamp(24px, 3vw, 32px);
+  font-weight: 700;
+  margin-bottom: 12px;
+  letter-spacing: -0.02em;
+}
+.cta-bar p {
+  color: rgba(255,255,255,0.8);
+  font-size: 17px;
+  margin-bottom: 28px;
+  max-width: 560px;
+  margin-left: auto;
+  margin-right: auto;
+}
+.cta-bar .btn-primary {
+  background: white;
+  color: var(--navy) !important;
+}
+.cta-bar .btn-primary:hover { background: var(--slate-100); color: var(--navy) !important; }
+
+/* ============== FOOTER ============== */
+footer {
+  background: var(--slate-900);
+  color: var(--slate-400);
+  padding: 48px 0 32px;
+  font-size: 14px;
+}
+.footer-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+.footer-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: white;
+  font-weight: 600;
+}
+.footer-links {
+  display: flex;
+  gap: 24px;
+}
+.footer-links a { color: var(--slate-400); }
+.footer-links a:hover { color: white; }
+.footer-bottom {
+  margin-top: 24px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  font-size: 12px;
+  color: var(--slate-500);
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+</style>
+</head>
+<body>
+
+<!-- ============== NAV ============== -->
+<nav class="nav">
+  <div class="container nav-inner">
+    <div class="brand">
+      <div class="brand-mark">O2</div>
+      Oracle2SSRS
+    </div>
+    <div class="nav-links">
+      <a href="#how">How it works</a>
+      <a href="#capabilities">Capabilities</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#quickstart">Quick start</a>
+      <a href="https://github.com/" class="nav-cta" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============== HERO ============== -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-grid">
+      <div>
+        <div class="hero-eyebrow">
+          <span class="hero-eyebrow-dot"></span>
+          Open-source migration tooling
+        </div>
+        <h1>Move off Oracle Reports.<br /><span class="grad">Land on SSRS.</span></h1>
+        <p class="hero-sub">
+          Drag an Oracle Reports XML onto the page and walk away with a deployment-ready SSRS RDL — translated PL/SQL, validated T-SQL, master-detail Tablix layout, and a pre-flight audit confirming it will open in Report Builder.
+        </p>
+        <div class="hero-ctas">
+          <a href="https://github.com/" class="btn btn-primary" target="_blank" rel="noopener">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.1.78-.25.78-.55v-2c-3.2.7-3.87-1.37-3.87-1.37-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.95.1-.74.4-1.25.73-1.54-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.17a10.95 10.95 0 0 1 5.74 0c2.18-1.48 3.14-1.17 3.14-1.17.62 1.58.23 2.75.11 3.04.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.36-5.25 5.65.41.36.78 1.06.78 2.13v3.16c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+            View on GitHub
+          </a>
+          <a href="#quickstart" class="btn btn-secondary">Get started →</a>
+        </div>
+        <div class="hero-meta">
+          <span class="hero-meta-item">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+            112 passing tests
+          </span>
+          <span class="hero-meta-item">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+            MIT licensed
+          </span>
+          <span class="hero-meta-item">
+            <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+            No vendor lock-in
+          </span>
+        </div>
+      </div>
+
+      <div>
+        <div class="terminal">
+          <div class="terminal-header">
+            <span class="terminal-dot r"></span>
+            <span class="terminal-dot y"></span>
+            <span class="terminal-dot g"></span>
+            <span class="terminal-title">~/oracle2ssrs — convert</span>
+          </div>
+          <div class="terminal-body">
+<span class="prompt">$</span> <span class="cmd">curl -F file=@SAMPLE_INSPECTION.xml \</span>
+    <span class="cmd">http://localhost:5057/api/convert</span>
+
+<span class="out">→ parsing Oracle Reports XML</span>
+<span class="out">→ translating PL/SQL → T-SQL</span>
+<span class="out">→ generating SSRS RDL</span>
+<span class="out">→ pre-flight audit</span>
+
+<span class="ok">✓ 12 datasets converted</span>
+<span class="ok">✓ 9 parameters mapped</span>
+<span class="ok">✓ 0 Oracle leftovers</span>
+<span class="em">verdict: <span class="ok">READY</span></span>
+
+<span class="prompt">$</span> <span class="cmd">_</span>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ============== PROBLEM ============== -->
+<section class="problem" id="problem">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">The challenge</span>
+      <h2 class="section-title">Migrating off Oracle Reports is painful, manual, and risky</h2>
+      <p class="section-sub">Oracle Reports has been end-of-life for years, but most organizations still have a backlog of business-critical RDF/XML reports tying them to legacy infrastructure.</p>
+    </div>
+
+    <div class="problem-grid">
+      <div class="problem-card">
+        <div class="problem-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><line x1="12" y1="8" x2="12" y2="12"/><line x1="12" y1="16" x2="12.01" y2="16"/></svg>
+        </div>
+        <h3>Hand-translation is slow</h3>
+        <p>Each report — its parameters, datasets, layout, and PL/SQL formulas — has to be rebuilt manually in Report Builder. Weeks per report, multiplied by hundreds.</p>
+      </div>
+      <div class="problem-card">
+        <div class="problem-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+        </div>
+        <h3>Dialect drift breaks queries</h3>
+        <p>Oracle SQL — DECODE, NVL, (+) joins, LISTAGG, SYSDATE, lexical refs, package functions — does not survive a copy-paste into T-SQL. Subtle bugs ship to production.</p>
+      </div>
+      <div class="problem-card">
+        <div class="problem-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2L2 7l10 5 10-5-10-5z"/><polyline points="2 17 12 22 22 17"/><polyline points="2 12 12 17 22 12"/></svg>
+        </div>
+        <h3>Distribution doesn't transfer</h3>
+        <p>Bursting and DDS were Oracle Reports features. SSRS Standard has no native equivalent, so distribution logic gets lost in the migration unless you rebuild it explicitly.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== HOW IT WORKS ============== -->
+<section class="how" id="how">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">How it works</span>
+      <h2 class="section-title">Three steps from legacy XML to deployable RDL</h2>
+      <p class="section-sub">A deterministic Python pipeline does the conversion. AI assistance is optional, not required.</p>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>Drop your artifacts</h3>
+        <p>Upload an Oracle Reports XML — or a folder containing the XML, supporting <code>.docx</code> SQL queries, screenshots, and rendered PDFs. The ingest engine auto-classifies each file.</p>
+        <span class="step-tag">.xml · .rdf · .docx · .pdf · .png</span>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>Convert and validate</h3>
+        <p>The pipeline parses, translates PL/SQL to T-SQL, generates SSRS RDL, and runs a pre-flight audit against ten correctness rules. Cross-validation catches parser drift between primary and supporting artifacts.</p>
+        <span class="step-tag">parse → translate → emit → audit</span>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>Deploy to SSRS</h3>
+        <p>Inject your connection string at convert-time (never logged, never stored), download the RDL, open it in Report Builder, and publish to your Report Server.</p>
+        <span class="step-tag">.rdl ready to publish</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== CAPABILITIES ============== -->
+<section class="caps" id="capabilities">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Capabilities</span>
+      <h2 class="section-title">Everything you need for a confident migration</h2>
+      <p class="section-sub">Built from the ground up to be deterministic where it matters and assistive where it helps.</p>
+    </div>
+
+    <div class="caps-grid">
+      <div class="cap">
+        <div class="cap-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg>
+        </div>
+        <h3>XML → RDL Generator</h3>
+        <p>Emits well-formed SSRS 2008+ RDL with DataSources, DataSets, ReportParameters, master-detail Tablix, and image controls.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>
+        </div>
+        <h3>PL/SQL → T-SQL</h3>
+        <p>DECODE, NVL, TO_CHAR, TRUNC, SYSDATE, INSTR, SUBSTR, (+) joins, CONNECT BY, LISTAGG, ROWNUM, lexical refs, bind variables, package functions.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        </div>
+        <h3>Live data preview</h3>
+        <p>Run translated T-SQL against a seeded SQLite database with Python UDFs that mirror SQL Server scalar functions — see real rows before you deploy.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/><polyline points="22 4 12 14.01 9 11.01"/></svg>
+        </div>
+        <h3>Pre-flight audit</h3>
+        <p>Ten deterministic rules check parse, namespace, datasources, datasets, Oracle leftovers, parameter consistency, layout integrity, and size units.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/></svg>
+        </div>
+        <h3>Cross-validation</h3>
+        <p>Compares the parsed model against any supplied SQL <code>.docx</code>, screenshots, and rendered PDFs to catch parser drift before download.</p>
+      </div>
+      <div class="cap">
+        <div class="cap-icon">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 4h16c1.1 0 2 .9 2 2v12c0 1.1-.9 2-2 2H4c-1.1 0-2-.9-2-2V6c0-1.1.9-2 2-2z"/><polyline points="22,6 12,13 2,6"/></svg>
+        </div>
+        <h3>Email bursting</h3>
+        <p>Detects bursting patterns in your Oracle layout and emits a burst-query SQL stub plus a PowerShell driver that runs against SSRS Standard via service account.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== ARCHITECTURE ============== -->
+<section class="arch" id="architecture">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Architecture</span>
+      <h2 class="section-title">A clean, inspectable pipeline</h2>
+      <p class="section-sub">Each stage is a small, testable Python module. Drop in your own translator rules via the registry plugin system.</p>
+    </div>
+
+    <div class="arch-diagram">
+      <svg viewBox="0 0 920 380" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Architecture diagram showing the conversion pipeline">
+        <defs>
+          <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="8" markerHeight="8" orient="auto-start-reverse">
+            <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+          </marker>
+          <linearGradient id="gradInput" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#fef3c7"/>
+            <stop offset="100%" stop-color="#fde68a"/>
+          </linearGradient>
+          <linearGradient id="gradOutput" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#d1fae5"/>
+            <stop offset="100%" stop-color="#a7f3d0"/>
+          </linearGradient>
+          <linearGradient id="gradCore" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="#dbeafe"/>
+            <stop offset="100%" stop-color="#bfdbfe"/>
+          </linearGradient>
+        </defs>
+
+        <!-- Input column -->
+        <g>
+          <rect x="20" y="100" width="160" height="64" rx="10" fill="url(#gradInput)" stroke="#d97706" stroke-width="1"/>
+          <text x="100" y="128" text-anchor="middle" font-family="Inter, sans-serif" font-weight="600" font-size="14" fill="#0f172a">Oracle Reports XML</text>
+          <text x="100" y="148" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#64748b">.xml · .rdf</text>
+
+          <rect x="20" y="180" width="160" height="64" rx="10" fill="url(#gradInput)" stroke="#d97706" stroke-width="1"/>
+          <text x="100" y="208" text-anchor="middle" font-family="Inter, sans-serif" font-weight="600" font-size="14" fill="#0f172a">Supporting docs</text>
+          <text x="100" y="228" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#64748b">.docx · .pdf · .png</text>
+        </g>
+
+        <!-- Pipeline core -->
+        <g>
+          <rect x="240" y="60" width="440" height="240" rx="14" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 4"/>
+          <text x="460" y="90" text-anchor="middle" font-family="Inter, sans-serif" font-weight="700" font-size="13" fill="#64748b" letter-spacing="0.08em">CONVERSION PIPELINE</text>
+
+          <rect x="260" y="110" width="120" height="50" rx="8" fill="url(#gradCore)" stroke="#2563eb" stroke-width="1"/>
+          <text x="320" y="140" text-anchor="middle" font-family="Inter, sans-serif" font-weight="600" font-size="13" fill="#0a2540">Parse</text>
+
+          <rect x="400" y="110" width="120" height="50" rx="8" fill="url(#gradCore)" stroke="#2563eb" stroke-width="1"/>
+          <text x="460" y="140" text-anchor="middle" font-family="Inter, sans-serif" font-weight="600" font-size="13" fill="#0a2540">Translate</text>
+
+          <rect x="540" y="110" width="120" height="50" rx="8" fill="url(#gradCore)" stroke="#2563eb" stroke-width="1"/>
+          <text x="600" y="140" text-anchor="middle" font-family="Inter, sans-serif" font-weight="600" font-size="13" fill="#0a2540">Generate</text>
+
+          <rect x="260" y="200" width="120" height="50" rx="8" fill="#f1f5f9" stroke="#64748b" stroke-width="1"/>
+          <text x="320" y="230" text-anchor="middle" font-family="Inter, sans-serif" font-weight="500" font-size="13" fill="#0f172a">Validate</text>
+
+          <rect x="400" y="200" width="120" height="50" rx="8" fill="#f1f5f9" stroke="#64748b" stroke-width="1"/>
+          <text x="460" y="230" text-anchor="middle" font-family="Inter, sans-serif" font-weight="500" font-size="13" fill="#0f172a">Cross-check</text>
+
+          <rect x="540" y="200" width="120" height="50" rx="8" fill="#f1f5f9" stroke="#64748b" stroke-width="1"/>
+          <text x="600" y="230" text-anchor="middle" font-family="Inter, sans-serif" font-weight="500" font-size="13" fill="#0f172a">Pre-flight</text>
+
+          <!-- arrows inside core -->
+          <line x1="380" y1="135" x2="400" y2="135" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <line x1="520" y1="135" x2="540" y2="135" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+          <line x1="380" y1="225" x2="400" y2="225" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+          <line x1="520" y1="225" x2="540" y2="225" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+
+          <line x1="320" y1="160" x2="320" y2="200" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)"/>
+        </g>
+
+        <!-- Outputs -->
+        <g>
+          <rect x="740" y="100" width="160" height="64" rx="10" fill="url(#gradOutput)" stroke="#059669" stroke-width="1"/>
+          <text x="820" y="128" text-anchor="middle" font-family="Inter, sans-serif" font-weight="600" font-size="14" fill="#0f172a">SSRS RDL</text>
+          <text x="820" y="148" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#64748b">.rdl ready to deploy</text>
+
+          <rect x="740" y="180" width="160" height="64" rx="10" fill="url(#gradOutput)" stroke="#059669" stroke-width="1"/>
+          <text x="820" y="208" text-anchor="middle" font-family="Inter, sans-serif" font-weight="600" font-size="14" fill="#0f172a">Audit + checklist</text>
+          <text x="820" y="228" text-anchor="middle" font-family="JetBrains Mono, monospace" font-size="11" fill="#64748b">deployment bundle</text>
+        </g>
+
+        <!-- input/output arrows -->
+        <line x1="180" y1="132" x2="240" y2="132" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+        <line x1="180" y1="212" x2="240" y2="212" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+        <line x1="680" y1="132" x2="740" y2="132" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+        <line x1="680" y1="212" x2="740" y2="212" stroke="#94a3b8" stroke-width="2" marker-end="url(#arrow)"/>
+      </svg>
+    </div>
+  </div>
+</section>
+
+<!-- ============== QUICK START ============== -->
+<section class="quickstart" id="quickstart">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Quick start</span>
+      <h2 class="section-title">Run it locally in under a minute</h2>
+      <p class="section-sub">No database required to try it. The seeded SQLite sample lets you see live previews immediately.</p>
+    </div>
+
+    <div class="qs-grid">
+      <div class="qs-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/></svg>
+          Install &amp; run
+        </h3>
+<pre class="qs-code"><span class="c"># clone the repo</span>
+<span class="k">git clone</span> https://github.com/your-org/oracle2ssrs.git
+<span class="k">cd</span> oracle2ssrs
+
+<span class="c"># Windows</span>
+run.bat
+
+<span class="c"># macOS / Linux / WSL</span>
+./run.sh
+
+<span class="c"># Then open</span>
+http://127.0.0.1:5057</pre>
+      </div>
+
+      <div class="qs-card">
+        <h3>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="22 12 18 12 15 21 9 3 6 12 2 12"/></svg>
+          Convert via API
+        </h3>
+<pre class="qs-code"><span class="c"># single XML</span>
+<span class="k">curl</span> -F file=@report.xml \
+     http://localhost:5057/api/convert
+
+<span class="c"># multi-file bundle (XML + docx + screenshots)</span>
+<span class="k">curl</span> -F files=@report.xml \
+     -F files=<span class="s">"@report queries.docx"</span> \
+     -F files=<span class="s">"@report screenshots.docx"</span> \
+     http://localhost:5057/api/convert-bundle
+
+<span class="c"># batch CLI</span>
+<span class="k">python</span> backend/cli.py samples/oracle --out ./out</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== STACK ============== -->
+<section class="stack">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Built on</span>
+      <h2 class="section-title">Boring, dependable building blocks</h2>
+      <p class="section-sub">Standard library where possible. Battle-tested dependencies where it makes sense. No framework lock-in.</p>
+    </div>
+
+    <div class="stack-grid">
+      <div class="stack-item">
+        <div class="stack-item-name">Python 3.9+</div>
+        <div class="stack-item-role">Conversion pipeline</div>
+      </div>
+      <div class="stack-item">
+        <div class="stack-item-name">Flask</div>
+        <div class="stack-item-role">Web UI &amp; API</div>
+      </div>
+      <div class="stack-item">
+        <div class="stack-item-name">lxml</div>
+        <div class="stack-item-role">XML parsing</div>
+      </div>
+      <div class="stack-item">
+        <div class="stack-item-name">SQLite</div>
+        <div class="stack-item-role">Live data preview</div>
+      </div>
+      <div class="stack-item">
+        <div class="stack-item-name">python-docx</div>
+        <div class="stack-item-role">Supporting doc ingest</div>
+      </div>
+      <div class="stack-item">
+        <div class="stack-item-name">pypdf</div>
+        <div class="stack-item-role">PDF cross-validation</div>
+      </div>
+      <div class="stack-item">
+        <div class="stack-item-name">pytest</div>
+        <div class="stack-item-role">112-test suite</div>
+      </div>
+      <div class="stack-item">
+        <div class="stack-item-name">PowerShell</div>
+        <div class="stack-item-role">Bursting driver</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== CTA BAR ============== -->
+<div class="cta-bar">
+  <div class="container">
+    <h2>Ready to get your reports off Oracle?</h2>
+    <p>Clone the repo, drop in your first XML, and see how much of the migration just disappears.</p>
+    <a href="https://github.com/" class="btn btn-primary" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.1.78-.25.78-.55v-2c-3.2.7-3.87-1.37-3.87-1.37-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.95.1-.74.4-1.25.73-1.54-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.17a10.95 10.95 0 0 1 5.74 0c2.18-1.48 3.14-1.17 3.14-1.17.62 1.58.23 2.75.11 3.04.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.36-5.25 5.65.41.36.78 1.06.78 2.13v3.16c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+      Star on GitHub
+    </a>
+  </div>
+</div>
+
+<!-- ============== FOOTER ============== -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <div class="brand-mark">O2</div>
+        Oracle2SSRS
+      </div>
+      <div class="footer-links">
+        <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+        <a href="ARCHITECTURE.md">Architecture</a>
+        <a href="API.md">API</a>
+        <a href="DEMO_SCRIPT.md">Demo</a>
+      </div>
+    </div>
+    <div class="footer-bottom">
+      <span>© 2026 Oracle2SSRS contributors. MIT licensed.</span>
+      <span>Built at a hackathon. Hardened for the real world.</span>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>
