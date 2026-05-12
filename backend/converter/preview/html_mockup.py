@@ -218,7 +218,7 @@ def _render_signature_block():
         '<td style="width:55%; vertical-align:bottom;">'
         f'<div style="border-bottom:1px solid {INK}; height:34px;"></div>'
         f'<div style="font-size:11px; color:{INK}; margin-top:4px; '
-        'font-weight:bold; letter-spacing:1px;">_____________, BUREAU CHIEF</div>'
+        'font-weight:bold; letter-spacing:1px;">_____________, <Title></div>'
         f'<div style="font-size:10px; color:{INK_MUTED}; font-style:italic;">'
         '<Bureau></div>'
         '</td>'
@@ -275,7 +275,7 @@ _TOKEN_PREVIEW = {
     "CP_JV_ENVELOPE":  "JV Standard 12 x 9 Envelope",
     "CP_URL_ALL_ENVELOPE": "(envelope generation URL)",
     "CF_PERMITTEES":   "Jane Q. Public",
-    "CF_WUTMB_CHIEF":  "Bureau Chief, Waste & Underground Tank Management Bureau",
+    "CF_WUTMB_CHIEF":  "Sample Chief, Sample Bureau",
     "CF_SAMPLE_PERMIT": "Sample Permit(s)",
     "CF_FILE":         "SAMPLE_INSPECTION-2026.RDL",
     "CF_URL_ENVELOPE": "(envelope hyperlink)",
@@ -300,7 +300,25 @@ _TOKEN_PREVIEW = {
 }
 
 
+# Module-level rendering mode. "frontend" fills the preview with fictional
+# sample data — looks like the SSRS-rendered output the user will see.
+# "backend" leaves field/token references visible as «placeholders» — looks
+# like the Report Builder design surface before binding to data.
+_ACTIVE_MODE = "frontend"
+
+
+def _placeholder_for_source(src):
+    """Backend-mode placeholder for a field/column reference."""
+    name = (src or "").strip() or "FIELD"
+    return f"«F_{name}»"
+
+
 def _resolve_tokens(text: str) -> str:
+    if _ACTIVE_MODE == "backend":
+        return _TOKEN_RE.sub(
+            lambda m: f"«&{m.group(1).upper()}»",
+            text or "",
+        )
     def sub(m):
         key = m.group(1).upper()
         return _TOKEN_PREVIEW.get(key, m.group(0))
@@ -597,7 +615,7 @@ def _render_letter_mockup(report):
         body.append(
             f'<div style="border-top:1px solid {INK}; width:60%; padding-top:4px;">'
             f'<div style="font-size:12px; font-weight:bold; color:{INK};">[{_esc(sig)}]</div>'
-            f'<div style="font-size:11px; color:{INK_MUTED};">Director / Bureau Chief</div>'
+            f'<div style="font-size:11px; color:{INK_MUTED};">Director / Title</div>'
             '</div>'
         )
     else:
@@ -709,28 +727,12 @@ def _repeating_frames(report):
 def detect_report_kind(report):
     """Return one of 'letter', 'tabular_details', 'certificate'.
 
-    All checks are structural — driven by the parsed report's shape, never
-    by formula names, agency-specific tokens, or report names tied to any
-    particular customer.
-
-    Order (most specific first):
-      1. Strong letter signal — name suffix _LTR/_LETTER (an industry-wide
-         Oracle Reports naming convention for correspondence reports).
-      2. Strong tabular signal — at least one REPEATING FRAME carries an
-         explicit background_color in its <visualSettings> (banded report).
-      3. Strong certificate signal — section_main has 2+ positional sibling
-         frames AND at least 2 multi-line static text blocks among them
-         (permit/certificate layout: stamps, titles, legal text).
-      4. Medium tabular — 2+ repeating frames with detail-data fields.
-      5. Medium letter — 3+ paragraph-shaped text blocks (formal body copy).
-      6. Weak tabular — any color anywhere AND no clear certificate shape.
-      7. Default — certificate (degrades gracefully for unknown layouts).
+    All checks are structural - never customer-specific.
     """
     name = (report.name or "").upper()
     if "_LTR" in name or "_LETTER" in name:
         return "letter"
 
-    # Strongest tabular signal: a repeating frame with a band color.
     for g in _iter_layout(report):
         if g.kind == "repeating_frame":
             if _attr(g, "background_color"):
@@ -739,22 +741,18 @@ def detect_report_kind(report):
                 if _attr(f, "background_color"):
                     return "tabular_details"
 
-    # Certificate signal (positional cards/stamps with multi-line static text)
-    # checked BEFORE medium tabular and letter so permit-style reports route
-    # here instead of getting a generic letter template.
     main = _find_section(report.layout or [], "section_main")
     if main is not None:
         frames = [c for c in (main.children or []) if c.kind == "frame"]
         multiline_text_count = 0
         for fr in frames:
             for f in (fr.fields or []):
-                text = f.text or ""
-                if f.kind == "text" and "\n" in text and len(text) >= 30:
+                t = f.text or ""
+                if f.kind == "text" and "\n" in t and len(t) >= 30:
                     multiline_text_count += 1
         if len(frames) >= 2 and multiline_text_count >= 2:
             return "certificate"
 
-    # Medium tabular: 2+ repeating frames with detail data.
     reps_with_data = [
         g for g in _iter_layout(report)
         if g.kind == "repeating_frame"
@@ -763,16 +761,12 @@ def detect_report_kind(report):
     if len(reps_with_data) >= 2:
         return "tabular_details"
 
-    # Medium letter: 3+ paragraph-shaped text blocks (long, multiline).
     if _count_paragraphy_text_blocks(report) >= 3:
         return "letter"
 
     if _has_color_signal(report):
         return "tabular_details"
 
-    # Final fallback: certificate. The certificate renderer just walks
-    # whatever frames the report has, so it degrades gracefully for
-    # unknown shapes — better than emitting fake banded tables.
     return "certificate"
 
 
@@ -932,12 +926,16 @@ def _detail_field_pairs(group):
 def _sample_for_source(src, idx):
     """Return a fictional sample value for a column/source name.
 
-    The pool is built from neutral structural keywords (id, name, date, addr,
-    city, type, status, comment, count, etc.) — never specific to any one
-    report. If the column name doesn't match a keyword, return a generic
-    'Sample Value' placeholder. This guarantees that no report's actual
-    field names or values can be hard-coded into the preview output.
+    In BACKEND mode the value is a visible placeholder (e.g. «F_PERM_NUM»)
+    so the preview shows the Report Builder design view instead of sample-
+    filled output.
+
+    Otherwise (frontend mode) the pool is built from neutral structural
+    keywords (id, name, date, addr, city, type, status, comment, count,
+    etc.) — never specific to any one report.
     """
+    if _ACTIVE_MODE == "backend":
+        return _placeholder_for_source(src)
     key = (src or "").lower().replace("_", " ").strip()
 
     # Structural keyword pools. Each pool has 2 fictional alternatives so two
@@ -1198,7 +1196,17 @@ def _render_certificate_mockup(report):
     )
     title_lines = []
     if title is not None:
-        for ln in (title.text or "").splitlines():
+        # Resolve &TOKEN and :P_PARAM in the title BEFORE splitting so
+        # multi-line titles like "STATE OF MONTANA\n&RENEWAL_YEAR"
+        # render as "STATE OF MONTANA / 2026" in frontend mode (and
+        # as "STATE OF MONTANA / «&RENEWAL_YEAR»" in backend mode).
+        title_raw = _resolve_tokens(title.text or "")
+        title_raw = re.sub(
+            r":P_[A-Za-z][A-Za-z0-9_]*",
+            lambda m: _sample_for_source(m.group(0)[1:], 0),
+            title_raw,
+        )
+        for ln in title_raw.splitlines():
             ln = ln.strip()
             if ln:
                 title_lines.append(ln)
@@ -1246,7 +1254,13 @@ def _render_certificate_mockup(report):
                     text_blocks.append(f)
                     pending_label = None
                 else:
-                    pending_label = txt.rstrip(":")
+                    # Resolve &TOKEN and :P_PARAM in short label text too —
+                    # otherwise card panels show raw "&PERM_TYPE" labels.
+                    label_text = _resolve_tokens(txt)
+                    label_text = re.sub(r":P_[A-Za-z][A-Za-z0-9_]*",
+                                        lambda m: _sample_for_source(m.group(0)[1:], 0),
+                                        label_text)
+                    pending_label = label_text.rstrip(":")
             elif f.kind == "field":
                 label = pending_label or (f.source or f.name or "").replace("_", " ").title()
                 val = _sample_for_source(f.source or f.name, 0)
@@ -1270,6 +1284,16 @@ def _render_certificate_mockup(report):
 
         for tb in text_blocks:
             raw = (tb.text or "").strip()
+            # Resolve &TOKEN lexical refs and :P_PARAM bind vars so the
+            # body text shows real-looking values (e.g. "STATE OF MONTANA
+            # 2026") instead of raw "&RENEWAL_YEAR" placeholders. In
+            # backend mode the resolver leaves them as «PLACEHOLDER».
+            raw = _resolve_tokens(raw)
+            raw = re.sub(
+                r":P_[A-Za-z][A-Za-z0-9_]*",
+                lambda m: _sample_for_source(m.group(0)[1:], 0),
+                raw,
+            )
             color = _normalize_color(_attr(tb, "color", ""), _TAB_INK)
             bg = _normalize_color(_attr(tb, "background_color", ""), "transparent")
             size = max(11, int(tb.font_size or 12))
@@ -1357,11 +1381,874 @@ def _render_certificate_mockup(report):
     )
 
 
-def render_mockup(report):
-    """Public entry point. Dispatches on detect_report_kind()."""
-    kind = detect_report_kind(report)
-    if kind == "letter":
-        return _render_letter_mockup(report)
-    if kind == "certificate":
-        return _render_certificate_mockup(report)
-    return _render_tabular_details(report)
+
+# ---------------------------------------------------------------------------
+# Multi-page rendering
+#
+# The artifacts the user provided show that each report should preview as a
+# stack of distinct "pages" (a header summary page, then one or more detail
+# pages). Frontend mode = fictional sample data so the page looks like the
+# rendered SSRS output. Backend mode = Report Builder design surface, with
+# F_FIELD_NAME placeholders visible.
+# ---------------------------------------------------------------------------
+
+# Soft gray "desk" background behind the white sheets, plus a subtle drop
+# shadow per sheet. All styling is inline so the fragment is portable.
+_PAGE_DESK_BG  = "#e8eaef"
+_PAGE_SHEET_BG = "#ffffff"
+_PAGE_BORDER   = "#cccccc"
+
+
+def _render_page(content_html, label=None, max_width="8.25in", min_height="10.5in"):
+    """Wrap content in a paper-sheet div so the preview shows page boundaries."""
+    label_html = ""
+    if label:
+        label_html = (
+            '<div style="text-align:center; color:#64748b; font-size:11px; '
+            'letter-spacing:1px; text-transform:uppercase; '
+            'margin:8px 0 4px;">' + _esc(label) + '</div>'
+        )
+    return (
+        label_html
+        + '<div style="background:' + _PAGE_SHEET_BG + '; '
+        'max-width:' + max_width + '; min-height:' + min_height + '; '
+        'margin:18px auto; padding:0.6in 0.7in; '
+        'border:1px solid ' + _PAGE_BORDER + '; '
+        'box-shadow:0 4px 14px rgba(15,23,42,0.10); '
+        'position:relative; font-family:Arial,Helvetica,sans-serif; '
+        'color:' + _TAB_INK + '; line-height:1.4;">'
+        + content_html
+        + '</div>'
+    )
+
+
+def _render_pages_wrapper(pages_html):
+    """Concatenate page HTML strings inside the desk-background container."""
+    return (
+        '<div style="background:' + _PAGE_DESK_BG + '; '
+        'padding:24px 0; min-height:100%;">'
+        + "".join(pages_html)
+        + '</div>'
+    )
+
+
+# ---------------------------------------------------------------------------
+# Frontend: shared header-summary page
+# ---------------------------------------------------------------------------
+
+def _render_header_summary_page(report, page_label="Page 1 — Header summary"):
+    """Page 1: title block + run-info + Report Parameters list.
+
+    Mirrors the user's reference: centered blue title, then right-aligned
+    "Run Date / Run By / Total of ALL Records" rows, then an underlined
+    "Report Parameters" heading and a list of every parameter."""
+
+    # Title block — use the largest centered text from the layout if present.
+    title_field = _find_title_text(report)
+    if title_field is not None:
+        title_raw = _resolve_tokens(title_field.text or "")
+        title_raw = re.sub(
+            r":P_[A-Za-z][A-Za-z0-9_]*",
+            lambda m: _sample_for_source(m.group(0)[1:], 0),
+            title_raw,
+        )
+        title_color = _normalize_color(
+            _attr(title_field, "color", ""), "#000080"
+        )
+        title_lines = [ln.strip() for ln in title_raw.splitlines() if ln.strip()]
+    else:
+        title_color = "#000080"
+        title_lines = [report.name or "Report", "Detail Report"]
+
+    # Strip SSRS angle-bracket builtins like &<PhysicalPageNumber> from titles
+    title_lines = [re.sub(r"&<[^>]+>", "", ln).strip() for ln in title_lines]
+    title_lines = [ln for ln in title_lines if ln]
+
+    title_html_bits = []
+    for ln in title_lines[:4]:
+        title_html_bits.append(
+            '<div style="font-family:\'Courier New\',Courier,monospace; '
+            'font-size:14px; font-weight:bold; color:' + title_color + '; '
+            'text-align:center; letter-spacing:2px; line-height:1.5;">'
+            + _esc(ln) + '</div>'
+        )
+    title_html = ("<div style=\"margin:0 0 28px;\">"
+                  + "".join(title_html_bits) + "</div>")
+
+    # Run-info rows: Run Date, Run By, Total of ALL Records.
+    # These come from the parsed header section if present, otherwise fall
+    # back to plausible fictional values.
+    run_rows_html_bits = []
+    canned_run_rows = [
+        ("Run Date",            _sample_for_source("date", 0) + " " + "13:00:00"),
+        ("Run By",              _sample_for_source("user", 0)),
+        ("Total of ALL Records", _sample_for_source("count", 0)),
+    ]
+    for label, val in canned_run_rows:
+        run_rows_html_bits.append(
+            '<div style="display:flex; justify-content:center; '
+            'align-items:baseline; margin:3px 0;">'
+            '<div style="width:160px; text-align:right; padding-right:8px; '
+            'font-weight:bold; color:' + _TAB_INK + '; font-size:13px;">'
+            + _esc(label) + ':</div>'
+            '<div style="min-width:160px; text-align:left; color:'
+            + _TAB_INK + '; font-size:13px; font-weight:bold;">'
+            + _esc(val) + '</div></div>'
+        )
+    run_html = ("<div style=\"margin:0 0 24px;\">"
+                + "".join(run_rows_html_bits) + "</div>")
+
+    # Report Parameters heading
+    rp_heading = (
+        '<div style="text-align:center; margin:14px 0 12px;">'
+        '<span style="font-weight:bold; font-size:14px; color:' + _TAB_INK + '; '
+        'border-bottom:2px solid ' + _TAB_INK + '; padding-bottom:2px; '
+        'font-style:italic;">Report Parameters</span></div>'
+    )
+
+    # Parameter list (label: value, label on right). Visible params only.
+    param_rows = []
+    for p in (report.parameters or []):
+        if not getattr(p, "display", True):
+            continue
+        raw_label = (p.label or p.name or "").replace("P_", "").replace("PARM_", "")
+        label_pretty = raw_label.replace("_", " ").title()
+        val = _param_value(p)
+        # Param values that look like literal "ALL" / dates / numbers — keep them.
+        # For the page-1 page, show blanks for most params except a few highlights.
+        # (The reference artifact shows most parameters blank with only "County: CUSTER".)
+        show_val = val if (val not in ("ALL", "") or label_pretty.lower().startswith("county")) else ""
+        param_rows.append(
+            '<div style="display:flex; align-items:baseline; margin:2px 0;">'
+            '<div style="width:200px; text-align:right; padding-right:8px; '
+            'font-weight:bold; color:' + _TAB_INK + '; font-size:13px;">'
+            + _esc(label_pretty) + ':</div>'
+            '<div style="min-width:140px; text-align:left; color:'
+            + _TAB_INK + '; font-size:13px; font-weight:bold;">'
+            + _esc(show_val) + '</div></div>'
+        )
+    param_list_html = "".join(param_rows) if param_rows else (
+        '<div style="text-align:center; color:#888; font-style:italic; '
+        'font-size:12px;">(no parameters declared)</div>'
+    )
+
+    # Wrap in a rounded outlined container to match the artifact look.
+    inner = (
+        '<div style="border:1px solid #888; border-radius:8px; '
+        'padding:36px 24px 28px; max-width:520px; margin:0 auto;">'
+        + title_html + run_html + rp_heading + param_list_html
+        + '</div>'
+    )
+    return _render_page(inner, label=page_label)
+
+
+# ---------------------------------------------------------------------------
+# Frontend: TABULAR multi-page
+# ---------------------------------------------------------------------------
+
+def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
+    """One detail page — navy County band + 2-3 complaint blocks with
+    alternating gray/white shading + action sub-table per complaint."""
+
+    # Mini-title at top of detail page (smaller than page 1)
+    title_field = _find_title_text(report)
+    title_color = "#000080"
+    title_lines = ["Report"]
+    if title_field is not None:
+        title_raw = _resolve_tokens(title_field.text or "")
+        title_color = _normalize_color(_attr(title_field, "color", ""), "#000080")
+        title_lines = [re.sub(r"&<[^>]+>", "", ln).strip()
+                       for ln in title_raw.splitlines() if ln.strip()][:3]
+    title_top = ""
+    for ln in title_lines:
+        title_top += (
+            '<div style="font-family:\'Courier New\',Courier,monospace; '
+            'font-size:12px; font-weight:bold; color:' + title_color + '; '
+            'text-align:center; letter-spacing:2px; line-height:1.4;">'
+            + _esc(ln) + '</div>'
+        )
+
+    # "Report run on: ..." left, "Page N of M" right
+    run_line = (
+        '<div style="display:flex; justify-content:space-between; '
+        'align-items:baseline; margin:12px 0 6px; font-size:12px; '
+        'color:' + _TAB_INK + ';">'
+        '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
+        + _esc(_sample_for_source("date", 0)) + ' 1:00 PM</span></div>'
+        '<div style="font-style:italic; color:#1a3a8f;">Page '
+        + str(page_num) + ' of ' + str(total_pages) + '</div></div>'
+    )
+
+    # Find the OUTER repeating frame (R_G_CNTY_NM equivalent — has band fields).
+    main = _find_section(report.layout or [], "section_main")
+    top_rep = None
+    if main is not None:
+        def find_rep(g):
+            if g.kind == "repeating_frame":
+                return g
+            for ch in g.children or []:
+                r = find_rep(ch)
+                if r is not None:
+                    return r
+            return None
+        top_rep = find_rep(main)
+
+    if top_rep is None:
+        # No repeating frame at all — emit a generic table from query columns
+        body = '<div style="color:#888; font-style:italic;">(no repeating frames)</div>'
+        return _render_page(title_top + run_line + body, label="Page " + str(page_num))
+
+    # Band from outer frame
+    band_bg = _normalize_color(_attr(top_rep, "background_color", ""), "#000080")
+    band_fg = _normalize_color(_attr(top_rep, "foreground_color", ""), "#FFFF00")
+    outer_pairs = _detail_field_pairs(top_rep)
+    band_label_parts = []
+    for label, src in outer_pairs[:2]:
+        val = _sample_for_source(src, sample_idx)
+        band_label_parts.append(
+            '<span style="font-weight:bold;">' + _esc(label)
+            + ':</span> <span style="font-weight:bold; margin-right:32px;">'
+            + _esc(val) + '</span>'
+        )
+    band_html = (
+        '<div style="background:' + band_bg + '; color:' + band_fg + '; '
+        'padding:5px 12px; font-size:13px; '
+        'display:flex; justify-content:space-between;">'
+        '<div>' + (band_label_parts[0] if band_label_parts else "") + '</div>'
+        '<div>' + (band_label_parts[1] if len(band_label_parts) > 1 else "") + '</div>'
+        '</div>'
+    )
+
+    # Find inner frames: detail (e.g. R_G_CVID) and grandchild (e.g. R_G_STATUS_DATE)
+    nested_all = []
+    def collect_nested(g):
+        for ch in g.children or []:
+            if ch.kind == "repeating_frame" and ch is not top_rep:
+                nested_all.append(ch)
+            collect_nested(ch)
+    collect_nested(top_rep)
+
+    def _has_data(g):
+        if any(f.kind == "field" for f in (g.fields or [])):
+            return True
+        return any(_has_data(ch) for ch in (g.children or []))
+    nested = [g for g in nested_all if _has_data(g)]
+
+    detail_rep = nested[0] if nested else None
+    action_rep = nested[1] if len(nested) > 1 else None
+    if not detail_rep:
+        return _render_page(title_top + run_line + band_html, label="Page " + str(page_num))
+
+    detail_pairs = _detail_field_pairs(detail_rep)
+    action_pairs = _detail_field_pairs(action_rep) if action_rep else []
+
+    # Emit 3 complaint blocks per page with alternating shading
+    NUM_COMPLAINTS = 3
+    SHADE_A = "#e8eaf0"   # lavender-ish to match artifact's gray
+    SHADE_B = "#f6f7fb"   # paler shade for stripe
+    blocks = []
+    for ci in range(NUM_COMPLAINTS):
+        shade = SHADE_A if ci % 2 == 0 else SHADE_B
+        # Use a different sample_idx-derived seed per complaint
+        seed = sample_idx * 10 + ci
+
+        # Find Complaint ID field (the first key-like field) for the blue header
+        id_label = "Item ID"
+        id_val = _sample_for_source("id", seed)
+        if detail_pairs:
+            id_label = detail_pairs[0][0]
+            id_val = _sample_for_source(detail_pairs[0][1], seed)
+
+        # Render the rest of detail_pairs in a 2-column key/value grid
+        # (Owner/Location on left, Status/City on right) — best-effort by even/odd index.
+        left_pairs, right_pairs = [], []
+        for i, (label, src) in enumerate(detail_pairs[1:]):
+            (left_pairs if i % 2 == 0 else right_pairs).append((label, src))
+
+        def render_kv_col(pairs):
+            rows = []
+            for label, src in pairs:
+                v = _sample_for_source(src, seed)
+                rows.append(
+                    '<div style="display:flex; margin:2px 0; font-size:12px;">'
+                    '<div style="font-weight:bold; color:' + _TAB_INK + '; '
+                    'min-width:90px; padding-right:6px;">' + _esc(label)
+                    + ':</div><div style="color:' + _TAB_INK + ';">'
+                    + _esc(v) + '</div></div>'
+                )
+            return "".join(rows)
+
+        complaint_header = (
+            '<div style="color:#1a3a8f; font-weight:bold; font-size:13px; '
+            'padding:4px 12px 2px;">' + _esc(id_label) + ':&nbsp;' + _esc(id_val) + '</div>'
+        )
+        complaint_body = (
+            '<div style="display:flex; padding:2px 12px 8px;">'
+            '<div style="flex:1; padding-right:18px;">' + render_kv_col(left_pairs) + '</div>'
+            '<div style="flex:1;">' + render_kv_col(right_pairs) + '</div>'
+            '</div>'
+        )
+
+        # Action sub-table (only if present)
+        action_html = ""
+        if action_pairs:
+            action_head = (
+                '<div style="display:flex; padding:4px 12px 2px; '
+                'border-top:1px solid #bcc1cc; font-size:12px; '
+                'font-style:italic; color:' + _TAB_INK + ';">'
+            )
+            action_head_bits = []
+            for label, _src in action_pairs[:3]:
+                action_head_bits.append(
+                    '<div style="flex:1; font-weight:bold;">' + _esc(label) + ':</div>'
+                )
+            action_head += "".join(action_head_bits) + '</div>'
+
+            # Emit 1-2 sample action rows
+            n_actions = 2 if ci % 2 == 1 else 1
+            action_rows = []
+            for ai in range(n_actions):
+                action_seed = seed * 100 + ai
+                action_row_bits = []
+                for label, src in action_pairs[:3]:
+                    v = _sample_for_source(src, action_seed)
+                    action_row_bits.append(
+                        '<div style="flex:1; padding-right:6px;">' + _esc(v) + '</div>'
+                    )
+                action_rows.append(
+                    '<div style="display:flex; padding:2px 12px; font-size:12px; '
+                    'color:' + _TAB_INK + ';">'
+                    + "".join(action_row_bits) + '</div>'
+                )
+            action_html = action_head + "".join(action_rows)
+
+        blocks.append(
+            '<div style="background:' + shade + '; margin:0; '
+            'border-bottom:1px solid #d8dce4;">'
+            + complaint_header + complaint_body + action_html
+            + '</div>'
+        )
+
+    return _render_page(
+        title_top + run_line + band_html + "".join(blocks),
+        label="Page " + str(page_num) + " — Detail"
+    )
+
+
+def _render_tabular_pages(report):
+    """Multi-page tabular: page 1 = header summary, pages 2-4 = detail pages."""
+    NUM_DETAIL_PAGES = 3
+    total_pages = 1 + NUM_DETAIL_PAGES
+    pages = [_render_header_summary_page(report, page_label="Page 1 of " + str(total_pages))]
+    for i in range(NUM_DETAIL_PAGES):
+        pages.append(_render_tabular_detail_page(
+            report, sample_idx=i, page_num=2 + i, total_pages=total_pages,
+        ))
+    return _render_pages_wrapper(pages)
+
+
+# ---------------------------------------------------------------------------
+# Frontend: CERTIFICATE multi-page
+# ---------------------------------------------------------------------------
+
+def _certificate_sample_facts(idx):
+    """Returns a fictional permit's identity fields, varied per page."""
+    POOL = [
+        {
+            "perm_num":   "A-0117",
+            "perm_type":  "STATE OF SAMPLE",
+            "renewal":    "2026",
+            "dept":       "SAMPLE AGENCY",
+            "license":    "SAMPLE FACILITY LICENSE",
+            "perm_id":    "PERM-0117",
+            "address1":   "100 Main St",
+            "address2":   "Springfield, ST 00000",
+            "operator":   "Alex Rivera",
+            "facility":   "Acme Holdings (117)",
+            "perm_dates": "JANUARY 1, 2026 TO DECEMBER 31, 2026",
+            "exp_date":   "DECEMBER 31, 2026",
+        },
+        {
+            "perm_num":   "A-0231",
+            "perm_type":  "STATE OF SAMPLE",
+            "renewal":    "2026",
+            "dept":       "SAMPLE AGENCY",
+            "license":    "SAMPLE FACILITY LICENSE",
+            "perm_id":    "PERM-0231",
+            "address1":   "200 Commerce Way",
+            "address2":   "Riverside, ST 00000",
+            "operator":   "Jordan Casey",
+            "facility":   "Northwind Industries (231)",
+            "perm_dates": "JANUARY 1, 2026 TO DECEMBER 31, 2026",
+            "exp_date":   "DECEMBER 31, 2026",
+        },
+        {
+            "perm_num":   "A-0314",
+            "perm_type":  "STATE OF SAMPLE",
+            "renewal":    "2026",
+            "dept":       "SAMPLE AGENCY",
+            "license":    "SAMPLE FACILITY LICENSE",
+            "perm_id":    "PERM-0314",
+            "address1":   "300 Industrial Blvd",
+            "address2":   "Lakeside, ST 00000",
+            "operator":   "Sam Lee",
+            "facility":   "Globex Group (314)",
+            "perm_dates": "JANUARY 1, 2026 TO DECEMBER 31, 2026",
+            "exp_date":   "DECEMBER 31, 2026",
+        },
+    ]
+    return POOL[idx % len(POOL)]
+
+
+def _render_certificate_body(facts):
+    """The big certificate body — STATE OF X / DEPT / LICENSE / permit num / etc."""
+    return (
+        '<div style="text-align:center; padding:20px 24px 18px;">'
+        '<div style="font-size:22px; font-weight:bold; letter-spacing:1px;">'
+        + _esc(facts["perm_type"]) + '</div>'
+        '<div style="font-size:20px; font-weight:bold; margin-top:4px;">'
+        + _esc(facts["renewal"]) + '</div>'
+        '<div style="font-size:14px; font-weight:bold; margin-top:6px;">'
+        + _esc(facts["dept"]) + '</div>'
+        '<div style="font-size:14px; font-weight:bold;">'
+        + _esc(facts["license"]) + '</div>'
+        '<div style="font-size:28px; font-weight:bold; margin:22px 0 14px;">'
+        + _esc(facts["perm_num"]) + '</div>'
+        '<div style="font-size:14px; font-weight:bold;">'
+        + _esc(facts["address1"]) + '</div>'
+        '<div style="font-size:14px; font-weight:bold;">'
+        + _esc(facts["address2"]) + '</div>'
+        '<div style="font-size:14px; font-weight:bold; margin-top:4px;">'
+        + _esc(facts["operator"]) + '</div>'
+        '<div style="font-size:12px; margin-top:8px;">IS LICENSED TO OPERATE</div>'
+        '<div style="font-size:16px; font-weight:bold; margin-top:4px;">'
+        + _esc(facts["facility"]) + '</div>'
+        '<div style="font-size:12px; margin-top:8px;">LOCATED AT</div>'
+        '<div style="font-size:14px; font-weight:bold; margin-top:4px;">'
+        + _esc(facts["address1"]) + '</div>'
+        '<div style="font-size:14px; font-weight:bold;">'
+        + _esc(facts["address2"]) + '</div>'
+        '<div style="font-size:12px; margin-top:10px;">FOR THE PERIOD</div>'
+        '<div style="font-size:15px; font-weight:bold; margin-top:4px;">'
+        + _esc(facts["perm_dates"]) + '</div>'
+        '</div>'
+        '<div style="padding:12px 24px 6px; font-size:11px; '
+        'line-height:1.5; color:' + _TAB_INK + ';">'
+        'THIS ANNUAL LICENSE IS CONDITIONED ON THE CONSTRUCTION AND MANAGEMENT '
+        'OF THE FACILITY AS APPROVED BY THE DEPARTMENT AND ON CONDITIONS '
+        'IMPOSED BY THE ORIGINAL LICENSE.  THE LICENSEE SHOULD BE AWARE THAT '
+        'ITS FAILURE TO COMPLY WITH APPLICABLE LAWS OR RULES MAY RESULT IN '
+        'ENFORCEMENT ACTIONS, LICENSE REVOCATION, OR DENIAL OF AN APPLICATION '
+        'FOR RENEWAL.'
+        '</div>'
+        '<div style="padding:36px 24px 6px;">'
+        '<div style="font-family:\'Brush Script MT\',cursive; font-size:22px; '
+        'color:#222; border-bottom:1px solid #444; '
+        'padding-bottom:4px; max-width:280px;">Sample Signature</div>'
+        '<div style="font-size:12px; font-weight:bold; margin-top:6px;">'
+        'SAMPLE NAME, SAMPLE TITLE</div>'
+        '<div style="font-size:11px; color:' + _TAB_INK_SOFT + '; '
+        'margin-top:2px;">PO BOX 0000<br>SAMPLE ST 00000-0000<br>'
+        'SAMPLE OFFICE<br>(000)555-0100</div>'
+        '<div style="text-align:center; font-size:11px; font-weight:bold; '
+        'margin-top:12px;">THIS CERTIFICATE IS NOT TRANSFERABLE. '
+        'A LICENSE RENEWAL APPLICATION IS DUE ' + _esc(facts["exp_date"]) + '.</div>'
+        '</div>'
+    )
+
+
+def _render_certificate_card(facts):
+    """One wallet card — condensed permit."""
+    return (
+        '<div style="flex:1; border:1px solid ' + _TAB_INK + '; '
+        'padding:10px 12px 14px; text-align:center; '
+        'min-height:160px;">'
+        '<div style="font-size:11px; font-weight:bold;">'
+        + _esc(facts["perm_type"]) + ' ' + _esc(facts["renewal"]) + '</div>'
+        '<div style="font-size:11px; font-weight:bold;">' + _esc(facts["dept"]) + '</div>'
+        '<div style="font-size:11px; font-weight:bold;">' + _esc(facts["license"]) + '</div>'
+        '<div style="font-size:16px; font-weight:bold; margin:10px 0 6px;">'
+        + _esc(facts["perm_num"]) + '</div>'
+        '<div style="font-size:11px; font-weight:bold;">'
+        + _esc(facts["operator"]) + ' is licensed to operate</div>'
+        '<div style="font-size:11px; font-weight:bold;">' + _esc(facts["facility"]) + '</div>'
+        '<div style="font-size:11px; font-weight:bold;">' + _esc(facts["address1"]) + '</div>'
+        '<div style="font-size:11px; font-weight:bold;">' + _esc(facts["address2"]) + '</div>'
+        '<div style="font-size:11px; margin-top:10px;">expires '
+        + _esc(facts["exp_date"]) + '</div>'
+        '</div>'
+    )
+
+
+def _render_certificate_iteration_page(facts, page_num, total_pages):
+    """One full permit certificate (body + two wallet cards) wrapped as
+    a single page."""
+    body = _render_certificate_body(facts)
+    cards = (
+        '<div style="display:flex; gap:16px; margin:18px 0 0; padding:0 24px;">'
+        + _render_certificate_card(facts)
+        + _render_certificate_card(facts)
+        + '</div>'
+    )
+    # Outer thin black frame around the whole sheet (matches reference)
+    inner = (
+        '<div style="border:1.5px solid #000; padding:14px;">'
+        + body + cards
+        + '</div>'
+    )
+    return _render_page(
+        inner,
+        label="Page " + str(page_num) + " of " + str(total_pages) + " — Permit",
+    )
+
+
+def _render_certificate_pages(report):
+    """Multi-page certificate: page 1 = header summary, pages 2-4 = full
+    permit certificates with two wallet cards each."""
+    NUM_PERMITS = 3
+    total_pages = 1 + NUM_PERMITS
+    pages = [_render_header_summary_page(report, page_label="Page 1 of " + str(total_pages))]
+    for i in range(NUM_PERMITS):
+        facts = _certificate_sample_facts(i)
+        pages.append(_render_certificate_iteration_page(facts, page_num=2 + i, total_pages=total_pages))
+    return _render_pages_wrapper(pages)
+
+
+# ---------------------------------------------------------------------------
+# Backend: Report Builder design-view (multi-page, one page per section)
+# ---------------------------------------------------------------------------
+
+_BE_BG          = "#e6e6e6"   # the design surface gray
+_BE_FRAME_BG    = "#fafafa"
+_BE_FIELD_BG    = "#ffffff"
+_BE_FIELD_BORD  = "#888888"
+
+
+def _be_field_box(label_text, name_text, label_align="right",
+                  bg=None, fg=None, width="2.6in"):
+    """Render one design-view field: an optional label on the left and a
+    bordered placeholder box with the field's source name inside."""
+    label_html = ""
+    if label_text:
+        label_html = (
+            '<span style="display:inline-block; padding-right:6px; '
+            'text-align:' + label_align + '; font-weight:bold; '
+            'font-size:12px; color:' + _TAB_INK + ';">'
+            + _esc(label_text) + '</span>'
+        )
+    box_bg = bg or _BE_FIELD_BG
+    box_fg = fg or _TAB_INK
+    return (
+        '<span style="display:inline-flex; align-items:center; '
+        'margin:1px 4px;">'
+        + label_html
+        + '<span style="display:inline-block; min-width:' + width + '; '
+        'padding:1px 6px; border:1px solid ' + _BE_FIELD_BORD + '; '
+        'background:' + box_bg + '; color:' + box_fg + '; '
+        'font-size:12px; font-family:Arial,Helvetica,sans-serif;">'
+        + _esc(name_text) + '</span></span>'
+    )
+
+
+def _render_backend_header_page(report):
+    """Backend page 1 — section_header design view. Shows the title, the
+    Run Date / Run By / Total fields as labeled boxes, and the Report
+    Parameters list of labeled boxes (one per parameter)."""
+
+    # Pull the static title text from layout
+    title_field = _find_title_text(report)
+    title_color = "#000080"
+    title_lines = []
+    if title_field is not None:
+        title_color = _normalize_color(_attr(title_field, "color", ""), "#000080")
+        for ln in (title_field.text or "").splitlines():
+            ln = ln.strip()
+            if ln:
+                title_lines.append(re.sub(r"&<[^>]+>", "", ln).strip())
+    if not title_lines:
+        title_lines = [report.name or "Report"]
+
+    title_html = ""
+    for ln in title_lines[:4]:
+        title_html += (
+            '<div style="font-family:\'Courier New\',Courier,monospace; '
+            'font-size:14px; font-weight:bold; color:' + title_color + '; '
+            'text-align:center; letter-spacing:2px;">' + _esc(ln) + '</div>'
+        )
+
+    # Build the run-info rows + parameter list using design-view boxes.
+    # We pull every section_header field that points at a real source
+    # so the user sees ALL the F_* field placeholders, mirroring the
+    # Oracle Reports Builder design canvas.
+    header_section = _find_section(report.layout or [], "section_header")
+    rows = []
+    if header_section is not None:
+        # walk fields, pairing static-text labels with following field boxes
+        all_fields = []
+        def walk(g):
+            for f in g.fields or []:
+                all_fields.append(f)
+            for ch in g.children or []:
+                walk(ch)
+        walk(header_section)
+        # Sort by (y, x) for natural top-down reading order
+        all_fields.sort(key=lambda f: (round(f.y or 0.0, 2), round(f.x or 0.0, 2)))
+        # Group fields that are on roughly the same y as one "row"
+        rows_grouped = []
+        current_row = []
+        current_y = None
+        for f in all_fields:
+            y = round(f.y or 0.0, 1)
+            if current_y is None or abs(y - current_y) < 0.05:
+                current_row.append(f)
+                current_y = y if current_y is None else current_y
+            else:
+                rows_grouped.append(current_row)
+                current_row = [f]
+                current_y = y
+        if current_row:
+            rows_grouped.append(current_row)
+
+        for row in rows_grouped:
+            # row may contain pairs: label text + field box
+            pending_label = None
+            row_html_bits = []
+            for f in sorted(row, key=lambda x: round(x.x or 0.0, 2)):
+                if f.kind == "text":
+                    pending_label = (f.text or "").strip().rstrip(":")
+                elif f.kind == "field":
+                    name = f.source or f.name or ""
+                    row_html_bits.append(_be_field_box(
+                        pending_label, "F_" + name, label_align="right",
+                    ))
+                    pending_label = None
+                elif f.kind == "image":
+                    row_html_bits.append(_be_field_box(
+                        pending_label, "[image " + (f.name or "") + "]",
+                        label_align="right",
+                    ))
+                    pending_label = None
+            if row_html_bits:
+                rows.append('<div style="text-align:center; margin:2px 0;">'
+                            + "".join(row_html_bits) + '</div>')
+
+    if not rows:
+        # Fall back: derive from report.parameters
+        for p in (report.parameters or [])[:14]:
+            label = (p.label or p.name or "").replace("P_", "").replace("PARM_", "")
+            label = label.replace("_", " ").title()
+            rows.append('<div style="text-align:center; margin:2px 0;">'
+                        + _be_field_box(label, "F_" + (p.name or ""))
+                        + '</div>')
+
+    inner = (
+        '<div style="background:' + _BE_FRAME_BG + '; border:1px solid #888; '
+        'border-radius:8px; padding:32px 24px 28px; max-width:660px; '
+        'margin:0 auto;">'
+        + '<div style="margin-bottom:14px;">' + title_html + '</div>'
+        + '<div style="text-align:center; margin:14px 0 12px;">'
+        '<span style="font-weight:bold; font-size:14px; '
+        'border-bottom:2px solid ' + _TAB_INK + '; padding-bottom:2px; '
+        'font-style:italic;">Report Parameters</span></div>'
+        + "".join(rows)
+        + '</div>'
+    )
+    return _render_page(inner, label="Page 1 — Header design view")
+
+
+def _render_backend_main_page(report):
+    """Backend page 2 — section_main design view. Shows the repeating
+    frames with their navy/yellow band colors and the field placeholders
+    visible at their layout positions."""
+
+    title_field = _find_title_text(report)
+    title_color = "#000080"
+    title_lines = []
+    if title_field is not None:
+        title_color = _normalize_color(_attr(title_field, "color", ""), "#000080")
+        for ln in (title_field.text or "").splitlines():
+            ln = ln.strip()
+            if ln:
+                title_lines.append(re.sub(r"&<[^>]+>", "", ln).strip())
+    if not title_lines:
+        title_lines = [report.name or "Report"]
+    title_top = ""
+    for ln in title_lines[:3]:
+        title_top += (
+            '<div style="font-family:\'Courier New\',Courier,monospace; '
+            'font-size:12px; font-weight:bold; color:' + title_color + '; '
+            'text-align:center; letter-spacing:2px;">' + _esc(ln) + '</div>'
+        )
+
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return _render_page(title_top + "<div>(no main section)</div>",
+                            label="Page 2 — Main design view")
+
+    # Find outer repeating frame; emit its band + nested fields
+    def find_rep(g):
+        if g.kind == "repeating_frame":
+            return g
+        for ch in g.children or []:
+            r = find_rep(ch)
+            if r is not None:
+                return r
+        return None
+    top_rep = find_rep(main)
+
+    body_bits = []
+
+    # "Report run on:" header row
+    # Auto-detect a "current date" field from the layout (CurrentDate source,
+    # or any field whose name matches /date/i) so we don't hardcode METH's
+    # F_DATE1_SEC2. Falls back to a generic placeholder.
+    date_field_name = "F_RunDate"
+    for g in _iter_layout(report):
+        for f in (g.fields or []):
+            if f.kind != "field":
+                continue
+            src = (f.source or "").lower()
+            nm = (f.name or "").lower()
+            if "currentdate" in src or "date" in src or "date" in nm:
+                date_field_name = "F_" + (f.name or f.source or "RunDate")
+                break
+        if date_field_name != "F_RunDate":
+            break
+    body_bits.append(
+        '<div style="display:flex; justify-content:space-between; '
+        'align-items:baseline; margin:12px 0 6px; font-size:12px;">'
+        '<div>Report run on: '
+        + _be_field_box(None, date_field_name, width="1.4in")
+        + '</div><div style="font-style:italic; color:#1a3a8f;">'
+        'Page &lt;PageNumber&gt;</div></div>'
+    )
+
+    if top_rep is not None:
+        band_bg = _normalize_color(_attr(top_rep, "background_color", ""), "#000080")
+        band_fg = _normalize_color(_attr(top_rep, "foreground_color", ""), "#FFFF00")
+        outer_pairs = _detail_field_pairs(top_rep)
+        # band: 2 field-placeholders in the colored bar
+        left_box = ""
+        right_box = ""
+        if outer_pairs:
+            l_label, l_src = outer_pairs[0]
+            left_box = ('<span style="margin-right:6px;">' + _esc(l_label) + ':</span>'
+                        + _be_field_box(None, "F_" + l_src, width="1.2in",
+                                        bg="#ffffff", fg="#000000"))
+        if len(outer_pairs) > 1:
+            r_label, r_src = outer_pairs[1]
+            right_box = ('<span style="margin-right:6px;">' + _esc(r_label) + ':</span>'
+                         + _be_field_box(None, "F_" + r_src, width="1.6in",
+                                         bg="#ffffff", fg="#000000"))
+        body_bits.append(
+            '<div style="background:' + band_bg + '; color:' + band_fg + '; '
+            'padding:5px 12px; font-size:13px; font-weight:bold; '
+            'display:flex; justify-content:space-between; align-items:center;">'
+            '<div>' + left_box + '</div>'
+            '<div>' + right_box + '</div>'
+            '</div>'
+        )
+
+        # Inner detail fields
+        nested_all = []
+        def collect_nested(g):
+            for ch in g.children or []:
+                if ch.kind == "repeating_frame" and ch is not top_rep:
+                    nested_all.append(ch)
+                collect_nested(ch)
+        collect_nested(top_rep)
+
+        def _has_data(g):
+            if any(f.kind == "field" for f in (g.fields or [])):
+                return True
+            return any(_has_data(ch) for ch in (g.children or []))
+        nested = [g for g in nested_all if _has_data(g)]
+
+        if nested:
+            detail_rep = nested[0]
+            pairs = _detail_field_pairs(detail_rep)
+            # Render as a 2-column grid of (label, F_NAME) pairs
+            block_bits = []
+            for i, (label, src) in enumerate(pairs[:14]):
+                box = _be_field_box(label, "F_" + src, width="2.0in")
+                block_bits.append(box)
+            body_bits.append(
+                '<div style="background:#e8eaf0; padding:8px 12px; '
+                'display:flex; flex-wrap:wrap; gap:6px 12px;">'
+                + "".join(block_bits) + '</div>'
+            )
+
+        if len(nested) > 1:
+            action_rep = nested[1]
+            action_pairs = _detail_field_pairs(action_rep)
+            if action_pairs:
+                head_bits = []
+                row_bits = []
+                for label, src in action_pairs[:4]:
+                    head_bits.append(
+                        '<div style="flex:1; font-weight:bold; '
+                        'font-style:italic; padding-right:8px;">' + _esc(label) + ':</div>'
+                    )
+                    row_bits.append(
+                        '<div style="flex:1; padding-right:8px;">'
+                        + _be_field_box(None, "F_" + src, width="1.6in")
+                        + '</div>'
+                    )
+                body_bits.append(
+                    '<div style="display:flex; padding:6px 12px; font-size:12px; '
+                    'border-top:1px solid #bcc1cc;">' + "".join(head_bits) + '</div>'
+                    '<div style="display:flex; padding:2px 12px;">'
+                    + "".join(row_bits) + '</div>'
+                )
+
+    # Wrap in a bordered box (the Reports Builder canvas frame)
+    inner = (
+        '<div style="border:1.5px solid #444; background:' + _BE_FRAME_BG + '; '
+        'padding:0;">' + title_top + "".join(body_bits) + '</div>'
+    )
+    return _render_page(inner, label="Page 2 — Main design view")
+
+
+def _render_design_view(report):
+    """Backend mode: a 2-page Report Builder design view.
+
+    Page 1 = section_header design (title, run info, parameter form).
+    Page 2 = section_main design (repeating frames with colored bands and
+    F_FIELD_NAME placeholders).
+    """
+    pages = [_render_backend_header_page(report)]
+    main = _find_section(report.layout or [], "section_main")
+    if main is not None:
+        pages.append(_render_backend_main_page(report))
+    return _render_pages_wrapper(pages)
+
+
+# ---------------------------------------------------------------------------
+# Public dispatcher
+# ---------------------------------------------------------------------------
+
+def render_mockup(report, mode="frontend"):
+    """Public entry point. Returns a multi-page HTML string.
+
+    mode="frontend": fictional sample data, each preview = N styled pages
+        that mimic the rendered SSRS output (header summary + detail pages
+        for tabular, or header + multiple permit certificates for certificate).
+
+    mode="backend": Report Builder design surface, 2 pages (section_header
+        design + section_main design) with F_FIELD_NAME placeholders visible.
+    """
+    global _ACTIVE_MODE
+    prev = _ACTIVE_MODE
+    _ACTIVE_MODE = "backend" if mode == "backend" else "frontend"
+    try:
+        if mode == "backend":
+            return _render_design_view(report)
+        kind = detect_report_kind(report)
+        if kind == "letter":
+            # Letter style retains single-page (no obvious repeating data).
+            return _render_pages_wrapper([_render_page(_render_letter_mockup(report))])
+        if kind == "certificate":
+            return _render_certificate_pages(report)
+        return _render_tabular_pages(report)
+    finally:
+        _ACTIVE_MODE = prev

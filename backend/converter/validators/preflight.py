@@ -219,6 +219,42 @@ def preflight_audit(rdl_xml: str) -> Dict:
     if not find_all(tree, "Page"):
         issues.append(("BLOCKER", "rdl.no_page", "Missing <Page> — page sizing required"))
 
+
+    # 9b) Enumerated-value validity. Several RDL elements have strict enum
+    # value sets per the 2008/01 schema; emitting an out-of-schema value
+    # causes deserialization failures like:
+    #   "Start is not a valid value. Line X, position Y."
+    # Catch them all here so the user never sees the cryptic upload error.
+    ENUM_RULES = {
+        "TextAlign":      {"Default", "Left", "Center", "Right", "General"},
+        "VerticalAlign":  {"Default", "Top", "Middle", "Bottom"},
+        "TextDecoration": {"Default", "Underline", "Overline", "LineThrough", "None"},
+        "FontStyle":      {"Default", "Normal", "Italic"},
+        "Direction":      {"LTR", "RTL"},
+        "WritingMode":    {"Horizontal", "Vertical", "Rotate270"},
+        "BreakLocation":  {"Start", "End", "StartAndEnd", "Between", "EndOfGroup"},
+        "KeepWithGroup":  {"None", "Before", "After"},
+    }
+    enum_re = re.compile(
+        r"<(" + "|".join(ENUM_RULES.keys()) + r")>([^<]+)</\1>"
+    )
+    bad_values: Dict[str, int] = {}
+    for tag, val in enum_re.findall(rdl_xml):
+        v = val.strip()
+        if v and v not in ENUM_RULES[tag]:
+            key = f"{tag}={v}"
+            bad_values[key] = bad_values.get(key, 0) + 1
+    for key, count in bad_values.items():
+        tag, val = key.split("=", 1)
+        valid = ", ".join(sorted(ENUM_RULES[tag]))
+        issues.append((
+            "BLOCKER",
+            f"rdl.bad_enum.{tag.lower()}",
+            f"<{tag}>{val}</{tag}> appears {count}x - not a valid value. "
+            f"Allowed: {valid}. Upload to SSRS will fail with "
+            f"'{val} is not a valid value'.",
+        ))
+
     # 10) Size unit sanity
     size_re = re.compile(
         r"<(Width|Height|TopMargin|BottomMargin|LeftMargin|RightMargin|PageWidth|PageHeight)>([^<]+)</\1>"

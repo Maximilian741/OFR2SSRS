@@ -643,7 +643,32 @@ def _apply_field_style(style_el: ET.Element, lf) -> None:
     if fg:
         _sub(style_el, "Color", fg)
     if getattr(lf, "align", ""):
-        _sub(style_el, "TextAlign", lf.align.capitalize())
+        _sub(style_el, "TextAlign", _ssrs_text_align(lf.align))
+
+
+def _ssrs_text_align(value: str) -> str:
+    """Map Oracle Reports alignment tokens to SSRS TextAlign values.
+
+    Oracle uses start/end/center (and occasionally fill, justify, flush).
+    SSRS 2008/01 schema accepts: Default, Left, Center, Right, General.
+    Emitting "Start" or "End" causes upload to fail with:
+        "Start is not a valid value. Line X, position Y."
+    """
+    if not value:
+        return "Default"
+    v = value.strip().lower()
+    return {
+        "start":   "Left",
+        "left":    "Left",
+        "end":     "Right",
+        "right":   "Right",
+        "center":  "Center",
+        "centre":  "Center",
+        "middle":  "Center",
+        "fill":    "Left",
+        "justify": "General",
+        "flush":   "Left",
+    }.get(v, "Default")
 
 
 def _apply_textbox_style(tb_style_el: ET.Element, lf) -> None:
@@ -682,7 +707,7 @@ def _emit_positioned_textbox(
     _apply_field_style(run_style, lf)
     if lf.align:
         para_style = _sub(para, "Style")
-        _sub(para_style, "TextAlign", lf.align.capitalize())
+        _sub(para_style, "TextAlign", _ssrs_text_align(lf.align))
     _sub(tb, "CanGrow", "true")
     _sub(tb, "KeepTogether", "true")
     rel_x = max(0.0, lf.x - origin_x)

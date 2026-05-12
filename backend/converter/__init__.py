@@ -29,7 +29,11 @@ def convert(xml_bytes: bytes) -> Dict[str, Any]:
     parsed: ParsedReport = parse_oracle_xml(xml_bytes)
     translate_report(parsed)
     rdl_xml = generate_rdl(parsed)
-    mockup_html = render_mockup(parsed)
+    # Render BOTH preview modes so the UI can toggle between
+    # frontend (filled with sample data) and backend (Report
+    # Builder skeleton with field-name placeholders).
+    mockup_html = render_mockup(parsed, mode="frontend")
+    mockup_backend_html = render_mockup(parsed, mode="backend")
 
     # Validation: T-SQL static + RDL structural
     validation_issues = validate_report(parsed)
@@ -82,6 +86,7 @@ def convert(xml_bytes: bytes) -> Dict[str, Any]:
         "rdl_xml": rdl_xml,
         "oracle_xml": parsed.raw_xml,
         "mockup_html": mockup_html,
+        "mockup_backend_html": mockup_backend_html,
         "validation_issues": validation_issues,
         "rdl_issues": rdl_issues,
         "deployment_checklist": deployment_checklist,

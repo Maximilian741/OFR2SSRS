@@ -317,9 +317,58 @@ function renderIngestSummary(report) {
 }
 
 // ----- Tab 1: Mockup -----
+// Two view modes per conversion:
+//   "frontend" -> data.mockup_html (filled with sample data; what SSRS will render)
+//   "backend"  -> data.mockup_backend_html (placeholders; Report Builder design view)
+// The toggle buttons live in #tab-mockup and set state.mockupMode.
 function renderMockupTab(data) {
   const host = $("#mockup-host");
-  if (host) host.innerHTML = data.mockup_html || "<em>No mockup available.</em>";
+  if (!host) return;
+  // state is the module-level closure variable declared at the top of this
+  // file (const state = {...}). DON'T reference window.state — it doesn't
+  // exist and the toggle would silently no-op.
+  const mode = state.mockupMode || "frontend";
+  const html = mode === "backend"
+    ? (data.mockup_backend_html || data.mockup_html || "<em>No backend skeleton.</em>")
+    : (data.mockup_html || "<em>No mockup available.</em>");
+  host.innerHTML = html;
+}
+
+function _setMockupMode(mode) {
+  state.mockupMode = mode;
+  const fe = document.getElementById("mockup-mode-frontend");
+  const be = document.getElementById("mockup-mode-backend");
+  if (fe && be) {
+    const baseCss   = "padding:8px 16px; border:0; cursor:pointer; font:600 13px system-ui,sans-serif; ";
+    const activeCss = "background:#1a3a8f; color:#fff;";
+    const idleCss   = "background:#f1f5f9; color:#334155;";
+    fe.classList.toggle("mockup-mode-active", mode === "frontend");
+    be.classList.toggle("mockup-mode-active", mode === "backend");
+    fe.style.cssText = baseCss + (mode === "frontend" ? activeCss : idleCss);
+    be.style.cssText = baseCss + (mode === "backend"  ? activeCss : idleCss);
+  }
+  if (state.data) renderMockupTab(state.data);
+}
+
+// Wire toggle buttons once on load. We attach immediately if the DOM is
+// already ready, otherwise wait for DOMContentLoaded — app.js may be
+// included near the end of <body>, in which case the listener never fires.
+function _wireMockupToggle() {
+  const fe = document.getElementById("mockup-mode-frontend");
+  const be = document.getElementById("mockup-mode-backend");
+  if (fe && !fe._wired) {
+    fe.addEventListener("click", () => _setMockupMode("frontend"));
+    fe._wired = true;
+  }
+  if (be && !be._wired) {
+    be.addEventListener("click", () => _setMockupMode("backend"));
+    be._wired = true;
+  }
+}
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", _wireMockupToggle);
+} else {
+  _wireMockupToggle();
 }
 
 // ----- Tab 2: RDL XML -----
