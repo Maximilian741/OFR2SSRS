@@ -372,6 +372,28 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
 # ReportParameters
 # ---------------------------------------------------------------------------
 
+def _default_value_text(p, dtype: str) -> str:
+    """Pick a DefaultValue Value text that matches the parameter's declared
+    DataType. Empty <Value/> is invalid for non-string types and triggers
+    'DefaultValue doesn't have the expected type' at upload. For String
+    types, an empty string (resulting in an empty <Value/> element) is
+    accepted as empty/NULL. For Integer/Float/DateTime/Boolean, emit the
+    VB.NET null literal '=Nothing' which SSRS accepts for any DataType."""
+    iv = (p.initial_value or "").strip() if p.initial_value else ""
+    if iv:
+        return iv  # explicit default from the source XML; keep verbatim
+    dt = (dtype or "String").strip()
+    if dt == "String":
+        return ""                    # empty string = NULL/empty for String
+    if dt in ("Integer", "Float"):
+        return "=Nothing"            # VB null literal, accepted by Integer/Float
+    if dt == "DateTime":
+        return "=Nothing"
+    if dt == "Boolean":
+        return "=Nothing"
+    return "=Nothing"                # safe fallback for any other DataType
+
+
 def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
     if not report.parameters:
         return None
@@ -388,15 +410,17 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
         has_initial = not (p.initial_value is None or p.initial_value == "")
         if not has_initial:
             _sub(rp, "Nullable", "true")
-        # DefaultValue: if the param has an explicit initial_value, use it;
-        # otherwise emit an empty <Value/> so Report Builder doesn't pop
-        # the "Define Query Parameters" dialog at Refresh Fields time.
+        # DefaultValue: pick a Value text that matches the parameter's
+        # declared DataType. Empty <Value/> is only valid for String type;
+        # for Integer/Float/DateTime/Boolean we emit '=Nothing' (VB null
+        # literal) which SSRS accepts as a valid expression for any type.
+        dv_text = _default_value_text(p, ptype)
         dv = _sub(rp, "DefaultValue")
         values = _sub(dv, "Values")
-        if has_initial:
-            _sub(values, "Value", str(p.initial_value))
-        else:
-            _sub(values, "Value")  # empty Value element = NULL/empty default
+        v_el = _sub(values, "Value")
+        if dv_text:
+            v_el.text = dv_text
+        # else: leave as empty <Value/> which is only emitted for String DataType
         if not has_initial and ptype == "String":
             _sub(rp, "AllowBlank", "true")
         _sub(rp, "Prompt", p.label or p.name)
