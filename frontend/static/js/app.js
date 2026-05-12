@@ -338,14 +338,18 @@ function _setMockupMode(mode) {
   state.mockupMode = mode;
   const fe = document.getElementById("mockup-mode-frontend");
   const be = document.getElementById("mockup-mode-backend");
+  // The active/inactive look is now driven entirely by CSS rules keyed off
+  // aria-checked. We keep the legacy .mockup-mode-active class in sync for
+  // any older selectors, but don't write inline styles anymore.
   if (fe && be) {
-    const baseCss   = "padding:8px 16px; border:0; cursor:pointer; font:600 13px system-ui,sans-serif; ";
-    const activeCss = "background:#1a3a8f; color:#fff;";
-    const idleCss   = "background:#f1f5f9; color:#334155;";
-    fe.classList.toggle("mockup-mode-active", mode === "frontend");
-    be.classList.toggle("mockup-mode-active", mode === "backend");
-    fe.style.cssText = baseCss + (mode === "frontend" ? activeCss : idleCss);
-    be.style.cssText = baseCss + (mode === "backend"  ? activeCss : idleCss);
+    const feOn = mode === "frontend";
+    const beOn = mode === "backend";
+    fe.setAttribute("aria-checked", feOn ? "true" : "false");
+    be.setAttribute("aria-checked", beOn ? "true" : "false");
+    fe.classList.toggle("mockup-mode-active", feOn);
+    be.classList.toggle("mockup-mode-active", beOn);
+    fe.tabIndex = feOn ? 0 : -1;
+    be.tabIndex = beOn ? 0 : -1;
   }
   if (state.data) renderMockupTab(state.data);
 }
@@ -756,6 +760,11 @@ function renderBurstingTab(data) {
 
   const burst = (data && data.bursting) || {};
 
+  // Plug-and-play: show + hydrate the Distribution Settings form when
+  // bursting was detected. The form lives in the static HTML (above
+  // #burst-host); we just hydrate values and wire its buttons once.
+  hydrateBurstForm(data, burst);
+
   // ---- Header card ----
   const header = document.createElement("div");
   header.className = "burst-header " + (burst.is_bursting ? "burst-yes" : "burst-no");
@@ -1104,4 +1113,171 @@ if (document.readyState === "loading") {
   document.addEventListener("DOMContentLoaded", wireEverything);
 } else {
   wireEverything();
+}
+
+// =========================================================================
+// Plug-and-play: Distribution Settings form on the Bursting tab.
+//
+// The static HTML provides the form (#burst-form-panel + #bf-* inputs).
+// We hydrate values, persist across tab switches via state.burstOverrides,
+// debounce live "Update Preview" re-renders, and POST to two new endpoints:
+//   POST /api/burst-preview         -> rebuilt 4-block JSON
+//   POST /api/download/burst-pack   -> .zip stream
+// =========================================================================
+
+function _bfDefaultBody() {
+  return "Hello,\n\nYour {ReportName} report for {BurstKey} is attached.\n\n- Reports";
+}
+
+function _bfReadForm() {
+  const g = (id) => document.getElementById(id);
+  const port = parseInt((g("bf-smtp-port") || {}).value, 10);
+  return {
+    SmtpServer:      (g("bf-smtp-host") || {}).value || "smtp.office365.com",
+    SmtpPort:        Number.isFinite(port) ? port : 587,
+    AuthMode:        (g("bf-auth-mode") || {}).value || "Office365",
+    SmtpFrom:        (g("bf-sender") || {}).value || "[email protected]",
+    SubjectTemplate: (g("bf-subject") || {}).value || "{ReportName} - {BurstKey}",
+    BodyTemplate:    (g("bf-body") || {}).value || _bfDefaultBody(),
+    EmailBurstSql:   (g("bf-sql") || {}).value || "",
+  };
+}
+
+function _bfWriteForm(o) {
+  const g = (id) => document.getElementById(id);
+  if (!o) return;
+  if (g("bf-smtp-host"))  g("bf-smtp-host").value  = o.SmtpServer || "smtp.office365.com";
+  if (g("bf-smtp-port"))  g("bf-smtp-port").value  = (o.SmtpPort != null ? o.SmtpPort : 587);
+  if (g("bf-auth-mode"))  g("bf-auth-mode").value  = o.AuthMode || "Office365";
+  if (g("bf-sender"))     g("bf-sender").value     = o.SmtpFrom || "[email protected]";
+  if (g("bf-subject"))    g("bf-subject").value    = o.SubjectTemplate || "{ReportName} - {BurstKey}";
+  if (g("bf-body"))       g("bf-body").value       = o.BodyTemplate || _bfDefaultBody();
+  if (g("bf-sql") && o.EmailBurstSql != null) g("bf-sql").value = o.EmailBurstSql;
+}
+
+function hydrateBurstForm(data, burst) {
+  const panel = document.getElementById("burst-form-panel");
+  if (!panel) return;
+
+  if (!burst || !burst.is_bursting) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  if (!state.burstOverrides) {
+    state.burstOverrides = {
+      SmtpServer:      "smtp.office365.com",
+      SmtpPort:        587,
+      AuthMode:        "Office365",
+      SmtpFrom:        "[email protected]",
+      SubjectTemplate: "{ReportName} - {BurstKey}",
+      BodyTemplate:    _bfDefaultBody(),
+      EmailBurstSql:   burst.email_burst_query || "",
+    };
+  } else if (!state.burstOverrides.EmailBurstSql && burst.email_burst_query) {
+    state.burstOverrides.EmailBurstSql = burst.email_burst_query;
+  }
+  _bfWriteForm(state.burstOverrides);
+
+  if (!panel._wired) {
+    panel._wired = true;
+
+    const debounce = (fn, ms) => {
+      let t = null;
+      return function() {
+        const args = arguments;
+        clearTimeout(t);
+        t = setTimeout(() => fn.apply(null, args), ms);
+      };
+    };
+
+    const triggerPreview = debounce(() => {
+      state.burstOverrides = _bfReadForm();
+      _burstPreview(state.burstOverrides);
+    }, 300);
+
+    ["bf-smtp-host","bf-smtp-port","bf-auth-mode","bf-sender",
+     "bf-subject","bf-body","bf-sql"].forEach((id) => {
+      const ele = document.getElementById(id);
+      if (!ele) return;
+      ele.addEventListener("input", () => {
+        state.burstOverrides = _bfReadForm();
+        triggerPreview();
+      });
+      ele.addEventListener("change", () => {
+        state.burstOverrides = _bfReadForm();
+        triggerPreview();
+      });
+    });
+
+    const upd = document.getElementById("bf-update");
+    if (upd) upd.addEventListener("click", () => {
+      state.burstOverrides = _bfReadForm();
+      _burstPreview(state.burstOverrides);
+    });
+
+    const dl = document.getElementById("bf-download");
+    if (dl) dl.addEventListener("click", () => {
+      state.burstOverrides = _bfReadForm();
+      _burstPackDownload(state.burstOverrides);
+    });
+  }
+}
+
+function _burstPreview(overrides) {
+  const status = document.getElementById("bf-status");
+  if (status) status.textContent = "Updating preview...";
+  fetch("/api/burst-preview", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config_overrides: overrides || {} }),
+  }).then((r) => r.json()).then((resp) => {
+    if (resp && !resp.error && state.data) {
+      state.data.bursting = Object.assign({}, state.data.bursting, {
+        email_burst_query:         resp.email_burst_query,
+        email_powershell_script:   resp.email_powershell_script,
+        email_config_template:     resp.email_config_template,
+        service_account_checklist: resp.service_account_checklist,
+      });
+      renderBurstingTab(state.data);
+      if (status) status.textContent = "Preview updated.";
+    } else {
+      if (status) status.textContent = (resp && resp.error) || "Preview failed.";
+    }
+  }).catch((err) => {
+    if (status) status.textContent = "Preview failed: " + ((err && err.message) || err);
+  });
+}
+
+function _burstPackDownload(overrides) {
+  const status = document.getElementById("bf-status");
+  if (status) status.textContent = "Building burst pack...";
+  fetch("/api/download/burst-pack", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ config_overrides: overrides || {} }),
+  }).then((r) => {
+    if (!r.ok) {
+      return r.json().then((j) => { throw new Error((j && j.error) || ("HTTP " + r.status)); });
+    }
+    return r.blob().then((blob) => {
+      const dispo = r.headers.get("Content-Disposition") || "";
+      let nm = "burst_pack.zip";
+      const m = /filename="?([^"]+)"?/.exec(dispo);
+      if (m) nm = m[1];
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = nm;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+      if (status) status.textContent = "Downloaded " + nm + ".";
+    });
+  }).catch((err) => {
+    if (status) status.textContent = "Download failed: " + ((err && err.message) || err);
+    toast("Burst pack download failed", "err");
+  });
 }

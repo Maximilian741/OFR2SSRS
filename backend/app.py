@@ -30,6 +30,8 @@ from converter import convert, run_query  # noqa: E402
 from converter.ingest import convert_bundle  # noqa: E402
 from converter.bundle_export import build_bundle_zip  # noqa: E402
 from converter.rdl_postprocess import inject_connection_string  # noqa: E402
+from converter import bursting as _bursting_mod  # noqa: E402
+from converter.parsers.oracle_xml import parse_oracle_xml as _parse_oracle_xml  # noqa: E402
 
 ROOT = HERE.parent
 SAMPLES = ROOT / "samples" / "oracle"
@@ -310,6 +312,87 @@ def api_mockup_variant(variant):
         parsed = parse_oracle_xml(oracle_xml.encode("utf-8") if isinstance(oracle_xml, str) else oracle_xml)
         html = render_mockup_print(parsed) if variant == "print" else render_mockup_compact(parsed)
         return html, 200, {"Content-Type": "text/html; charset=utf-8"}
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+def _last_parsed_report():
+    """Re-parse the last-converted Oracle XML into a ParsedReport.
+
+    The bursting builders take a ParsedReport (object with .name/.queries/
+    .parameters), not a dict. _LAST stores the dict shape returned by
+    convert(), so we keep the raw XML in _LAST["oracle_xml"] and re-parse
+    on demand here. Cheap and stateless.
+    """
+    data = _LAST
+    if not data:
+        return None
+    raw = data.get("oracle_xml") or ""
+    if not raw:
+        return None
+    try:
+        return _parse_oracle_xml(raw.encode("utf-8") if isinstance(raw, str) else raw)
+    except Exception:
+        return None
+
+
+@app.post("/api/burst-preview")
+def api_burst_preview():
+    """Re-render the bursting tab's 4 collapsible blocks using UI-form values."""
+    payload = request.get_json(silent=True) or {}
+    overrides = payload.get("config_overrides") or {}
+    parsed = _last_parsed_report()
+    if parsed is None:
+        return jsonify({"error": "no report converted yet"}), 400
+    info = (_LAST.get("bursting") or {})
+
+    try:
+        sql_override = overrides.get("EmailBurstSql")
+        email_sql = sql_override or _bursting_mod.build_email_burst_query(parsed, info)
+
+        ps_src = _bursting_mod._EMAIL_PS_TEMPLATE
+        rname = parsed.name or "report"
+        ps_src = ps_src.replace("__REPORT_NAME__", rname)
+        ps_src = ps_src.replace("__BURST_SQL__", email_sql.replace("\\", "\\\\"))
+
+        cfg_template = _bursting_mod.build_email_config_template(parsed, info)
+        json_overrides = {k: v for k, v in overrides.items() if k != "EmailBurstSql"}
+        cfg_json = _bursting_mod._apply_config_overrides(cfg_template, json_overrides)
+
+        checklist = _bursting_mod.build_service_account_checklist(parsed, info)
+        return jsonify({
+            "email_burst_query":        email_sql,
+            "email_powershell_script":  ps_src,
+            "email_config_template":    cfg_json,
+            "service_account_checklist": checklist,
+        })
+    except Exception as e:
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
+@app.post("/api/download/burst-pack")
+def api_download_burst_pack():
+    """Build and stream a Burst Pack zip for the last-converted report,
+    applying UI-form config overrides."""
+    payload = request.get_json(silent=True) or {}
+    overrides = payload.get("config_overrides") or {}
+    parsed = _last_parsed_report()
+    if parsed is None:
+        return jsonify({"error": "no report converted yet"}), 400
+    info = (_LAST.get("bursting") or {})
+    rdl_xml = _LAST.get("rdl_xml") or ""
+
+    try:
+        blob = _bursting_mod.build_burst_pack_zip(parsed, rdl_xml, info, overrides)
+        rname = parsed.name or "report"
+        return send_file(
+            io.BytesIO(blob),
+            mimetype="application/zip",
+            as_attachment=True,
+            download_name=f"{rname}_burst_pack.zip",
+        )
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

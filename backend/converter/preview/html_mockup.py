@@ -1399,17 +1399,32 @@ _PAGE_SHEET_BG = "#ffffff"
 _PAGE_BORDER   = "#cccccc"
 
 
-def _render_page(content_html, label=None, max_width="8.25in", min_height="10.5in"):
-    """Wrap content in a paper-sheet div so the preview shows page boundaries."""
+def _render_page(content_html, label=None, max_width="8.25in", min_height="10.5in",
+                 first_page=True):
+    """Wrap content in a paper-sheet div so the preview shows page boundaries.
+
+    When ``first_page`` is False, a faint dashed horizontal rule is emitted
+    above the page label so the divider reads clearly between pages of a
+    multi-page preview. The label itself is rendered in the navy band color
+    used elsewhere in the report, at a larger weight than the older grey
+    caption it replaces.
+    """
+    rule_html = ""
+    if label and not first_page:
+        rule_html = (
+            '<div style="border-top:1px dashed #cbd5e1; '
+            'max-width:8.25in; margin:0 auto 12px;"></div>'
+        )
     label_html = ""
     if label:
         label_html = (
-            '<div style="text-align:center; color:#64748b; font-size:11px; '
-            'letter-spacing:1px; text-transform:uppercase; '
-            'margin:8px 0 4px;">' + _esc(label) + '</div>'
+            '<div style="text-align:center; font-size:13px; font-weight:600; '
+            'color:#000079; letter-spacing:0.3px; '
+            'margin:16px 0 6px;">' + _esc(label) + '</div>'
         )
     return (
-        label_html
+        rule_html
+        + label_html
         + '<div style="background:' + _PAGE_SHEET_BG + '; '
         'max-width:' + max_width + '; min-height:' + min_height + '; '
         'margin:18px auto; padding:0.6in 0.7in; '
@@ -1423,11 +1438,27 @@ def _render_page(content_html, label=None, max_width="8.25in", min_height="10.5i
 
 
 def _render_pages_wrapper(pages_html):
-    """Concatenate page HTML strings inside the desk-background container."""
+    """Concatenate page HTML strings inside the desk-background container.
+
+    A faint dashed horizontal rule is inserted between every adjacent pair of
+    pages so the boundary between successive sheets is easy to read while
+    scrolling through a multi-page preview. The first page has no rule above
+    it.
+    """
+    _DIVIDER = (
+        '<div style="border-top:1px dashed #cbd5e1; '
+        'max-width:8.25in; margin:0 auto 12px;"></div>'
+    )
+    if not pages_html:
+        joined = ""
+    else:
+        joined = pages_html[0]
+        for p in pages_html[1:]:
+            joined += _DIVIDER + p
     return (
         '<div style="background:' + _PAGE_DESK_BG + '; '
         'padding:24px 0; min-height:100%;">'
-        + "".join(pages_html)
+        + joined
         + '</div>'
     )
 

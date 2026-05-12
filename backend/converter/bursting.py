@@ -598,6 +598,55 @@ def build_service_account_checklist(report, info):
 # These replace the earlier stub versions (later defs win in Python).
 # ---------------------------------------------------------------------------
 
+_EMAIL_COL_PATTERNS = (
+    "RECIPIENT_EMAIL", "PRI_EMAIL", "PRIMARY_EMAIL",
+    "EMAIL_ADDR", "EMAIL_ADDRESS", "EMAIL",
+    "CONTACT_EMAIL", "MAIL_ADDR",
+)
+
+
+def _detect_main_table(report):
+    """Inspect the parsed report's queries and try to pick the primary table
+    the report binds against. Strategy: look at every dataset's tsql/sql,
+    parse `FROM <ident>` and `JOIN <ident>`, and return the most-frequently
+    referenced one. Falls back to None.
+    """
+    counts = {}
+    pat = re.compile(
+        r"\b(?:FROM|JOIN)\s+([A-Za-z_][A-Za-z0-9_\.]*)",
+        re.IGNORECASE,
+    )
+    for q in getattr(report, "queries", []):
+        body = (getattr(q, "tsql", "") or getattr(q, "sql", "") or "")
+        for m in pat.finditer(body):
+            tok = m.group(1)
+            # Strip schema-prefix for the comparison (dbo.X -> X)
+            short = tok.split(".")[-1]
+            if not short or short.upper() in (
+                "DUAL", "SYS", "INFORMATION_SCHEMA", "SELECT",
+            ):
+                continue
+            counts[short] = counts.get(short, 0) + 1
+    if not counts:
+        return None
+    # Most-referenced wins; tie-broken by first-seen order (stable sort).
+    return sorted(counts.items(), key=lambda kv: -kv[1])[0][0]
+
+
+def _detect_email_column(report):
+    """Walk every dataset's columns and return the first that looks like an
+    email address (matches a pattern in _EMAIL_COL_PATTERNS, longest-first
+    so 'EMAIL_ADDR' beats 'EMAIL'). Returns the original casing or None.
+    """
+    patterns = sorted(_EMAIL_COL_PATTERNS, key=len, reverse=True)
+    for _q, c in _all_query_columns(report):
+        cu = (c or "").upper()
+        for p in patterns:
+            if p in cu:
+                return c
+    return None
+
+
 def build_email_burst_query(report, info):
     """The burst query the PowerShell driver loops over.
 
@@ -605,47 +654,69 @@ def build_email_burst_query(report, info):
     parameter, renders to PDF, sends via SMTP, and logs the outcome.
 
     The query is intentionally written to FAIL CLOSED (no spam): rows with
-    no email are skipped, not sent to a fallback. Production deploys MUST
-    replace the placeholders with the org's actual contact source.
+    no email are skipped, not sent to a fallback.
+
+    Improvement: we now AUTO-DETECT the main table and (if possible) the
+    recipient-email column from the parsed report's own datasets, and
+    substitute them directly into the rendered SQL. Anything we can't infer
+    is left as a clearly-labeled placeholder so the user knows where to
+    edit. A header comment shows exactly what was substituted.
     """
     burst_key = (info or {}).get("burst_key_field") or "Perm_Num"
+    rname = (report.name if hasattr(report, "name") else "") or "report"
 
-    return f"""-- =============================================================
--- {(report.name if hasattr(report, 'name') else 'report')} — Email Burst Query
--- One row per recipient. Driver loops this and emails each row.
--- =============================================================
--- Required columns (the driver references them by name):
---   Burst_Key       value bound to the report's per-recipient parameter
---   EmailTo         primary recipient address (REQUIRED — rows without this are skipped)
---   EmailCc         optional cc list (semicolon-separated)
---   Subject         email subject line
---   Recipient_Name  for logging only (helps trace failures)
---   Render_Format   PDF | EXCELOPENXML | WORDOPENXML  (default PDF)
+    detected_main = _detect_main_table(report)
+    detected_email_col = _detect_email_column(report)
 
-SELECT
-    CAST(p.{burst_key} AS NVARCHAR(64))                         AS Burst_Key,
-    -- TODO replace with your real email column / UDF.
-    -- Common patterns:
-    --   o.Email_Addr                                            (direct column)
-    --   dbo.fn_F_Get_Permittee_Email(p.{burst_key})             (UDF; port the
-    --                                                            Oracle Pkg_*.F_*)
-    o.Email_Addr                                                AS EmailTo,
-    NULL                                                        AS EmailCc,
-    CONCAT(
-        '[App] ',
-        '<ReportTitle>',
-        ' — ',
-        CAST(p.{burst_key} AS NVARCHAR(64))
-    )                                                           AS Subject,
-    p.Site_Name                                                 AS Recipient_Name,
-    'PDF'                                                       AS Render_Format
-FROM dbo.<MainTable> AS p
-LEFT JOIN dbo.<EmailTable> AS o
-    ON o.{burst_key} = p.{burst_key}
-WHERE o.Email_Addr IS NOT NULL          -- fail-closed: never email '[unknown]'
-  AND p.<active_flag> = 1               -- never email retired/inactive permittees
-ORDER BY p.{burst_key};
-"""
+    main_table = detected_main or "<MainTable>"
+    email_table = "<EmailTable>"
+    if detected_email_col:
+        # We have an email column somewhere in the schema; for the rendered
+        # SQL we assume it lives on the main table unless the user overrides.
+        # That keeps the JOIN sane while still being copy-pastable.
+        email_expr = "p." + detected_email_col
+        email_join = ""  # no separate email-lookup table needed
+    else:
+        email_expr = "o.<RecipientEmail>"
+        email_join = (
+            "LEFT JOIN dbo." + email_table + " AS o\n"
+            "    ON o." + burst_key + " = p." + burst_key + "\n"
+        )
+
+    subst_summary = (
+        "--   <MainTable>      -> " + (main_table if detected_main else "<MainTable>  (NOT DETECTED — edit me)")
+        + "\n--   <RecipientEmail> -> " + (detected_email_col if detected_email_col else "<RecipientEmail>  (NOT DETECTED — edit me)")
+        + "\n--   burst_key        -> " + burst_key
+    )
+
+    return (
+        "-- =============================================================\n"
+        "-- " + rname + " — Email Burst Query\n"
+        "-- One row per recipient. Driver loops this and emails each row.\n"
+        "-- =============================================================\n"
+        "-- Required columns (the driver references them by name):\n"
+        "--   Burst_Key       value bound to the report's per-recipient parameter\n"
+        "--   EmailTo         primary recipient address (REQUIRED — rows without this are skipped)\n"
+        "--   EmailCc         optional cc list (semicolon-separated)\n"
+        "--   Subject         email subject line\n"
+        "--   Recipient_Name  for logging only (helps trace failures)\n"
+        "--   Render_Format   PDF | EXCELOPENXML | WORDOPENXML  (default PDF)\n"
+        "--\n"
+        "-- Auto-substitutions (override any '<...>' that remains):\n"
+        + subst_summary + "\n"
+        "\n"
+        "SELECT\n"
+        "    CAST(p." + burst_key + " AS NVARCHAR(64))                         AS Burst_Key,\n"
+        "    " + email_expr + "                                                AS EmailTo,\n"
+        "    NULL                                                              AS EmailCc,\n"
+        "    CONCAT('[" + rname + "] — ', CAST(p." + burst_key + " AS NVARCHAR(64)))  AS Subject,\n"
+        "    CAST(p." + burst_key + " AS NVARCHAR(64))                         AS Recipient_Name,\n"
+        "    'PDF'                                                             AS Render_Format\n"
+        "FROM dbo." + main_table + " AS p\n"
+        + email_join +
+        "WHERE " + email_expr + " IS NOT NULL          -- fail-closed: never email '[unknown]'\n"
+        "ORDER BY p." + burst_key + ";\n"
+    )
 
 
 # Production PowerShell template. Reads its config from a sibling JSON file so
@@ -931,7 +1002,7 @@ def build_service_account_checklist(report, info):
          "body": "Two paths. Pick one before writing the config:<br>"
                  "&nbsp;&nbsp;<b>Internal Exchange / relay</b>: contact mail admin to allow "
                  "<code>svc_o2s_burst$</code> to relay; SMTP server is your relay host on port 25 "
-                 "(no TLS) or 587 (TLS). Set <code>SmtpCredentialTarget</code> to a bogus value — "
+                 "(no TLS) or 587 (TLS). Set <code>SmtpCredentialTarget</code> to a bogus value -- "
                  "the Send-MailMessage call uses Windows auth via the service account.<br>"
                  "&nbsp;&nbsp;<b>O365 SMTP AUTH</b>: create an account with a license, generate an "
                  "app password (or OAuth2). Store with: <code>Install-Module CredentialManager; "
@@ -939,38 +1010,191 @@ def build_service_account_checklist(report, info):
                  "'[email protected]' -Password '...'</code>. Run that ONCE while logged "
                  "in AS the service account so the credential is encrypted to its profile."},
         {"step": 6, "title": "Drop the files on the SSRS host",
-         "body": "Create <code>C:\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\</code> and put inside:"
-                 "&nbsp;&nbsp;burst.ps1 (from this tab)<br>"
-                 "&nbsp;&nbsp;burst.config.json (from this tab — fill in the values)<br>"
-                 "ACL the folder so only the service account + admins can read/write. "
-                 "The script writes logs to <code>%ProgramData%\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\</code> "
-                 "which the service account can already access."},
+         "body": "Create <code>C:\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\</code> and put inside:<br>"
+                 "&nbsp;&nbsp;burst.ps1 (from the Burst Pack zip)<br>"
+                 "&nbsp;&nbsp;burst.config.json (fill in the values via the UI form, then download)<br>"
+                 "ACL the folder so only the service account + admins can read/write."},
         {"step": 7, "title": "Test in DRY mode first",
          "body": "From an admin shell:<br>"
                  "<code>powershell.exe -ExecutionPolicy Bypass -File C:\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\burst.ps1 -DryRun</code><br>"
-                 "It will pull the burst query, log every recipient it WOULD email, but never call "
-                 "SMTP. Confirm the row count matches what you expect. If the query is wrong, "
-                 "fix it before going to step 8."},
+                 "It will pull the burst query, log every recipient it WOULD email, but never call SMTP."},
         {"step": 8, "title": "Test in REDIRECT mode",
          "body": "Edit <code>burst.config.json</code> and set <code>TestRedirect</code> to YOUR "
                  "address. Run without <code>-DryRun</code>. Every recipient's email goes to YOU "
-                 "instead of the real address. The history file is NOT updated, so production runs "
-                 "later still see all keys as unsent. Verify rendered PDF + email body are correct, "
-                 "then clear <code>TestRedirect</code>."},
+                 "instead of the real address. Verify, then clear <code>TestRedirect</code>."},
         {"step": 9, "title": "Schedule via Task Scheduler",
          "body": "<code>schtasks /Create /TN \"O2S Burst &lt;ReportName&gt;\" "
                  "/TR \"powershell.exe -ExecutionPolicy Bypass -File "
                  "C:\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\burst.ps1\" "
                  "/SC WEEKLY /D MON /ST 06:00 "
-                 "/RU \"DOMAIN\\\\svc_o2s_burst$\" /RP * /RL HIGHEST</code><br>"
-                 "Or via the Task Scheduler GUI — make sure <i>Run whether user is logged on or not</i> "
-                 "and <i>Run with highest privileges</i> are both checked. Set <i>Stop the task if it "
-                 "runs longer than: 4 hours</i> as a runaway guard."},
+                 "/RU \"DOMAIN\\\\svc_o2s_burst$\" /RP * /RL HIGHEST</code>"},
         {"step": 10, "title": "Wire monitoring",
          "body": "The driver writes <code>%ProgramData%\\\\Oracle2SSRS\\\\&lt;ReportName&gt;\\\\YYYYMMDD.jsonl</code> "
-                 "— one JSON event per row. Forward this directory to your SIEM via "
-                 "Filebeat / NXLog / Splunk Universal Forwarder. Alert on: "
-                 "<code>event = \"run_complete\" AND failed &gt; 0</code> "
-                 "(any failure), and on absence of a <code>run_start</code> event "
-                 "after the scheduled window closes (silent failure)."},
+                 "-- one JSON event per row. Forward to your SIEM and alert on "
+                 "<code>event = \"run_complete\" AND failed &gt; 0</code>."},
     ]
+
+
+# ---------------------------------------------------------------------------
+# Burst Pack zip — plug-and-play download
+# ---------------------------------------------------------------------------
+
+def build_burst_readme(report, info, config):
+    """Step-by-step README that ships inside the Burst Pack zip."""
+    rname = (getattr(report, "name", "") or "report")
+    bk = (info or {}).get("burst_key_field") or "Id"
+    smtp_host = (config or {}).get("SmtpServer") or "smtp.office365.com"
+    sender = (config or {}).get("SmtpFrom") or "[email protected]"
+
+    return (
+        "# " + rname + " — Burst Pack\n"
+        "\n"
+        "This zip contains everything you need to email-distribute the **"
+        + rname + "** report on a per-recipient basis (one PDF, one email, per row of the burst query).\n"
+        "\n"
+        "## Contents\n"
+        "\n"
+        "| File | Purpose |\n"
+        "|------|---------|\n"
+        "| `" + rname + ".rdl` | The SSRS report definition. Deploy via Report Builder or rs.exe. |\n"
+        "| `burst.config.json` | All env-specific knobs. Edit this, not the script. |\n"
+        "| `Send-Reports.ps1` | The PowerShell driver. Runs as a service account. |\n"
+        "| `README.md` | This file. |\n"
+        "| `service-account-setup.md` | Step-by-step service-account provisioning checklist. |\n"
+        "\n"
+        "## Quick start\n"
+        "\n"
+        "1. **Install pre-reqs** on the SSRS host (as Administrator, once):\n"
+        "   ```powershell\n"
+        "   Install-Module ReportingServicesTools, SqlServer, CredentialManager -Scope AllUsers -Force\n"
+        "   ```\n"
+        "2. **Deploy the RDL** to SSRS (Report Manager > Upload File, or rs.exe). Confirm it renders for at least one burst key when run interactively.\n"
+        "3. **Drop this folder on the SSRS host** at `C:\\Oracle2SSRS\\" + rname + "\\`.\n"
+        "4. **Store the SMTP credential** while logged in AS the service account:\n"
+        "   ```powershell\n"
+        "   New-StoredCredential -Target 'O2S_SMTP' -UserName '" + sender + "' -Password '...'\n"
+        "   ```\n"
+        "5. **Edit `burst.config.json`** -- specifically the `SmtpServer` (currently `"
+        + smtp_host + "`), `ReportServer`, `DbServer`, `DbName`, and the burst SQL if needed.\n"
+        "6. **Dry-run first** -- no email actually leaves:\n"
+        "   ```powershell\n"
+        "   powershell -ExecutionPolicy Bypass -File .\\Send-Reports.ps1 -DryRun\n"
+        "   ```\n"
+        "   The output tells you exactly how many rows the burst query found and which address each would have gone to.\n"
+        "7. **Redirect-test** -- set `TestRedirect` in the config to YOUR email, run for real once, confirm the rendered PDF and body look right, then clear `TestRedirect`.\n"
+        "8. **Schedule** under Task Scheduler:\n"
+        "   ```\n"
+        "   schtasks /Create /TN \"O2S Burst " + rname + "\" /TR \"powershell -ExecutionPolicy Bypass -File C:\\Oracle2SSRS\\" + rname + "\\Send-Reports.ps1\" /SC WEEKLY /D MON /ST 06:00 /RU DOMAIN\\svc_o2s_burst$ /RL HIGHEST\n"
+        "   ```\n"
+        "\n"
+        "## Burst key\n"
+        "\n"
+        "This report bursts on `" + bk + "`. The driver passes that value to the RDL as a parameter on every render; the RDL filters its main dataset on it.\n"
+        "\n"
+        "## Troubleshooting\n"
+        "\n"
+        "- **\"No recipients\" / 0 rows**: the burst SQL returned nothing. Run it interactively against the report DB. The most common cause is that `<MainTable>` / `<RecipientEmail>` placeholders were never filled in.\n"
+        "- **\"render_failed\"**: the SSRS catalog path is wrong, or the service account lacks `Browser` on the report folder. See `service-account-setup.md` step 4.\n"
+        "- **\"smtp_failed\" / 535 auth**: the stored credential target name in `burst.config.json` doesn't match what's in Credential Manager, OR the SMTP account requires modern auth (OAuth2) and you stored an app password.\n"
+        "- **All emails went to my test address even after I cleared TestRedirect**: you edited the config under a different account than the one running the scheduled task. Check `%ProgramData%\\Oracle2SSRS\\" + rname + "\\sent_keys.txt` -- if it's empty after a real run, the script doesn't see the config you edited.\n"
+        "\n"
+        "## Where logs live\n"
+        "\n"
+        "`%ProgramData%\\Oracle2SSRS\\" + rname + "\\YYYYMMDD.jsonl` -- one JSON event per row. Tail with `Get-Content -Wait` while a run is in flight. Forward to your SIEM in production.\n"
+    )
+
+
+def _service_account_md(report, info):
+    """Flat-markdown rendering of the service-account checklist."""
+    items = build_service_account_checklist(report, info) or []
+    lines = ["# Service-account setup\n"]
+    for s in items:
+        # Strip HTML tags from the body for plain-text MD readability.
+        body = re.sub(r"<[^>]+>", "", str(s.get("body", "")))
+        body = body.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&nbsp;", " ")
+        lines.append("## " + str(s.get("step", "?")) + ". " + str(s.get("title", "")))
+        lines.append("")
+        lines.append(body)
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _apply_config_overrides(template_json, overrides):
+    """Merge UI form overrides on top of the JSON template. Returns the
+    final JSON string. Unknown keys from the UI are preserved (e.g. AuthMode)
+    so the PowerShell driver can read them if it grows new knobs."""
+    import json as _json
+    try:
+        cfg = _json.loads(template_json)
+    except Exception:
+        cfg = {}
+    if not isinstance(overrides, dict):
+        overrides = {}
+    # Only let through string/number/bool/null overrides. No dict/list nesting
+    # from the UI form (avoids injection of weird structures).
+    for k, v in overrides.items():
+        if v is None or isinstance(v, (str, int, float, bool)):
+            cfg[k] = v
+    return _json.dumps(cfg, indent=2)
+
+
+def build_burst_pack_zip(report, rdl_xml, bursting_info, config_overrides=None):
+    """Build an in-memory zip with the full plug-and-play Burst Pack.
+
+    Contents:
+      <report>.rdl
+      burst.config.json   (template + overrides merged)
+      Send-Reports.ps1    (the production PS driver)
+      README.md           (step-by-step quick start)
+      service-account-setup.md
+    """
+    import io as _io
+    import zipfile as _zip
+
+    info = bursting_info or {}
+    overrides = config_overrides or {}
+
+    rname = (getattr(report, "name", "") or "report")
+    rdl_filename = rname + ".rdl"
+
+    # Build each artifact. If the UI passed an EmailBurstSql override use it
+    # verbatim (the user may have hand-tweaked the auto-substituted query);
+    # otherwise rebuild from the parsed report.
+    email_sql = overrides.pop("EmailBurstSql", None) if isinstance(overrides, dict) else None
+    if not email_sql:
+        email_sql = build_email_burst_query(report, info)
+
+    # Build the PS driver. We rebuild fresh so a per-call SQL override is honored.
+    ps_src = _EMAIL_PS_TEMPLATE
+    ps_src = ps_src.replace("__REPORT_NAME__", rname)
+    ps_src = ps_src.replace("__BURST_SQL__", email_sql.replace("\\", "\\\\"))
+
+    # Build the config: start with template, merge overrides.
+    cfg_template = build_email_config_template(report, info)
+    cfg_json = _apply_config_overrides(cfg_template, overrides)
+
+    readme = build_burst_readme(report, info, overrides)
+    sa_md = _service_account_md(report, info)
+
+    buf = _io.BytesIO()
+    with _zip.ZipFile(buf, "w", _zip.ZIP_DEFLATED) as z:
+        if rdl_xml:
+            z.writestr(rdl_filename, rdl_xml)
+        z.writestr("burst.config.json", cfg_json)
+        z.writestr("Send-Reports.ps1", ps_src)
+        z.writestr("README.md", readme)
+        z.writestr("service-account-setup.md", sa_md)
+    return buf.getvalue()
+
+
+__all__ = [
+    "detect_bursting",
+    "build_burst_query",
+    "build_powershell_dds_script",
+    "build_email_burst_query",
+    "build_email_powershell_script",
+    "build_email_config_template",
+    "build_service_account_checklist",
+    "build_burst_pack_zip",
+    "build_burst_readme",
+]

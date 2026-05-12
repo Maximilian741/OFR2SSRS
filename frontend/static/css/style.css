@@ -1086,14 +1086,18 @@ body:not(.show-advanced) .tab[data-tab="extras"] {
 .advanced-toggle:hover { color: var(--text); background: var(--panel-2); }
 body.show-advanced .advanced-toggle { background: var(--panel-2); color: var(--text); }
 
-/* Big "Download RDL" CTA on the Mockup tab */
+/* Big "Download RDL" CTA on the Mockup tab — sticky to viewport bottom so
+   it stays reachable while scrolling through multi-page previews. */
 .mockup-cta-bar {
   display: flex; gap: 12px; align-items: center;
-  padding: 14px 18px; margin-bottom: 14px;
+  padding: 14px 18px; margin: 0 0 14px;
   background: linear-gradient(135deg, var(--accent), var(--accent-2));
   color: #fff;
   border-radius: var(--radius);
-  box-shadow: 0 2px 14px rgba(91,140,255,0.25);
+  box-shadow: 0 -2px 14px rgba(15,23,42,0.18), 0 2px 14px rgba(91,140,255,0.25);
+  position: sticky;
+  bottom: 0;
+  z-index: 50;
 }
 .mockup-cta-bar .cta-text { flex: 1; font-size: 13px; }
 .mockup-cta-bar .cta-text b { font-size: 15px; display: block; margin-bottom: 2px; }
@@ -1105,6 +1109,50 @@ body.show-advanced .advanced-toggle { background: var(--panel-2); color: var(--t
   font-family: inherit;
 }
 .mockup-cta-bar .cta-btn:hover { background: rgba(0,0,0,0.4); }
+
+/* ---------- Segmented control: Frontend / Backend toggle ---------- */
+.mockup-mode-toggle {
+  display: inline-flex;
+  gap: 0;
+  margin: 0 0 14px;
+  padding: 3px;
+  border: 1px solid #d0d5dc;
+  background: #f1f5f9;
+  border-radius: 10px;
+  width: fit-content;
+}
+.mockup-mode-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 8px 16px;
+  border: 0;
+  background: transparent;
+  color: #334155;
+  font: 600 13px system-ui, -apple-system, "Segoe UI", sans-serif;
+  border-radius: 7px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+.mockup-mode-btn .mockup-mode-icon {
+  font-size: 14px;
+  line-height: 1;
+  display: inline-block;
+}
+.mockup-mode-btn:hover:not([aria-checked="true"]) {
+  background: #e2e8f0;
+  color: #1e293b;
+}
+.mockup-mode-btn[aria-checked="true"] {
+  background: #000079;
+  color: #ffffff;
+  box-shadow:
+    inset 0 1px 2px rgba(0,0,0,0.20),
+    0 0 0 1px rgba(0, 0, 121, 0.35),
+    0 0 6px rgba(26, 58, 143, 0.25);
+}
+.mockup-mode-btn:focus-visible {
+  outline: 2px solid #5b8cff;
+  outline-offset: 2px;
+}
 
 /* Hide the demo "Take a tour" floating button — was buggy and adds clutter. */
 /* tour button now visible */

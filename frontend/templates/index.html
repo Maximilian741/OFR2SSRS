@@ -142,25 +142,27 @@
 
       <!-- Tab: HTML Mockup -->
       <div id="tab-mockup" class="tab-panel" hidden>
+        <div class="mockup-mode-toggle" role="radiogroup" aria-label="Mockup view mode">
+          <button id="mockup-mode-frontend" class="mockup-mode-btn" data-mode="frontend"
+                  role="radio" aria-checked="true" type="button">
+            <span class="mockup-mode-icon" aria-hidden="true">&#x1F441;</span>
+            <span>Frontend (filled with sample data)</span>
+          </button>
+          <button id="mockup-mode-backend" class="mockup-mode-btn" data-mode="backend"
+                  role="radio" aria-checked="false" type="button">
+            <span class="mockup-mode-icon" aria-hidden="true">&#x1F527;</span>
+            <span>Backend (Report Builder skeleton)</span>
+          </button>
+        </div>
+        <div class="panel-card mockup-card">
+          <div id="mockup-host" class="mockup-host"></div>
+        </div>
         <div id="mockup-cta" class="mockup-cta-bar" hidden>
           <div class="cta-text">
             <b>Looks good?</b>
             Click here to download the SSRS-ready <code>.rdl</code> file. Drop it in Report Builder.
           </div>
           <button id="cta-download-rdl" class="cta-btn">Download .rdl</button>
-        </div>
-        <div class="mockup-mode-toggle" style="display:flex; gap:0; margin:0 0 12px; border:1px solid #d0d5dc; border-radius:8px; overflow:hidden; width:fit-content;">
-          <button id="mockup-mode-frontend" class="mockup-mode-btn mockup-mode-active" data-mode="frontend"
-                  style="padding:8px 16px; border:0; cursor:pointer; font:600 13px system-ui,sans-serif; background:#1a3a8f; color:#fff;">
-            Frontend (filled with sample data)
-          </button>
-          <button id="mockup-mode-backend" class="mockup-mode-btn" data-mode="backend"
-                  style="padding:8px 16px; border:0; cursor:pointer; font:600 13px system-ui,sans-serif; background:#f1f5f9; color:#334155;">
-            Backend (Report Builder skeleton)
-          </button>
-        </div>
-        <div class="panel-card mockup-card">
-          <div id="mockup-host" class="mockup-host"></div>
         </div>
       </div>
 
@@ -177,6 +179,58 @@
 
       <!-- Tab: Bursting / Email Distribution -->
       <div id="tab-burst" class="tab-panel" hidden>
+
+        <!-- Plug-and-play Distribution Settings form -->
+        <section id="burst-form-panel" class="panel-card burst-form-panel" hidden style="margin-bottom:14px; padding:14px 16px;">
+          <div class="panel-toolbar" style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px;">
+            <div class="panel-title" style="font-weight:700; font-size:15px;">Distribution Settings</div>
+            <div class="burst-form-hint muted-note" style="font-size:12px;">Edit these, then Update Preview or Download Burst Pack.</div>
+          </div>
+          <div class="burst-form-grid" style="display:grid; grid-template-columns:repeat(2,minmax(220px,1fr)); gap:10px 14px;">
+            <label class="burst-field">
+              <span>SMTP Host</span>
+              <input id="bf-smtp-host" type="text" value="smtp.office365.com" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="burst-field">
+              <span>SMTP Port</span>
+              <input id="bf-smtp-port" type="number" min="1" max="65535" value="587">
+            </label>
+            <label class="burst-field">
+              <span>Auth Mode</span>
+              <select id="bf-auth-mode">
+                <option value="Office365" selected>Office365</option>
+                <option value="Exchange">Exchange</option>
+                <option value="Anonymous-Relay">Anonymous-Relay</option>
+              </select>
+            </label>
+            <label class="burst-field">
+              <span>Sender Email</span>
+              <input id="bf-sender" type="email" value="[email protected]" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="burst-field" style="grid-column:1 / -1;">
+              <span>Subject Template <span class="muted-note" style="font-weight:400;">- use <code>{BurstKey}</code> and <code>{ReportName}</code></span></span>
+              <input id="bf-subject" type="text" value="{ReportName} - {BurstKey}" autocomplete="off" spellcheck="false">
+            </label>
+            <label class="burst-field" style="grid-column:1 / -1;">
+              <span>Body Template <span class="muted-note" style="font-weight:400;">- placeholders <code>{BurstKey}</code>, <code>{ReportName}</code></span></span>
+              <textarea id="bf-body" rows="3" spellcheck="false">Hello,
+
+Your {ReportName} report for {BurstKey} is attached.
+
+- Reports</textarea>
+            </label>
+            <label class="burst-field" style="grid-column:1 / -1;">
+              <span>Email-Source SQL <span class="muted-note" style="font-weight:400;">- auto-substituted from the parsed report</span></span>
+              <textarea id="bf-sql" rows="8" spellcheck="false" style="font-family:'JetBrains Mono',monospace; font-size:12px;"></textarea>
+            </label>
+          </div>
+          <div class="burst-form-actions" style="display:flex; gap:10px; margin-top:12px; align-items:center;">
+            <button id="bf-update" class="btn btn-ghost" type="button">Update Preview</button>
+            <button id="bf-download" class="btn btn-primary" type="button">Download Burst Pack (.zip)</button>
+            <span id="bf-status" class="muted-note" style="margin-left:auto;"></span>
+          </div>
+        </section>
+
         <div id="burst-host" class="burst-host"></div>
       </div>
 
@@ -334,7 +388,6 @@ void main(){
         fragmentSource: document.getElementById('bg-frag').textContent,
       });
     } catch (e) {
-      // WebGL unavailable — fall back to static gradient via CSS
       document.body.classList.add('no-shader');
     }
   })();
