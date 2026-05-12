@@ -76,6 +76,23 @@ def index():
     return render_template("index.html", samples=sample_files, asset_version=_asset_version())
 
 
+def _resolve_target_db(req) -> str:
+    """Pull the target_db toggle off a Flask request (form, JSON, or query).
+
+    Default is ``"oracle"`` so users who never touch the toggle ship an RDL
+    that matches their Oracle backend. ``"sqlserver"`` opts back into the
+    translated T-SQL behavior. Anything else is normalized to ``"oracle"``.
+    """
+    val = (
+        (req.form.get("target_db") if req.form else None)
+        or req.values.get("target_db")
+        or ""
+    ).strip().lower()
+    if val not in ("oracle", "sqlserver"):
+        val = "oracle"
+    return val
+
+
 @app.post("/api/convert")
 def api_convert():
     """Accept an uploaded .xml/.rdf file and return the full conversion payload."""
@@ -83,7 +100,8 @@ def api_convert():
     if not f:
         return jsonify({"error": "no file uploaded"}), 400
     try:
-        data = convert(f.read())
+        target_db = _resolve_target_db(request)
+        data = convert(f.read(), target_db=target_db)
         # Optional: caller-supplied connection string injected into the RDL
         # before download. We never log or store it (it stays in request memory
         # only for this one substitution).
@@ -128,7 +146,8 @@ def api_convert_bundle():
     if not files:
         return jsonify({"error": "no files uploaded"}), 400
     try:
-        data = convert_bundle(files)
+        target_db = _resolve_target_db(request)
+        data = convert_bundle(files, target_db=target_db)
         cs = (request.form.get("connection_string") or "").strip()
         if cs and data.get("rdl_xml"):
             data["rdl_xml"] = inject_connection_string(data["rdl_xml"], cs)
@@ -148,7 +167,8 @@ def api_convert_sample(name):
     if not safe.exists() or safe.parent != SAMPLES:
         abort(404)
     try:
-        data = convert(safe.read_bytes())
+        target_db = _resolve_target_db(request)
+        data = convert(safe.read_bytes(), target_db=target_db)
         cs = (request.values.get("connection_string") or "").strip()
         if cs:
             data["rdl_xml"] = inject_connection_string(data["rdl_xml"], cs)

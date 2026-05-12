@@ -74,6 +74,7 @@ DEFAULT_COLUMNS = ["Permit", "Renewal_Year", "Site_Name", "Site_Addr", "Perm_Dat
 # ---------------------------------------------------------------------------
 
 _QUERY_PARAM_RE = re.compile(r"@(P_\w+)", re.IGNORECASE)
+_ORACLE_BIND_VAR_RE = re.compile(r":(P_\w+)", re.IGNORECASE)
 
 
 def _detect_query_parameters(tsql: str) -> List[str]:
@@ -83,6 +84,20 @@ def _detect_query_parameters(tsql: str) -> List[str]:
     seen: Set[str] = set()
     out: List[str] = []
     for m in _QUERY_PARAM_RE.finditer(tsql):
+        name = m.group(1)
+        if name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def _detect_oracle_bind_vars(sql: str) -> List[str]:
+    """Find unique :P_FOO references in Oracle SQL text, preserving order."""
+    if not sql:
+        return []
+    seen: Set[str] = set()
+    out: List[str] = []
+    for m in _ORACLE_BIND_VAR_RE.finditer(sql):
         name = m.group(1)
         if name not in seen:
             seen.add(name)
@@ -191,13 +206,30 @@ def _layout_format_triggers(report: ParsedReport) -> List[Tuple[str, str]]:
 # DataSources
 # ---------------------------------------------------------------------------
 
-def _build_data_sources() -> ET.Element:
+def _build_data_sources(target_db: str = "oracle") -> ET.Element:
+    """Emit <DataSources>. ``target_db`` selects the provider/connect-string
+    pair the RDL ships with:
+
+    * ``"oracle"`` (default) — ``<DataProvider>OracleClient</DataProvider>``
+      with a placeholder Oracle TNS connection string. The user is expected
+      to repoint this to their shared Oracle data source after upload.
+    * ``"sqlserver"`` — original behavior: ``<DataProvider>SQL</DataProvider>``
+      with a localhost SQL Server connection string.
+    """
     ds_root = ET.Element(_q("DataSources"))
     ds = _sub(ds_root, "DataSource")
     ds.set("Name", "DS_Main")
     cp = _sub(ds, "ConnectionProperties")
-    _sub(cp, "DataProvider", "SQL")
-    _sub(cp, "ConnectString", "Data Source=localhost;Initial Catalog=AppDb")
+    if target_db == "oracle":
+        # ``OracleClient`` is the most portable choice across modern SSRS
+        # Oracle drivers. The connect string is a placeholder hint; the user
+        # replaces it with their shared Oracle connection at upload time.
+        _sub(cp, "DataProvider", "OracleClient")
+        _sub(cp, "ConnectString",
+             "Data Source=ORCL;User Id=user;Password=password")
+    else:
+        _sub(cp, "DataProvider", "SQL")
+        _sub(cp, "ConnectString", "Data Source=localhost;Initial Catalog=AppDb")
     _rdsub(ds, "SecurityType", "Integrated")
     return ds_root
 
@@ -206,32 +238,82 @@ def _build_data_sources() -> ET.Element:
 # DataSets
 # ---------------------------------------------------------------------------
 
-def _build_dataset(query: DataQuery, declared_params: Iterable[str]) -> ET.Element:
-    """Build one <DataSet> element from a DataQuery."""
+def _build_dataset(query: DataQuery, declared_params: Iterable[str],
+                   target_db: str = "oracle") -> ET.Element:
+    """Build one <DataSet> element from a DataQuery.
+
+    ``target_db`` selects which CommandText flavor and parameter prefix to
+    emit:
+
+    * ``"oracle"`` (default) — emit ``query.sql`` verbatim (original Oracle
+      SQL with ``:P_PARAM`` bind vars preserved). QueryParameters are
+      declared with a leading colon (``:P_PARAM``) per the Oracle Reports
+      bind-var convention. If ``query.sql`` is empty we fall back to
+      ``query.tsql`` rather than emit an empty CommandText.
+    * ``"sqlserver"`` — emit ``query.tsql`` (translated T-SQL with
+      ``@P_PARAM`` bind vars), legacy behavior.
+    """
     ds = ET.Element(_q("DataSet"))
     ds.set("Name", _safe(query.name) or "DataSet1")
 
     # <Query>
     q_el = _sub(ds, "Query")
     _sub(q_el, "DataSourceName", "DS_Main")
-    cmd_text = (query.tsql or query.sql or "").strip()
-    if not cmd_text:
-        cmd_text = f"-- empty query for {query.name}"
-    _sub(q_el, "CommandText", cmd_text)
 
-    # <QueryParameters> from @P_FOO references in tsql
-    referenced = _detect_query_parameters(cmd_text)
-    if referenced:
-        qp_root = _sub(q_el, "QueryParameters")
-        declared_set = {p.upper() for p in declared_params}
-        for pname in referenced:
-            qp = _sub(qp_root, "QueryParameter")
-            qp.set("Name", f"@{pname}")
-            # Bind to the report parameter if it exists, otherwise just empty
-            if pname.upper() in declared_set:
-                _sub(qp, "Value", f"=Parameters!{pname}.Value")
-            else:
-                _sub(qp, "Value", "")
+    if target_db == "oracle":
+        # Prefer the original Oracle SQL; fall back to the translated tsql
+        # if the parser never captured a sql payload for this query (rare —
+        # only happens for synthetic placeholder queries built downstream
+        # without populating .sql). In that fallback case the emitted text
+        # may still contain T-SQL constructs; user will need to hand-edit.
+        cmd_text = (query.sql or "").strip()
+        used_fallback = False
+        if not cmd_text:
+            cmd_text = (query.tsql or "").strip()
+            used_fallback = True
+        if not cmd_text:
+            cmd_text = f"-- empty query for {query.name}"
+        _sub(q_el, "CommandText", cmd_text)
+
+        # Oracle bind vars look like :P_FOO. Declare each one referenced in
+        # the SQL as a <QueryParameter Name=":P_FOO"> bound to the report
+        # parameter (or empty when undeclared).
+        referenced = _detect_oracle_bind_vars(cmd_text)
+        if used_fallback:
+            # Fallback path: text is actually T-SQL, so look for @P_FOO too.
+            for n in _detect_query_parameters(cmd_text):
+                if n not in referenced:
+                    referenced.append(n)
+        if referenced:
+            qp_root = _sub(q_el, "QueryParameters")
+            declared_set = {p.upper() for p in declared_params}
+            for pname in referenced:
+                qp = _sub(qp_root, "QueryParameter")
+                qp.set("Name", f":{pname}")
+                if pname.upper() in declared_set:
+                    _sub(qp, "Value", f"=Parameters!{pname}.Value")
+                else:
+                    _sub(qp, "Value", "")
+    else:
+        # T-SQL path: existing behavior. Prefer .tsql, fall back to .sql.
+        cmd_text = (query.tsql or query.sql or "").strip()
+        if not cmd_text:
+            cmd_text = f"-- empty query for {query.name}"
+        _sub(q_el, "CommandText", cmd_text)
+
+        # <QueryParameters> from @P_FOO references in tsql
+        referenced = _detect_query_parameters(cmd_text)
+        if referenced:
+            qp_root = _sub(q_el, "QueryParameters")
+            declared_set = {p.upper() for p in declared_params}
+            for pname in referenced:
+                qp = _sub(qp_root, "QueryParameter")
+                qp.set("Name", f"@{pname}")
+                # Bind to the report parameter if it exists, otherwise just empty
+                if pname.upper() in declared_set:
+                    _sub(qp, "Value", f"=Parameters!{pname}.Value")
+                else:
+                    _sub(qp, "Value", "")
 
     # <Fields>
     fields = _sub(ds, "Fields")
@@ -243,25 +325,29 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str]) -> ET.Eleme
     return ds
 
 
-def _build_data_sets(report: ParsedReport) -> ET.Element:
+def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Element:
     root = ET.Element(_q("DataSets"))
     declared = [p.name for p in report.parameters or []]
     if not report.queries:
-        # Always emit at least one dataset so the Tablix has something to bind
+        # Always emit at least one dataset so the Tablix has something to bind.
+        # For Oracle target we put the placeholder in .sql so CommandText
+        # comes through unchanged; for sqlserver we put it in .tsql.
+        placeholder_sql = "SELECT 1 AS Permit, 0 AS Renewal_Year, '' AS Site_Name"
         placeholder = DataQuery(
             name="Q_PERMIT",
-            tsql="SELECT 1 AS Permit, 0 AS Renewal_Year, '' AS Site_Name",
+            sql=placeholder_sql,
+            tsql=placeholder_sql,
             items=[
                 DataItem(name="Permit", datatype="character"),
                 DataItem(name="Renewal_Year", datatype="number"),
                 DataItem(name="Site_Name", datatype="character"),
             ],
         )
-        root.append(_build_dataset(placeholder, declared))
+        root.append(_build_dataset(placeholder, declared, target_db=target_db))
         return root
 
     for q in report.queries:
-        root.append(_build_dataset(q, declared))
+        root.append(_build_dataset(q, declared, target_db=target_db))
     return root
 
 
@@ -1530,14 +1616,14 @@ def _build_code() -> ET.Element:
     return code
 
 
-def _build_report_root(report: ParsedReport) -> ET.Element:
+def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.Element:
     root = ET.Element(_q("Report"))
     _rdsub(root, "ReportID", "00000000-0000-0000-0000-000000000000")
     _sub(root, "Description", report.name or "Converted")
     _sub(root, "Author", "Oracle2SSRS")
     _sub(root, "AutoRefresh", "0")
-    root.append(_build_data_sources())
-    root.append(_build_data_sets(report))
+    root.append(_build_data_sources(target_db=target_db))
+    root.append(_build_data_sets(report, target_db=target_db))
     embedded = _build_embedded_images(report)
     if embedded is not None:
         root.append(embedded)
@@ -1567,9 +1653,18 @@ def _build_report_root(report: ParsedReport) -> ET.Element:
     return root
 
 
-def generate_rdl(report: ParsedReport) -> str:
-    """Return a complete RDL XML document as a string."""
-    root = _build_report_root(report)
+def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
+    """Return a complete RDL XML document as a string.
+
+    ``target_db``: ``"oracle"`` (default) emits the original Oracle SQL in
+    each <CommandText> with ``:P_PARAM`` bind vars and an ``OracleClient``
+    DataProvider. ``"sqlserver"`` emits the translated T-SQL with
+    ``@P_PARAM`` bind vars and a ``SQL`` DataProvider.
+    """
+    target_db = (target_db or "oracle").lower()
+    if target_db not in ("oracle", "sqlserver"):
+        target_db = "oracle"
+    root = _build_report_root(report, target_db=target_db)
     try:
         ET.indent(root, space="  ")
     except AttributeError:

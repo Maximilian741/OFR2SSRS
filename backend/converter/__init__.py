@@ -24,11 +24,28 @@ from .ai_assist import build_prompts
 from .bursting import detect_bursting, build_burst_query, build_powershell_dds_script, build_email_burst_query, build_email_powershell_script, build_service_account_checklist, build_email_config_template
 
 
-def convert(xml_bytes: bytes) -> Dict[str, Any]:
-    """End-to-end conversion. Returns a dict ready to ship to the frontend."""
+def convert(xml_bytes: bytes, target_db: str = "oracle") -> Dict[str, Any]:
+    """End-to-end conversion. Returns a dict ready to ship to the frontend.
+
+    Parameters
+    ----------
+    xml_bytes:
+        The Oracle Reports XML payload.
+    target_db:
+        Which RDL backend variant to emit. ``"oracle"`` (default) preserves
+        the original Oracle SQL inside <CommandText> with ``:P_PARAM`` bind
+        vars and emits an ``OracleClient`` DataProvider so the user can host
+        the report in SSRS but still query their Oracle backend. ``"sqlserver"``
+        emits the translated T-SQL with ``@P_PARAM`` bind vars and a ``SQL``
+        DataProvider, which is the legacy behavior.
+    """
+    target_db = (target_db or "oracle").lower()
+    if target_db not in ("oracle", "sqlserver"):
+        target_db = "oracle"
+
     parsed: ParsedReport = parse_oracle_xml(xml_bytes)
     translate_report(parsed)
-    rdl_xml = generate_rdl(parsed)
+    rdl_xml = generate_rdl(parsed, target_db=target_db)
     # Render BOTH preview modes so the UI can toggle between
     # frontend (filled with sample data) and backend (Report
     # Builder skeleton with field-name placeholders).
@@ -94,6 +111,7 @@ def convert(xml_bytes: bytes) -> Dict[str, Any]:
         "preflight": preflight_audit(rdl_xml),
         "ai_prompts": ai_prompts,
         "bursting": bursting_info,
+        "target_db": target_db,
     }
 
 

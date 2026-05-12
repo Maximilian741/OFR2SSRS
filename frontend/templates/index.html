@@ -43,6 +43,17 @@
     </section>
 
     <section class="side-section">
+      <div class="side-heading">Target database backend</div>
+      <select id="target-db" class="conn-input">
+        <option value="oracle" selected>Oracle (default)</option>
+        <option value="sqlserver">SQL Server</option>
+      </select>
+      <div class="muted-note conn-note">
+        Oracle preserves original SQL. SQL Server uses translated T-SQL. Change BEFORE converting.
+      </div>
+    </section>
+
+    <section class="side-section">
       <div class="side-heading">SSRS Connection (optional)</div>
       <input id="conn-string" type="password" autocomplete="off" spellcheck="false"
              class="conn-input"

@@ -451,13 +451,20 @@ def _ingest_report_dict(classification: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def convert_bundle(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
+def convert_bundle(files: List[Tuple[str, bytes]], target_db: str = "oracle") -> Dict[str, Any]:
     """Top-level entry: classify everything, then convert what we can.
 
     Returns the same shape as converter.convert(...) plus an "ingest_report"
     key. If no convertible artifacts exist, returns
     {"error": "no_convertible_artifacts", "ingest_report": {...}}.
+
+    ``target_db`` is forwarded to the underlying converter so the generated
+    RDL emits either original Oracle SQL (default) or translated T-SQL.
     """
+    target_db = (target_db or "oracle").lower()
+    if target_db not in ("oracle", "sqlserver"):
+        target_db = "oracle"
+
     classification = classify_files(files or [])
     ingest = _ingest_report_dict(classification)
 
@@ -470,7 +477,7 @@ def convert_bundle(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
         from .cross_validate import cross_validate
         from .parsers.oracle_xml import parse_oracle_xml
         try:
-            data = _convert(primary_xml[1])
+            data = _convert(primary_xml[1], target_db=target_db)
         except Exception as e:
             return {
                 "error": f"convert_failed: {e}",
@@ -502,7 +509,7 @@ def convert_bundle(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
         except Exception as e:
             report.warnings.append(f"Translator error: {e}")
         try:
-            rdl_xml = generate_rdl(report)
+            rdl_xml = generate_rdl(report, target_db=target_db)
         except Exception as e:
             rdl_xml = ""
             report.warnings.append(f"RDL generation error: {e}")
@@ -512,6 +519,7 @@ def convert_bundle(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
             "oracle_xml": "",
             "mockup_html": "<em>No Oracle layout available -- synthetic report from SQL only.</em>",
             "ingest_report": ingest,
+            "target_db": target_db,
         }
 
     # Path 3: nothing convertible.

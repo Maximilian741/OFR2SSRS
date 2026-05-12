@@ -74,12 +74,22 @@ function getConnString() {
   return el ? (el.value || "").trim() : "";
 }
 
+// Read the target-database toggle. Defaults to "oracle" so users who never
+// touch the dropdown ship an RDL whose CommandText matches their Oracle
+// backend rather than the translated T-SQL.
+function getTargetDb() {
+  const el = document.getElementById("target-db");
+  const v = el ? (el.value || "").trim().toLowerCase() : "oracle";
+  return (v === "sqlserver") ? "sqlserver" : "oracle";
+}
+
 // ----- API calls -----
 async function uploadFile(file) {
   setStatus("Converting…", "busy");
   const fd = new FormData();
   fd.append("file", file);
   const _cs = getConnString(); if (_cs) fd.append("connection_string", _cs);
+  fd.append("target_db", getTargetDb());
   try {
     const res = await fetch("/api/convert", { method: "POST", body: fd });
     const json = await res.json();
@@ -97,6 +107,7 @@ async function uploadBundle(list) {
   const fd = new FormData();
   list.forEach(f => fd.append("files", f, f._relPath || f.name));
   const _cs = getConnString(); if (_cs) fd.append("connection_string", _cs);
+  fd.append("target_db", getTargetDb());
   try {
     const res = await fetch("/api/convert-bundle", { method: "POST", body: fd });
     const json = await res.json();
@@ -121,7 +132,11 @@ async function runSample(name, btn) {
   if (btn) btn.classList.add("busy");
   try {
     const _cs = getConnString();
-    const _qs = _cs ? ("?connection_string=" + encodeURIComponent(_cs)) : "";
+    const _td = getTargetDb();
+    const _qsParts = [];
+    if (_cs) _qsParts.push("connection_string=" + encodeURIComponent(_cs));
+    _qsParts.push("target_db=" + encodeURIComponent(_td));
+    const _qs = _qsParts.length ? ("?" + _qsParts.join("&")) : "";
     const res = await fetch("/api/convert-sample/" + encodeURIComponent(name) + _qs, { method: "POST" });
     const json = await res.json();
     if (!res.ok || json.error) throw new Error(json.error || "Sample failed");
