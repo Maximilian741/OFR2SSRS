@@ -14,7 +14,7 @@ import base64
 import binascii
 import re
 import xml.etree.ElementTree as ET
-from typing import Iterable, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from converter.models import (
     DataItem,
@@ -1430,33 +1430,298 @@ def _certificate_extents(section_main: LayoutGroup) -> Tuple[float, float]:
     return max_w, max_h
 
 
+def _classify_section_main_fields(section_main: LayoutGroup) -> Dict[str, Any]:
+    """Walk section_main depth-first and pull out the values we need for a
+    simple stacked certificate layout.
+
+    Returns a dict with these keys (any missing value is None / []):
+      title_lines      List[str]   - centered multi-line title (>=2 lines preferred)
+      title_field      LayoutField - layout field that supplied title_lines
+      perm_type        LayoutField - secondary "license type" field
+      permit_field     LayoutField - the big PERMIT NUMBER field (bound or text)
+      permittee_field  LayoutField - the operator/permittee name field
+      site_addr_field  LayoutField - the site address field
+      site_text        LayoutField - "is licensed to operate / located at" text block
+      perm_dates       LayoutField - the "for the period ..." text block
+      error_text       LayoutField - the "ERROR: ..." conditional text
+      legal_text       LayoutField - the long static legal disclaimer (>=200 chars)
+      signature_text   LayoutField - the signer name / title text block
+      transfer_text    LayoutField - the "THIS CERTIFICATE IS NOT TRANSFERABLE" line
+      signature_field  LayoutField - the signature image/text field
+      card_l_fields    List[LayoutField] - all fields under any M_CARD_L frame
+      card_r_fields    List[LayoutField] - all fields under any M_CARD_R frame
+    """
+    out: Dict[str, Any] = {
+        "title_lines": [],
+        "title_field": None,
+        "perm_type": None,
+        "permit_field": None,
+        "permittee_field": None,
+        "site_addr_field": None,
+        "site_text": None,
+        "perm_dates": None,
+        "error_text": None,
+        "legal_text": None,
+        "signature_text": None,
+        "transfer_text": None,
+        "signature_field": None,
+        "card_l_fields": [],
+        "card_r_fields": [],
+    }
+
+    def _is_title(f: LayoutField) -> bool:
+        t = (f.text or "")
+        if not t.strip():
+            return False
+        if (f.align or "").lower() != "center":
+            return False
+        if "\n" not in t:
+            return False
+        u = t.upper()
+        if "STATE OF" in u or "DEPARTMENT" in u or "DIVISION" in u:
+            return True
+        return int(f.font_size or 0) >= 18
+
+    longest_legal: Optional[LayoutField] = None
+    longest_legal_len = 0
+
+    def walk(group: LayoutGroup,
+             in_card_l: bool = False,
+             in_card_r: bool = False) -> None:
+        nonlocal longest_legal, longest_legal_len
+        name_upper = (group.name or "").upper()
+        if "CARD_L" in name_upper:
+            in_card_l = True
+        if "CARD_R" in name_upper:
+            in_card_r = True
+
+        for f in group.fields or []:
+            if in_card_l:
+                out["card_l_fields"].append(f)
+                continue
+            if in_card_r:
+                out["card_r_fields"].append(f)
+                continue
+
+            kind = (f.kind or "").lower()
+            text = (f.text or "")
+            src_upper = (f.source or "").upper()
+            name_u = (f.name or "").upper()
+
+            if kind == "text":
+                if _is_title(f) and not out["title_lines"]:
+                    lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
+                    if lines:
+                        out["title_lines"] = lines
+                        out["title_field"] = f
+                        continue
+                up = text.upper()
+                if up.startswith("ERROR") and out["error_text"] is None:
+                    out["error_text"] = f
+                    continue
+                if (
+                    "FOR THE PERIOD" in up
+                    or "&PERM_DATES" in up
+                ) and out["perm_dates"] is None:
+                    out["perm_dates"] = f
+                    continue
+                if (
+                    ("LICENSED TO OPERATE" in up
+                     or "&CP_OPERATE" in up
+                     or "&SITE_NAME" in up)
+                    and out["site_text"] is None
+                ):
+                    out["site_text"] = f
+                    continue
+                if "TRANSFERABLE" in up and out["transfer_text"] is None:
+                    out["transfer_text"] = f
+                    continue
+                if (
+                    "&PERMIT" in up
+                    and out["permit_field"] is None
+                    and int(f.font_size or 0) >= 18
+                ):
+                    out["permit_field"] = f
+                    continue
+                if (
+                    "WUTMB" in up
+                    or "CHIEF" in up
+                    or ("&CF_" in up and "SIGN" in name_u)
+                    or "BUREAU" in up
+                ) and out["signature_text"] is None:
+                    out["signature_text"] = f
+                    continue
+                # Longest static text wins as the legal disclaimer.
+                if len(text) > longest_legal_len:
+                    longest_legal_len = len(text)
+                    longest_legal = f
+                continue
+
+            if kind == "field":
+                if (
+                    src_upper in ("PERMIT", "PERM_NUM")
+                    or src_upper.endswith("_PERMIT")
+                    or "PERMIT_NUM" in src_upper
+                    or src_upper.endswith("_NUM")
+                ) and out["permit_field"] is None:
+                    out["permit_field"] = f
+                    continue
+                if (
+                    "PERM_TYPE" in src_upper or "PERM_TYPE" in name_u
+                ) and out["perm_type"] is None:
+                    out["perm_type"] = f
+                    continue
+                if (
+                    "PERMITTEE" in src_upper or "PERMITTEE" in name_u
+                ) and out["permittee_field"] is None:
+                    out["permittee_field"] = f
+                    continue
+                if (
+                    "SITE_ADDR" in src_upper or "SITE_ADDR" in name_u
+                ) and out["site_addr_field"] is None:
+                    out["site_addr_field"] = f
+                    continue
+                if (
+                    "SIGNATURE" in src_upper or "SIGNATURE" in name_u
+                ) and out["signature_field"] is None:
+                    out["signature_field"] = f
+                    continue
+
+        for c in group.children or []:
+            walk(c, in_card_l=in_card_l, in_card_r=in_card_r)
+
+    walk(section_main)
+
+    if longest_legal is not None and len(longest_legal.text or "") >= 200:
+        out["legal_text"] = longest_legal
+    return out
+
+
+def _emit_stacked_textbox(
+    parent: ET.Element,
+    name: str,
+    value: str,
+    is_expression: bool,
+    top_in: float,
+    height_in: float,
+    width_in: float = 7.5,
+    left_in: float = 0.0,
+    font_size: int = 10,
+    bold: bool = False,
+    align: str = "left",
+    can_grow: bool = True,
+) -> ET.Element:
+    """Emit a simple stacked Textbox at a fixed Top offset inside a Rectangle.
+
+    Differs from _emit_positioned_textbox in that the geometry comes from
+    explicit kwargs (so we don't carry over the Oracle inch coordinates
+    that pushed the body to ~14in), and the style is a small bundle of
+    SSRS-friendly defaults rather than _apply_field_style.
+    """
+    tb = _sub(parent, "Textbox")
+    tb.set("Name", name)
+    paragraphs = _sub(tb, "Paragraphs")
+    para = _sub(paragraphs, "Paragraph")
+    runs = _sub(para, "TextRuns")
+    run = _sub(runs, "TextRun")
+    _sub(run, "Value", value if (is_expression or value) else "=Nothing")
+    run_style = _sub(run, "Style")
+    _sub(run_style, "FontSize", f"{int(font_size) if font_size else 10}pt")
+    if bold:
+        _sub(run_style, "FontWeight", "Bold")
+    if align:
+        para_style = _sub(para, "Style")
+        _sub(para_style, "TextAlign", _ssrs_text_align(align))
+    if can_grow:
+        _sub(tb, "CanGrow", "true")
+    _sub(tb, "KeepTogether", "true")
+    _sub(tb, "Top", _in(top_in))
+    _sub(tb, "Left", _in(left_in))
+    _sub(tb, "Width", _in(width_in))
+    _sub(tb, "Height", _in(height_in))
+    tb_style = _sub(tb, "Style")
+    _sub(tb_style, "PaddingLeft", "2pt")
+    _sub(tb_style, "PaddingRight", "2pt")
+    _sub(tb_style, "PaddingTop", "1pt")
+    _sub(tb_style, "PaddingBottom", "1pt")
+    return tb
+
+
+def _textbox_value_from_field(
+    lf: Optional[LayoutField],
+    report: ParsedReport,
+    dataset_name: str,
+) -> Tuple[str, bool]:
+    """Resolve a LayoutField to (value, is_expression) using the existing
+    token/Field/Parameter resolver. Returns ("=Nothing", True) when lf is
+    missing so the placeholder stays clean in PDF export."""
+    if lf is None:
+        return "=Nothing", True
+    kind = (lf.kind or "").lower()
+    if kind == "text":
+        text = lf.text or lf.source or ""
+        if not text.strip():
+            return "=Nothing", True
+        value, is_expr = _resolve_text_expression(
+            text, report, dataset_name=dataset_name, audit_notes=None
+        )
+        if is_expr:
+            value = _wrap_unscoped_aggregates(value, report, True)
+            return value, True
+        return value, False
+    # kind == "field"
+    value = _field_value_for(
+        lf, report, dataset_name=dataset_name, audit_notes=None
+    )
+    if not value:
+        fallback = lf.text or lf.source or ""
+        if not fallback.strip():
+            return "=Nothing", True
+        return fallback, False
+    value = _wrap_unscoped_aggregates(value, report, True)
+    return value, True
+
+
 def _build_certificate_body(
     report: ParsedReport,
     main: DataQuery,
     section_main: LayoutGroup,
 ) -> Tuple[ET.Element, float, float]:
-    """Build a List-wrapped certificate body. Returns (body, width_in, height_in)."""
+    """Build a Tablix-wrapped certificate body using a SIMPLE STACKED layout.
+
+    The Oracle XML positions every textbox at an inch-coordinate authored
+    for Oracle Reports' renderer; when SSRS lays those out the body ends
+    up ~14in tall and one permit splits across four PDF pages. To produce
+    a clean 1-page-per-permit PDF we ignore the positional coordinates
+    entirely and emit a single Rectangle whose ReportItems are a vertical
+    stack of textboxes at hand-picked Top offsets.
+
+    Layout (all widths 7.5in unless noted):
+        Title block         (3-line centered bold)          0.00 .. 0.90
+        License type        (centered, bold)                0.90 .. 1.15
+        Permit number       (big bold centered)             1.15 .. 1.65
+        Permittee block     (operator / address)            1.65 .. 2.40
+        "Licensed to operate" + facility                    2.40 .. 3.00
+        "Located at" + site address                         3.00 .. 3.70
+        "For the period" + dates                            3.70 .. 4.30
+        Legal disclaimer    (small)                         4.30 .. 7.60
+        Transfer notice                                     7.60 .. 7.90
+        Signature line + signer block                       7.90 .. 8.70
+        Two wallet cards side-by-side (3.5in each, gap)     8.80 .. 10.00
+    """
     body = ET.Element(_q("Body"))
     items = _sub(body, "ReportItems")
 
-    # Index by the SAFE name we'll write into <EmbeddedImages>; the
-    # <Image><Value> reference must match the safe spelling exactly or
-    # SSRS rejects the upload with "<value> is not a valid Value".
     embedded_index = {
         _safe(img.id): (img.mime_type or "image/gif")
         for img in (report.embedded_images or [])
         if img.id
     }
 
-    extent_w, extent_h = _certificate_extents(section_main)
-    list_width = max(section_main.width or 0.0, extent_w, 7.5)
-    list_height = max(section_main.height or 0.0, extent_h, 1.0)
+    list_width = 7.5
+    body_height = 10.0  # total stacked-content height inside the Rectangle
 
-    # 2008+ SSRS dropped <List>, <Table>, <Matrix> in favor of a unified
-    # <Tablix>. A "list" is just a Tablix with one column, one row, and a
-    # single detail row group — exactly what we build below. Emitting <List>
-    # under the 2008/01 namespace causes "invalid child element 'List'"
-    # deserialization errors on the report server.
+    # Tablix shell (single cell wrapping one Rectangle).
     list_el = _sub(items, "Tablix")
     list_el.set("Name", "Tablix_Permit")
 
@@ -1466,7 +1731,7 @@ def _build_certificate_body(
     _sub(col, "Width", _in(list_width))
     rows = _sub(list_body, "TablixRows")
     row = _sub(rows, "TablixRow")
-    _sub(row, "Height", _in(list_height))
+    _sub(row, "Height", _in(body_height))
     cells = _sub(row, "TablixCells")
     cell = _sub(cells, "TablixCell")
     contents = _sub(cell, "CellContents")
@@ -1475,42 +1740,200 @@ def _build_certificate_body(
     body_rect.set("Name", "Rect_Body")
     body_items = _sub(body_rect, "ReportItems")
 
-    for child in section_main.children or []:
-        if (child.kind or "").lower() not in ("frame", "repeating_frame"):
-            continue
-        # Skip zero-dimension frames that have NO child items either.
-        # An empty Rectangle with positional Top/Left/Height creates a
-        # placeholder page on PDF export.
-        if (
-            child.width <= 0
-            and child.height <= 0
-            and not (child.children or [])
-            and not (child.fields or [])
-        ):
-            continue
-        _emit_frame(
-            body_items, child, report, embedded_index, 0.0, 0.0,
-            dataset_name=main.name, audit_notes=None,
-        )
+    # --- Pull values out of section_main (no _emit_frame call!) ---
+    classified = _classify_section_main_fields(section_main)
+    ds = main.name
 
-    # KeepTogether on the body Rectangle: per RDL 2008/01 schema this
-    # element comes AFTER ReportItems and BEFORE Top/Left/Height/Width.
-    # It tells the renderer to keep the entire body block on one page
-    # when paging, so the cert body and the two wallet cards stay
-    # together per permit iteration (Problem 3 in the bug report).
+    # --- Title block (single CanGrow textbox, 3 lines via vbCrLf) ---
+    title_lines = classified["title_lines"] or [
+        "STATE", "DEPARTMENT", "LICENSE",
+    ]
+    title_field = classified["title_field"]
+    title_lines = [ln for ln in title_lines if not ln.startswith("&")]
+    if not title_lines:
+        title_lines = ["LICENSE"]
+    safe_lines = [_q_safe(ln) for ln in title_lines[:3]]
+    title_expr = "=" + " & vbCrLf & ".join(
+        '"' + s + '"' for s in safe_lines
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_Title", title_expr, True,
+        top_in=0.00, height_in=0.90, width_in=list_width,
+        font_size=(title_field.font_size if title_field else 18) or 18,
+        bold=True, align="center",
+    )
+
+    # --- License type (perm_type) ---
+    pt_val, pt_is_expr = _textbox_value_from_field(
+        classified["perm_type"], report, ds
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_PermType", pt_val, pt_is_expr,
+        top_in=0.92, height_in=0.22, width_in=list_width,
+        font_size=14, bold=True, align="center",
+    )
+
+    # --- PERMIT NUMBER (big bold centered) ---
+    perm_val, perm_is_expr = _textbox_value_from_field(
+        classified["permit_field"], report, ds
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_PermitNum", perm_val, perm_is_expr,
+        top_in=1.18, height_in=0.45, width_in=list_width,
+        font_size=22, bold=True, align="center",
+    )
+
+    # --- Permittee block (operator + address) ---
+    permittee_val, permittee_is_expr = _textbox_value_from_field(
+        classified["permittee_field"], report, ds
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_Permittee", permittee_val, permittee_is_expr,
+        top_in=1.68, height_in=0.70, width_in=list_width,
+        font_size=14, bold=True, align="center",
+    )
+
+    # --- "Is licensed to operate / located at" combined ---
+    site_text_val, site_text_is_expr = _textbox_value_from_field(
+        classified["site_text"], report, ds
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_SiteText", site_text_val, site_text_is_expr,
+        top_in=2.42, height_in=0.55, width_in=list_width,
+        font_size=11, bold=False, align="center",
+    )
+
+    # --- Site address line ---
+    site_addr_val, site_addr_is_expr = _textbox_value_from_field(
+        classified["site_addr_field"], report, ds
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_SiteAddr", site_addr_val, site_addr_is_expr,
+        top_in=3.00, height_in=0.65, width_in=list_width,
+        font_size=14, bold=True, align="center",
+    )
+
+    # --- For the period <dates> ---
+    dates_val, dates_is_expr = _textbox_value_from_field(
+        classified["perm_dates"], report, ds
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_PermDates", dates_val, dates_is_expr,
+        top_in=3.70, height_in=0.55, width_in=list_width,
+        font_size=11, bold=False, align="center",
+    )
+
+    # --- Legal disclaimer (longest static text) ---
+    legal_val, legal_is_expr = _textbox_value_from_field(
+        classified["legal_text"], report, ds
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_Legal", legal_val, legal_is_expr,
+        top_in=4.30, height_in=3.25, width_in=list_width,
+        font_size=9, bold=False, align="left",
+    )
+
+    # --- Transfer / renewal-due notice ---
+    transfer_val, transfer_is_expr = _textbox_value_from_field(
+        classified["transfer_text"], report, ds
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_Transfer", transfer_val, transfer_is_expr,
+        top_in=7.60, height_in=0.25, width_in=list_width,
+        font_size=8, bold=True, align="center",
+    )
+
+    # --- Signature line + signer block ---
+    sig_val, sig_is_expr = _textbox_value_from_field(
+        classified["signature_text"], report, ds
+    )
+    _emit_stacked_textbox(
+        body_items, "Tb_Sig", sig_val, sig_is_expr,
+        top_in=7.90, height_in=0.85, width_in=list_width,
+        font_size=10, bold=False, align="left",
+    )
+
+    # --- Two wallet cards (side-by-side rectangles) ---
+    def _emit_card(rect_name: str, card_fields, top_in: float, left_in: float,
+                   width_in: float, height_in: float) -> None:
+        card = _sub(body_items, "Rectangle")
+        card.set("Name", rect_name)
+        card_items = _sub(card, "ReportItems")
+
+        # Pick best-known card sub-fields by text content.
+        card_lines: List[Tuple[Optional[LayoutField], int, bool]] = []
+        # We want: state/year line, permit type, permit number,
+        # permittee block, expires line. Use first match by heuristic.
+        state_field = None
+        type_field = None
+        num_field = None
+        site_field = None
+        exp_field = None
+        for f in card_fields:
+            t_up = (f.text or "").upper()
+            n_up = (f.name or "").upper()
+            if "STATE" in t_up and state_field is None:
+                state_field = f
+                continue
+            if "&PERMIT" in t_up and num_field is None:
+                num_field = f
+                continue
+            if ("&PERM_TYPE" in t_up or "PERM_TYPE" in n_up) and type_field is None:
+                type_field = f
+                continue
+            if ("EXPIRES" in t_up or "EXP_DATE" in t_up) and exp_field is None:
+                exp_field = f
+                continue
+            if "&CF_PERMITTEES" in t_up or "CP_OPERATE" in t_up:
+                if site_field is None:
+                    site_field = f
+                continue
+
+        rows_spec = [
+            (state_field, 0.00, 0.22, 9, True, "center"),
+            (type_field,  0.22, 0.20, 9, True, "center"),
+            (num_field,   0.42, 0.30, 12, True, "center"),
+            (site_field,  0.72, 0.45, 8, True, "center"),
+            (exp_field,   1.17, 0.20, 8, False, "center"),
+        ]
+        for idx, (fld, top, h, fs, bold, align) in enumerate(rows_spec):
+            v, is_expr = _textbox_value_from_field(fld, report, ds)
+            _emit_stacked_textbox(
+                card_items, f"{rect_name}_Row{idx}", v, is_expr,
+                top_in=top, height_in=h, width_in=width_in - 0.2,
+                left_in=0.10,
+                font_size=fs, bold=bold, align=align,
+            )
+
+        _sub(card, "KeepTogether", "true")
+        _sub(card, "Top", _in(top_in))
+        _sub(card, "Left", _in(left_in))
+        _sub(card, "Height", _in(height_in))
+        _sub(card, "Width", _in(width_in))
+        card_style = _sub(card, "Style")
+        # Light border so the wallet card reads as a card
+        border = _sub(card_style, "Border")
+        _sub(border, "Style", "Solid")
+        _sub(border, "Width", "0.5pt")
+
+    _emit_card(
+        "Rect_CardL", classified["card_l_fields"],
+        top_in=8.80, left_in=0.00, width_in=3.50, height_in=1.40,
+    )
+    _emit_card(
+        "Rect_CardR", classified["card_r_fields"],
+        top_in=8.80, left_in=4.00, width_in=3.50, height_in=1.40,
+    )
+
+    # Rectangle KeepTogether + geometry (after ReportItems, before Top/etc.).
     _sub(body_rect, "KeepTogether", "true")
     _sub(body_rect, "Top", "0in")
     _sub(body_rect, "Left", "0in")
-    _sub(body_rect, "Height", _in(list_height))
+    _sub(body_rect, "Height", _in(body_height))
     _sub(body_rect, "Width", _in(list_width))
     _sub(body_rect, "Style")
 
-    # NOTE: do NOT add <Style> as a direct child of <CellContents>.
-    # Per the SSRS 2008/01 RDL schema, CellContents allows only
-    # {ColSpan, RowSpan} plus one ReportItem (here the Rectangle above).
-    # Adding <Style> here triggers an "invalid child element 'Style'"
-    # deserialization error on upload to the report server.
-
+    # Column/row hierarchy and detail group (unchanged structurally).
     col_hier = _sub(list_el, "TablixColumnHierarchy")
     col_members = _sub(col_hier, "TablixMembers")
     _sub(col_members, "TablixMember")
@@ -1536,20 +1959,14 @@ def _build_certificate_body(
     _sub(detail_member, "Group").set("Name", "Details_Permit")
 
     _sub(list_el, "DataSetName", _safe(main.name))
-    # KeepTogether on the Tablix: per RDL 2008/01 schema this element
-    # comes AFTER DataSetName (and after PageBreak/Filters/SortExpressions
-    # if those were present) but BEFORE Top/Left/Height/Width/Style. It
-    # tells the renderer that each detail-group iteration (= one permit
-    # row in the certificate report) should stay on a single page, which
-    # eliminates the mid-permit blank-page split that Problem 2 describes.
     _sub(list_el, "KeepTogether", "true")
     _sub(list_el, "Top", "0in")
     _sub(list_el, "Left", "0in")
-    _sub(list_el, "Height", _in(list_height))
+    _sub(list_el, "Height", _in(body_height))
     _sub(list_el, "Width", _in(list_width))
-    list_style = _sub(list_el, "Style")
+    _sub(list_el, "Style")
 
-    body_height_in = max(list_height + 0.25, 1.0)
+    body_height_in = body_height + 0.25
     _sub(body, "Height", _in(body_height_in))
     _sub(body, "Style")
     return body, list_width, body_height_in
