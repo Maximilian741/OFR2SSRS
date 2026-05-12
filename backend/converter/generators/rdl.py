@@ -830,6 +830,100 @@ def _field_value_for(
     return f"=Fields!{_safe(name)}.Value"
 
 
+_UNSCOPED_FIELDS_RE = re.compile(r"Fields!([A-Za-z_][A-Za-z0-9_]*)\.Value")
+
+
+def _build_field_owner_map(report: ParsedReport) -> dict:
+    """Return {field_name_upper: dataset_name} from all declared queries.
+
+    Used to look up which dataset declares a Fields!X.Value reference so
+    we can wrap aggregates with an explicit scope when the host element
+    is outside any Tablix (page header/footer/body-not-in-list).
+    """
+    owner: dict = {}
+    for q in (report.queries or []):
+        for it in (q.items or []):
+            if not getattr(it, "name", None):
+                continue
+            owner.setdefault(it.name.upper(), q.name or "")
+    return owner
+
+
+def _wrap_unscoped_aggregates(
+    expr: str,
+    report: ParsedReport,
+    in_tablix_scope: bool,
+) -> str:
+    """Wrap bare =Fields!X.Value references in First(..., "DS") when the
+    enclosing element is outside any data region (in_tablix_scope=False).
+
+    SSRS requires every Fields! reference in page header/footer/body-direct
+    items to be wrapped in an aggregate that carries an explicit dataset
+    scope. Without it, upload fails with:
+      "The Value expression ... references a field in an aggregate
+       expression without a scope."
+
+    Idempotent: a Fields!X.Value already wrapped (e.g. by an existing
+    First(..., "DS") call) is left alone -- the regex only touches bare
+    occurrences not already preceded by an aggregate+open-paren and not
+    immediately followed by a scope arg.
+    """
+    if in_tablix_scope:
+        return expr
+    if not expr or "Fields!" not in expr:
+        return expr
+    owner = _build_field_owner_map(report)
+
+    AGG_NAMES = ("First", "Last", "Sum", "Avg", "Min", "Max", "Count",
+                 "CountDistinct", "CountRows", "StDev", "StDevP",
+                 "Var", "VarP")
+
+    def _already_scoped(text: str, match: re.Match) -> bool:
+        # Check whether the Fields!X.Value match is already inside an
+        # aggregate call that supplies a scope argument. We scan backwards
+        # for an aggregate name + "(" and forward for "," "<DS>" before ")".
+        # This is heuristic but only fails open (leaves the expression
+        # unchanged) -- preflight will still catch missed cases.
+        before = text[: match.start()]
+        # Look at the last aggregate-name token + "(" before this match.
+        m_open = re.search(
+            r"(" + "|".join(AGG_NAMES) + r")\s*\(\s*$",
+            before,
+        )
+        if not m_open:
+            return False
+        # Find the matching closing paren after this match.
+        depth = 1
+        i = match.end()
+        scope_arg = ""
+        while i < len(text) and depth > 0:
+            ch = text[i]
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif ch == "," and depth == 1:
+                scope_arg = text[i + 1 :].lstrip()
+                break
+            i += 1
+        return bool(re.match(r'"[^"]+"', scope_arg))
+
+    def _replace(m: re.Match) -> str:
+        field = m.group(1)
+        if _already_scoped(expr, m):
+            return m.group(0)
+        ds = owner.get(field.upper(), "")
+        if not ds:
+            # No declared dataset for this field -- leave alone; preflight
+            # will surface it.
+            return m.group(0)
+        return f'First(Fields!{field}.Value, "{ds}")'
+
+    return _UNSCOPED_FIELDS_RE.sub(_replace, expr)
+
+
 def _apply_field_style(style_el: ET.Element, lf) -> None:
     """Apply font/color attributes to a TextRun <Style>.
 
@@ -1009,6 +1103,7 @@ def _emit_layout_field(
     name_prefix: str = "",
     dataset_name: str = "",
     audit_notes: Optional[List[str]] = None,
+    in_tablix_scope: bool = True,
 ) -> None:
     kind = (lf.kind or "field").lower()
     if lf.width <= 0 and lf.height <= 0 and not lf.text and not lf.source:
@@ -1032,6 +1127,8 @@ def _emit_layout_field(
         value, is_expr = _resolve_text_expression(
             text, report, dataset_name=dataset_name, audit_notes=audit_notes
         )
+        if is_expr:
+            value = _wrap_unscoped_aggregates(value, report, in_tablix_scope)
         _emit_positioned_textbox(parent, name, value, is_expr, lf, origin_x, origin_y)
         return
     value = _field_value_for(
@@ -1041,6 +1138,7 @@ def _emit_layout_field(
         value = lf.text or lf.source or ""
         _emit_positioned_textbox(parent, name, value, False, lf, origin_x, origin_y)
         return
+    value = _wrap_unscoped_aggregates(value, report, in_tablix_scope)
     _emit_positioned_textbox(parent, name, value, True, lf, origin_x, origin_y)
 
 
@@ -1053,6 +1151,7 @@ def _emit_frame(
     parent_y: float,
     dataset_name: str = "",
     audit_notes: Optional[List[str]] = None,
+    in_tablix_scope: bool = True,
 ) -> None:
     # Frames bound to a query introduce their own dataset scope for any
     # &TOKEN / :TOKEN references inside their fields.
@@ -1063,11 +1162,13 @@ def _emit_frame(
         for f in frame.fields or []:
             _emit_layout_field(parent_items, f, report, embedded_index,
                                rect_origin_x, rect_origin_y,
-                               dataset_name=scope_ds, audit_notes=audit_notes)
+                               dataset_name=scope_ds, audit_notes=audit_notes,
+                               in_tablix_scope=in_tablix_scope)
         for child in frame.children or []:
             _emit_frame(parent_items, child, report, embedded_index,
                         rect_origin_x, rect_origin_y,
-                        dataset_name=scope_ds, audit_notes=audit_notes)
+                        dataset_name=scope_ds, audit_notes=audit_notes,
+                        in_tablix_scope=in_tablix_scope)
         return
 
     rect = _sub(parent_items, "Rectangle")
@@ -1087,7 +1188,8 @@ def _emit_frame(
     for f in frame.fields or []:
         _emit_layout_field(inner_items, f, report, embedded_index,
                            frame_origin_x, frame_origin_y,
-                           dataset_name=scope_ds, audit_notes=audit_notes)
+                           dataset_name=scope_ds, audit_notes=audit_notes,
+                           in_tablix_scope=in_tablix_scope)
 
     for child in frame.children or []:
         child_kind = (child.kind or "").lower()
@@ -1102,12 +1204,14 @@ def _emit_frame(
                 _emit_layout_field(child_inner, cf, report, embedded_index,
                                    child.x, child.y,
                                    dataset_name=child_scope_ds,
-                                   audit_notes=audit_notes)
+                                   audit_notes=audit_notes,
+                                   in_tablix_scope=in_tablix_scope)
             for grand in child.children or []:
                 _emit_frame(child_inner, grand, report, embedded_index,
                             child.x, child.y,
                             dataset_name=child_scope_ds,
-                            audit_notes=audit_notes)
+                            audit_notes=audit_notes,
+                            in_tablix_scope=in_tablix_scope)
             if len(list(child_inner)) > 0:
                 child_rect.append(child_inner)
             _sub(child_rect, "Top", _in(max(0.0, child.y - frame_origin_y)))
@@ -1132,7 +1236,8 @@ def _emit_frame(
             _emit_frame(inner_items, child, report, embedded_index,
                         frame_origin_x, frame_origin_y,
                         dataset_name=child_scope_ds,
-                        audit_notes=audit_notes)
+                        audit_notes=audit_notes,
+                        in_tablix_scope=in_tablix_scope)
 
     # Attach the inner ReportItems only when it has actual content. An
     # empty <ReportItems/> is a schema violation in RDL 2008/01.
@@ -1365,7 +1470,17 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0) -> ET.Elemen
         img = _sub(pf_items, "Image")
         img.set("Name", "Img_Sig")
         _sub(img, "Source", "Database")
-        _sub(img, "Value", '=First(Fields!' + _safe(sf) + '.Value)')
+        # Page footer is OUTSIDE any data region, so aggregate Fields! refs
+        # MUST carry an explicit dataset scope or SSRS rejects upload with:
+        #   "The Value expression for the image 'Img_Sig' references a field
+        #    in an aggregate expression without a scope. A scope is required
+        #    for all aggregates in the page header or footer which reference
+        #    fields."
+        _sub(
+            img,
+            "Value",
+            f'=First(Fields!{_safe(sf)}.Value, "{_safe(sig_q.name)}")',
+        )
         _sub(img, "MIMEType", "image/png")
         _sub(img, "Sizing", "FitProportional")
         _sub(img, "Top", "0.05in")

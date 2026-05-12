@@ -491,6 +491,67 @@ def preflight_audit(rdl_xml: str) -> Dict:
                         f"=Parameters!P_{field_name}.Value.",
                     ))
 
+    # 9d) Unscoped aggregate Fields! reference. Every <Image>/<Textbox>
+    # whose Value expression references Fields!X.Value MUST be either
+    # inside a Tablix (so the data region supplies the scope) or wrap the
+    # Fields! reference in an aggregate function with an explicit dataset
+    # scope argument. Page header/footer items and body items not under a
+    # Tablix all need explicit scope or SSRS rejects upload with:
+    #   "The Value expression for the image 'Img_Sig' references a field
+    #    in an aggregate expression without a scope. A scope is required
+    #    for all aggregates in the page header or footer which reference
+    #    fields."
+    AGG_FUNCS = ("First", "Last", "Sum", "Avg", "Min", "Max", "Count",
+                 "CountDistinct", "CountRows", "StDev", "StDevP",
+                 "Var", "VarP", "RunningValue", "Aggregate")
+    agg_alt = "|".join(AGG_FUNCS)
+
+    def _is_scoped(expr: str, field_name: str) -> bool:
+        # Strict match: <Agg>(... Fields!<X>.Value [...optional...] , "<DS>" )
+        pat = (
+            r"(?:" + agg_alt + r")\s*\(" +
+            r"[^()]*?Fields!" + re.escape(field_name) + r"\.Value" +
+            r"[^()]*?,\s*\"[^\"]+\"\s*\)"
+        )
+        return bool(re.search(pat, expr))
+
+    # Pre-compute "is this element inside a Tablix?" by walking down
+    # from each Tablix and collecting id()'s of descendants.
+    in_tablix_ids: set = set()
+    for tx in find_all(tree, "Tablix"):
+        for desc in tx.iter():
+            in_tablix_ids.add(id(desc))
+
+    fields_ref_re = re.compile(r"Fields!([A-Za-z_][A-Za-z0-9_]*)\.Value")
+
+    for tag_name in ("Image", "Textbox"):
+        for el in find_all(tree, tag_name):
+            if id(el) in in_tablix_ids:
+                continue
+            el_name = el.get("Name", "?")
+            for v in find_all(el, "Value"):
+                txt = (v.text or "")
+                if "Fields!" not in txt:
+                    continue
+                seen: set = set()
+                for m in fields_ref_re.finditer(txt):
+                    fname = m.group(1)
+                    if fname in seen:
+                        continue
+                    seen.add(fname)
+                    if _is_scoped(txt, fname):
+                        continue
+                    issues.append((
+                        "BLOCKER",
+                        f"rdl.unscoped_aggregate.{tag_name.lower()}.{el_name}",
+                        f"{tag_name} {el_name!r} is outside any data region "
+                        f"but references Fields!{fname}.Value without an "
+                        f"aggregate scope. Wrap as "
+                        f'First(Fields!{fname}.Value, "<DataSetName>"). '
+                        f"SSRS otherwise fails upload with 'references a "
+                        f"field in an aggregate expression without a scope'.",
+                    ))
+
     # 10) Size unit sanity
     size_re = re.compile(
         r"<(Width|Height|TopMargin|BottomMargin|LeftMargin|RightMargin|PageWidth|PageHeight)>([^<]+)</\1>"
