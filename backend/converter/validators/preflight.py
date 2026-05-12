@@ -296,7 +296,73 @@ def preflight_audit(rdl_xml: str) -> Dict:
             f"'{val} is not a valid value'.",
         ))
 
-    # 10) Size unit sanity
+    # 3c) Expression scope validity. Every textbox <Value> expression that
+    # references =Fields!X.Value must live inside a data region (Tablix) and
+    # X must be in that Tablix's bound DataSet <Fields> list. References to
+    # parameter values must use =Parameters!P_X.Value. This catches the
+    # exact upload error:
+    #   "The Value expression for the text box 'Tb_X' refers to the field
+    #    'Y'. Report item expressions can only refer to fields within the
+    #    current dataset scope ..."
+    fields_re = re.compile(r"=\s*Fields!([A-Za-z_][A-Za-z0-9_]*)\.Value", re.IGNORECASE)
+
+    # Build dataset -> set(field names) map for scope checks.
+    ds_fields: Dict[str, set] = {}
+    for ds in datasets:
+        ds_name = ds.get("Name", "")
+        names: set = set()
+        for f in find_all(ds, "Field"):
+            n = f.get("Name", "")
+            if n:
+                names.add(n)
+        ds_fields[ds_name] = names
+
+    # Walk each Tablix and collect its DataSetName + the set of textbox
+    # names directly under that tablix's CellContents (so we know which
+    # textboxes are "in scope").
+    tablix_scope: Dict[str, str] = {}  # textbox name -> dataset name
+    for tx in find_all(tree, "Tablix"):
+        dsn_el = tx.find(NS + "DataSetName") if NS else tx.find("DataSetName")
+        dsn = (dsn_el.text or "").strip() if dsn_el is not None else ""
+        if not dsn:
+            continue
+        for tb in find_all(tx, "Textbox"):
+            tb_name = tb.get("Name", "")
+            if tb_name:
+                tablix_scope[tb_name] = dsn
+
+    # Now check every textbox in the tree.
+    for tb in find_all(tree, "Textbox"):
+        tb_name = tb.get("Name", "?")
+        # Read every <Value> text inside this textbox.
+        for v in find_all(tb, "Value"):
+            txt = (v.text or "")
+            if "Fields!" not in txt:
+                continue
+            for m in fields_re.finditer(txt):
+                field_name = m.group(1)
+                dsn = tablix_scope.get(tb_name, "")
+                if not dsn:
+                    issues.append((
+                        "BLOCKER",
+                        f"rdl.expr_scope.outside_dataset.{tb_name}",
+                        f"Textbox {tb_name!r} uses =Fields!{field_name}.Value "
+                        f"but is not inside any data region (no dataset scope). "
+                        f"Maybe meant =Parameters!P_{field_name}.Value.",
+                    ))
+                    continue
+                allowed = ds_fields.get(dsn, set())
+                if field_name not in allowed:
+                    issues.append((
+                        "BLOCKER",
+                        f"rdl.expr_scope.field_missing.{tb_name}",
+                        f"Textbox {tb_name!r} (dataset {dsn!r}) refers to field "
+                        f"'{field_name}', which is not in that dataset's "
+                        f"<Fields> list. Maybe meant "
+                        f"=Parameters!P_{field_name}.Value.",
+                    ))
+
+        # 10) Size unit sanity
     size_re = re.compile(
         r"<(Width|Height|TopMargin|BottomMargin|LeftMargin|RightMargin|PageWidth|PageHeight)>([^<]+)</\1>"
     )

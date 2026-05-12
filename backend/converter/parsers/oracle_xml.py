@@ -289,6 +289,61 @@ def _parse_formulas(data_el, program_units_index: dict, warnings: List[str]) -> 
             )
         except Exception as exc:  # pragma: no cover - defensive
             warnings.append(f"failed to parse formula: {exc}")
+    # Oracle Reports <placeholder> elements are derived/computed values just
+    # like <formula>, but they're populated by a sibling formula's PL/SQL via
+    # ``:CP_X := ...`` assignments instead of having their own body. The RDL
+    # generator needs to know about them so that &CP_X tokens in layout text
+    # don't fall through to a phantom Fields! reference. Treat them as
+    # formulas with an empty body (the user re-implements the assignment
+    # logic in SSRS as a calculated field).
+    for ph in _iter_descendants(data_el, "placeholder"):
+        try:
+            name = _attr(ph, "name")
+            if not name:
+                continue
+            # Skip if a real <formula> with the same name was already collected.
+            if any((f.name or "").upper() == name.upper() for f in formulas):
+                continue
+            return_type = _attr(ph, "datatype", "VARCHAR2")
+            formulas.append(
+                FormulaColumn(
+                    name=name,
+                    return_type=return_type,
+                    plsql_body="",
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            warnings.append(f"failed to parse placeholder: {exc}")
+    # Oracle Reports <summary> elements are aggregate columns (count, sum, etc.).
+    # Like formulas and placeholders, they're computed at run time and don't
+    # appear in any base dataset's column list, so &SUMMARY_NAME tokens in
+    # layout text need to resolve to a literal SSRS expression instead of a
+    # phantom Fields! reference. Re-implementation lands as an SSRS aggregate
+    # function (Sum/Count/Avg) in a calculated field.
+    for sm in _iter_descendants(data_el, "summary"):
+        try:
+            name = _attr(sm, "name")
+            if not name:
+                continue
+            if any((f.name or "").upper() == name.upper() for f in formulas):
+                continue
+            return_type = _attr(sm, "datatype", "NUMBER")
+            func = _attr(sm, "function", "")
+            source_col = _attr(sm, "source", "")
+            note_body = (
+                f"Oracle <summary function={func!r} source={source_col!r}>; "
+                f"re-implement as SSRS aggregate expression"
+                if func or source_col else ""
+            )
+            formulas.append(
+                FormulaColumn(
+                    name=name,
+                    return_type=return_type,
+                    plsql_body=note_body,
+                )
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            warnings.append(f"failed to parse summary: {exc}")
     return formulas
 
 

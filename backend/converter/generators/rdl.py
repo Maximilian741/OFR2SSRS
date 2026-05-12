@@ -547,6 +547,153 @@ def _build_embedded_images(report: ParsedReport) -> Optional[ET.Element]:
 
 _TOKEN_RE = re.compile(r"&([A-Za-z_][A-Za-z0-9_]*)")
 
+# Bind-var refs like :P_RENEWAL_YEAR (Oracle Reports style). Inside dataset
+# CommandText these become @P_X (handled by the translator); outside (i.e. in
+# layout text expressions) they should resolve to =Parameters!P_X.Value.
+_BIND_VAR_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _build_token_resolver(report: ParsedReport):
+    """Return a callable ``resolver(token, dataset_name) -> (kind, ssrs_name, note)``.
+
+    ``kind`` is one of:
+      * "param"            - token resolves to a declared ReportParameter.
+                             ``ssrs_name`` is the canonical declared name
+                             (with P_ prefix). Caller emits
+                             ``=Parameters!P_X.Value``.
+      * "field"            - token resolves to a DataItem in the given
+                             dataset scope. ``ssrs_name`` is the dataset-safe
+                             field name. Caller emits ``=Fields!X.Value``.
+      * "field_other_ds"   - token matches a DataItem in a SIBLING dataset
+                             (not the one bound by the enclosing Tablix).
+                             ``ssrs_name`` is a literal SSRS expression
+                             (a static string placeholder), NOT a field
+                             reference. This keeps the SSRS preflight clean
+                             (no out-of-scope ``Fields!`` reference) while
+                             documenting via ``note`` that the user must
+                             rewire the textbox to the correct dataset
+                             at deploy time.
+      * "formula"          - token matches a FormulaColumn (Oracle CF_*/CP_*
+                             derived value). ``ssrs_name`` is a literal SSRS
+                             expression (a static string placeholder), NOT
+                             a field reference, since SSRS has no native
+                             Oracle Reports formula construct. ``note``
+                             points the user at the PL/SQL body so they
+                             can re-implement as a calculated field.
+      * "field_unverified" - fallback: token does not match any param, any
+                             known DataItem, or any formula. The legacy
+                             behavior of emitting ``=Fields!X.Value`` is
+                             preserved so we don't regress unanalyzable
+                             reports; ``note`` flags the binding as suspect.
+
+    Parameter names are matched both with their declared prefix (P_X, PARM_X)
+    and the bare suffix (X). Matching is case-insensitive; the returned
+    ``ssrs_name`` for params is the canonical declared spelling, so SSRS
+    parameter references use ``=Parameters!P_X.Value`` consistently.
+    """
+    # Build param lookup: bare-upper -> canonical declared name.
+    param_canonical: dict = {}
+    for p in (report.parameters or []):
+        canon = p.name
+        param_canonical[canon.upper()] = canon
+        upper = canon.upper()
+        for prefix in ("P_", "PARM_"):
+            if upper.startswith(prefix):
+                stripped = canon[len(prefix):]
+                if stripped:
+                    param_canonical.setdefault(stripped.upper(), canon)
+
+    # Build dataset-field lookup: dataset_upper -> {field_upper -> canonical}
+    # and an "all fields" map for cross-scope detection that also remembers
+    # the owning dataset name (for the audit message).
+    dataset_fields: dict = {}
+    all_field_owner: dict = {}  # field_upper -> (canonical_name, dataset_name)
+    for q in (report.queries or []):
+        per: dict = {}
+        for it in (q.items or []):
+            if not it.name:
+                continue
+            per[it.name.upper()] = it.name
+            all_field_owner.setdefault(it.name.upper(), (it.name, q.name or ""))
+        dataset_fields[(q.name or "").upper()] = per
+
+    # Build formula lookup: name_upper -> FormulaColumn-like object with
+    # ``.name`` and ``.plsql_body`` attributes. Tolerate a missing
+    # ``formulas`` attribute (older ParsedReport instances).
+    formula_by_name: dict = {}
+    for f in (getattr(report, "formulas", None) or []):
+        fname = getattr(f, "name", "") or ""
+        if not fname:
+            continue
+        formula_by_name.setdefault(fname.upper(), f)
+
+    def resolve(token: str, dataset_name: str = ""):
+        if not token:
+            return ("field_unverified", token, "empty token")
+        u = token.upper()
+        # 1) Declared parameter wins (case-insensitive, with or without prefix).
+        if u in param_canonical:
+            return ("param", param_canonical[u], "")
+        # 2) Field in the enclosing dataset scope.
+        ds_key = (dataset_name or "").upper()
+        if ds_key and ds_key in dataset_fields and u in dataset_fields[ds_key]:
+            return ("field", dataset_fields[ds_key][u], "")
+        # 3) Formula match (Oracle CF_*/CP_*). Emit a literal string expression
+        # so the SSRS scope checker doesn't flag a phantom Fields! reference.
+        if u in formula_by_name:
+            f = formula_by_name[u]
+            canonical = getattr(f, "name", token) or token
+            body_preview = (getattr(f, "plsql_body", "") or "").strip()
+            body_preview = " ".join(body_preview.split())
+            if len(body_preview) > 120:
+                body_preview = body_preview[:117] + "..."
+            literal_expr = (
+                f'="<{canonical} \u2014 populate at deploy time>"'
+            )
+            note = (
+                f"token {token!r} maps to Oracle formula {canonical!r}; "
+                f"SSRS has no native formula construct, emitted a literal "
+                f"placeholder expression. Re-implement the PL/SQL body as "
+                f"an SSRS calculated field. PL/SQL: {body_preview!r}"
+                if body_preview
+                else (
+                    f"token {token!r} maps to Oracle formula {canonical!r}; "
+                    f"emitted a literal placeholder expression. "
+                    f"Re-implement as an SSRS calculated field."
+                )
+            )
+            return ("formula", literal_expr, note)
+        # 4) Field that exists in a DIFFERENT dataset (cross-scope match).
+        # Emitting =Fields!X.Value here would fail SSRS scope validation
+        # because the enclosing Tablix is bound to a different dataset.
+        # Emit a literal placeholder and tell the user to rewire the
+        # textbox into the correct dataset's Tablix at deploy time.
+        if u in all_field_owner:
+            canonical, owner_ds = all_field_owner[u]
+            literal_expr = (
+                f'="<{canonical} \u2014 from dataset {owner_ds}, '
+                f'rewire at deploy time>"'
+            )
+            note = (
+                f"token {token!r} not in dataset {dataset_name!r}; "
+                f"matches DataItem in sibling dataset {owner_ds!r}. "
+                f"Emitted a literal placeholder so SSRS scope validation "
+                f"passes. To populate, move this textbox into the "
+                f"{owner_ds} Tablix (master-detail rewire) or add the "
+                f"field to {dataset_name!r} via a join."
+            )
+            return ("field_other_ds", literal_expr, note)
+        # 5) Fallback - legacy behavior, marked unverified.
+        return (
+            "field_unverified",
+            token,
+            f"token {token!r} not declared as Parameter or DataItem; emitted as Fields!{token}.Value",
+        )
+
+    return resolve
+
+
+
 
 def _find_section_main(report: ParsedReport) -> Optional[LayoutGroup]:
     """Return the section_main LayoutGroup if it has at least one frame child."""
@@ -574,54 +721,113 @@ def _section_by_kind(report: ParsedReport, kind_name: str) -> Optional[LayoutGro
     return None
 
 
-def _resolve_text_expression(text: str, report: ParsedReport) -> Tuple[str, bool]:
-    """Resolve &TOKEN substitutions to either a literal or an SSRS expression.
+def _resolve_text_expression(
+    text: str,
+    report: ParsedReport,
+    dataset_name: str = "",
+    audit_notes: Optional[List[str]] = None,
+) -> Tuple[str, bool]:
+    """Resolve &TOKEN (and :P_TOKEN bind-var) substitutions to either a literal
+    or an SSRS expression.
 
     Returns (value, is_expression). When is_expression=False, value is a literal.
+
+    Routing rules (see _build_token_resolver):
+      &P_X / &X where X is a declared param  -> Parameters!P_X.Value
+      :P_X bind-var (any scope)              -> Parameters!P_X.Value
+      &X where X is a DataItem of dataset_name -> Fields!X.Value
+      otherwise                              -> Fields!X.Value + audit note
     """
     if not text:
         return "", False
-    if "&" not in text:
-        return text, False
-    if not _TOKEN_RE.search(text):
+    has_amp = "&" in text and bool(_TOKEN_RE.search(text))
+    has_bind = ":" in text and bool(_BIND_VAR_RE.search(text))
+    if not has_amp and not has_bind:
         return text, False
 
-    declared_params = {p.name.upper() for p in (report.parameters or [])}
+    resolver = _build_token_resolver(report)
+
+    # Walk a combined pattern (&TOKEN | :TOKEN) so we preserve ordering.
+    combined_re = re.compile(
+        r"(?P<amp>&[A-Za-z_][A-Za-z0-9_]*)|(?P<bind>:[A-Za-z_][A-Za-z0-9_]*)"
+    )
 
     parts: List[str] = []
     last = 0
-    for m in _TOKEN_RE.finditer(text):
+    any_token = False
+    for m in combined_re.finditer(text):
+        any_token = True
         literal_chunk = text[last:m.start()]
         if literal_chunk:
             parts.append('"' + _q_safe(literal_chunk) + '"')
-        token = m.group(1)
-        upper = token.upper()
-        if upper.startswith("P_") or upper in declared_params:
-            parts.append(f"Parameters!{token}.Value")
+        token = (m.group("amp") or m.group("bind"))[1:]
+        kind, name, note = resolver(token, dataset_name)
+        if kind == "param":
+            parts.append(f"Parameters!{name}.Value")
+        elif kind == "field":
+            parts.append(f"Fields!{_safe(name)}.Value")
+            if note and audit_notes is not None:
+                audit_notes.append(note)
+        elif kind in ("formula", "field_other_ds"):
+            # ``name`` is already a complete SSRS expression starting with =
+            # (a literal string placeholder). Strip the leading = since the
+            # outer expression is rebuilt by joining ``parts`` with " & ".
+            literal = name
+            if literal.startswith("="):
+                literal = literal[1:]
+            parts.append(literal)
+            if note and audit_notes is not None:
+                audit_notes.append(note)
         else:
-            parts.append(f"Fields!{_safe(token)}.Value")
+            parts.append(f"Fields!{_safe(name)}.Value")
+            if note and audit_notes is not None:
+                audit_notes.append(note)
         last = m.end()
     tail = text[last:]
     if tail:
         parts.append('"' + _q_safe(tail) + '"')
-    if not parts:
+    if not any_token or not parts:
         return text, False
     expr = "=" + " & ".join(parts)
     return expr, True
 
 
-def _field_value_for(lf: LayoutField, report: ParsedReport) -> str:
-    """Return the SSRS <Value> string for a kind=field LayoutField."""
-    src = (lf.source or lf.text or "").strip()
-    if not src:
+def _field_value_for(
+    lf: LayoutField,
+    report: ParsedReport,
+    dataset_name: str = "",
+    audit_notes: Optional[List[str]] = None,
+) -> str:
+    """Return the SSRS <Value> string for a kind=field LayoutField.
+
+    Routes through _build_token_resolver so that:
+      * a source matching a declared ReportParameter (with or without P_ prefix)
+        emits =Parameters!P_X.Value
+      * a source matching a DataItem in ``dataset_name`` emits =Fields!X.Value
+      * anything else falls back to =Fields!X.Value with an audit note (legacy
+        behavior preserved so we don't regress unanalyzable reports).
+    """
+    raw = (lf.source or lf.text or "").strip()
+    if not raw:
         return ""
-    declared_params = {p.name.upper() for p in (report.parameters or [])}
+    # Strip leading & or : the caller may have left on the source string.
+    src = raw.lstrip("&:")
     upper = src.upper()
     if upper == "CURRENTDATE" or upper == "CURRENT_DATE":
         return "=Globals!ExecutionTime"
-    if upper.startswith("P_") or upper in declared_params:
-        return f"=Parameters!{src}.Value"
-    return f"=Fields!{_safe(src)}.Value"
+    resolver = _build_token_resolver(report)
+    kind, name, note = resolver(src, dataset_name)
+    if kind == "param":
+        return f"=Parameters!{name}.Value"
+    if kind in ("formula", "field_other_ds"):
+        # ``name`` is already a full SSRS expression (e.g. ="<...>") that is
+        # a safe literal — emit it verbatim, NOT wrapped in Fields!.
+        if note and audit_notes is not None:
+            audit_notes.append(note)
+        return name
+    if note and audit_notes is not None:
+        audit_notes.append(note)
+    return f"=Fields!{_safe(name)}.Value"
 
 
 def _apply_field_style(style_el: ET.Element, lf) -> None:
@@ -761,6 +967,8 @@ def _emit_layout_field(
     origin_x: float,
     origin_y: float,
     name_prefix: str = "",
+    dataset_name: str = "",
+    audit_notes: Optional[List[str]] = None,
 ) -> None:
     kind = (lf.kind or "field").lower()
     if lf.width <= 0 and lf.height <= 0 and not lf.text and not lf.source:
@@ -781,10 +989,14 @@ def _emit_layout_field(
         return
     if kind == "text":
         text = lf.text or lf.source or ""
-        value, is_expr = _resolve_text_expression(text, report)
+        value, is_expr = _resolve_text_expression(
+            text, report, dataset_name=dataset_name, audit_notes=audit_notes
+        )
         _emit_positioned_textbox(parent, name, value, is_expr, lf, origin_x, origin_y)
         return
-    value = _field_value_for(lf, report)
+    value = _field_value_for(
+        lf, report, dataset_name=dataset_name, audit_notes=audit_notes
+    )
     if not value:
         value = lf.text or lf.source or ""
         _emit_positioned_textbox(parent, name, value, False, lf, origin_x, origin_y)
@@ -799,16 +1011,23 @@ def _emit_frame(
     embedded_index: dict,
     parent_x: float,
     parent_y: float,
+    dataset_name: str = "",
+    audit_notes: Optional[List[str]] = None,
 ) -> None:
+    # Frames bound to a query introduce their own dataset scope for any
+    # &TOKEN / :TOKEN references inside their fields.
+    scope_ds = frame.source_query or dataset_name
     if frame.width <= 0 and frame.height <= 0:
         rect_origin_x = parent_x
         rect_origin_y = parent_y
         for f in frame.fields or []:
             _emit_layout_field(parent_items, f, report, embedded_index,
-                               rect_origin_x, rect_origin_y)
+                               rect_origin_x, rect_origin_y,
+                               dataset_name=scope_ds, audit_notes=audit_notes)
         for child in frame.children or []:
             _emit_frame(parent_items, child, report, embedded_index,
-                        rect_origin_x, rect_origin_y)
+                        rect_origin_x, rect_origin_y,
+                        dataset_name=scope_ds, audit_notes=audit_notes)
         return
 
     rect = _sub(parent_items, "Rectangle")
@@ -820,20 +1039,26 @@ def _emit_frame(
 
     for f in frame.fields or []:
         _emit_layout_field(inner_items, f, report, embedded_index,
-                           frame_origin_x, frame_origin_y)
+                           frame_origin_x, frame_origin_y,
+                           dataset_name=scope_ds, audit_notes=audit_notes)
 
     for child in frame.children or []:
         child_kind = (child.kind or "").lower()
+        child_scope_ds = child.source_query or scope_ds
         if child_kind in ("frame", "repeating_frame"):
             child_rect = _sub(inner_items, "Rectangle")
             child_rect.set("Name", f"Rect_{_safe(child.name) or 'SubFrame'}")
             child_inner = _sub(child_rect, "ReportItems")
             for cf in child.fields or []:
                 _emit_layout_field(child_inner, cf, report, embedded_index,
-                                   child.x, child.y)
+                                   child.x, child.y,
+                                   dataset_name=child_scope_ds,
+                                   audit_notes=audit_notes)
             for grand in child.children or []:
                 _emit_frame(child_inner, grand, report, embedded_index,
-                            child.x, child.y)
+                            child.x, child.y,
+                            dataset_name=child_scope_ds,
+                            audit_notes=audit_notes)
             _sub(child_rect, "Top", _in(max(0.0, child.y - frame_origin_y)))
             _sub(child_rect, "Left", _in(max(0.0, child.x - frame_origin_x)))
             _sub(child_rect, "Height", _in(child.height if child.height > 0 else 0.5))
@@ -854,7 +1079,9 @@ def _emit_frame(
                 _sub(cborder, "Color", child_bc)
         else:
             _emit_frame(inner_items, child, report, embedded_index,
-                        frame_origin_x, frame_origin_y)
+                        frame_origin_x, frame_origin_y,
+                        dataset_name=child_scope_ds,
+                        audit_notes=audit_notes)
 
     rel_x = max(0.0, frame.x - parent_x)
     rel_y = max(0.0, frame.y - parent_y)
@@ -941,7 +1168,10 @@ def _build_certificate_body(
             continue
         if child.width <= 0 and child.height <= 0:
             continue
-        _emit_frame(body_items, child, report, embedded_index, 0.0, 0.0)
+        _emit_frame(
+            body_items, child, report, embedded_index, 0.0, 0.0,
+            dataset_name=main.name, audit_notes=None,
+        )
 
     _sub(body_rect, "Top", "0in")
     _sub(body_rect, "Left", "0in")
