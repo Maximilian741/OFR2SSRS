@@ -349,6 +349,28 @@ def _pick_group_key(query: DataQuery, candidates: Iterable[str]) -> Optional[str
     return query.items[0].name
 
 
+def _find_group_for_query(report: ParsedReport, query_name: str) -> Optional[LayoutGroup]:
+    """Return the first LayoutGroup whose source_query matches query_name."""
+    target = (query_name or "").upper()
+    if not target:
+        return None
+
+    def walk(group: LayoutGroup) -> Optional[LayoutGroup]:
+        if (group.source_query or "").upper() == target:
+            return group
+        for child in group.children or []:
+            hit = walk(child)
+            if hit is not None:
+                return hit
+        return None
+
+    for g in report.layout or []:
+        hit = walk(g)
+        if hit is not None:
+            return hit
+    return None
+
+
 def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     columns = _column_names_for_main(report, main)
     if not columns:
@@ -356,6 +378,18 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
 
     tablix = ET.Element(_q("Tablix"))
     tablix.set("Name", "Tablix_Main")
+
+    # If the layout has a repeating frame for this query and it carries a
+    # background_color, use that for the header band; otherwise fall back
+    # to the default LightSteelBlue.
+    main_group = _find_group_for_query(report, main.name)
+    header_bg = "LightSteelBlue"
+    detail_bg = ""
+    if main_group is not None:
+        gb = getattr(main_group, "background_color", "")
+        if gb:
+            header_bg = gb
+            detail_bg = gb
 
     # Determine if a master-detail nested group should be emitted.
     detail_query = _pick_detail_query(report, main.name)
@@ -382,7 +416,7 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             f"Hdr_{_safe(col)}",
             col.replace("_", " "),
             bold=True,
-            bg="LightSteelBlue",
+            bg=header_bg,
         )
 
     # Detail row
@@ -396,6 +430,7 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             contents,
             f"Cell_{_safe(col)}",
             f"=Fields!{_safe(col)}.Value",
+            bg=detail_bg or None,
         )
 
     # TablixColumnHierarchy
@@ -589,19 +624,42 @@ def _field_value_for(lf: LayoutField, report: ParsedReport) -> str:
     return f"=Fields!{_safe(src)}.Value"
 
 
-def _apply_field_style(style_el: ET.Element, lf: LayoutField) -> None:
-    if lf.font_size:
+def _apply_field_style(style_el: ET.Element, lf) -> None:
+    """Apply font/color attributes to a TextRun <Style>.
+
+    Note: BackgroundColor and Border belong on the outer Textbox <Style>,
+    not the TextRun <Style>; use _apply_textbox_style for those.
+    """
+    if getattr(lf, "font_size", None):
         _sub(style_el, "FontSize", f"{int(lf.font_size)}pt")
-    if lf.font_family:
+    if getattr(lf, "font_family", ""):
         _sub(style_el, "FontFamily", lf.font_family)
-    if lf.bold:
+    if getattr(lf, "bold", False):
         _sub(style_el, "FontWeight", "Bold")
-    if lf.italic:
+    if getattr(lf, "italic", False):
         _sub(style_el, "FontStyle", "Italic")
-    if lf.color:
-        _sub(style_el, "Color", lf.color)
-    if lf.align:
+    # Foreground/text color: prefer `color`, fall back to `foreground_color`.
+    fg = getattr(lf, "color", "") or getattr(lf, "foreground_color", "")
+    if fg:
+        _sub(style_el, "Color", fg)
+    if getattr(lf, "align", ""):
         _sub(style_el, "TextAlign", lf.align.capitalize())
+
+
+def _apply_textbox_style(tb_style_el: ET.Element, lf) -> None:
+    """Apply BackgroundColor + Border (and padding) onto the Textbox <Style>.
+
+    Defensive on attribute access so this works whether or not Agent A has
+    added background_color / border_color yet.
+    """
+    bg = getattr(lf, "background_color", "")
+    if bg:
+        _sub(tb_style_el, "BackgroundColor", bg)
+    bc = getattr(lf, "border_color", "")
+    if bc:
+        border = _sub(tb_style_el, "Border")
+        _sub(border, "Color", bc)
+        _sub(border, "Style", "Solid")
 
 
 def _emit_positioned_textbox(
@@ -634,6 +692,7 @@ def _emit_positioned_textbox(
     _sub(tb, "Width", _in(lf.width if lf.width > 0 else 1.0))
     _sub(tb, "Height", _in(lf.height if lf.height > 0 else 0.2))
     tb_style = _sub(tb, "Style")
+    _apply_textbox_style(tb_style, lf)
     _sub(tb_style, "PaddingLeft", "1pt")
     _sub(tb_style, "PaddingRight", "1pt")
     _sub(tb_style, "PaddingTop", "1pt")
@@ -755,11 +814,19 @@ def _emit_frame(
             _sub(child_rect, "Height", _in(child.height if child.height > 0 else 0.5))
             _sub(child_rect, "Width", _in(child.width if child.width > 0 else 1.0))
             cstyle = _sub(child_rect, "Style")
+            child_bg = getattr(child, "background_color", "")
+            if child_bg:
+                _sub(cstyle, "BackgroundColor", child_bg)
+            child_bc = getattr(child, "border_color", "")
             if (child.border_width or 0) > 0:
                 cborder = _sub(cstyle, "Border")
                 _sub(cborder, "Style", "Solid")
-                _sub(cborder, "Color", "Black")
+                _sub(cborder, "Color", child_bc or "Black")
                 _sub(cborder, "Width", "1pt")
+            elif child_bc:
+                cborder = _sub(cstyle, "Border")
+                _sub(cborder, "Style", "Solid")
+                _sub(cborder, "Color", child_bc)
         else:
             _emit_frame(inner_items, child, report, embedded_index,
                         frame_origin_x, frame_origin_y)
@@ -771,11 +838,19 @@ def _emit_frame(
     _sub(rect, "Height", _in(frame.height))
     _sub(rect, "Width", _in(frame.width))
     rstyle = _sub(rect, "Style")
+    frame_bg = getattr(frame, "background_color", "")
+    if frame_bg:
+        _sub(rstyle, "BackgroundColor", frame_bg)
+    frame_bc = getattr(frame, "border_color", "")
     if (frame.border_width or 0) > 0:
         rborder = _sub(rstyle, "Border")
         _sub(rborder, "Style", "Solid")
-        _sub(rborder, "Color", "Black")
+        _sub(rborder, "Color", frame_bc or "Black")
         _sub(rborder, "Width", f"{max(0.5, frame.border_width):.2f}pt")
+    elif frame_bc:
+        rborder = _sub(rstyle, "Border")
+        _sub(rborder, "Style", "Solid")
+        _sub(rborder, "Color", frame_bc)
 
 
 def _certificate_extents(section_main: LayoutGroup) -> Tuple[float, float]:
@@ -813,8 +888,13 @@ def _build_certificate_body(
     list_width = max(section_main.width or 0.0, extent_w, 7.5)
     list_height = max(section_main.height or 0.0, extent_h, 1.0)
 
-    list_el = _sub(items, "List")
-    list_el.set("Name", "List_Permit")
+    # 2008+ SSRS dropped <List>, <Table>, <Matrix> in favor of a unified
+    # <Tablix>. A "list" is just a Tablix with one column, one row, and a
+    # single detail row group — exactly what we build below. Emitting <List>
+    # under the 2008/01 namespace causes "invalid child element 'List'"
+    # deserialization errors on the report server.
+    list_el = _sub(items, "Tablix")
+    list_el.set("Name", "Tablix_Permit")
 
     list_body = _sub(list_el, "TablixBody")
     cols = _sub(list_body, "TablixColumns")
@@ -1047,6 +1127,7 @@ def _build_report_root(report: ParsedReport) -> ET.Element:
     _sub(root, "Language", "en-US")
     _rdsub(root, "DrawGrid", "true")
     _rdsub(root, "GridSpacing", "0.083333in")
+
     return root
 
 

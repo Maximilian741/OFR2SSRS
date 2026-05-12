@@ -28,6 +28,7 @@ from converter.models import (
     ReportParameter,
     TriggerCode,
 )
+from converter.parsers.oracle_colors import resolve_color
 
 
 # ---------------------------------------------------------------------------
@@ -359,6 +360,40 @@ def _apply_visual_settings(target, el) -> None:
         return
     target.border_width = _float_attr(vs, "lineWidth")
     target.border_pattern = _attr(vs, "linePattern")
+    # Color/style attributes (mapped to CSS by oracle_colors.resolve_color)
+    target.background_color = resolve_color(_attr(vs, "fillBackgroundColor"))
+    target.foreground_color = resolve_color(_attr(vs, "fillForegroundColor"))
+    target.fill_pattern = _attr(vs, "fillPattern").lower()
+    line_color = _attr(vs, "lineColor")
+    edge_color = _attr(vs, "edgeLineColor") or line_color
+    target.border_color = resolve_color(edge_color)
+
+
+def _parse_visual_settings(el):
+    """Extract color/style attributes from <visualSettings> child of `el`.
+
+    Returns a dict with keys: background_color, foreground_color,
+    fill_pattern, line_color, edge_line_color. Missing/unknown values
+    resolve to empty strings.
+    """
+    vs = _find(el, "visualSettings")
+    if vs is None:
+        return {
+            "background_color": "",
+            "foreground_color": "",
+            "fill_pattern": "",
+            "line_color": "",
+            "edge_line_color": "",
+        }
+    line_color = _attr(vs, "lineColor")
+    edge_color_raw = _attr(vs, "edgeLineColor") or line_color
+    return {
+        "background_color": resolve_color(_attr(vs, "fillBackgroundColor")),
+        "foreground_color": resolve_color(_attr(vs, "fillForegroundColor")),
+        "fill_pattern": _attr(vs, "fillPattern").lower(),
+        "line_color": resolve_color(line_color),
+        "edge_line_color": resolve_color(edge_color_raw),
+    }
 
 
 def _format_trigger_of(el) -> str:
@@ -425,6 +460,8 @@ def _layout_field_from_element(el) -> LayoutField:
 
     kind = "text" if tag == "text" else "field"
 
+    vs_attrs = _parse_visual_settings(el)
+
     return LayoutField(
         name=name,
         source=source,
@@ -441,6 +478,10 @@ def _layout_field_from_element(el) -> LayoutField:
         width=width,
         height=height,
         format_trigger=_format_trigger_of(el),
+        background_color=vs_attrs["background_color"],
+        foreground_color=vs_attrs["foreground_color"],
+        fill_pattern=vs_attrs["fill_pattern"],
+        border_color=vs_attrs["edge_line_color"] or vs_attrs["line_color"],
     )
 
 
@@ -518,6 +559,7 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                 y = _float_attr(geom, "y") if geom is not None else 0.0
                 width = _float_attr(geom, "width") if geom is not None else 0.0
                 height = _float_attr(geom, "height") if geom is not None else 0.0
+                vs_attrs = _parse_visual_settings(child)
                 bin_data = _find(child, "binaryData")
                 image_id = ""
                 if bin_data is not None and (bin_data.text or "").strip():
@@ -538,6 +580,10 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                         image_id=image_id,
                         x=x, y=y, width=width, height=height,
                         format_trigger=_format_trigger_of(child),
+                        background_color=vs_attrs["background_color"],
+                        foreground_color=vs_attrs["foreground_color"],
+                        fill_pattern=vs_attrs["fill_pattern"],
+                        border_color=vs_attrs["edge_line_color"] or vs_attrs["line_color"],
                     )
                 else:
                     lf = LayoutField(
@@ -546,6 +592,10 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                         source=name,
                         x=x, y=y, width=width, height=height,
                         format_trigger=_format_trigger_of(child),
+                        background_color=vs_attrs["background_color"],
+                        foreground_color=vs_attrs["foreground_color"],
+                        fill_pattern=vs_attrs["fill_pattern"],
+                        border_color=vs_attrs["edge_line_color"] or vs_attrs["line_color"],
                     )
                 target = current_group
                 if target is None:

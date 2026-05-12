@@ -141,6 +141,11 @@ class LayoutField:
     width: float = 0.0
     height: float = 0.0
     format_trigger: str = ""        # name of PL/SQL format trigger function
+    # Color/style attributes captured from <visualSettings> on the element
+    background_color: str = ""       # fillBackgroundColor (CSS-ready, e.g. "#808080")
+    foreground_color: str = ""       # fillForegroundColor (alternate fill / accent)
+    fill_pattern: str = ""           # "solid" | "transparent" | ""
+    border_color: str = ""           # from lineColor / edgeLineColor
 
 
 # LayoutGroup.kind values:
@@ -167,6 +172,11 @@ class LayoutGroup:
     # Border attributes from <visualSettings lineWidth="N" linePattern="solid"/>
     border_width: float = 0.0
     border_pattern: str = ""
+    # Color/style attributes captured from <visualSettings> on the frame
+    background_color: str = ""
+    foreground_color: str = ""
+    fill_pattern: str = ""
+    border_color: str = ""
     # Section repeat-on (e.g. main repeats per G_PERMIT row)
     repeat_on: str = ""
     # Format trigger name (PL/SQL function controlling visibility)
@@ -237,6 +247,11 @@ def _layout_to_dict(g: LayoutGroup) -> Dict[str, Any]:
         "source_query": g.source_query,
         "x": g.x, "y": g.y, "width": g.width, "height": g.height,
         "border_width": g.border_width,
+        "border_pattern": g.border_pattern,
+        "background_color": g.background_color,
+        "foreground_color": g.foreground_color,
+        "fill_pattern": g.fill_pattern,
+        "border_color": g.border_color,
         "repeat_on": g.repeat_on,
         "fields": [f.__dict__ for f in g.fields],
         "children": [_layout_to_dict(c) for c in g.children],

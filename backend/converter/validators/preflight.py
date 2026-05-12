@@ -78,6 +78,33 @@ def preflight_audit(rdl_xml: str) -> Dict:
         issues.append(("BLOCKER", "rdl.namespace",
                        f"Unknown RDL namespace: {ns!r}"))
 
+
+    # 3a) Schema-deprecated elements. SSRS 2008+ folded <List>, <Table>, and
+    # <Matrix> into a unified <Tablix>. Emitting any of these under the
+    # 2008/2010/2016 namespace produces a deserialization error at upload:
+    #   "ReportItems has invalid child element 'List'..."
+    # This catches the entire class of bug at convert-time so the user never
+    # gets the cryptic error from the report server.
+    DEPRECATED_2008 = {
+        "List":          "removed - use <Tablix> with one column and a single detail row group",
+        "Table":         "removed - use <Tablix> with TablixColumnHierarchy/TablixRowHierarchy",
+        "Matrix":        "removed - use <Tablix> with column AND row hierarchy groups",
+        "RowGrouping":   "removed - use <TablixRowHierarchy>",
+        "ColumnGrouping": "removed - use <TablixColumnHierarchy>",
+    }
+    found_deprecated: Dict[str, int] = {}
+    for el in tree.iter():
+        local = stripns(el.tag)
+        if local in DEPRECATED_2008:
+            found_deprecated[local] = found_deprecated.get(local, 0) + 1
+    for elem_name, count in found_deprecated.items():
+        issues.append((
+            "BLOCKER",
+            f"rdl.deprecated_element.{elem_name.lower()}",
+            f"<{elem_name}> appears {count}x - {DEPRECATED_2008[elem_name]}. "
+            f"Upload to SSRS will fail with 'invalid child element {elem_name!r}'.",
+        ))
+
     # 4) DataSources
     ds_list = find_all(tree, "DataSource")
     stats["datasources"] = len(ds_list)
