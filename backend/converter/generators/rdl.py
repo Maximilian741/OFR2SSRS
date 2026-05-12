@@ -207,29 +207,31 @@ def _layout_format_triggers(report: ParsedReport) -> List[Tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 def _build_data_sources(target_db: str = "oracle") -> ET.Element:
-    """Emit <DataSources>. ``target_db`` selects the provider/connect-string
-    pair the RDL ships with:
+    """Emit <DataSources>.
 
-    * ``"oracle"`` (default) — ``<DataProvider>OracleClient</DataProvider>``
-      with a placeholder Oracle TNS connection string. The user is expected
-      to repoint this to their shared Oracle data source after upload.
-    * ``"sqlserver"`` — original behavior: ``<DataProvider>SQL</DataProvider>``
-      with a localhost SQL Server connection string.
+    IMPORTANT: We always emit ``<DataProvider>SQL</DataProvider>`` regardless
+    of ``target_db``. Why: the user's normal workflow is to upload the RDL,
+    then in Report Builder swap the embedded DataSource for a SHARED data
+    source on their report server. That shared data source carries its own
+    provider/connect-string. The embedded provider only matters for one
+    thing: Report Builder needs to RECOGNIZE the value so it can open the
+    Data Source Properties dialog. ``SQL`` is universally registered on
+    every SSRS edition. Setting it to ``OracleClient`` previously caused
+    "Select connection type" / "rsDataExtensionNotFound" errors on servers
+    where the Oracle data extension wasn't installed — which broke the
+    swap-to-shared-connection workflow entirely.
+
+    ``target_db`` is preserved on the signature because _build_dataset
+    still uses it to pick the CommandText flavor (Oracle SQL vs T-SQL),
+    which is the part of the RDL that actually has to match the runtime
+    backend.
     """
     ds_root = ET.Element(_q("DataSources"))
     ds = _sub(ds_root, "DataSource")
     ds.set("Name", "DS_Main")
     cp = _sub(ds, "ConnectionProperties")
-    if target_db == "oracle":
-        # ``OracleClient`` is the most portable choice across modern SSRS
-        # Oracle drivers. The connect string is a placeholder hint; the user
-        # replaces it with their shared Oracle connection at upload time.
-        _sub(cp, "DataProvider", "OracleClient")
-        _sub(cp, "ConnectString",
-             "Data Source=ORCL;User Id=user;Password=password")
-    else:
-        _sub(cp, "DataProvider", "SQL")
-        _sub(cp, "ConnectString", "Data Source=localhost;Initial Catalog=AppDb")
+    _sub(cp, "DataProvider", "SQL")
+    _sub(cp, "ConnectString", "Data Source=localhost;Initial Catalog=AppDb")
     _rdsub(ds, "SecurityType", "Integrated")
     return ds_root
 

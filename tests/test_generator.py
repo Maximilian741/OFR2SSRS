@@ -129,8 +129,15 @@ def test_convert_default_target_is_oracle(synthetic_xml_bytes):
     # Oracle SQL keeps :P_FOO bind vars; T-SQL @P_FOO must NOT appear in CT.
     assert re.search(r":P_[A-Z_]+", joined), "Expected :P_ bind var in Oracle CommandText"
     assert not re.search(r"@P_[A-Z_]+", joined), "T-SQL @P_ bind vars must not appear in Oracle CommandText"
-    # DataProvider should be OracleClient
-    assert "OracleClient" in _extract_data_providers(rdl)
+    # DataProvider stays "SQL" regardless of target_db. Real-world usage:
+    # the user swaps the embedded DataSource for a SHARED data source on
+    # their report server after upload, and that shared source carries
+    # its own provider/connect-string. The embedded provider only matters
+    # insofar as Report Builder needs to RECOGNIZE the value to open the
+    # Data Source Properties dialog. "SQL" is universally registered on
+    # every SSRS edition; "OracleClient" is not, and setting it broke the
+    # swap-to-shared-connection workflow on servers lacking the extension.
+    assert "SQL" in _extract_data_providers(rdl)
 
 
 def test_convert_sqlserver_target_uses_tsql(synthetic_xml_bytes):
@@ -165,8 +172,17 @@ def test_generate_rdl_sqlserver_emits_at_query_param_names(translated_report):
 
 
 def test_generate_rdl_invalid_target_db_falls_back_to_oracle(translated_report):
-    """An unrecognized target_db value normalizes to the safe default."""
+    """An unrecognized target_db normalizes to the safe Oracle default.
+
+    "Safe default" here means CommandText is Oracle SQL with :P_ bind vars
+    (i.e. NOT the T-SQL @P_ variant). The embedded DataProvider stays "SQL"
+    regardless — see _build_data_sources for why.
+    """
+    import re
     from converter.generators.rdl import generate_rdl
     rdl = generate_rdl(translated_report, target_db="postgres")
-    # Should look like the Oracle path
-    assert "OracleClient" in _extract_data_providers(rdl)
+    cmds = _extract_command_texts(rdl)
+    joined = "\n".join(cmds)
+    assert not re.search(r"@P_[A-Z_]+", joined), \
+        "Invalid target_db should fall back to Oracle (no @P_ in CommandText)"
+    assert "SQL" in _extract_data_providers(rdl)
