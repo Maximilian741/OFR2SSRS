@@ -777,8 +777,13 @@ def _build_token_resolver(report: ParsedReport):
         ds_key = (dataset_name or "").upper()
         if ds_key and ds_key in dataset_fields and u in dataset_fields[ds_key]:
             return ("field", dataset_fields[ds_key][u], "")
-        # 3) Formula match (Oracle CF_*/CP_*). Emit a literal string expression
-        # so the SSRS scope checker doesn't flag a phantom Fields! reference.
+        # 3) Formula match (Oracle CF_*/CP_*). SSRS has no native formula
+        # construct, so we emit =Nothing here -- the user-visible PDF must
+        # show NOTHING (not a literal "<X -- populate at deploy time>"
+        # string, which exports verbatim into the rendered PDF and looks
+        # unprofessional). The audit note below preserves the original
+        # placeholder text for the deployment-checklist tab so a developer
+        # can still see which textboxes need rewiring.
         if u in formula_by_name:
             f = formula_by_name[u]
             canonical = getattr(f, "name", token) or token
@@ -786,18 +791,19 @@ def _build_token_resolver(report: ParsedReport):
             body_preview = " ".join(body_preview.split())
             if len(body_preview) > 120:
                 body_preview = body_preview[:117] + "..."
-            literal_expr = (
-                f'="<{canonical} \u2014 populate at deploy time>"'
-            )
+            literal_expr = "=Nothing"
             note = (
-                f"token {token!r} maps to Oracle formula {canonical!r}; "
-                f"SSRS has no native formula construct, emitted a literal "
-                f"placeholder expression. Re-implement the PL/SQL body as "
-                f"an SSRS calculated field. PL/SQL: {body_preview!r}"
+                f"PLACEHOLDER (formula): <{canonical} \u2014 populate at "
+                f"deploy time>. token {token!r} maps to Oracle formula "
+                f"{canonical!r}; SSRS has no native formula construct, "
+                f"emitted =Nothing so the PDF export shows nothing. "
+                f"Re-implement the PL/SQL body as an SSRS calculated "
+                f"field. PL/SQL: {body_preview!r}"
                 if body_preview
                 else (
-                    f"token {token!r} maps to Oracle formula {canonical!r}; "
-                    f"emitted a literal placeholder expression. "
+                    f"PLACEHOLDER (formula): <{canonical} \u2014 populate "
+                    f"at deploy time>. token {token!r} maps to Oracle "
+                    f"formula {canonical!r}; emitted =Nothing. "
                     f"Re-implement as an SSRS calculated field."
                 )
             )
@@ -805,21 +811,21 @@ def _build_token_resolver(report: ParsedReport):
         # 4) Field that exists in a DIFFERENT dataset (cross-scope match).
         # Emitting =Fields!X.Value here would fail SSRS scope validation
         # because the enclosing Tablix is bound to a different dataset.
-        # Emit a literal placeholder and tell the user to rewire the
-        # textbox into the correct dataset's Tablix at deploy time.
+        # Emit =Nothing so the rendered PDF shows nothing, and capture the
+        # rewire instructions in the audit note for the deployment
+        # checklist (the user-visible PDF must not show literal
+        # "<X -- from dataset Q -- rewire at deploy time>" strings).
         if u in all_field_owner:
             canonical, owner_ds = all_field_owner[u]
-            literal_expr = (
-                f'="<{canonical} \u2014 from dataset {owner_ds}, '
-                f'rewire at deploy time>"'
-            )
+            literal_expr = "=Nothing"
             note = (
-                f"token {token!r} not in dataset {dataset_name!r}; "
-                f"matches DataItem in sibling dataset {owner_ds!r}. "
-                f"Emitted a literal placeholder so SSRS scope validation "
-                f"passes. To populate, move this textbox into the "
-                f"{owner_ds} Tablix (master-detail rewire) or add the "
-                f"field to {dataset_name!r} via a join."
+                f"PLACEHOLDER (cross-dataset): <{canonical} \u2014 from "
+                f"dataset {owner_ds}, rewire at deploy time>. token "
+                f"{token!r} not in dataset {dataset_name!r}; matches "
+                f"DataItem in sibling dataset {owner_ds!r}. Emitted "
+                f"=Nothing so the PDF stays clean. To populate, move "
+                f"this textbox into the {owner_ds} Tablix (master-detail "
+                f"rewire) or add the field to {dataset_name!r} via a join."
             )
             return ("field_other_ds", literal_expr, note)
         # 5) Fallback - legacy behavior, marked unverified.
@@ -1472,13 +1478,27 @@ def _build_certificate_body(
     for child in section_main.children or []:
         if (child.kind or "").lower() not in ("frame", "repeating_frame"):
             continue
-        if child.width <= 0 and child.height <= 0:
+        # Skip zero-dimension frames that have NO child items either.
+        # An empty Rectangle with positional Top/Left/Height creates a
+        # placeholder page on PDF export.
+        if (
+            child.width <= 0
+            and child.height <= 0
+            and not (child.children or [])
+            and not (child.fields or [])
+        ):
             continue
         _emit_frame(
             body_items, child, report, embedded_index, 0.0, 0.0,
             dataset_name=main.name, audit_notes=None,
         )
 
+    # KeepTogether on the body Rectangle: per RDL 2008/01 schema this
+    # element comes AFTER ReportItems and BEFORE Top/Left/Height/Width.
+    # It tells the renderer to keep the entire body block on one page
+    # when paging, so the cert body and the two wallet cards stay
+    # together per permit iteration (Problem 3 in the bug report).
+    _sub(body_rect, "KeepTogether", "true")
     _sub(body_rect, "Top", "0in")
     _sub(body_rect, "Left", "0in")
     _sub(body_rect, "Height", _in(list_height))
@@ -1516,6 +1536,13 @@ def _build_certificate_body(
     _sub(detail_member, "Group").set("Name", "Details_Permit")
 
     _sub(list_el, "DataSetName", _safe(main.name))
+    # KeepTogether on the Tablix: per RDL 2008/01 schema this element
+    # comes AFTER DataSetName (and after PageBreak/Filters/SortExpressions
+    # if those were present) but BEFORE Top/Left/Height/Width/Style. It
+    # tells the renderer that each detail-group iteration (= one permit
+    # row in the certificate report) should stay on a single page, which
+    # eliminates the mid-permit blank-page split that Problem 2 describes.
+    _sub(list_el, "KeepTogether", "true")
     _sub(list_el, "Top", "0in")
     _sub(list_el, "Left", "0in")
     _sub(list_el, "Height", _in(list_height))
@@ -1551,50 +1578,19 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
 def _build_page(report: ParsedReport, page_height_in: float = 11.0) -> ET.Element:
     page = ET.Element(_q("Page"))
 
-    # PageHeader
-    has_renewal_year = any(
-        p.name.upper() == "P_RENEWAL_YEAR" for p in (report.parameters or [])
-    )
+    # PageHeader -- intentionally MINIMAL. The page-header title used to
+    # duplicate the in-body "STATE OF MONTANA / DEPARTMENT OF ENVIRONMENTAL
+    # QUALITY / ..." title block, which on PDF export produced two stacked
+    # title blocks per page. The body emits the title (it's part of the
+    # certificate layout); the page header now stays empty so each PDF
+    # page shows the title exactly once.
     ph = _sub(page, "PageHeader")
-    _sub(ph, "Height", "0.6in")
+    _sub(ph, "Height", "0.25in")
     _sub(ph, "PrintOnFirstPage", "true")
     _sub(ph, "PrintOnLastPage", "true")
-    ph_items = _sub(ph, "ReportItems")
-    # Title textbox
-    title_tb = _sub(ph_items, "Textbox")
-    title_tb.set("Name", "Hdr_Title")
-    paragraphs = _sub(title_tb, "Paragraphs")
-    para = _sub(paragraphs, "Paragraph")
-    runs = _sub(para, "TextRuns")
-    run = _sub(runs, "TextRun")
-    _sub(run, "Value", "DEPARTMENT OF ENVIRONMENTAL QUALITY")
-    rstyle = _sub(run, "Style")
-    _sub(rstyle, "FontSize", "14pt")
-    _sub(rstyle, "FontWeight", "Bold")
-    _sub(title_tb, "Top", "0.05in")
-    _sub(title_tb, "Left", "0.25in")
-    _sub(title_tb, "Width", "5in")
-    _sub(title_tb, "Height", "0.3in")
-    _sub(title_tb, "CanGrow", "true")
-    title_style = _sub(title_tb, "Style")
-
-    if has_renewal_year:
-        yr_tb = _sub(ph_items, "Textbox")
-        yr_tb.set("Name", "Hdr_RenewalYear")
-        paragraphs = _sub(yr_tb, "Paragraphs")
-        para = _sub(paragraphs, "Paragraph")
-        runs = _sub(para, "TextRuns")
-        run = _sub(runs, "TextRun")
-        _sub(run, "Value", "=Parameters!P_RENEWAL_YEAR.Value")
-        rstyle = _sub(run, "Style")
-        _sub(rstyle, "FontSize", "12pt")
-        _sub(rstyle, "FontWeight", "Bold")
-        _sub(yr_tb, "Top", "0.05in")
-        _sub(yr_tb, "Left", "5.5in")
-        _sub(yr_tb, "Width", "2in")
-        _sub(yr_tb, "Height", "0.3in")
-        _sub(yr_tb, "CanGrow", "true")
-        yr_style = _sub(yr_tb, "Style")
+    # Note: <ReportItems> must have >=1 child per RDL 2008/01 schema.
+    # When we have nothing to put in the header we simply omit
+    # <ReportItems> entirely -- it's optional on PageHeader.
 
     # Optional PageFooter
     pf = _sub(page, "PageFooter")
