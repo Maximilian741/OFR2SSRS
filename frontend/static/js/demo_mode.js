@@ -143,13 +143,22 @@
         "Clicking <b>" + (chip.textContent.trim() || "this sample") + "</b> now. " +
         "The conversion takes about a second.");
 
+      // Listen for the explicit "conversion done" event app.js dispatches.
+      // This is the authoritative signal; DOM-shape polling is a fallback
+      // in case the mockup rework changes #mockup-host children again.
+      let convertedEventFired = false;
+      const onConvertedEvt = () => { convertedEventFired = true; };
+      document.addEventListener("o2s:converted", onConvertedEvt, { once: true });
+
       try { chip.click(); } catch (e) { console.warn("[Tour] chip click failed", e); }
 
       // Wait for ANY of these to become true (whichever is fastest):
+      //   - o2s:converted custom event fired (authoritative)
       //   - #summary-section visible (sidebar populated)
       //   - #mockup-host has content
       //   - status pill says "Converted"
       const got = await waitFor(() => {
+        if (convertedEventFired) return true;
         const summary = $("#summary-section");
         const mockup  = $("#mockup-host");
         const pill    = $("#status-pill");
@@ -158,6 +167,7 @@
         const pillOk         = pill && /converted|ok/i.test(pill.textContent);
         return summaryVisible || mockupHas || pillOk;
       }, 10000, 150);
+      document.removeEventListener("o2s:converted", onConvertedEvt);
 
       if (!got) {
         console.warn("[Tour] conversion did not finish in 10s — proceeding anyway");
@@ -194,6 +204,28 @@
       highlight(tabBurst);
       await showTooltip(tabBurst, "5. Bursting / Email distribution",
         "If your report goes out as letters to multiple recipients, this tab " +
+        "tells you exactly how to wire it up via your service-account email.");
+    }
+
+    // --- Done ---
+    highlight(null);
+    document.querySelectorAll(".demo-tooltip").forEach(n => n.remove());
+    if (typeof window.toast === "function") {
+      window.toast("Tour complete — happy converting!", "ok");
+    }
+  }
+
+  function init() {
+    ensureStyles();
+    makeButton();
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();
+If your report goes out as letters to multiple recipients, this tab " +
         "tells you exactly how to wire it up via your service-account email.");
     }
 

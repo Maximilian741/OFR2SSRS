@@ -173,6 +173,18 @@ function walkEntry(entry, prefix, out) {
 
 // ----- Conversion result handler -----
 function onConverted(data) {
+  // Dispatch a custom event so external listeners (e.g. the take-a-tour
+  // walkthrough in demo_mode.js) can reliably detect conversion completion
+  // without poking at the module-scoped `state`.
+  try {
+    document.dispatchEvent(new CustomEvent("o2s:converted", { detail: data }));
+  } catch (e) {
+    // CustomEvent unsupported is essentially impossible in any browser this
+    // page supports, but log it loudly so we never silently swallow init
+    // problems in this file again (the drop-zone regression hunt depended on
+    // catch blocks not eating errors).
+    console.error("[Oracle2SSRS] o2s:converted dispatch failed:", e);
+  }
   state.data = data;
   setStatus("Converted", "ok");
   if ($("#empty-state")) $("#empty-state").hidden = true;

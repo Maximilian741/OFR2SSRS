@@ -89,3 +89,63 @@ def test_validate_report_handles_empty_report():
     rep = ParsedReport(name="EMPTY")
     issues = validate_report(rep)
     assert isinstance(issues, list)
+
+
+# -- Preflight RDL audit: container child-element validity --
+
+def _wrap_minimal_rdl(cell_contents_inner: str) -> str:
+    """Build a minimal RDL string with the given inner XML inside a single
+    <CellContents>. Used by preflight tests to exercise the schema-validation
+    rules without spinning up a full report.
+    """
+    NS = "http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition"
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="{NS}">
+  <DataSources><DataSource Name="DS"><ConnectionProperties><DataProvider>SQL</DataProvider><ConnectString/></ConnectionProperties></DataSource></DataSources>
+  <DataSets><DataSet Name="D1"><Query><DataSourceName>DS</DataSourceName><CommandText>SELECT 1</CommandText></Query></DataSet></DataSets>
+  <Body>
+    <ReportItems>
+      <Tablix Name="T"><DataSetName>D1</DataSetName>
+        <TablixBody>
+          <TablixColumns><TablixColumn><Width>1in</Width></TablixColumn></TablixColumns>
+          <TablixRows><TablixRow><Height>1in</Height>
+            <TablixCells><TablixCell><CellContents>{cell_contents_inner}</CellContents></TablixCell></TablixCells>
+          </TablixRow></TablixRows>
+        </TablixBody>
+        <TablixColumnHierarchy><TablixMembers><TablixMember/></TablixMembers></TablixColumnHierarchy>
+        <TablixRowHierarchy><TablixMembers><TablixMember/></TablixMembers></TablixRowHierarchy>
+      </Tablix>
+    </ReportItems>
+    <Height>1in</Height>
+  </Body>
+  <Page><PageHeight>11in</PageHeight><PageWidth>8.5in</PageWidth><LeftMargin>1in</LeftMargin><RightMargin>1in</RightMargin><TopMargin>1in</TopMargin><BottomMargin>1in</BottomMargin></Page>
+  <Width>8.5in</Width>
+</Report>'''
+
+
+def test_preflight_flags_style_inside_cellcontents():
+    """<CellContents><Style/></CellContents> is illegal in the SSRS 2008/01
+    schema — preflight must flag it as a BLOCKER with rule
+    rdl.invalid_cellcontents_child."""
+    from converter.validators.preflight import preflight_audit
+    rdl = _wrap_minimal_rdl('<Style><FontSize>10pt</FontSize></Style><Rectangle Name="R"/>')
+    result = preflight_audit(rdl)
+    rules = [i["rule"] for i in result["issues"]]
+    assert "rdl.invalid_cellcontents_child" in rules, (
+        f"expected rdl.invalid_cellcontents_child in issues; got {rules}"
+    )
+    assert result["verdict"] == "BLOCKER"
+    # Message should name the disallowed child
+    msgs = [i["message"] for i in result["issues"]
+            if i["rule"] == "rdl.invalid_cellcontents_child"]
+    assert any("Style" in m for m in msgs)
+
+
+def test_preflight_passes_clean_cellcontents():
+    """A CellContents whose only child is a Rectangle (ReportItem) is valid;
+    the new rule must NOT fire."""
+    from converter.validators.preflight import preflight_audit
+    rdl = _wrap_minimal_rdl('<Rectangle Name="R"/>')
+    result = preflight_audit(rdl)
+    rules = [i["rule"] for i in result["issues"]]
+    assert "rdl.invalid_cellcontents_child" not in rules

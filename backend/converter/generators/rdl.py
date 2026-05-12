@@ -949,7 +949,11 @@ def _build_certificate_body(
     _sub(body_rect, "Width", _in(list_width))
     _sub(body_rect, "Style")
 
-    cell_style = _sub(contents, "Style")
+    # NOTE: do NOT add <Style> as a direct child of <CellContents>.
+    # Per the SSRS 2008/01 RDL schema, CellContents allows only
+    # {ColSpan, RowSpan} plus one ReportItem (here the Rectangle above).
+    # Adding <Style> here triggers an "invalid child element 'Style'"
+    # deserialization error on upload to the report server.
 
     col_hier = _sub(list_el, "TablixColumnHierarchy")
     col_members = _sub(col_hier, "TablixMembers")

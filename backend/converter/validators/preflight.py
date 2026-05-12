@@ -105,6 +105,47 @@ def preflight_audit(rdl_xml: str) -> Dict:
             f"Upload to SSRS will fail with 'invalid child element {elem_name!r}'.",
         ))
 
+    # 3b) Container child-element validity. The SSRS 2008/01 schema enforces
+    # strict allowed-child sets on certain layout containers; emitting a
+    # disallowed direct child triggers cryptic deserialization errors at
+    # upload time, e.g.:
+    #   "CellContents has invalid child element 'Style' in namespace ..."
+    # Catch the entire class of bug at convert-time so the user never sees
+    # the report-server error.
+    ALLOWED_CHILDREN = {
+        "CellContents": {
+            "ColSpan", "RowSpan",
+            "Line", "Rectangle", "Textbox", "Image", "Subreport",
+            "Chart", "GaugePanel", "CustomReportItem", "Tablix",
+        },
+        "ReportItems": {
+            "Line", "Rectangle", "Textbox", "Image", "Subreport",
+            "Chart", "GaugePanel", "CustomReportItem", "Tablix",
+        },
+    }
+    for container_tag, allowed in ALLOWED_CHILDREN.items():
+        bad_children: Dict[str, int] = {}
+        for el in find_all(tree, container_tag):
+            for child in list(el):
+                local = stripns(child.tag)
+                if local not in allowed:
+                    bad_children[local] = bad_children.get(local, 0) + 1
+        for child_name, count in bad_children.items():
+            allowed_list = ", ".join(sorted(allowed))
+            rule_suffix = (
+                "invalid_cellcontents_child"
+                if container_tag == "CellContents"
+                else "invalid_reportitems_child"
+            )
+            issues.append((
+                "BLOCKER",
+                f"rdl.{rule_suffix}",
+                f"<{container_tag}> has invalid direct child <{child_name}> "
+                f"({count}x). Allowed direct children: {allowed_list}. "
+                f"Upload to SSRS will fail with 'invalid child element "
+                f"{child_name!r}'.",
+            ))
+
     # 4) DataSources
     ds_list = find_all(tree, "DataSource")
     stats["datasources"] = len(ds_list)
