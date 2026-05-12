@@ -1827,9 +1827,13 @@ def _build_certificate_body(
     legal_val, legal_is_expr = _textbox_value_from_field(
         classified["legal_text"], report, ds
     )
+    # Legal block — tightened from 3.25in to 2.60in so the transfer/sig/cards
+    # below it all fit before the body Rectangle's 10.00in ceiling. CanGrow=true
+    # in _emit_stacked_textbox lets the box still expand if the text is long;
+    # this just changes the BASELINE height that subsequent stacking math uses.
     _emit_stacked_textbox(
         body_items, "Tb_Legal", legal_val, legal_is_expr,
-        top_in=4.30, height_in=3.25, width_in=list_width,
+        top_in=4.30, height_in=2.60, width_in=list_width,
         font_size=9, bold=False, align="left",
     )
 
@@ -1839,7 +1843,7 @@ def _build_certificate_body(
     )
     _emit_stacked_textbox(
         body_items, "Tb_Transfer", transfer_val, transfer_is_expr,
-        top_in=7.60, height_in=0.25, width_in=list_width,
+        top_in=6.95, height_in=0.25, width_in=list_width,
         font_size=8, bold=True, align="center",
     )
 
@@ -1849,7 +1853,7 @@ def _build_certificate_body(
     )
     _emit_stacked_textbox(
         body_items, "Tb_Sig", sig_val, sig_is_expr,
-        top_in=7.90, height_in=0.85, width_in=list_width,
+        top_in=7.25, height_in=0.95, width_in=list_width,
         font_size=10, bold=False, align="left",
     )
 
@@ -1916,13 +1920,17 @@ def _build_certificate_body(
         _sub(border, "Style", "Solid")
         _sub(border, "Width", "0.5pt")
 
+    # Cards live at Top=8.45in with Height=1.40in → end at 9.85in.
+    # MUST be < body_height (currently 10.00in) so SSRS doesn't paginate
+    # them onto the next sheet. Previous Top=8.80in pushed the bottom edge
+    # to 10.20in (0.20in overflow) and SSRS split cards to a separate page.
     _emit_card(
         "Rect_CardL", classified["card_l_fields"],
-        top_in=8.80, left_in=0.00, width_in=3.50, height_in=1.40,
+        top_in=8.45, left_in=0.00, width_in=3.50, height_in=1.40,
     )
     _emit_card(
         "Rect_CardR", classified["card_r_fields"],
-        top_in=8.80, left_in=4.00, width_in=3.50, height_in=1.40,
+        top_in=8.45, left_in=4.00, width_in=3.50, height_in=1.40,
     )
 
     # Rectangle KeepTogether + geometry (after ReportItems, before Top/etc.).
@@ -2122,10 +2130,9 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
 def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     """Return a complete RDL XML document as a string.
 
-    ``target_db``: ``"oracle"`` (default) emits the original Oracle SQL in
-    each <CommandText> with ``:P_PARAM`` bind vars and an ``OracleClient``
-    DataProvider. ``"sqlserver"`` emits the translated T-SQL with
-    ``@P_PARAM`` bind vars and a ``SQL`` DataProvider.
+    target_db: "oracle" (default) emits original Oracle SQL with :P_ bind
+    vars; "sqlserver" emits translated T-SQL with @P_ bind vars. Anything
+    else falls back to "oracle".
     """
     target_db = (target_db or "oracle").lower()
     if target_db not in ("oracle", "sqlserver"):
