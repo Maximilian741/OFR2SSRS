@@ -275,6 +275,21 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
             used_fallback = True
         if not cmd_text:
             cmd_text = f"-- empty query for {query.name}"
+        # Replace any &LEXICAL_REF in the SQL with a SQL comment so Oracle
+        # accepts the statement. Lexical refs are Oracle Reports
+        # text-substitution templates (e.g. "&P_CRITERIA_PERMIT" expands to
+        # a dynamic WHERE clause). SSRS has no direct equivalent — the
+        # developer needs to reimplement the dynamic logic at deploy time,
+        # but commenting out the ref keeps the SQL syntactically valid for
+        # "Refresh Fields" / schema inspection right now. Only applied for
+        # the Oracle target; the T-SQL path uses query.tsql which has
+        # already had refs translated to =Parameters!X.Value.
+        cmd_text = re.sub(
+            r"&([A-Z_][A-Z0-9_]*)",
+            r"/* lexical ref &\1 -- reimplement as dynamic WHERE/SELECT at deploy time */",
+            cmd_text,
+            flags=re.IGNORECASE,
+        )
         _sub(q_el, "CommandText", cmd_text)
 
         # Oracle bind vars look like :P_FOO. Declare each one referenced in
@@ -364,15 +379,27 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
     for p in report.parameters:
         rp = _sub(root, "ReportParameter")
         rp.set("Name", p.name)
-        _sub(rp, "DataType", _ssrs_param_type(p))
-        _sub(rp, "Prompt", p.label or p.name)
-        if p.initial_value is None or p.initial_value == "":
+        # SSRS 2008/01 ReportParameter element order: DataType, Nullable,
+        # DefaultValue, AllowBlank, Prompt, Hidden, MultiValue, ValidValues,
+        # UsedInQuery. Emitting elements out of order fails schema
+        # validation in Report Builder.
+        ptype = _ssrs_param_type(p)
+        _sub(rp, "DataType", ptype)
+        has_initial = not (p.initial_value is None or p.initial_value == "")
+        if not has_initial:
             _sub(rp, "Nullable", "true")
-            _sub(rp, "AllowBlank", "true") if _ssrs_param_type(p) == "String" else None
-        else:
-            dv = _sub(rp, "DefaultValue")
-            values = _sub(dv, "Values")
+        # DefaultValue: if the param has an explicit initial_value, use it;
+        # otherwise emit an empty <Value/> so Report Builder doesn't pop
+        # the "Define Query Parameters" dialog at Refresh Fields time.
+        dv = _sub(rp, "DefaultValue")
+        values = _sub(dv, "Values")
+        if has_initial:
             _sub(values, "Value", str(p.initial_value))
+        else:
+            _sub(values, "Value")  # empty Value element = NULL/empty default
+        if not has_initial and ptype == "String":
+            _sub(rp, "AllowBlank", "true")
+        _sub(rp, "Prompt", p.label or p.name)
         if not p.display:
             _sub(rp, "Hidden", "true")
     return root
