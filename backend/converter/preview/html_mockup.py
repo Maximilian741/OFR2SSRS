@@ -1436,12 +1436,195 @@ def _render_pages_wrapper(pages_html):
 # Frontend: shared header-summary page
 # ---------------------------------------------------------------------------
 
-def _render_header_summary_page(report, page_label="Page 1 — Header summary"):
-    """Page 1: title block + run-info + Report Parameters list.
+def _collect_header_layout_items(report):
+    """Walk section_header (including nested frames) and return a flat list of
+    (kind, name, source, text, x, y, width, height) tuples for every text/field."""
+    items = []
+    for g in report.layout or []:
+        if g.kind != "section_header":
+            continue
+        def walk(gr):
+            for f in (gr.fields or []):
+                if f.kind not in ("text", "field"):
+                    continue
+                items.append((
+                    f.kind, f.name, f.source or "", (f.text or ""),
+                    f.x, f.y, f.width, f.height, f
+                ))
+            for ch in (gr.children or []):
+                walk(ch)
+        walk(g)
+    return items
 
-    Mirrors the user's reference: centered blue title, then right-aligned
-    "Run Date / Run By / Total of ALL Records" rows, then an underlined
-    "Report Parameters" heading and a list of every parameter."""
+
+def _header_label_value_pairs(items):
+    """From a flat item list, return (label_text, value_item) pairs where a
+    `text` ending in ':' is horizontally followed by a `field` (or another
+    text with a source) on the same row (y diff < 0.2 in)."""
+    texts  = [it for it in items if it[0] == "text" and (it[3] or "").strip().endswith(":")]
+    others = [it for it in items if it is not None]
+    pairs = []
+    used  = set()
+    for lab in texts:
+        _, lname, _, ltext, lx, ly, lw, lh, _lf = lab
+        # find best candidate to the right on the same row
+        best = None
+        best_dx = None
+        for cand in others:
+            ckind, cname, csrc, ctext, cx, cy, cw, ch, _cf = cand
+            if cname == lname:
+                continue
+            if abs(cy - ly) > 0.25:
+                continue
+            if cx + 0.001 < lx + lw - 0.01:
+                continue  # must be to the right of the label
+            # prefer field over text; require some content tie
+            if ckind == "text" and not csrc and not (ctext or "").strip():
+                continue
+            dx = cx - (lx + lw)
+            if dx < -0.05 or dx > 3.5:
+                continue
+            if best is None or dx < best_dx:
+                best = cand
+                best_dx = dx
+        if best is not None and id(best) not in used:
+            pairs.append((ltext.strip().rstrip(":").strip(), best))
+            used.add(id(best))
+    return pairs
+
+
+_CANNED_RUN_LABELS = ("run date", "run by", "total")
+_PARAMS_HEADING_RE = re.compile(r"^\*?\s*report\s+parameters\s*$", re.I)
+
+
+def _header_has_parameters_heading(items):
+    """True if section_header carries a standalone 'Report Parameters' heading
+    text (any case, optional leading *). This is the structural marker that
+    the existing centered template was designed around."""
+    for it in items:
+        kind, _name, _src, text, _x, _y, _w, _h, _f = it
+        if kind != "text":
+            continue
+        if _PARAMS_HEADING_RE.match((text or "").strip()):
+            return True
+    return False
+
+
+def _is_canned_run_label(text):
+    t = (text or "").strip().lower().rstrip(":").strip()
+    return any(t.startswith(prefix) for prefix in _CANNED_RUN_LABELS)
+
+
+def _render_rich_header_page(report, items, pairs, page_label):
+    """Render page 1 as a left-aligned `<label>: <value>` info list, mirroring
+    the section_header layout (rows sorted top-to-bottom)."""
+
+    # Sort pairs by the label's y, then x.
+    def label_pos(p):
+        lt = p[0]
+        # find the matching label item
+        for it in items:
+            if it[0] == "text" and (it[3] or "").strip().rstrip(":").strip() == lt:
+                return (it[5], it[4])
+        return (0.0, 0.0)
+    pairs_sorted = sorted(pairs, key=label_pos)
+
+    rows_html_bits = []
+    for label_text, value_item in pairs_sorted:
+        vkind, _vname, vsrc, vtext, _vx, _vy, _vw, _vh, _vf = value_item
+        if vkind == "field":
+            if (vsrc or "").lower() == "currentdate":
+                val = _sample_for_source("date", 0)
+            else:
+                val = _sample_for_source(vsrc or vtext or "value", 0)
+        else:
+            # static text: resolve any &TOKEN substitutions
+            val = _resolve_tokens(vtext or "")
+            val = re.sub(r"&<[^>]+>", "", val).strip()
+        rows_html_bits.append(
+            '<div style="display:flex; align-items:baseline; margin:4px 0;">'
+            '<div style="min-width:200px; max-width:240px; text-align:left; '
+            'padding-right:12px; font-weight:bold; color:' + _TAB_INK + '; '
+            'font-size:13px;">' + _esc(label_text) + ':</div>'
+            '<div style="flex:1; text-align:left; color:' + _TAB_INK + '; '
+            'font-size:13px; font-weight:bold;">'
+            + _esc(val) + '</div></div>'
+        )
+
+    # Also surface any unpaired wide text blocks (e.g. footnote/info lines)
+    # that sit below the last pair — render as plain italic notes.
+    used_ids = {id(v) for _, v in pairs}
+    used_ids.update(id(it) for it in items
+                    if it[0] == "text" and (it[3] or "").strip().endswith(":"))
+    last_y = max((label_pos(p)[0] for p in pairs_sorted), default=0.0)
+    notes = []
+    for it in items:
+        if id(it) in used_ids:
+            continue
+        kind, _n, _s, text, _x, y, _w, _h, _f = it
+        if kind != "text":
+            continue
+        t = (text or "").strip()
+        if not t or t.endswith(":"):
+            continue
+        if y < last_y - 0.1:
+            continue
+        notes.append((y, t))
+    notes.sort()
+    notes_html = ""
+    for _y, t in notes[:4]:
+        notes_html += (
+            '<div style="margin:6px 0 0; color:' + _TAB_INK_SOFT + '; '
+            'font-size:12px; font-style:italic;">' + _esc(t) + '</div>'
+        )
+
+    inner = (
+        '<div style="padding:36px 32px 28px; max-width:640px; margin:0 auto;">'
+        + "".join(rows_html_bits)
+        + notes_html
+        + '</div>'
+    )
+    return _render_page(inner, label=page_label)
+
+
+def _render_header_summary_page(report, page_label="Page 1 — Header summary"):
+    """Page 1: dispatches between a structured `<label>: <value>` info list
+    (when the report's section_header is rich, e.g. label+field pairs that
+    are themselves the header content) and the legacy centered "title +
+    Run Date/Run By/Total + Report Parameters" template (when the header is
+    sparse and a separate 'Report Parameters' heading divides parameter
+    rows from a centered title)."""
+
+    # --- Rich-header detection ---------------------------------------------
+    items = _collect_header_layout_items(report)
+    pairs = _header_label_value_pairs(items)
+    has_params_heading = _header_has_parameters_heading(items)
+
+    # Pairs that are NOT canned run-info rows (Run Date / Run By / Total).
+    non_canned_pairs = [p for p in pairs if not _is_canned_run_label(p[0])]
+    # Y-span of those non-canned pairs (in inches).
+    if non_canned_pairs:
+        ys = []
+        for label_text, value_item in non_canned_pairs:
+            ys.append(value_item[5])
+            for it in items:
+                if it[0] == "text" and (it[3] or "").strip().rstrip(":").strip() == label_text:
+                    ys.append(it[5])
+                    break
+        y_span = max(ys) - min(ys) if ys else 0.0
+    else:
+        y_span = 0.0
+
+    # Rich when:
+    #  * there are >= 4 non-canned label:value pairs spanning > 2 inches AND
+    #  * there is NO standalone "Report Parameters" heading (which is the
+    #    structural marker of the legacy centered template).
+    is_rich = (len(non_canned_pairs) >= 4
+               and y_span > 2.0
+               and not has_params_heading)
+
+    if is_rich:
+        return _render_rich_header_page(report, items, pairs, page_label)
 
     # Title block — use the largest centered text from the layout if present.
     title_field = _find_title_text(report)
@@ -1575,7 +1758,7 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
         'color:' + _TAB_INK + ';">'
         '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
         + _esc(_sample_for_source("date", 0)) + ' 1:00 PM</span></div>'
-        '<div style="font-style:italic; color:#1a3a8f;">Page '
+        '<div style="font-style:italic; color:#000079;">Page '
         + str(page_num) + ' of ' + str(total_pages) + '</div></div>'
     )
 
@@ -1599,7 +1782,7 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
         return _render_page(title_top + run_line + body, label="Page " + str(page_num))
 
     # Band from outer frame
-    band_bg = _normalize_color(_attr(top_rep, "background_color", ""), "#000080")
+    band_bg = _normalize_color(_attr(top_rep, "background_color", ""), "#000079")
     band_fg = _normalize_color(_attr(top_rep, "foreground_color", ""), "#FFFF00")
     outer_pairs = _detail_field_pairs(top_rep)
     band_label_parts = []
@@ -1612,7 +1795,7 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
         )
     band_html = (
         '<div style="background:' + band_bg + '; color:' + band_fg + '; '
-        'padding:5px 12px; font-size:13px; '
+        'padding:7px 14px; font-size:13px; '
         'display:flex; justify-content:space-between;">'
         '<div>' + (band_label_parts[0] if band_label_parts else "") + '</div>'
         '<div>' + (band_label_parts[1] if len(band_label_parts) > 1 else "") + '</div>'
@@ -1644,8 +1827,8 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
 
     # Emit 3 complaint blocks per page with alternating shading
     NUM_COMPLAINTS = 3
-    SHADE_A = "#e8eaf0"   # lavender-ish to match artifact's gray
-    SHADE_B = "#f6f7fb"   # paler shade for stripe
+    SHADE_A = "#ececec"   # neutral mid-gray (matches artifact)
+    SHADE_B = "#f7f7f7"   # neutral near-white (matches artifact)
     blocks = []
     for ci in range(NUM_COMPLAINTS):
         shade = SHADE_A if ci % 2 == 0 else SHADE_B
@@ -1679,8 +1862,8 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
             return "".join(rows)
 
         complaint_header = (
-            '<div style="color:#1a3a8f; font-weight:bold; font-size:13px; '
-            'padding:4px 12px 2px;">' + _esc(id_label) + ':&nbsp;' + _esc(id_val) + '</div>'
+            '<div style="color:#000079; font-weight:bold; font-size:13px; '
+            'padding:6px 14px 4px;">' + _esc(id_label) + ':&nbsp;' + _esc(id_val) + '</div>'
         )
         complaint_body = (
             '<div style="display:flex; padding:2px 12px 8px;">'
@@ -1694,7 +1877,7 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
         if action_pairs:
             action_head = (
                 '<div style="display:flex; padding:4px 12px 2px; '
-                'border-top:1px solid #bcc1cc; font-size:12px; '
+                'border-top:1px solid #bbbbbb; font-size:12px; '
                 'font-style:italic; color:' + _TAB_INK + ';">'
             )
             action_head_bits = []
@@ -1724,7 +1907,7 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
 
         blocks.append(
             '<div style="background:' + shade + '; margin:0; '
-            'border-bottom:1px solid #d8dce4;">'
+            'border-bottom:1px solid #cccccc;">'
             + complaint_header + complaint_body + action_html
             + '</div>'
         )
@@ -2124,7 +2307,7 @@ def _render_backend_main_page(report):
     )
 
     if top_rep is not None:
-        band_bg = _normalize_color(_attr(top_rep, "background_color", ""), "#000080")
+        band_bg = _normalize_color(_attr(top_rep, "background_color", ""), "#000079")
         band_fg = _normalize_color(_attr(top_rep, "foreground_color", ""), "#FFFF00")
         outer_pairs = _detail_field_pairs(top_rep)
         # band: 2 field-placeholders in the colored bar
@@ -2252,3 +2435,4 @@ def render_mockup(report, mode="frontend"):
         return _render_tabular_pages(report)
     finally:
         _ACTIVE_MODE = prev
+
