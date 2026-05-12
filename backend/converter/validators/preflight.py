@@ -146,6 +146,136 @@ def preflight_audit(rdl_xml: str) -> Dict:
                 f"{child_name!r}'.",
             ))
 
+    # 3c) Empty required containers. The RDL 2008/01 schema marks several
+    # collection elements with minOccurs=1 on their child sequence. Emitting
+    # them empty triggers cryptic SSRS upload errors like:
+    #   "The element 'ReportItems' has incomplete content. List of possible
+    #    elements expected: 'Line, Rectangle, Textbox, Image, Subreport,
+    #    Chart, GaugePanel, Tablix, CustomReportItem'."
+    # Catch them all here so the generator can't accidentally regress.
+    REQUIRED_NONEMPTY = (
+        "ReportItems",
+        "TablixCells",
+        "TablixRows",
+        "TablixColumns",
+        "Fields",
+        "EmbeddedImages",
+        "ReportParameters",
+        "DataSets",
+        "DataSources",
+        "TablixMembers",
+        "GroupExpressions",
+        "Paragraphs",
+        "TextRuns",
+    )
+    empty_counts: Dict[str, int] = {}
+    for tag in REQUIRED_NONEMPTY:
+        for el in find_all(tree, tag):
+            if len(list(el)) == 0:
+                empty_counts[tag] = empty_counts.get(tag, 0) + 1
+    for tag, count in empty_counts.items():
+        issues.append((
+            "BLOCKER",
+            f"rdl.empty_required_container.{tag.lower()}",
+            f"<{tag}> appears {count}x with zero children. RDL 2008/01 "
+            f"requires at least one child element. Upload to SSRS will "
+            f"fail with 'The element {tag!r} has incomplete content.' "
+            f"Either populate the container or omit it entirely.",
+        ))
+
+    # 3d) Image element validity. Per RDL 2008/01 schema:
+    #   <Image>
+    #     <Source>External | Embedded | Database</Source>     (required)
+    #     <Value>...</Value>                                   (required;
+    #         meaning depends on Source: literal embedded-image name for
+    #         Embedded, expression for Database/External)
+    #     <Sizing>AutoSize | Fit | FitProportional | Clip</Sizing>  (optional)
+    # If Source is Embedded, <Value> must match the Name of an
+    # <EmbeddedImage> declared in the report-level <EmbeddedImages>
+    # collection, or upload fails with:
+    #   "The value of the Value property for the image '<X>' is '<Y>',
+    #    which is not a valid Value."
+    valid_image_source = {"External", "Embedded", "Database"}
+    valid_image_sizing = {"AutoSize", "Fit", "FitProportional", "Clip"}
+    embedded_names = set()
+    for ei in find_all(tree, "EmbeddedImage"):
+        nm = ei.get("Name") or ""
+        if nm:
+            embedded_names.add(nm)
+    for img in find_all(tree, "Image"):
+        img_name = img.get("Name", "?")
+        src = img.find(NS + "Source") if NS else img.find("Source")
+        val = img.find(NS + "Value") if NS else img.find("Value")
+        sz = img.find(NS + "Sizing") if NS else img.find("Sizing")
+        if src is None:
+            issues.append((
+                "BLOCKER",
+                f"rdl.image.invalid.{img_name}",
+                f"Image {img_name!r}: missing <Source>. Required values: "
+                f"External, Embedded, Database.",
+            ))
+        elif (src.text or "").strip() not in valid_image_source:
+            issues.append((
+                "BLOCKER",
+                f"rdl.image.invalid.{img_name}",
+                f"Image {img_name!r}: <Source>{src.text!r}</Source> not a "
+                f"valid value. Allowed: External, Embedded, Database.",
+            ))
+        if val is None:
+            issues.append((
+                "BLOCKER",
+                f"rdl.image.invalid.{img_name}",
+                f"Image {img_name!r}: missing <Value>.",
+            ))
+        elif src is not None and (src.text or "").strip() == "Embedded":
+            v = (val.text or "").strip()
+            if v and v not in embedded_names:
+                issues.append((
+                    "BLOCKER",
+                    f"rdl.image.invalid.{img_name}",
+                    f"Image {img_name!r}: Source=Embedded but Value={v!r} "
+                    f"does not match any <EmbeddedImage> Name. Declared "
+                    f"embedded names: {sorted(embedded_names)!r}. SSRS "
+                    f"will reject upload with 'is not a valid Value'.",
+                ))
+        elif src is not None and (src.text or "").strip() == "Database":
+            v = (val.text or "").strip()
+            if v and not v.startswith("="):
+                issues.append((
+                    "BLOCKER",
+                    f"rdl.image.invalid.{img_name}",
+                    f"Image {img_name!r}: Source=Database but Value={v!r} "
+                    f"is not an expression. Expected =Fields!X.Value.",
+                ))
+        if sz is not None:
+            sv = (sz.text or "").strip()
+            if sv and sv not in valid_image_sizing:
+                issues.append((
+                    "BLOCKER",
+                    f"rdl.image.invalid.{img_name}",
+                    f"Image {img_name!r}: <Sizing>{sv!r}</Sizing> not a "
+                    f"valid value. Allowed: AutoSize, Fit, FitProportional, "
+                    f"Clip.",
+                ))
+
+    # 3e) EmbeddedImage integrity. Each <EmbeddedImage> must carry both
+    # <MIMEType> and <ImageData>; SSRS otherwise reports a deserialization
+    # error at upload time.
+    for ei in find_all(tree, "EmbeddedImage"):
+        nm = ei.get("Name", "?")
+        if (ei.find(NS + "MIMEType") if NS else ei.find("MIMEType")) is None:
+            issues.append((
+                "BLOCKER",
+                f"rdl.embedded_image.invalid.{nm}",
+                f"EmbeddedImage {nm!r}: missing <MIMEType>.",
+            ))
+        if (ei.find(NS + "ImageData") if NS else ei.find("ImageData")) is None:
+            issues.append((
+                "BLOCKER",
+                f"rdl.embedded_image.invalid.{nm}",
+                f"EmbeddedImage {nm!r}: missing <ImageData>.",
+            ))
+
     # 4) DataSources
     ds_list = find_all(tree, "DataSource")
     stats["datasources"] = len(ds_list)
@@ -258,7 +388,7 @@ def preflight_audit(rdl_xml: str) -> Dict:
     if not find_all(tree, "Body"):
         issues.append(("BLOCKER", "rdl.no_body", "Missing <Body>"))
     if not find_all(tree, "Page"):
-        issues.append(("BLOCKER", "rdl.no_page", "Missing <Page> — page sizing required"))
+        issues.append(("BLOCKER", "rdl.no_page", "Missing <Page> - page sizing required"))
 
 
     # 9b) Enumerated-value validity. Several RDL elements have strict enum
@@ -296,7 +426,7 @@ def preflight_audit(rdl_xml: str) -> Dict:
             f"'{val} is not a valid value'.",
         ))
 
-    # 3c) Expression scope validity. Every textbox <Value> expression that
+    # 9c) Expression scope validity. Every textbox <Value> expression that
     # references =Fields!X.Value must live inside a data region (Tablix) and
     # X must be in that Tablix's bound DataSet <Fields> list. References to
     # parameter values must use =Parameters!P_X.Value. This catches the
@@ -320,7 +450,7 @@ def preflight_audit(rdl_xml: str) -> Dict:
     # Walk each Tablix and collect its DataSetName + the set of textbox
     # names directly under that tablix's CellContents (so we know which
     # textboxes are "in scope").
-    tablix_scope: Dict[str, str] = {}  # textbox name -> dataset name
+    tablix_scope: Dict[str, str] = {}
     for tx in find_all(tree, "Tablix"):
         dsn_el = tx.find(NS + "DataSetName") if NS else tx.find("DataSetName")
         dsn = (dsn_el.text or "").strip() if dsn_el is not None else ""
@@ -334,7 +464,6 @@ def preflight_audit(rdl_xml: str) -> Dict:
     # Now check every textbox in the tree.
     for tb in find_all(tree, "Textbox"):
         tb_name = tb.get("Name", "?")
-        # Read every <Value> text inside this textbox.
         for v in find_all(tb, "Value"):
             txt = (v.text or "")
             if "Fields!" not in txt:
@@ -362,7 +491,7 @@ def preflight_audit(rdl_xml: str) -> Dict:
                         f"=Parameters!P_{field_name}.Value.",
                     ))
 
-        # 10) Size unit sanity
+    # 10) Size unit sanity
     size_re = re.compile(
         r"<(Width|Height|TopMargin|BottomMargin|LeftMargin|RightMargin|PageWidth|PageHeight)>([^<]+)</\1>"
     )

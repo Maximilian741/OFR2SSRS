@@ -939,14 +939,54 @@ def _emit_image(
     origin_x: float,
     origin_y: float,
 ) -> Optional[ET.Element]:
+    """Emit an <Image> element bound to an embedded image.
+
+    Per RDL 2008/01 schema, <Image> requires:
+      * <Source> in {External, Embedded, Database}
+      * <Value> whose meaning depends on Source. For Embedded the Value
+        MUST be the literal Name of an <EmbeddedImage> declared in the
+        report-level <EmbeddedImages> collection. SSRS upload rejects the
+        report with "Value ... is not a valid Value" if the name doesn't
+        resolve.
+
+    If the layout field references an image_id that we don't have
+    embedded image bytes for, we cannot honor an Embedded reference. We
+    fall back to a placeholder Textbox (preserving position/size) so the
+    RDL stays schema-valid and uploads cleanly.
+    """
     image_id = lf.image_id or lf.source
     if not image_id:
         return None
+    safe_id = _safe(image_id)
+    # Honor Embedded only when the referenced image actually exists in
+    # the report-level <EmbeddedImages>. Otherwise we'd ship a dangling
+    # Embedded ref that fails SSRS schema validation at upload.
+    if safe_id not in embedded_index:
+        # Fall back to a positioned, empty textbox placeholder so the
+        # surrounding layout still validates and the user sees a visible
+        # gap where the missing image used to be. This is preferable to
+        # emitting an invalid Image element.
+        tb = _sub(parent, "Textbox")
+        tb.set("Name", name)
+        paragraphs = _sub(tb, "Paragraphs")
+        para = _sub(paragraphs, "Paragraph")
+        runs = _sub(para, "TextRuns")
+        run = _sub(runs, "TextRun")
+        _sub(run, "Value", "")
+        _sub(run, "Style")
+        rel_x = max(0.0, lf.x - origin_x)
+        rel_y = max(0.0, lf.y - origin_y)
+        _sub(tb, "Top", _in(rel_y))
+        _sub(tb, "Left", _in(rel_x))
+        _sub(tb, "Width", _in(lf.width if lf.width > 0 else 0.5))
+        _sub(tb, "Height", _in(lf.height if lf.height > 0 else 0.5))
+        _sub(tb, "Style")
+        return tb
     img = _sub(parent, "Image")
     img.set("Name", name)
     _sub(img, "Source", "Embedded")
-    _sub(img, "Value", _safe(image_id))
-    mime = embedded_index.get(image_id, "image/gif")
+    _sub(img, "Value", safe_id)
+    mime = embedded_index.get(safe_id, "image/gif")
     _sub(img, "MIMEType", mime)
     _sub(img, "Sizing", "FitProportional")
     rel_x = max(0.0, lf.x - origin_x)
@@ -1032,7 +1072,14 @@ def _emit_frame(
 
     rect = _sub(parent_items, "Rectangle")
     rect.set("Name", f"Rect_{_safe(frame.name) or 'Frame'}")
-    inner_items = _sub(rect, "ReportItems")
+    # Build the ReportItems into a detached element first; only attach it
+    # to the Rectangle if at least one child report item lands there.
+    # Per RDL 2008/01 schema <ReportItems> requires >=1 child item and
+    # SSRS upload fails with:
+    #   "The element 'ReportItems' has incomplete content. List of
+    #    possible elements expected: ..."
+    # when it's emitted empty.
+    inner_items = ET.Element(_q("ReportItems"))
 
     frame_origin_x = frame.x
     frame_origin_y = frame.y
@@ -1048,7 +1095,9 @@ def _emit_frame(
         if child_kind in ("frame", "repeating_frame"):
             child_rect = _sub(inner_items, "Rectangle")
             child_rect.set("Name", f"Rect_{_safe(child.name) or 'SubFrame'}")
-            child_inner = _sub(child_rect, "ReportItems")
+            # Same deferred-attach pattern as the parent Rectangle: only
+            # emit <ReportItems> if there is actual content underneath.
+            child_inner = ET.Element(_q("ReportItems"))
             for cf in child.fields or []:
                 _emit_layout_field(child_inner, cf, report, embedded_index,
                                    child.x, child.y,
@@ -1059,6 +1108,8 @@ def _emit_frame(
                             child.x, child.y,
                             dataset_name=child_scope_ds,
                             audit_notes=audit_notes)
+            if len(list(child_inner)) > 0:
+                child_rect.append(child_inner)
             _sub(child_rect, "Top", _in(max(0.0, child.y - frame_origin_y)))
             _sub(child_rect, "Left", _in(max(0.0, child.x - frame_origin_x)))
             _sub(child_rect, "Height", _in(child.height if child.height > 0 else 0.5))
@@ -1082,6 +1133,13 @@ def _emit_frame(
                         frame_origin_x, frame_origin_y,
                         dataset_name=child_scope_ds,
                         audit_notes=audit_notes)
+
+    # Attach the inner ReportItems only when it has actual content. An
+    # empty <ReportItems/> is a schema violation in RDL 2008/01.
+    if len(list(inner_items)) > 0:
+        # Element ordering in <Rectangle>: ReportItems must come BEFORE
+        # Top/Left/Height/Width per the 2008/01 schema sequence.
+        rect.append(inner_items)
 
     rel_x = max(0.0, frame.x - parent_x)
     rel_y = max(0.0, frame.y - parent_y)
@@ -1131,9 +1189,13 @@ def _build_certificate_body(
     body = ET.Element(_q("Body"))
     items = _sub(body, "ReportItems")
 
+    # Index by the SAFE name we'll write into <EmbeddedImages>; the
+    # <Image><Value> reference must match the safe spelling exactly or
+    # SSRS rejects the upload with "<value> is not a valid Value".
     embedded_index = {
-        img.id: (img.mime_type or "image/gif")
+        _safe(img.id): (img.mime_type or "image/gif")
         for img in (report.embedded_images or [])
+        if img.id
     }
 
     extent_w, extent_h = _certificate_extents(section_main)
