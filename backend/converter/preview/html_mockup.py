@@ -51,50 +51,16 @@ def _column_labels(query):
 
 
 def _sample_rows(columns):
-    canned = {
-        "permit": ["MV-2026-0117", "MV-2026-0231"],
-        "facility": ["Acme Holdings - Springfield", "Northwind Industries - Riverside"],
-        "facility name": ["Acme Holdings - Springfield", "Northwind Industries - Riverside"],
-        "name": ["Acme Holdings - Springfield", "Northwind Industries - Riverside"],
-        "city": ["Springfield", "Riverside"],
-        "address": ["100 Main St", "200 Commerce Way"],
-        "site addr": ["100 Main St, Springfield, ST 00000", "200 Commerce Way, Riverside, ST 00000"],
-        "owner": ["Jane Q. Public", "Jordan Sample"],
-        "permittee": ["Public, Jane Q.", "Sample, Jordan"],
-        "renewal year": ["2026", "2026"],
-        "year": ["2026", "2026"],
-        "status": ["Active", "Active"],
-        "phone": ["(000) 555-0144", "(000) 555-0299"],
-        "email": ["[email protected]", "[email protected]"],
-        "zip": ["00000", "00000"],
-        "state": ["ST", "ST"],
-        "county": ["Sample County A", "Sample County B"],
-        "expires": ["12/31/2026", "12/31/2026"],
-        "issued": ["01/05/2026", "01/12/2026"],
-        "fee": ["$250.00", "$250.00"],
-        "perm dates": ["JANUARY 5, 2026 TO DECEMBER 31, 2026", "JANUARY 12, 2026 TO DECEMBER 31, 2026"],
-        "perm type": ["<REPORT TITLE>", "<REPORT TITLE>"],
-    }
-    fallback_a = ["A-001", "Sample Co. A", "Lakeside", "Owner A", "2026", "Active"]
-    fallback_b = ["A-002", "Sample Co. B", "Northport", "Owner B", "2026", "Active"]
+    """Build 2 fictional sample rows for a list of column names.
 
+    Delegates per-column lookup to _sample_for_source so all placeholder
+    data lives in ONE pool — structural keyword-based, never customer- or
+    report-specific.
+    """
     row_a, row_b = [], []
-    for i, col in enumerate(columns):
-        key = col.lower().replace("_", " ").strip()
-        if key in canned:
-            row_a.append(canned[key][0])
-            row_b.append(canned[key][1])
-        else:
-            matched = False
-            for k, v in canned.items():
-                if k in key or key in k:
-                    row_a.append(v[0])
-                    row_b.append(v[1])
-                    matched = True
-                    break
-            if not matched:
-                row_a.append(fallback_a[i % len(fallback_a)])
-                row_b.append(fallback_b[i % len(fallback_b)])
+    for col in columns:
+        row_a.append(_sample_for_source(col, 0))
+        row_b.append(_sample_for_source(col, 1))
     return [row_a, row_b]
 
 
@@ -516,21 +482,22 @@ def _render_certificate(report: ParsedReport) -> str:
 
 
 def _is_letter_style(report):
-    """Heuristic: a 'letter' report has many text/paragraph formulas
-    (CF_PARA_*, CF_DIRECTOR, CF_GOVERNOR, etc.) or a name ending in _LTR_*
-    or _LETTER. Tabular reports have a main query with many dataItems
-    and few/no paragraph formulas."""
+    """Structural heuristic for letter-style reports. No customer/agency-
+    specific token matching — purely shape-based:
+
+      * Name suffix _LTR / _LETTER (a convention many Oracle Reports shops use)
+      * OR 3+ paragraph-shaped text blocks in the layout
+      * OR a single static text block ≥ 400 characters (a body paragraph)
+    """
     name = (report.name or "").upper()
     if "_LTR" in name or "_LETTER" in name:
         return True
-    # Check formulas for letter-shaped names
-    letter_signals = 0
-    for f in report.formulas:
-        fn = (f.name or "").upper()
-        if fn.startswith("CF_PARA") or fn.startswith("CF_DIRECTOR") or            fn.startswith("CF_GOVERNOR") or fn.startswith("CF_SIGN") or            fn.startswith("CF_BODY") or fn.startswith("CF_GREETING") or            fn.startswith("CF_SALUT"):
-            letter_signals += 1
-    if letter_signals >= 1:
+    if _count_paragraphy_text_blocks(report) >= 3:
         return True
+    for g in _iter_layout(report):
+        for f in g.fields or []:
+            if f.kind == "text" and len(f.text or "") >= 400:
+                return True
     return False
 
 
@@ -669,11 +636,17 @@ def _render_letter_mockup(report):
 # Default palette for the tabular-details variant. Used when the parsed model
 # does not carry explicit background_color / foreground_color attributes
 # (Agent A's color-parsing work is wiring those up in parallel).
-_TAB_TITLE_RED   = "#c80000"
-_TAB_BAND_BG     = "#1a3a8f"
-_TAB_BAND_FG     = "#ffe066"
-_TAB_DETAIL_BG   = "#e8eaf0"
-_TAB_SUBBAND_BG  = "#1a3a8f"
+# Neutral fallback palette. The renderer ALWAYS prefers colors parsed from
+# the report's own <visualSettings> elements (via oracle_colors.resolve_color);
+# these constants are used ONLY when the source XML has no color information
+# for a given element. They are deliberately grayscale so an uncolored report
+# from any source looks like a generic monochrome document, not like a
+# specific previously-seen report.
+_TAB_TITLE_RED   = "#1a1a1a"   # default title color (near-black, NOT red)
+_TAB_BAND_BG     = "#666666"   # neutral mid-gray group-header band
+_TAB_BAND_FG     = "#ffffff"
+_TAB_DETAIL_BG   = "#f5f5f5"   # very light gray detail block
+_TAB_SUBBAND_BG  = "#7a7a7a"
 _TAB_SUBBAND_FG  = "#ffffff"
 _TAB_INK         = "#111111"
 _TAB_INK_SOFT    = "#444444"
@@ -734,36 +707,73 @@ def _repeating_frames(report):
 
 
 def detect_report_kind(report):
-    """Return 'letter' or 'tabular_details' based on the parsed report.
+    """Return one of 'letter', 'tabular_details', 'certificate'.
 
-    Heuristic order:
-      1. Strong letter signal (name contains _LTR_ / _LETTER, OR
-         many CF_PARA_* / CF_DIRECTOR / CF_GOVERNOR formulas) -> letter.
-         This wins over color because letter templates often carry
-         decorative background colors on their letterhead frame.
-      2. Else if any REPEATING FRAME carries a non-empty background_color
-         (the strongest tabular-details signal post Agent-A) -> tabular_details
-      3. Else if any frame/field carries a non-empty background_color
-         -> tabular_details (weaker signal but still report-like).
-      4. Else if 3+ paragraph-like text blocks -> letter
-      5. Default: tabular_details (more report-like than the
-         generic B&W table for unknown reports).
+    All checks are structural — driven by the parsed report's shape, never
+    by formula names, agency-specific tokens, or report names tied to any
+    particular customer.
+
+    Order (most specific first):
+      1. Strong letter signal — name suffix _LTR/_LETTER (an industry-wide
+         Oracle Reports naming convention for correspondence reports).
+      2. Strong tabular signal — at least one REPEATING FRAME carries an
+         explicit background_color in its <visualSettings> (banded report).
+      3. Strong certificate signal — section_main has 2+ positional sibling
+         frames AND at least 2 multi-line static text blocks among them
+         (permit/certificate layout: stamps, titles, legal text).
+      4. Medium tabular — 2+ repeating frames with detail-data fields.
+      5. Medium letter — 3+ paragraph-shaped text blocks (formal body copy).
+      6. Weak tabular — any color anywhere AND no clear certificate shape.
+      7. Default — certificate (degrades gracefully for unknown layouts).
     """
-    if _is_letter_style(report):
+    name = (report.name or "").upper()
+    if "_LTR" in name or "_LETTER" in name:
         return "letter"
-    # Repeating frame with a band color is the strongest tabular signal.
+
+    # Strongest tabular signal: a repeating frame with a band color.
     for g in _iter_layout(report):
-        if g.kind == "repeating_frame" and _attr(g, "background_color"):
-            return "tabular_details"
         if g.kind == "repeating_frame":
+            if _attr(g, "background_color"):
+                return "tabular_details"
             for f in g.fields or []:
                 if _attr(f, "background_color"):
                     return "tabular_details"
-    if _has_color_signal(report):
+
+    # Certificate signal (positional cards/stamps with multi-line static text)
+    # checked BEFORE medium tabular and letter so permit-style reports route
+    # here instead of getting a generic letter template.
+    main = _find_section(report.layout or [], "section_main")
+    if main is not None:
+        frames = [c for c in (main.children or []) if c.kind == "frame"]
+        multiline_text_count = 0
+        for fr in frames:
+            for f in (fr.fields or []):
+                text = f.text or ""
+                if f.kind == "text" and "\n" in text and len(text) >= 30:
+                    multiline_text_count += 1
+        if len(frames) >= 2 and multiline_text_count >= 2:
+            return "certificate"
+
+    # Medium tabular: 2+ repeating frames with detail data.
+    reps_with_data = [
+        g for g in _iter_layout(report)
+        if g.kind == "repeating_frame"
+        and any(f.kind == "field" for f in (g.fields or []))
+    ]
+    if len(reps_with_data) >= 2:
         return "tabular_details"
+
+    # Medium letter: 3+ paragraph-shaped text blocks (long, multiline).
     if _count_paragraphy_text_blocks(report) >= 3:
         return "letter"
-    return "tabular_details"
+
+    if _has_color_signal(report):
+        return "tabular_details"
+
+    # Final fallback: certificate. The certificate renderer just walks
+    # whatever frames the report has, so it degrades gracefully for
+    # unknown shapes — better than emitting fake banded tables.
+    return "certificate"
 
 
 def _find_title_text(report):
@@ -807,20 +817,27 @@ def _section_main_text_fields(report):
 
 
 def _normalize_color(color, fallback):
-    """Coerce a possibly-blank or Oracle-named color into a hex string."""
+    """Coerce an Oracle color token into a #RRGGBB hex string.
+
+    Order of resolution:
+      1. Empty / None → fallback.
+      2. Already a hex literal (#abc, #aabbcc) → returned as-is.
+      3. Otherwise delegate to oracle_colors.resolve_color() which handles
+         named colors (red, darkblue, gray16, navy, ...) AND r/g/b triplets
+         (r0g0b50 = rgb(0,0,127) in Oracle's 0-100 scale).
+      4. If the resolver can't decode it, return fallback.
+    """
     if not color:
         return fallback
-    if color.startswith("#"):
+    if isinstance(color, str) and color.startswith("#"):
         return color
-    low = color.lower()
-    if "red" in low:
-        return _TAB_TITLE_RED
-    if low in ("black", "ink"):
-        return _TAB_INK
-    if "navy" in low or "blue" in low:
-        return _TAB_BAND_BG
-    if "yellow" in low:
-        return _TAB_BAND_FG
+    try:
+        from converter.parsers.oracle_colors import resolve_color
+        resolved = resolve_color(color)
+        if resolved:
+            return resolved
+    except Exception:
+        pass
     return fallback
 
 
@@ -913,36 +930,55 @@ def _detail_field_pairs(group):
 
 
 def _sample_for_source(src, idx):
-    """Sample value for a given Oracle column/source name, idx 0 or 1."""
+    """Return a fictional sample value for a column/source name.
+
+    The pool is built from neutral structural keywords (id, name, date, addr,
+    city, type, status, comment, count, etc.) — never specific to any one
+    report. If the column name doesn't match a keyword, return a generic
+    'Sample Value' placeholder. This guarantees that no report's actual
+    field names or values can be hard-coded into the preview output.
+    """
     key = (src or "").lower().replace("_", " ").strip()
-    canned = {
-        "cvid":              ["MV-2026-0117", "MV-2026-0231"],
-        "cnty nm":           ["Sample County A", "Sample County B"],
-        "cnty":              ["Sample County A", "Sample County B"],
-        "county":            ["Sample County A", "Sample County B"],
-        "location":          ["100 Main St, Springfield", "200 Commerce Way, Riverside"],
-        "site addr":         ["100 Main St, Springfield, ST", "200 Commerce Way, Riverside, ST"],
-        "cf owner name":     ["Acme Holdings", "Northwind Industries"],
-        "owner":             ["Acme Holdings", "Northwind Industries"],
-        "cf contractor name":["Cleanup LLC", "Restoration Co."],
-        "contractor":        ["Cleanup LLC", "Restoration Co."],
-        "action type id":    ["Inspection", "Decontamination"],
-        "action type desc":  ["Inspection", "Decontamination"],
-        "action type name":  ["Inspection", "Decontamination"],
-        "action hist descr": ["Initial site walk performed.",
-                              "Decontamination certified complete."],
-        "status date":       ["03/12/2026", "04/02/2026"],
-        "countcvidpercnty nm":["2", "2"],
-        "permit":            ["MV-2026-0117", "MV-2026-0231"],
-        "facility name":     ["Acme Holdings - Springfield",
-                              "Northwind Industries - Riverside"],
-    }
-    if key in canned:
-        return canned[key][idx]
-    for k, v in canned.items():
-        if k and (k in key or key in k):
-            return v[idx]
-    return ["Sample Value A", "Sample Value B"][idx]
+
+    # Structural keyword pools. Each pool has 2 fictional alternatives so two
+    # sample rows look different. NEVER use customer/jurisdiction-specific
+    # tokens (no "County A", no "Montana", no "Methamphetamine", etc.).
+    NAME_POOL    = ["Acme Holdings", "Northwind Industries"]
+    PERSON_POOL  = ["Alex Rivera", "Jordan Casey"]
+    ADDR_POOL    = ["100 Main St, Springfield, ST 00000",
+                    "200 Commerce Way, Riverside, ST 00000"]
+    CITY_POOL    = ["Springfield", "Riverside"]
+    DATE_POOL    = ["03/12/2026", "04/02/2026"]
+    NUM_POOL     = ["1001", "1002"]
+    SHORT_ID     = ["A-0117", "A-0231"]
+    TYPE_POOL    = ["Type Alpha", "Type Bravo"]
+    STATUS_POOL  = ["Active", "Pending"]
+    COMMENT_POOL = ["Initial review completed.", "Follow-up scheduled."]
+    GROUP_POOL   = ["Group One", "Group Two"]
+    EMAIL_POOL   = ["[email protected]", "[email protected]"]
+    PHONE_POOL   = ["(555) 010-1001", "(555) 010-1002"]
+
+    # Keyword → pool dispatch (order matters: more-specific keywords first).
+    KEYWORD_MAP = [
+        (("email",),                       EMAIL_POOL),
+        (("phone", "tel",),                PHONE_POOL),
+        (("contractor", "owner", "permittee", "company", "org", "facility"), NAME_POOL),
+        (("contact", "user", "person", "signer", "manager"), PERSON_POOL),
+        (("addr", "street", "location"),   ADDR_POOL),
+        (("city", "town"),                 CITY_POOL),
+        (("date", "dt"),                   DATE_POOL),
+        (("comment", "descr", "notes", "remark"), COMMENT_POOL),
+        (("status",),                      STATUS_POOL),
+        (("type",),                        TYPE_POOL),
+        (("count", "total", "qty", "num", "number"), NUM_POOL),
+        (("id", "code", "key"),            SHORT_ID),
+        (("nm", "name", "label", "group"), GROUP_POOL),
+    ]
+    for keywords, pool in KEYWORD_MAP:
+        for kw in keywords:
+            if kw and kw in key:
+                return pool[idx % len(pool)]
+    return ["Sample Value A", "Sample Value B"][idx % 2]
 
 
 def _render_band(bg, fg, content_html, weight="bold", size=12, pad="6px 12px"):
@@ -1088,13 +1124,17 @@ def _render_tabular_details(report):
         for idx in (0, 1):
             blocks.append(_render_repeating_block(top_rep, idx, defaults))
     else:
+        # Fallback when the layout has NO repeating frames: emit a plain
+        # banded data table from the main query's column labels. No fake
+        # "County" header — the band label comes from the first column.
         query = _pick_main_query(report)
         columns = _column_labels(query)
         rows = _sample_rows(columns)
+        first_label = columns[0] if columns else "Group"
         for idx, row in enumerate(rows):
+            band_value = _esc(row[0]) if row else "Sample Group " + str(idx + 1)
             header_html = (
-                'County: <b>' + _esc(row[0] if row else "Sample County")
-                + '</b> &nbsp; &nbsp; Total For County: <b>2</b>'
+                _esc(first_label) + ': <b>' + band_value + '</b>'
             )
             blocks.append(_render_band(defaults["band_bg"], defaults["band_fg"], header_html))
             detail_rows = "".join(
@@ -1133,10 +1173,195 @@ def _render_tabular_details(report):
     )
 
 
+def _render_certificate_mockup(report):
+    """Render a certificate/permit-style report.
+
+    Walks section_main's frames as vertically-stacked panels. Each panel:
+      * Title row (the largest centered text field, if any)
+      * Detail grid (key/value pairs of remaining fields with sample values)
+      * Body paragraph blocks for any multi-line static text >= 30 chars
+
+    All colors come from the parsed visualSettings on each frame/field;
+    fallback is neutral grayscale only when the XML has no color information.
+    """
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return _render_tabular_details(report)
+    frames = [c for c in (main.children or []) if c.kind == "frame"]
+    if not frames:
+        return _render_tabular_details(report)
+
+    title = _find_title_text(report)
+    title_color = _normalize_color(
+        _attr(title, "color", "") if title else "",
+        _TAB_TITLE_RED,
+    )
+    title_lines = []
+    if title is not None:
+        for ln in (title.text or "").splitlines():
+            ln = ln.strip()
+            if ln:
+                title_lines.append(ln)
+    if not title_lines:
+        title_lines = [report.name or "Report"]
+
+    title_html_bits = [
+        '<div style="text-align:center; padding:18px 0 14px; '
+        'border-bottom:1px solid ' + _TAB_RULE_LIGHT + '; '
+        'margin-bottom:18px;">'
+    ]
+    for i, ln in enumerate(title_lines[:4]):
+        size = 22 if i == 0 else (16 if i == 1 else 13)
+        title_html_bits.append(
+            '<div style="font-size:' + str(size) + 'px; font-weight:bold; '
+            'color:' + title_color + '; line-height:1.25; '
+            'margin:2px 0; letter-spacing:0.3px;">'
+            + _esc(ln) + '</div>'
+        )
+    title_html_bits.append('</div>')
+    title_html = "".join(title_html_bits)
+
+    param_html = _render_tabular_param_form(report)
+
+    panels = []
+    for fr in frames:
+        text_blocks = []
+        kv_pairs = []
+        img_blocks = []
+
+        fields = sorted(
+            fr.fields or [],
+            key=lambda f: (round(f.y or 0.0, 2), round(f.x or 0.0, 2)),
+        )
+        pending_label = None
+        for f in fields:
+            if f.kind == "image":
+                img_blocks.append(f)
+                continue
+            if f.kind == "text":
+                txt = (f.text or "").strip()
+                if not txt:
+                    continue
+                if "\n" in txt or len(txt) >= 40:
+                    text_blocks.append(f)
+                    pending_label = None
+                else:
+                    pending_label = txt.rstrip(":")
+            elif f.kind == "field":
+                label = pending_label or (f.source or f.name or "").replace("_", " ").title()
+                val = _sample_for_source(f.source or f.name, 0)
+                kv_pairs.append((label, f.source or f.name, val))
+                pending_label = None
+
+        inner_reps = []
+        def collect_reps(g, acc):
+            for ch in g.children or []:
+                if ch.kind == "repeating_frame":
+                    acc.append(ch)
+                else:
+                    collect_reps(ch, acc)
+        collect_reps(fr, inner_reps)
+
+        if not (text_blocks or kv_pairs or img_blocks or inner_reps):
+            continue
+
+        panel_bg = _normalize_color(_attr(fr, "background_color", ""), _TAB_PAPER)
+        panel_bits = []
+
+        for tb in text_blocks:
+            raw = (tb.text or "").strip()
+            color = _normalize_color(_attr(tb, "color", ""), _TAB_INK)
+            bg = _normalize_color(_attr(tb, "background_color", ""), "transparent")
+            size = max(11, int(tb.font_size or 12))
+            align = (tb.align or "start").lower()
+            css_align = {"start": "left", "end": "right", "center": "center"}.get(align, "left")
+            font_weight = "bold" if tb.bold else "normal"
+            font_style = "italic" if tb.italic else "normal"
+            esc_text = _esc(raw).replace("\n", "<br>")
+            panel_bits.append(
+                '<div style="font-size:' + str(size) + 'px; color:' + color + '; '
+                'background:' + bg + '; text-align:' + css_align + '; '
+                'font-weight:' + font_weight + '; font-style:' + font_style + '; '
+                'margin:6px 0; line-height:1.4; white-space:pre-wrap;">'
+                + esc_text + '</div>'
+            )
+
+        if kv_pairs:
+            rows_html = []
+            for label, _src, val in kv_pairs:
+                rows_html.append(
+                    '<tr>'
+                    '<td style="padding:3px 12px 3px 0; text-align:right; '
+                    'color:' + _TAB_INK_SOFT + '; font-weight:bold; '
+                    'width:32%; font-size:12px; vertical-align:top;">'
+                    + _esc(label) + ':</td>'
+                    '<td style="padding:3px 0; color:' + _TAB_INK + '; '
+                    'font-size:12px; border-bottom:1px solid '
+                    + _TAB_RULE_LIGHT + ';">' + _esc(val) + '</td>'
+                    '</tr>'
+                )
+            panel_bits.append(
+                '<table style="width:100%; border-collapse:collapse; '
+                'margin:8px 0;">' + "".join(rows_html) + '</table>'
+            )
+
+        for ib in img_blocks:
+            panel_bits.append(
+                '<div style="margin:8px 0; padding:18px; text-align:center; '
+                'border:1px dashed ' + _TAB_RULE_LIGHT + '; color:'
+                + _TAB_INK_MUTED + '; font-size:11px; font-style:italic;">'
+                '[image placeholder: ' + _esc(ib.name or "image") + ']</div>'
+            )
+
+        rep_defaults = {
+            "band_bg":    _TAB_BAND_BG,
+            "band_fg":    _TAB_BAND_FG,
+            "detail_bg":  _TAB_DETAIL_BG,
+            "subband_bg": _TAB_SUBBAND_BG,
+            "subband_fg": _TAB_SUBBAND_FG,
+        }
+        for rep in inner_reps[:2]:
+            for idx in (0, 1):
+                panel_bits.append(_render_repeating_block(rep, idx, rep_defaults))
+
+        raw_panel_label = (fr.name or "").lstrip("M_").replace("_", " ").title().strip()
+        if raw_panel_label and len(raw_panel_label) > 1:
+            panel_bits.insert(
+                0,
+                '<div style="font-size:11px; color:' + _TAB_INK_MUTED + '; '
+                'text-transform:uppercase; letter-spacing:1px; '
+                'margin:14px 0 6px;">' + _esc(raw_panel_label) + '</div>',
+            )
+
+        panels.append(
+            '<div style="background:' + panel_bg + '; padding:14px 18px; '
+            'margin:0 0 16px; border:1px solid ' + _TAB_RULE_LIGHT + '; '
+            'border-radius:4px;">' + "".join(panel_bits) + '</div>'
+        )
+
+    footer = (
+        '<div style="margin-top:18px; padding-top:10px; '
+        'border-top:1px dashed ' + _TAB_RULE_LIGHT + '; font-size:10px; '
+        'color:' + _TAB_INK_MUTED + '; font-style:italic; text-align:center;">'
+        'Certificate-style preview. Sample values shown; live data is '
+        'bound at runtime via SSRS.</div>'
+    )
+
+    body = title_html + (param_html or "") + "".join(panels) + footer
+    return (
+        '<div style="font-family:Arial,Helvetica,sans-serif; '
+        'background:' + _TAB_PAPER + '; color:' + _TAB_INK + '; '
+        'padding:32px 36px; border:1px solid ' + _TAB_RULE_LIGHT + '; '
+        'max-width:920px; margin:0 auto; line-height:1.4;">'
+        + body + '</div>'
+    )
+
+
 def render_mockup(report):
-    """Public entry point. Dispatches to the letter or tabular-details
-    template based on detect_report_kind()."""
+    """Public entry point. Dispatches on detect_report_kind()."""
     kind = detect_report_kind(report)
     if kind == "letter":
         return _render_letter_mockup(report)
+    if kind == "certificate":
+        return _render_certificate_mockup(report)
     return _render_tabular_details(report)
