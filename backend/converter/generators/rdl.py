@@ -412,7 +412,11 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
 
     # <Query>
     q_el = _sub(ds, "Query")
-    _sub(q_el, "DataSourceName", "DS_Main")
+    # Must match the <DataSource Name="..."> in _build_data_sources. The
+    # data source is emitted as a SHARED reference named "SharedDataSource";
+    # SSRS rejects the RDL at upload with "dataset Q_X refers to the data
+    # source DS_Main, which does not exist" if these don't match.
+    _sub(q_el, "DataSourceName", "SharedDataSource")
 
     if target_db == "oracle":
         # Prefer the original Oracle SQL; fall back to the translated tsql
