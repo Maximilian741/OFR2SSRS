@@ -73,8 +73,17 @@ DEFAULT_COLUMNS = ["Permit", "Renewal_Year", "Site_Name", "Site_Addr", "Perm_Dat
 # Helpers
 # ---------------------------------------------------------------------------
 
-_QUERY_PARAM_RE = re.compile(r"@(P_\w+)", re.IGNORECASE)
-_ORACLE_BIND_VAR_RE = re.compile(r":(P_\w+)", re.IGNORECASE)
+# Oracle SQL bind variables / T-SQL @-parameters. We MUST NOT hardcode the
+# "P_" prefix: real Oracle Reports use a mix of P_*, PARM_*, IN_*, V_*,
+# and bare-name conventions per shop. Match any identifier that follows
+# the sigil so the converter generalizes across reports.
+#
+# The patterns deliberately exclude PL/SQL token sequences that look like
+# bind vars but aren't (e.g. "::TYPE" cast operator, "name:" label). The
+# leading sigil must be at a word boundary; the identifier must start
+# with a letter or underscore.
+_QUERY_PARAM_RE = re.compile(r"(?<![@\w])@([A-Za-z_]\w*)")
+_ORACLE_BIND_VAR_RE = re.compile(r"(?<![:\w])\:([A-Za-z_]\w*)")
 
 
 def _detect_query_parameters(tsql: str) -> List[str]:
@@ -133,12 +142,21 @@ def _in(value: float) -> str:
 
 
 def _collect_layout_columns(report: ParsedReport, query_name: str) -> List[str]:
-    """Walk the layout tree, return ordered column names bound to query_name."""
+    """Walk the layout tree, return ordered column names bound to query_name.
+
+    Layout repeating-frames carry the GROUP name (G_FOO) in source_query;
+    queries are named Q_FOO. We match either an exact hit or the Oracle
+    Q_/G_ convention via the shared suffix (see _query_matches_layout_ref).
+    """
     cols: List[str] = []
     seen: Set[str] = set()
+    # Build a stub DataQuery so we can reuse the suffix-matching helper.
+    target_stub = DataQuery(name=query_name or "")
 
     def walk(group: LayoutGroup) -> None:
-        if (group.source_query or "").upper() == query_name.upper():
+        if group.source_query and _query_matches_layout_ref(
+            target_stub, group.source_query
+        ):
             for f in group.fields:
                 src = (f.source or "").strip()
                 if src and src not in seen:
@@ -153,37 +171,164 @@ def _collect_layout_columns(report: ParsedReport, query_name: str) -> List[str]:
 
 
 def _pick_main_query(report: ParsedReport) -> Optional[DataQuery]:
-    """Prefer Q_PERMIT; fall back to first query."""
-    for q in report.queries or []:
-        if q.name.upper() == "Q_PERMIT":
-            return q
-    if report.queries:
-        return report.queries[0]
-    return None
+    """Pick the report's primary dataset using structural signals only.
+
+    Heuristic (no per-report name hardcoding): the query with the most
+    DataItems is the main one. Oracle Reports puts the bulk of the SELECT
+    list in one query and uses smaller satellite queries for sub-bands
+    (org, signature, etc.). Ties are broken by source-order so a single
+    placeholder query (e.g. when there's only one) still works.
+    """
+    queries = report.queries or []
+    if not queries:
+        return None
+    return max(queries, key=lambda q: (len(q.items or []), -queries.index(q)))
+
+
+def _layout_group_query_names(report: ParsedReport) -> Set[str]:
+    """Collect every source_query referenced anywhere in the layout tree.
+
+    Returns an upper-cased set. Used by detail/signature pickers to map
+    layout repeating-frame bindings back to query objects regardless of
+    the Q_/G_ naming convention (Oracle pairs Q_FOO with G_FOO; matching
+    is done by the longest common suffix).
+    """
+    names: Set[str] = set()
+
+    def walk(g: LayoutGroup) -> None:
+        if g.source_query:
+            names.add(g.source_query.upper())
+        for c in g.children or []:
+            walk(c)
+
+    for g in report.layout or []:
+        walk(g)
+    return names
+
+
+def _query_matches_layout_ref(q: DataQuery, layout_ref: str) -> bool:
+    """True when layout_ref names the same data group as DataQuery q.
+
+    Oracle convention: Q_FOO query <-> G_FOO group. We match by the
+    portion AFTER the first underscore, case-insensitive, so Q_PERMIT
+    matches G_PERMIT and Q_1 matches G_1 without baking names in.
+    """
+    if not layout_ref:
+        return False
+    lref = layout_ref.upper()
+    qname = (q.name or "").upper()
+    if lref == qname:
+        return True
+    q_tail = qname.split("_", 1)[1] if "_" in qname else qname
+    l_tail = lref.split("_", 1)[1] if "_" in lref else lref
+    return bool(q_tail) and q_tail == l_tail
 
 
 def _pick_detail_query(report: ParsedReport, main_name: str) -> Optional[DataQuery]:
-    """Pick a master-detail secondary query (Q_ORG preferred)."""
-    if not report.queries:
+    """Pick a master-detail secondary query using layout structure.
+
+    Structural rule: walk the layout. Any repeating_frame whose parent
+    chain contains a repeating_frame bound to ``main_name`` and whose
+    own source_query maps to a DIFFERENT DataQuery is the detail. This
+    captures the master-detail pattern without hardcoding names.
+
+    Fallbacks (in order, so genericity stays graceful):
+      1. Any query bound by a repeating_frame anywhere in the layout
+         that isn't the main query.
+      2. The first non-main query in source order.
+    """
+    queries = report.queries or []
+    if not queries:
         return None
     main_upper = (main_name or "").upper()
-    # Prefer Q_ORG explicitly
-    for q in report.queries:
-        if q.name.upper() == "Q_ORG" and q.name.upper() != main_upper:
+
+    others = [q for q in queries if q.name.upper() != main_upper]
+    if not others:
+        return None
+
+    def find_nested_under_main(group: LayoutGroup, under_main: bool) -> Optional[DataQuery]:
+        kind = (group.kind or "").lower()
+        bound_to_main = bool(group.source_query) and any(
+            _query_matches_layout_ref(q, group.source_query)
+            for q in queries
+            if q.name.upper() == main_upper
+        )
+        now_under_main = under_main or (kind == "repeating_frame" and bound_to_main)
+        if (
+            now_under_main
+            and kind == "repeating_frame"
+            and group.source_query
+            and not bound_to_main
+        ):
+            for q in others:
+                if _query_matches_layout_ref(q, group.source_query):
+                    return q
+        for child in group.children or []:
+            hit = find_nested_under_main(child, now_under_main)
+            if hit is not None:
+                return hit
+        return None
+
+    for g in report.layout or []:
+        hit = find_nested_under_main(g, False)
+        if hit is not None:
+            return hit
+
+    # Fallback 1: any non-main query referenced by some repeating_frame.
+    layout_refs = _layout_group_query_names(report)
+    for q in others:
+        if any(_query_matches_layout_ref(q, r) for r in layout_refs):
             return q
-    # Otherwise the next non-primary query
-    for q in report.queries:
-        if q.name.upper() != main_upper:
-            return q
-    return None
+
+    # Fallback 2: first non-main query in source order.
+    return others[0]
 
 
 def _pick_signature_query(report: ParsedReport) -> Optional[DataQuery]:
-    """Pick a query for signature/image binding (Q_SIGNATURE)."""
-    for q in (report.queries or []):
-        if q.name.upper() == "Q_SIGNATURE":
-            return q
-    return None
+    """Pick a query that supplies an image/signature blob.
+
+    Structural signals (no name hardcoding):
+      * The layout contains an ``Image`` field whose source matches one
+        of the query's DataItems.
+      * Failing that, a single-item query whose lone field is not also
+        the main/detail group key (a small query like Q_SIGNATURE that
+        produces just a BLOB).
+
+    Returns None when no plausible candidate exists; callers must handle.
+    """
+    queries = report.queries or []
+    if not queries:
+        return None
+
+    # Build a set of every field source referenced by an Image layout
+    # field anywhere in the report.
+    image_sources: Set[str] = set()
+
+    def walk(g: LayoutGroup) -> None:
+        for f in g.fields or []:
+            if (f.kind or "").lower() == "image":
+                src = (f.source or f.image_id or "").upper()
+                if src:
+                    image_sources.add(src)
+        for c in g.children or []:
+            walk(c)
+
+    for g in report.layout or []:
+        walk(g)
+
+    if image_sources:
+        for q in queries:
+            for it in q.items or []:
+                if (it.name or "").upper() in image_sources:
+                    return q
+
+    # Structural fallback: smallest query (typically a single-item BLOB
+    # carrier). Skip the main query so we don't return it twice.
+    main = _pick_main_query(report)
+    candidates = [q for q in queries if q is not main and q.items]
+    if not candidates:
+        return None
+    return min(candidates, key=lambda q: len(q.items or []))
 
 
 def _layout_format_triggers(report: ParsedReport) -> List[Tuple[str, str]]:
@@ -303,12 +448,19 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
                     referenced.append(n)
         if referenced:
             qp_root = _sub(q_el, "QueryParameters")
-            declared_set = {p.upper() for p in declared_params}
+            # Case-insensitive lookup mapping bind-var spelling back to the
+            # canonical declared ReportParameter name. SSRS Parameters! refs
+            # are case-sensitive, so a bind :PARM_X_id must resolve to the
+            # declared PARM_X_ID. Empty <Value/> means the bind passes NULL
+            # at runtime -- correct for the common Oracle pattern
+            # WHERE :P IS NULL OR col IN (:P).
+            canonical = {p.upper(): p for p in declared_params}
             for pname in referenced:
                 qp = _sub(qp_root, "QueryParameter")
                 qp.set("Name", f":{pname}")
-                if pname.upper() in declared_set:
-                    _sub(qp, "Value", f"=Parameters!{pname}.Value")
+                canon = canonical.get(pname.upper())
+                if canon:
+                    _sub(qp, "Value", f"=Parameters!{canon}.Value")
                 else:
                     _sub(qp, "Value", "")
     else:
@@ -322,13 +474,14 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         referenced = _detect_query_parameters(cmd_text)
         if referenced:
             qp_root = _sub(q_el, "QueryParameters")
-            declared_set = {p.upper() for p in declared_params}
+            canonical = {p.upper(): p for p in declared_params}
             for pname in referenced:
                 qp = _sub(qp_root, "QueryParameter")
                 qp.set("Name", f"@{pname}")
                 # Bind to the report parameter if it exists, otherwise just empty
-                if pname.upper() in declared_set:
-                    _sub(qp, "Value", f"=Parameters!{pname}.Value")
+                canon = canonical.get(pname.upper())
+                if canon:
+                    _sub(qp, "Value", f"=Parameters!{canon}.Value")
                 else:
                     _sub(qp, "Value", "")
 
@@ -350,8 +503,10 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
         # For Oracle target we put the placeholder in .sql so CommandText
         # comes through unchanged; for sqlserver we put it in .tsql.
         placeholder_sql = "SELECT 1 AS Permit, 0 AS Renewal_Year, '' AS Site_Name"
+        # Use a neutral placeholder name (NOT Q_PERMIT) so the converter
+        # stays generic across reports. Columns are equally generic.
         placeholder = DataQuery(
-            name="Q_PERMIT",
+            name="Q_MAIN",
             sql=placeholder_sql,
             tsql=placeholder_sql,
             items=[
@@ -489,13 +644,19 @@ def _pick_group_key(query: DataQuery, candidates: Iterable[str]) -> Optional[str
 
 
 def _find_group_for_query(report: ParsedReport, query_name: str) -> Optional[LayoutGroup]:
-    """Return the first LayoutGroup whose source_query matches query_name."""
-    target = (query_name or "").upper()
-    if not target:
+    """Return the first LayoutGroup whose source_query matches query_name.
+
+    Match accepts the Oracle Q_/G_ convention (Q_PERMIT <-> G_PERMIT) so
+    we don't have to bake the prefix translation into every call site.
+    """
+    if not query_name:
         return None
+    target_stub = DataQuery(name=query_name)
 
     def walk(group: LayoutGroup) -> Optional[LayoutGroup]:
-        if (group.source_query or "").upper() == target:
+        if group.source_query and _query_matches_layout_ref(
+            target_stub, group.source_query
+        ):
             return group
         for child in group.children or []:
             hit = walk(child)
@@ -2004,10 +2165,9 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0) -> ET.Elemen
     page = ET.Element(_q("Page"))
 
     # PageHeader -- intentionally MINIMAL. The page-header title used to
-    # duplicate the in-body "STATE OF MONTANA / DEPARTMENT OF ENVIRONMENTAL
-    # QUALITY / ..." title block, which on PDF export produced two stacked
-    # title blocks per page. The body emits the title (it's part of the
-    # certificate layout); the page header now stays empty so each PDF
+    # duplicate the in-body title block, which on PDF export produced two
+    # stacked title blocks per page. The body emits the title (it's part of
+    # the certificate layout); the page header now stays empty so each PDF
     # page shows the title exactly once.
     ph = _sub(page, "PageHeader")
     _sub(ph, "Height", "0.25in")
@@ -2025,8 +2185,8 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0) -> ET.Elemen
     pf_items = _sub(pf, "ReportItems")
 
     sig_q = _pick_signature_query(report)
-    if sig_q is not None:
-        sf = sig_q.items[0].name if sig_q.items else "Sig"
+    if sig_q is not None and sig_q.items:
+        sf = sig_q.items[0].name
         img = _sub(pf_items, "Image")
         img.set("Name", "Img_Sig")
         _sub(img, "Source", "Database")
