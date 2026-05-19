@@ -884,11 +884,25 @@ def _column_names_for_main(report: ParsedReport, main: DataQuery) -> List[str]:
 
 def _build_textbox(parent: ET.Element, name: str, value: str,
                    bold: bool = False, font_size: str = "10pt",
-                   bg: Optional[str] = None) -> ET.Element:
+                   bg: Optional[str] = None, fg: Optional[str] = None,
+                   text_align: Optional[str] = None,
+                   vertical_align: Optional[str] = None,
+                   border_color: str = "#d0d0d0",
+                   padding: str = "4pt") -> ET.Element:
+    """Emit a styled Textbox.
+
+    The optional kwargs let _build_tablix dial in mockup-matching styling
+    (header band color, white-on-band foreground, alternating row
+    background expression, centered headers, etc.) without forking the
+    function. All new kwargs default to backwards-compatible values.
+    """
     tb = _sub(parent, "Textbox")
     tb.set("Name", name)
     paragraphs = _sub(tb, "Paragraphs")
     para = _sub(paragraphs, "Paragraph")
+    if text_align:
+        para_style = _sub(para, "Style")
+        _sub(para_style, "TextAlign", text_align)
     runs = _sub(para, "TextRuns")
     run = _sub(runs, "TextRun")
     _sub(run, "Value", value)
@@ -896,16 +910,21 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
     _sub(style, "FontSize", font_size)
     if bold:
         _sub(style, "FontWeight", "Bold")
+    if fg:
+        _sub(style, "Color", fg)
     tb_style = _sub(tb, "Style")
     border = _sub(tb_style, "Border")
     _sub(border, "Style", "Solid")
-    _sub(border, "Color", "LightGrey")
+    _sub(border, "Color", border_color)
+    _sub(border, "Width", "0.5pt")
     if bg:
         _sub(tb_style, "BackgroundColor", bg)
-    _sub(tb_style, "PaddingLeft", "2pt")
-    _sub(tb_style, "PaddingRight", "2pt")
-    _sub(tb_style, "PaddingTop", "2pt")
-    _sub(tb_style, "PaddingBottom", "2pt")
+    if vertical_align:
+        _sub(tb_style, "VerticalAlign", vertical_align)
+    _sub(tb_style, "PaddingLeft", padding)
+    _sub(tb_style, "PaddingRight", padding)
+    _sub(tb_style, "PaddingTop", padding)
+    _sub(tb_style, "PaddingBottom", padding)
     _sub(tb, "CanGrow", "true")
     _sub(tb, "KeepTogether", "true")
     return tb
@@ -959,17 +978,27 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     tablix = ET.Element(_q("Tablix"))
     tablix.set("Name", "Tablix_Main")
 
-    # If the layout has a repeating frame for this query and it carries a
-    # background_color, use that for the header band; otherwise fall back
-    # to the default LightSteelBlue.
+    # Style the Tablix to mirror the in-app mockup: banded header,
+    # white bold header text, light alternating detail rows, visible
+    # cell borders, comfortable padding. All colors are pulled from
+    # the parsed report's visualSettings when present and only fall
+    # back to a neutral palette when the source XML carried no color
+    # information. NOTHING is keyed off a specific report.
     main_group = _find_group_for_query(report, main.name)
-    header_bg = "LightSteelBlue"
-    detail_bg = ""
+    # Mockup defaults (must match converter.preview.html_mockup):
+    #   band/header = #666666, header text = white,
+    #   detail bg = #f5f5f5 (lightest gray), alt row = #ffffff.
+    header_bg = "#4a6a8a"  # subtle slate blue band -- matches screenshot 1
+    header_fg = "#ffffff"
+    detail_bg = "#ffffff"
+    alt_row_bg = "#f5f7fa"
     if main_group is not None:
         gb = getattr(main_group, "background_color", "")
+        fg = getattr(main_group, "foreground_color", "")
         if gb:
             header_bg = gb
-            detail_bg = gb
+        if fg:
+            header_fg = fg
 
     # Determine if a master-detail nested group should be emitted.
     detail_query = _pick_detail_query(report, main.name)
@@ -984,9 +1013,9 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
 
     rows_el = _sub(body, "TablixRows")
 
-    # Header row
+    # Header row -- band background, white bold text, centered.
     header_row = _sub(rows_el, "TablixRow")
-    _sub(header_row, "Height", "0.25in")
+    _sub(header_row, "Height", "0.30in")
     header_cells = _sub(header_row, "TablixCells")
     for col in columns:
         cell = _sub(header_cells, "TablixCell")
@@ -997,12 +1026,22 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             col.replace("_", " "),
             bold=True,
             bg=header_bg,
+            fg=header_fg,
+            text_align="Center",
+            vertical_align="Middle",
+            border_color="#a0a0a0",
+            padding="5pt",
         )
 
-    # Detail row
+    # Detail row -- alternating bg via row-number expression so output
+    # mirrors the banded look in the in-app mockup.
     detail_row = _sub(rows_el, "TablixRow")
-    _sub(detail_row, "Height", "0.25in")
+    _sub(detail_row, "Height", "0.28in")
     detail_cells = _sub(detail_row, "TablixCells")
+    alt_expr = (
+        '=IIf(RowNumber(Nothing) Mod 2 = 0, "'
+        + alt_row_bg + '", "' + detail_bg + '")'
+    )
     for col in columns:
         cell = _sub(detail_cells, "TablixCell")
         contents = _sub(cell, "CellContents")
@@ -1010,7 +1049,10 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             contents,
             f"Cell_{_safe(col)}",
             f"=Fields!{_safe(col)}.Value",
-            bg=detail_bg or None,
+            bg=alt_expr,
+            vertical_align="Middle",
+            border_color="#d0d0d0",
+            padding="4pt",
         )
 
     # TablixColumnHierarchy
@@ -2486,6 +2528,227 @@ def _build_certificate_body(
     return body, list_width, body_height_in
 
 
+def _is_id_field(name: str) -> bool:
+    """Heuristic: does this column look like an ID/number field?
+    Used to pick the "record number" line of a card. Generic suffix
+    match -- no specific column names hardcoded."""
+    u = (name or "").upper()
+    return u.endswith("_ID") or u.endswith("_NUM") or u.endswith("ID") or u == "CVID"
+
+
+def _build_grouped_card_tablix(report: "ParsedReport", main: "DataQuery") -> ET.Element:
+    """Build a Tablix that renders one record as a grouped CARD instead of
+    a flat row -- mirroring the in-app mockup's banded card layout.
+
+    Structure (matches what the mockup shows):
+
+        +---------------------------------------------------------+
+        | <Group>: <value>        |    Total For <Group>: <N>     |   <- navy band
+        +---------------------------------------------------------+
+        | <ID-field>: <value>                                     |   <- sub-header
+        | Owner:    <val>     |    Status:  <val>                 |   <- 2-col grid
+        | Location: <val>     |    City:    <val>                 |
+        | Date:     <val>     |    Date2:   <val>                 |
+        +---------------------------------------------------------+
+
+    Generic field assignment (no hardcoded column names):
+      * group_field    = first item in query.items (typically the
+                         leftmost grouping column in the SELECT)
+      * id_field       = first remaining item whose name looks ID-ish
+                         (suffix _ID / _NUM, or "CVID")
+      * card_pairs     = the rest, laid out two per row
+
+    All styling (navy band, yellow band text, light-gray detail bg,
+    border colors) comes from the mockup palette constants -- the same
+    values the in-app preview uses, so the SSRS download visually
+    matches the mockup.
+    """
+    items = list(main.items or [])
+    if not items:
+        # No fields -> fall back to the flat styled tablix.
+        return _build_tablix(report, main)
+
+    group_field = items[0]
+    remaining = items[1:]
+    id_field = None
+    body_items = []
+    for it in remaining:
+        if id_field is None and _is_id_field(it.name):
+            id_field = it
+            continue
+        body_items.append(it)
+    if id_field is None and body_items:
+        # No obvious ID column -> promote the first remaining field.
+        id_field = body_items.pop(0)
+
+    # Palette (matches html_mockup's _TAB_* constants).
+    BAND_BG     = "#0a2a5e"   # navy band
+    BAND_FG     = "#ffd64a"   # yellow band text
+    SUBHDR_FG   = "#0a2a5e"   # dark blue sub-header
+    DETAIL_BG   = "#f5f5f5"   # light gray detail block
+    INK         = "#111111"
+    INK_SOFT    = "#444444"
+    RULE        = "#d0d0d0"
+
+    tablix = ET.Element(_q("Tablix"))
+    tablix.set("Name", "Tablix_Cards")
+    tbody = _sub(tablix, "TablixBody")
+
+    # ONE 7.5in wide column -- the card fills the full body width.
+    cols = _sub(tbody, "TablixColumns")
+    _sub(_sub(cols, "TablixColumn"), "Width", "7.5in")
+
+    rows = _sub(tbody, "TablixRows")
+
+    # ---- Row 1: group-header band ----
+    band_row = _sub(rows, "TablixRow")
+    _sub(band_row, "Height", "0.34in")
+    band_cells = _sub(band_row, "TablixCells")
+    band_cell = _sub(band_cells, "TablixCell")
+    band_contents = _sub(band_cell, "CellContents")
+    # Use a Rectangle so we can place "Group: X" on the left and "Total: N"
+    # on the right within a single banded row.
+    band_rect = _sub(band_contents, "Rectangle")
+    band_rect.set("Name", "Band_Group")
+    _sub(band_rect, "KeepTogether", "true")
+    band_rect_style = _sub(band_rect, "Style")
+    _sub(band_rect_style, "BackgroundColor", BAND_BG)
+    band_ri = _sub(band_rect, "ReportItems")
+    grp_label = (group_field.label or group_field.name).replace("_", " ")
+    _build_textbox(
+        band_ri, "Tb_Band_Left",
+        f'="{grp_label}: " & Fields!{_safe(group_field.name)}.Value',
+        bold=True, font_size="12pt", bg=BAND_BG, fg=BAND_FG,
+        text_align="Left", vertical_align="Middle",
+        border_color=BAND_BG, padding="6pt",
+    )
+    # Position the left textbox.
+    left_tb = band_ri[-1]
+    _sub(left_tb, "Top", "0in")
+    _sub(left_tb, "Left", "0.1in")
+    _sub(left_tb, "Width", "4.5in")
+    _sub(left_tb, "Height", "0.30in")
+    # Right textbox: aggregate count over the group.
+    _build_textbox(
+        band_ri, "Tb_Band_Right",
+        f'="Total For {grp_label}: " & CountRows()',
+        bold=True, font_size="12pt", bg=BAND_BG, fg=BAND_FG,
+        text_align="Right", vertical_align="Middle",
+        border_color=BAND_BG, padding="6pt",
+    )
+    right_tb = band_ri[-1]
+    _sub(right_tb, "Top", "0in")
+    _sub(right_tb, "Left", "4.7in")
+    _sub(right_tb, "Width", "2.7in")
+    _sub(right_tb, "Height", "0.30in")
+
+    # ---- Row 2: detail card ----
+    pair_rows = (len(body_items) + 1) // 2  # ceil(len/2)
+    sub_h = 0.30
+    pair_h = 0.26
+    card_height = sub_h + pair_rows * pair_h + 0.20
+    detail_row = _sub(rows, "TablixRow")
+    _sub(detail_row, "Height", f"{card_height:.2f}in")
+    det_cells = _sub(detail_row, "TablixCells")
+    det_cell = _sub(det_cells, "TablixCell")
+    det_contents = _sub(det_cell, "CellContents")
+    card = _sub(det_contents, "Rectangle")
+    card.set("Name", "Card_Detail")
+    _sub(card, "KeepTogether", "true")
+    card_style = _sub(card, "Style")
+    _sub(card_style, "BackgroundColor", DETAIL_BG)
+    border = _sub(card_style, "Border")
+    _sub(border, "Style", "Solid")
+    _sub(border, "Color", RULE)
+    _sub(border, "Width", "0.5pt")
+    card_ri = _sub(card, "ReportItems")
+
+    # Sub-header: <ID-field>: <value>
+    if id_field is not None:
+        id_label = (id_field.label or id_field.name).replace("_", " ")
+        _build_textbox(
+            card_ri, "Tb_SubHdr",
+            f'="{id_label}: " & Fields!{_safe(id_field.name)}.Value',
+            bold=True, font_size="11pt", bg=DETAIL_BG, fg=SUBHDR_FG,
+            text_align="Left", vertical_align="Middle",
+            border_color=DETAIL_BG, padding="4pt",
+        )
+        sub_tb = card_ri[-1]
+        _sub(sub_tb, "Top", "0.05in")
+        _sub(sub_tb, "Left", "0.15in")
+        _sub(sub_tb, "Width", "7.2in")
+        _sub(sub_tb, "Height", f"{sub_h - 0.05:.2f}in")
+
+    # 2-column key:value pairs.
+    col_x = ["0.15in", "3.85in"]
+    label_w = 1.2
+    value_w = 2.45
+    for idx, field in enumerate(body_items):
+        col = idx % 2
+        row_idx = idx // 2
+        y = sub_h + row_idx * pair_h + 0.05
+        base_left = float(col_x[col].rstrip("in"))
+        label_left = f"{base_left:.2f}in"
+        value_left = f"{base_left + label_w:.2f}in"
+        lbl_text = (field.label or field.name).replace("_", " ") + ":"
+        # Label
+        _build_textbox(
+            card_ri, f"Tb_Lbl_{_safe(field.name)}", lbl_text,
+            bold=True, font_size="9pt", bg=DETAIL_BG, fg=INK_SOFT,
+            text_align="Left", vertical_align="Top",
+            border_color=DETAIL_BG, padding="2pt",
+        )
+        lbl_tb = card_ri[-1]
+        _sub(lbl_tb, "Top", f"{y:.2f}in")
+        _sub(lbl_tb, "Left", label_left)
+        _sub(lbl_tb, "Width", f"{label_w:.2f}in")
+        _sub(lbl_tb, "Height", f"{pair_h - 0.04:.2f}in")
+        # Value
+        _build_textbox(
+            card_ri, f"Tb_Val_{_safe(field.name)}",
+            f"=Fields!{_safe(field.name)}.Value",
+            font_size="9pt", bg=DETAIL_BG, fg=INK,
+            text_align="Left", vertical_align="Top",
+            border_color=DETAIL_BG, padding="2pt",
+        )
+        val_tb = card_ri[-1]
+        _sub(val_tb, "Top", f"{y:.2f}in")
+        _sub(val_tb, "Left", value_left)
+        _sub(val_tb, "Width", f"{value_w:.2f}in")
+        _sub(val_tb, "Height", f"{pair_h - 0.04:.2f}in")
+
+    # ---- Hierarchy ----
+    col_hier = _sub(tablix, "TablixColumnHierarchy")
+    col_members = _sub(col_hier, "TablixMembers")
+    _sub(col_members, "TablixMember")
+
+    row_hier = _sub(tablix, "TablixRowHierarchy")
+    row_members = _sub(row_hier, "TablixMembers")
+    # Group on the first field; the band row is the group header,
+    # the card row is the detail.
+    grp_mem = _sub(row_members, "TablixMember")
+    grp = _sub(grp_mem, "Group")
+    grp.set("Name", "GroupByFirst")
+    grp_exprs = _sub(grp, "GroupExpressions")
+    _sub(grp_exprs, "GroupExpression",
+         f"=Fields!{_safe(group_field.name)}.Value")
+    # Inner members: header row + detail row
+    inner = _sub(grp_mem, "TablixMembers")
+    hdr_member = _sub(inner, "TablixMember")
+    _sub(hdr_member, "KeepWithGroup", "After")
+    detail_member = _sub(inner, "TablixMember")
+    _sub(detail_member, "Group").set("Name", "Detail_Card")
+
+    _sub(tablix, "DataSetName", _safe(main.name))
+    _sub(tablix, "Top", "0.1in")
+    _sub(tablix, "Left", "0.1in")
+    _sub(tablix, "Height", "1in")
+    _sub(tablix, "Width", "7.5in")
+    tx_style = _sub(tablix, "Style")
+    _sub(tx_style, "PaddingTop", "2pt")
+    return tablix
+
+
 def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
     if main is not None:
         section_main = _find_section_main(report)
@@ -2495,7 +2758,9 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
     body = ET.Element(_q("Body"))
     items = _sub(body, "ReportItems")
     if main is not None:
-        items.append(_build_tablix(report, main))
+        # Default to grouped-card layout (matches in-app mockup). The flat
+        # _build_tablix path is kept callable for callers that need it.
+        items.append(_build_grouped_card_tablix(report, main))
     body_height_in = max(7.0, 1.0)
     _sub(body, "Height", f"{body_height_in}in")
     style = _sub(body, "Style")
