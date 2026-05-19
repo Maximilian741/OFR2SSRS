@@ -1,0 +1,1478 @@
+<?xml version="1.0" encoding="WINDOWS-1252" ?>
+<report name="METH_DETAILS" DTDVersion="9.0.2.0.10"
+ beforeParameterFormTrigger="beforepform">
+  <xmlSettings xmlTag="METH_DETAILS" xmlPrologType="text">
+  <![CDATA[<?xml version="1.0"?>]]>
+  </xmlSettings>
+  <comment>
+  <![CDATA[03/25/2007  C. Bogard   altered the report layout and fields showing. the program wanted the status added back in the action type and action date added in and the layout more user friendly. 
+07/16/2007  C. Bogard   totally changed the layout of the report. made it more user friendly.
+09/18/2007 C. Bogard    added the action comments column and changed the action type from action_type_desc to action_type_name
+11/23/2007 C.Bogard  Added v_org_cur to the select statement twice using different alias names. done this way so that i can filter by owner and contractor.]]>
+  </comment>
+  <reportHtmlEscapes>
+    <beforeReportHtmlEscape>
+    <![CDATA[<html>
+<body dir=&Direction bgcolor="#ffffff">
+]]>
+    </beforeReportHtmlEscape>
+    <beforePageHtmlEscape>
+    <![CDATA[#NULL#]]>
+    </beforePageHtmlEscape>
+    <afterPageHtmlEscape>
+    <![CDATA[<hr size=5 noshade>
+]]>
+    </afterPageHtmlEscape>
+    <beforeFormHtmlEscape>
+    <![CDATA[<html>
+<body bgcolor="#ffffff">
+<form method=post action="_action_">
+<input name="hidden_run_parameters" type=hidden value="_hidden_">
+<center>
+<p><table border=0 cellspacing=0 cellpadding=0>
+<tr>
+<td><input type=submit></td>
+<td width=15>
+<td><input type=reset></td>
+</tr>
+</table>
+<p><hr><p>
+]]>
+    </beforeFormHtmlEscape>
+    <pageNavigationHtmlEscape>
+    <![CDATA[<HTML>
+<TITLE>Oracle HTML Navigator</TITLE>
+<HEAD>
+<SCRIPT LANGUAGE = "JavaScript">
+
+var jump_index = 1			// Jump to this page
+var num_pages = &TotalPages			// Total number of pages
+var basefilename = "&file_name"		// Base file name
+var fileext = "&file_ext"		//File extension
+
+/* jumps to "new_page" */
+function new_page(form, new_page)
+{
+	form.reqpage.value = new_page;
+	parent.frames[0].location = basefilename + "_" + new_page + "."+fileext;
+}
+
+/* go back one page */
+function back(form)
+{
+	/* if we are not in first page */
+	if (jump_index > 1)
+	{
+		jump_index--;
+		new_page(form, jump_index);
+	}
+}
+
+/* go forward one page */
+function forward(form)
+{
+	/* if we are not in last page */
+	if (jump_index < num_pages)
+	{
+		jump_index++;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to first page */
+function first(form)
+{
+	if(jump_index != 1)
+	{
+		jump_index = 1;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to last page */
+function last(form)
+{
+	if(jump_index != num_pages)
+	{
+		jump_index = num_pages;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to the user specified page number */
+function pagenum(form)
+{
+	/* sanity check */
+	if (form.reqpage.value < 1)
+	{
+		form.reqpage.value = 1;
+	}
+	if (form.reqpage.value > num_pages)
+	{
+		form.reqpage.value = num_pages;
+	}
+	jump_index = form.reqpage.value;
+	new_page(form, jump_index);
+}
+</SCRIPT>
+</HEAD>
+
+<BODY>
+<FORM NAME="ThisForm" onSubmit="pagenum(this); return false;">
+<center><table><tr>
+<td> <INPUT TYPE="button"  VALUE="<< " onClick="first(this.form)">
+<td> <INPUT TYPE="button"  VALUE=" < " onClick="back(this.form)">
+<td> <INPUT TYPE="button"  VALUE="Page:" onClick="pagenum(this.form)">
+<td> <INPUT NAME="reqpage" VALUE="1" SIZE=2>
+<td> <INPUT TYPE="button"  VALUE=" > " onClick="forward(this.form)">
+<td> <INPUT TYPE="button"  VALUE=" >>" onClick="last(this.form)">
+</table></center>
+</FORM></BODY>
+</HTML>
+]]>
+    </pageNavigationHtmlEscape>
+  </reportHtmlEscapes>
+  <data>
+    <userParameter name="PARM_CVID" datatype="number" width="10"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PARM_ADDR_CITY" datatype="character" width="40"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PARM_CNTY_ID" datatype="character" width="40"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PARM_OWNER" datatype="character" width="85"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PARM_CONTRACTOR" datatype="number" width="10"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PARM_RECVD_START_DT" datatype="date" width="10"
+     precision="10" inputMask="FMFXMM/DD/YYYY" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="PARM_RECVD_END_DT" datatype="date" width="10"
+     precision="10" inputMask="FMFXMM/DD/YYYY" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="PARM_REFERRED_START_DT" datatype="date" width="10"
+     precision="10" inputMask="FMFXMM/DD/YYYY" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="PARM_REFERRED_END_DT" datatype="date" width="10"
+     precision="10" inputMask="FMFXMM/DD/YYYY" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="PARM_ACTION_TYPE_ID" datatype="character" width="40"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_ACTION_HIST_ID" datatype="character" width="40"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_METH_ID" datatype="number" precision="10"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PARM_CNTY" datatype="character" width="40"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PARM_USER" datatype="character" width="50"
+     precision="10" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PARM_STAT_TYPE_DESC" datatype="character" width="40"
+     precision="10" defaultWidth="0" defaultHeight="0"/>
+    <dataSource name="Q_1">
+      <select>
+      <![CDATA[SELECT VMH.CVID,
+       VMH.METH_ID,
+       VMH.OWNER,
+       VMH.STAT_TYPE_ID,
+        UPPER(ST.STAT_TYPE_DESC),
+        ST.STAT_TYPE_DESC,
+        AH.STATUS_DATE,     
+        AH.ACTION_TYPE_ID,
+       ACT.ACTION_TYPE_DESC,
+       ACT.ACTION_TYPE_NAME,
+        AH.ACTION_HIST_ID, 
+        AH.ACTION_HIST_DESCR,
+       VMH.SITE_ID,
+       VMH.SITE_NAME, 
+       VMH.INCIDENT_SITE_NAME, 
+         C.CNTY_NM,
+       VMH.ADDR_CITY,
+       VMH.LOCATION,
+       VMH.COMPLNT_RECVD_DT, 
+       VMH.COMPLNT_OBSERVED_DT,
+       VMH.COMPLNT_REFERRED_DT,
+         M.ORG_ID, 
+       VMH.CNTY_ID
+FROM ACTION_HISTORY AH, 
+     ACTION_TYPE ACT,
+     V_METH_HEADER VMH,
+     COUNTIES C,
+     MEMBER M,
+     STATUS_TYPE ST,
+     ORGANIZATION O
+WHERE AH.ACTION_TYPE_ID = ACT.ACTION_TYPE_ID(+)
+  AND VMH.STAT_TYPE_ID = ST.STAT_TYPE_ID (+)
+  AND VMH.METH_ID = M.METH_ID (+)
+  AND AH.METH_ID(+) = VMH.METH_ID
+  AND O.ORG_ID = VMH.OWNER(+)
+--AND (M.MEM_ID IS NULL OR (M.MEM_ID IS NOT NULL AND TRUNC(SYSDATE) BETWEEN TRUNC(NVL(M.MEM_START_DATE,TO_DATE('01-JAN-1800', 'DD-MON-YYYY'))) AND --TRUNC(NVL(M.MEM_END_DATE,SYSDATE)))) 
+  AND (:PARM_CVID IS NULL OR (:PARM_CVID IS NOT NULL AND VMH.CVID IN (:PARM_CVID)))
+  AND (:PARM_ADDR_CITY IS NULL OR (:PARM_ADDR_CITY IS NOT NULL AND VMH.ADDR_CITY IN (:PARM_ADDR_CITY)))
+  AND (:PARM_CNTY IS NULL OR (:PARM_CNTY IS NOT NULL AND C.CNTY_NM IN (:PARM_CNTY)))
+  AND (UPPER(:PARM_STAT_TYPE_DESC) IS NULL OR (UPPER(:PARM_STAT_TYPE_DESC) IS NOT NULL AND UPPER(ST.STAT_TYPE_DESC) IN (UPPER(:PARM_STAT_TYPE_DESC))))
+  AND (:PARM_OWNER IS NULL OR( :PARM_OWNER IS NOT NULL AND VMH.OWNER = (:PARM_OWNER)))
+  AND (:PARM_CONTRACTOR IS NULL OR (:PARM_CONTRACTOR IS NOT NULL AND M.ORG_ID = (:PARM_CONTRACTOR)))
+  AND (:PARM_ACTION_TYPE_id IS NULL OR (:PARM_ACTION_TYPE_id IS NOT NULL AND Ah.ACTION_TYPE_id IN (:PARM_ACTION_TYPE_id)))  
+  AND (:P_ACTION_HIST_ID IS NULL OR (:P_ACTION_HIST_ID IS NOT NULL AND :P_ACTION_HIST_ID = AH.ACTION_HIST_ID))
+  AND (:P_METH_ID IS NULL OR (:P_METH_ID IS NOT NULL AND :P_METH_ID = AH.METH_ID)) 
+  AND VMH.CNTY_ID = C.CNTY_ID
+  AND TRUNC(NVL(VMH.COMPLNT_RECVD_DT,SYSDATE)) BETWEEN TRUNC(NVL(:PARM_RECVD_START_DT,TO_DATE('01-JAN-1800', 'DD-MON-YYYY'))) AND TRUNC(NVL(:PARM_RECVD_END_DT,SYSDATE)) 
+  AND TRUNC(NVL(VMH.COMPLNT_REFERRED_DT,SYSDATE)) BETWEEN TRUNC(NVL(:PARM_REFERRED_START_DT,TO_DATE('01-JAN-1800', 'DD-MON-YYYY'))) AND TRUNC(NVL(:PARM_REFERRED_END_DT,SYSDATE)) ;
+
+]]>
+      </select>
+      <displayInfo x="1.71875" y="0.04285" width="2.66663" height="0.34375"/>
+      <group name="G_CNTY_NM">
+        <displayInfo x="2.10791" y="0.63647" width="1.88330" height="0.60156"
+        />
+        <dataItem name="CNTY_NM" datatype="vchar2" columnOrder="36" width="30"
+         defaultWidth="100000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="County:">
+          <dataDescriptor expression="C.CNTY_NM"
+           descriptiveExpression="CNTY_NM" order="16" width="30"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <summary name="CountCVIDPerCNTY_NM" source="CVID" function="count"
+         precision="8" reset="G_CNTY_NM" compute="report"
+         defaultWidth="100000" defaultHeight="10000" columnFlags="520"
+         defaultLabel="Total Per County:">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+      </group>
+      <group name="G_CVID">
+        <displayInfo x="2.02649" y="1.49939" width="2.05115" height="1.79785"
+        />
+        <dataItem name="CVID" oracleDatatype="number" columnOrder="11"
+         width="22" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Complaint ID:">
+          <dataDescriptor expression="VMH.CVID" descriptiveExpression="CVID"
+           order="1" oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_OWNER_NAME" source="cf_owner_nameformula"
+         datatype="character" width="85" precision="10" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="49" defaultLabel="Owner:"
+         breakOrder="ascending">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <dataItem name="STAT_TYPE_DESC" datatype="vchar2" columnOrder="44"
+         width="512" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Status:">
+          <dataDescriptor expression="ST.STAT_TYPE_DESC"
+           descriptiveExpression="STAT_TYPE_DESC" order="6" width="512"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="LOCATION" datatype="vchar2" columnOrder="20"
+         width="4000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Location:">
+          <dataDescriptor expression="VMH.LOCATION"
+           descriptiveExpression="LOCATION" order="18" width="4000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ADDR_CITY" datatype="vchar2" columnOrder="19"
+         width="30" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="City:">
+          <dataDescriptor expression="VMH.ADDR_CITY"
+           descriptiveExpression="ADDR_CITY" order="17" width="30"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="COMPLNT_RECVD_DT" datatype="date"
+         oracleDatatype="date" columnOrder="21" width="9"
+         defaultWidth="100000" defaultHeight="10000" columnFlags="33"
+         defaultLabel="Received Date:">
+          <dataDescriptor expression="VMH.COMPLNT_RECVD_DT"
+           descriptiveExpression="COMPLNT_RECVD_DT" order="19"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_CONTRACTOR_NAME" source="cf_contractor_nameformula"
+         datatype="character" width="85" precision="10" defaultWidth="150000"
+         defaultHeight="10000" columnFlags="49" defaultLabel="Contractor:"
+         breakOrder="ascending">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <dataItem name="COMPLNT_OBSERVED_DT" datatype="vchar2"
+         columnOrder="22" width="100" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Bust Date:">
+          <dataDescriptor expression="VMH.COMPLNT_OBSERVED_DT"
+           descriptiveExpression="COMPLNT_OBSERVED_DT" order="20" width="100"
+          />
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="COMPLNT_REFERRED_DT" datatype="date"
+         oracleDatatype="date" columnOrder="23" width="9" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Complaint Referred Date">
+          <dataDescriptor expression="VMH.COMPLNT_REFERRED_DT"
+           descriptiveExpression="COMPLNT_REFERRED_DT" order="21"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+      <group name="G_ACTION_TYPE_ID">
+        <displayInfo x="2.04248" y="3.56885" width="2.01086" height="0.43066"
+        />
+        <dataItem name="ACTION_TYPE_ID" oracleDatatype="number"
+         columnOrder="38" width="22" defaultWidth="120000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Action Display">
+          <dataDescriptor expression="AH.ACTION_TYPE_ID"
+           descriptiveExpression="ACTION_TYPE_ID" order="8"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+      <group name="G_STATUS_DATE">
+        <displayInfo x="2.06323" y="4.28369" width="1.97791" height="2.82324"
+        />
+        <dataItem name="UPPER_ST_STAT_TYPE_DESC" datatype="vchar2"
+         columnOrder="52" width="512" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Upper St Stat Type Desc">
+          <dataDescriptor expression="UPPER ( ST.STAT_TYPE_DESC )"
+           descriptiveExpression="UPPER(ST.STAT_TYPE_DESC)" order="5"
+           width="512"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="STATUS_DATE" datatype="date" oracleDatatype="date"
+         columnOrder="40" width="9" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Action Date:">
+          <dataDescriptor expression="AH.STATUS_DATE"
+           descriptiveExpression="STATUS_DATE" order="7" oracleDatatype="date"
+           width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ACTION_HIST_DESCR" datatype="vchar2" columnOrder="47"
+         width="4000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Action Comments:">
+          <dataDescriptor expression="AH.ACTION_HIST_DESCR"
+           descriptiveExpression="ACTION_HIST_DESCR" order="12" width="4000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ACTION_TYPE_NAME" datatype="vchar2" columnOrder="46"
+         width="5" defaultWidth="50000" defaultHeight="10000" columnFlags="33"
+         defaultLabel="Action Type:">
+          <dataDescriptor expression="ACT.ACTION_TYPE_NAME"
+           descriptiveExpression="ACTION_TYPE_NAME" order="10" width="5"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ACTION_TYPE_DESC" datatype="vchar2" columnOrder="39"
+         width="512" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Action Type:">
+          <dataDescriptor expression="ACT.ACTION_TYPE_DESC"
+           descriptiveExpression="ACTION_TYPE_DESC" order="9" width="512"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SITE_ID" oracleDatatype="number" columnOrder="15"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Site Id" breakOrder="none">
+          <dataDescriptor expression="VMH.SITE_ID"
+           descriptiveExpression="SITE_ID" order="13" oracleDatatype="number"
+           width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ACTION_HIST_ID" oracleDatatype="number"
+         columnOrder="41" width="22" defaultWidth="120000"
+         defaultHeight="10000" columnFlags="0" defaultLabel="Action Hist Id"
+         breakOrder="none">
+          <dataDescriptor expression="AH.ACTION_HIST_ID"
+           descriptiveExpression="ACTION_HIST_ID" order="11"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="OWNER" oracleDatatype="number" columnOrder="13"
+         width="22" defaultWidth="200000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Owner" breakOrder="none">
+          <dataDescriptor expression="VMH.OWNER" descriptiveExpression="OWNER"
+           order="3" oracleDatatype="number" width="22" scale="-127"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="METH_ID" oracleDatatype="number" columnOrder="12"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Meth ID" breakOrder="none">
+          <dataDescriptor expression="VMH.METH_ID"
+           descriptiveExpression="METH_ID" order="2" oracleDatatype="number"
+           width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SITE_NAME" datatype="vchar2" columnOrder="16"
+         width="64" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Site Name" breakOrder="none">
+          <dataDescriptor expression="VMH.SITE_NAME"
+           descriptiveExpression="SITE_NAME" order="14" width="64"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="INCIDENT_SITE_NAME" datatype="vchar2" columnOrder="17"
+         width="64" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Incident Site Name" breakOrder="none">
+          <dataDescriptor expression="VMH.INCIDENT_SITE_NAME"
+           descriptiveExpression="INCIDENT_SITE_NAME" order="15" width="64"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="STAT_TYPE_ID" oracleDatatype="number" columnOrder="14"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Stat Type Id" breakOrder="none">
+          <dataDescriptor expression="VMH.STAT_TYPE_ID"
+           descriptiveExpression="STAT_TYPE_ID" order="4"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ORG_ID" oracleDatatype="number" columnOrder="24"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Org Id" breakOrder="none">
+          <dataDescriptor expression="M.ORG_ID" descriptiveExpression="ORG_ID"
+           order="22" oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_ACTION_DESC" source="cf_actionformula"
+         datatype="character" width="60" precision="10" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="16" defaultLabel="Cf 1"
+         breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <dataItem name="CNTY_ID" oracleDatatype="number" columnOrder="18"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Cnty Id" breakOrder="none">
+          <dataDescriptor expression="VMH.CNTY_ID"
+           descriptiveExpression="CNTY_ID" order="23" oracleDatatype="number"
+           width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <summary name="CountCVIDPerReport" source="CVID" function="count"
+     precision="8" reset="report" compute="report" defaultWidth="100000"
+     defaultHeight="10000" columnFlags="552" defaultLabel="Overall Total:">
+      <displayInfo x="4.50000" y="1.27087" width="1.50000" height="0.19995"/>
+    </summary>
+  </data>
+  <layout>
+  <section name="header" orientation="portrait">
+    <body>
+      <roundedRectangle name="B_3">
+        <geometryInfo x="0.68750" y="0.06250" width="6.18750" height="5.93750"
+        />
+        <visualSettings fillBackgroundColor="gray" linePattern="solid"/>
+        <points>
+          <point x="0.68750" y="0.06250"/>
+          <point x="6.18750" y="5.93750"/>
+          <point x="0.13794" y="0.13794"/>
+        </points>
+      </roundedRectangle>
+      <field name="F_RCVD_START_DT" source="PARM_RECVD_START_DT"
+       minWidowLines="1" formatMask="MM/DD/YYYY" spacing="0" alignment="start"
+        >
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="2.84375" width="3.10156" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <field name="F_RCVD_END_DT" source="PARM_RECVD_END_DT" minWidowLines="1"
+       formatMask="MM/DD/YYYY" spacing="0" alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="3.09375" width="3.10156" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <field name="F_RFRD_START_DATE" source="PARM_REFERRED_START_DT"
+       minWidowLines="1" formatMask="MM/DD/YYYY" spacing="0" alignment="start"
+        >
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="3.34375" width="3.10156" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <field name="F_RFRD_END_DT" source="PARM_REFERRED_END_DT"
+       minWidowLines="1" formatMask="MM/DD/YYYY" spacing="0" alignment="start"
+        >
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="3.59375" width="3.10156" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <field name="F_STATUS_TYPE" source="PARM_STAT_TYPE_DESC"
+       minWidowLines="1" spacing="0" alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="3.84375" width="3.10156" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <field name="F_PARM_ADDR_CITY" source="PARM_ADDR_CITY" minWidowLines="1"
+       spacing="0" alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="4.09375" width="3.11865" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <text name="B_8" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="3.12500" y="4.09900" width="0.37500" height="0.17712"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_PARM_ADDR_CITY" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="56" childEdgePercent="38"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[City:]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_PARM_COUNTY" source="PARM_CNTY" minWidowLines="1"
+       formatMask="MM/DD/YYYY" spacing="0" alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="4.33337" width="3.11865" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <text name="B_15" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.87500" y="4.33862" width="0.62500" height="0.17712"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_PARM_COUNTY" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="44" childEdgePercent="44"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[County:]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_PARM_CONTRACTOR" source="PARM_CONTRACTOR"
+       minWidowLines="1" spacing="6" alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="4.57031" width="3.11865" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <text name="B_9" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.62500" y="4.58594" width="0.87500" height="0.15625"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_PARM_CONTRACTOR" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="51" childEdgePercent="72"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Contractor:]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_PARM_OWNER" source="PARM_OWNER" minWidowLines="1"
+       formatMask="MM/DD/YYYY" spacing="0" alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="4.81775" width="3.11865" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <text name="B_10" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.93750" y="4.82300" width="0.56250" height="0.17712"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_PARM_OWNER" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="58" childEdgePercent="59"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Owner:]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_PARM_COMPLAINT_ID" source="PARM_CVID" minWidowLines="1"
+       spacing="0" alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.58594" y="5.05994" width="3.11865" height="0.18750"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <text name="B_11" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.50000" y="5.06519" width="1.00000" height="0.17712"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_PARM_COMPLAINT_ID" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="40" childEdgePercent="46"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Complaint ID:]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_7" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.56250" y="3.84900" width="0.93750" height="0.17712"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_STATUS_TYPE" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="50" childEdgePercent="32"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Status Type:]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_6" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.18750" y="3.59900" width="1.31250" height="0.17712"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_RFRD_END_DT" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="67" childEdgePercent="62"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Referred End Date:]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_5" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.06250" y="3.34900" width="1.43750" height="0.17712"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_RFRD_START_DATE" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="61" childEdgePercent="50"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Referred Start Date:]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_4" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.12500" y="3.09900" width="1.37500" height="0.17712"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_RCVD_END_DT" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="61" childEdgePercent="62"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Received End Date:]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_1" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.06250" y="2.84900" width="1.43750" height="0.17712"
+        />
+        <advancedLayout>
+          <anchor parentObjectName="F_RCVD_START_DT" parentEdgeType="left"
+           childEdgeType="right" parentEdgePercent="39" childEdgePercent="38"
+          />
+        </advancedLayout>
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Received Start Date:]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_RDATE_RUN" source="CurrentDate" minWidowLines="1"
+       formatMask="MM/DD/YYYY HH24:MI:SS" spacing="0" alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.83594" y="1.46875" width="1.41406" height="0.18750"
+        />
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <field name="F_USER" source="PARM_USER" minWidowLines="1" spacing="0"
+       alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="3.85156" y="1.71875" width="2.02344" height="0.18750"
+        />
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <field name="F_CVID_TOTAL" source="CountCVIDPerReport" minWidowLines="1"
+       spacing="0" alignment="start">
+        <font face="Arial" size="10" bold="yes"/>
+        <geometryInfo x="4.53906" y="1.96875" width="0.71094" height="0.18750"
+        />
+        <visualSettings fillBackgroundColor="gray"/>
+      </field>
+      <text name="B_12" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="3.00000" y="1.47400" width="0.75000" height="0.17712"
+        />
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Run Date:]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_13" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="3.12500" y="1.72400" width="0.62500" height="0.17712"
+        />
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Run By:]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_14" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="2.81250" y="1.97400" width="1.62500" height="0.17712"
+        />
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Total of ALL Records:]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_16" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="2.43750" y="2.50000" width="2.87500" height="0.25000"
+        />
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Arial" size="12" bold="yes" italic="yes" underline="yes"
+          />
+          <string>
+          <![CDATA[Report Parameters]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_17" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="1.70837" y="0.58337" width="4.33337" height="0.58337"
+        />
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Verdana" size="11" bold="yes" textColor="darkblue"/>
+          <string>
+          <![CDATA[Methamphetamine Cleanup Program Detail Report]]>
+          </string>
+        </textSegment>
+        <textSegment>
+          <font face="Times New Roman" size="11" bold="yes"
+           textColor="darkblue"/>
+          <string>
+          <![CDATA[
+]]>
+          </string>
+        </textSegment>
+        <textSegment>
+          <font face="Verdana" size="11" bold="yes" textColor="darkblue"/>
+          <string>
+          <![CDATA[Montana Department of Environmental Quality
+]]>
+          </string>
+        </textSegment>
+        <textSegment>
+          <font face="Verdana" size="11" bold="yes" textColor="darkblue"/>
+          <string>
+          <![CDATA[Meth Cleanup Program]]>
+          </string>
+        </textSegment>
+      </text>
+    </body>
+  </section>
+  <section name="main">
+    <body width="8.00000">
+      <location x="0.25000"/>
+      <frame name="M_G_CNTY_NM_GRPFR">
+        <geometryInfo x="0.00000" y="0.02136" width="7.93750" height="1.54114"
+        />
+        <generalLayout pageProtect="yes" verticalElasticity="variable"/>
+        <advancedLayout keepWithAnchoringObject="yes"/>
+        <visualSettings fillPattern="solid" fillForegroundColor="gray16"
+         lineForegroundColor="darkblue"/>
+        <repeatingFrame name="R_G_CNTY_NM" source="G_CNTY_NM"
+         printDirection="down" minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.00000" y="0.02136" width="7.93750"
+           height="1.54114"/>
+          <generalLayout pageProtect="yes" verticalElasticity="variable"/>
+          <visualSettings fillPattern="transparent"
+           fillBackgroundColor="r0g0b50"/>
+          <field name="F_CNTY_NM" source="CNTY_NM" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="Arial" size="11" bold="yes" italic="yes"
+             textColor="yellow"/>
+            <geometryInfo x="0.62500" y="0.02136" width="3.81250"
+             height="0.16614"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <frame name="M_G_CNTY_NM_FTR">
+            <geometryInfo x="0.00000" y="1.50000" width="7.87500"
+             height="0.06250"/>
+            <generalLayout pageProtect="yes"/>
+            <advancedLayout printObjectOnPage="lastPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings fillPattern="solid" fillForegroundColor="gray16"/>
+          </frame>
+          <repeatingFrame name="R_G_ACTION_TYPE_ID" source="G_ACTION_TYPE_ID"
+           printDirection="down" minWidowRecords="1" columnMode="no">
+            <geometryInfo x="0.00000" y="1.37500" width="7.87500"
+             height="0.18750"/>
+            <generalLayout pageProtect="yes" verticalElasticity="variable"/>
+          </repeatingFrame>
+          <frame name="M_G_CVID_GRPFR">
+            <geometryInfo x="0.00000" y="0.25000" width="7.93750"
+             height="1.31250"/>
+            <generalLayout verticalElasticity="variable"/>
+            <visualSettings fillPattern="transparent"
+             fillForegroundColor="gray16" fillBackgroundColor="gray16"
+             linePattern="solid" hideLeftBorder="yes" hideRightBorder="yes"
+             hideTopBorder="yes"/>
+            <repeatingFrame name="R_G_CVID" source="G_CVID"
+             printDirection="down" minWidowRecords="1" columnMode="no">
+              <geometryInfo x="0.00000" y="0.25000" width="7.93750"
+               height="1.31250"/>
+              <generalLayout pageProtect="yes" verticalElasticity="variable"/>
+              <visualSettings fillPattern="transparent"
+               fillBackgroundColor="gray16" linePattern="solid"
+               lineForegroundColor="gray12" hideRightBorder="yes"
+               hideTopBorder="yes"/>
+              <field name="F_CVID" source="CVID" minWidowLines="1" spacing="0"
+               alignment="start">
+                <font face="Arial" size="11" bold="yes" italic="yes"
+                 textColor="darkblue"/>
+                <geometryInfo x="1.12500" y="0.25000" width="1.81250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+              </field>
+              <field name="F_CF_OWNER_NAME" source="CF_OWNER_NAME"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Arial" size="10"/>
+                <geometryInfo x="0.62500" y="0.43750" width="4.37500"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+              </field>
+              <field name="F_LOCATION" source="LOCATION" minWidowLines="1"
+               spacing="0" alignment="start">
+                <font face="Arial" size="10"/>
+                <geometryInfo x="0.81250" y="0.62500" width="4.18750"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+              </field>
+              <field name="F_COMPLNT_RECVD_DT" source="COMPLNT_RECVD_DT"
+               minWidowLines="1" formatMask="MM/DD/YYYY" spacing="0"
+               alignment="center">
+                <font face="Arial" size="10"/>
+                <geometryInfo x="1.25000" y="0.81250" width="1.62500"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+              </field>
+              <field name="F_CF_CONTRACTOR_NAME" source="CF_CONTRACTOR_NAME"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Arial" size="10"/>
+                <geometryInfo x="0.93750" y="1.00000" width="5.31250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillPattern="transparent"
+                 fillBackgroundColor="gray16"/>
+              </field>
+              <frame name="M_G_CVID_FTR">
+                <geometryInfo x="0.00000" y="1.50000" width="7.87500"
+                 height="0.00122"/>
+                <generalLayout pageProtect="yes"/>
+                <advancedLayout printObjectOnPage="lastPage"
+                 basePrintingOn="anchoringObject"/>
+                <visualSettings fillPattern="solid"
+                 fillForegroundColor="gray16"/>
+              </frame>
+              <frame name="M_G_ACTION_TYPE_ID_GRPFR">
+                <geometryInfo x="0.00000" y="1.18750" width="7.93750"
+                 height="0.37500"/>
+                <generalLayout pageProtect="yes" verticalElasticity="variable"/>
+                <visualSettings fillPattern="transparent"
+                 fillForegroundColor="gray16" fillBackgroundColor="gray4"
+                 linePattern="solid" lineForegroundColor="gray4"
+                 hideLeftBorder="yes" hideRightBorder="yes"
+                 hideTopBorder="yes"/>
+                <frame name="M_G_STATUS_DATE_GRPFR">
+                  <geometryInfo x="0.00000" y="1.18750" width="7.93750"
+                   height="0.37500"/>
+                  <generalLayout pageProtect="yes"
+                   verticalElasticity="variable"/>
+                  <visualSettings fillPattern="transparent"
+                   fillForegroundColor="gray16" fillBackgroundColor="gray4"
+                   linePattern="solid" hideLeftBorder="yes"
+                   hideRightBorder="yes" hideTopBorder="yes"/>
+                  <field name="F_ACTION_TYPE_ID" source="ACTION_TYPE_ID"
+                   visible="no" minWidowLines="1" spacing="0"
+                   alignment="start">
+                    <font face="Arial" size="11" bold="yes" italic="yes"/>
+                    <geometryInfo x="5.75000" y="1.25000" width="0.12500"
+                     height="0.18750"/>
+                    <generalLayout verticalElasticity="expand"/>
+                    <advancedLayout printObjectOnPage="allPage"
+                     basePrintingOn="enclosingObject"/>
+                  </field>
+                  <repeatingFrame name="R_G_STATUS_DATE"
+                   source="G_STATUS_DATE" printDirection="down"
+                   minWidowRecords="1" columnMode="no">
+                    <geometryInfo x="0.00000" y="1.37500" width="7.93750"
+                     height="0.18750"/>
+                    <generalLayout pageProtect="yes"
+                     verticalElasticity="expand"/>
+                    <visualSettings fillPattern="transparent"
+                     fillBackgroundColor="gray4" linePattern="solid"
+                     lineForegroundColor="gray4" hideLeftBorder="yes"
+                     hideRightBorder="yes" hideTopBorder="yes"
+                     hideBottomBorder="yes"/>
+                    <field name="F_STATUS_DATE" source="STATUS_DATE"
+                     minWidowLines="1" formatMask="MM/DD/YYYY" spacing="0"
+                     alignment="center">
+                      <font face="Arial" size="10"/>
+                      <geometryInfo x="6.75000" y="1.37500" width="1.06250"
+                       height="0.18750"/>
+                      <generalLayout verticalElasticity="expand"/>
+                      <visualSettings fillPattern="transparent"
+                       fillBackgroundColor="gray4"/>
+                    </field>
+                    <field name="F_ACTION_HIST_DESCR"
+                     source="ACTION_HIST_DESCR" minWidowLines="1" spacing="0"
+                     alignment="start">
+                      <font face="Arial" size="10"/>
+                      <geometryInfo x="2.50000" y="1.37500" width="4.00000"
+                       height="0.18750"/>
+                      <generalLayout verticalElasticity="expand"/>
+                    </field>
+                    <field name="F_ACTION_TYPE_NAME" source="ACTION_TYPE_DESC"
+                     minWidowLines="1" spacing="0" alignment="start">
+                      <font face="Arial" size="10"/>
+                      <geometryInfo x="0.06250" y="1.37500" width="2.18750"
+                       height="0.18750"/>
+                      <generalLayout verticalElasticity="expand"/>
+                    </field>
+                  </repeatingFrame>
+                  <frame name="M_G_STATUS_DATE_HDR">
+                    <geometryInfo x="0.00000" y="1.18750" width="7.93750"
+                     height="0.18750"/>
+                    <generalLayout pageProtect="yes"/>
+                    <advancedLayout printObjectOnPage="allPage"
+                     basePrintingOn="enclosingObject"/>
+                    <visualSettings fillPattern="transparent"
+                     fillForegroundColor="darkblue"
+                     fillBackgroundColor="gray4" linePattern="solid"
+                     lineForegroundColor="gray4" hideLeftBorder="yes"
+                     hideRightBorder="yes" hideTopBorder="yes"
+                     hideBottomBorder="yes"/>
+                    <text name="B_STATUS_DATE" minWidowLines="1">
+                      <textSettings spacing="0"/>
+                      <geometryInfo x="6.75000" y="1.18750" width="1.18750"
+                       height="0.18750"/>
+                      <visualSettings fillForegroundColor="red"/>
+                      <textSegment>
+                        <font face="Arial" size="10" bold="yes" italic="yes"/>
+                        <string>
+                        <![CDATA[Action Date:]]>
+                        </string>
+                      </textSegment>
+                    </text>
+                    <text name="B_ACTION_HIST_DESCR" minWidowLines="1">
+                      <textSettings spacing="0"/>
+                      <geometryInfo x="2.50000" y="1.18750" width="1.75000"
+                       height="0.18750"/>
+                      <visualSettings fillForegroundColor="red"/>
+                      <textSegment>
+                        <font face="Arial" size="10" bold="yes" italic="yes"/>
+                        <string>
+                        <![CDATA[Action Comments:]]>
+                        </string>
+                      </textSegment>
+                    </text>
+                    <text name="B_ACTION_TYPE_NAME" minWidowLines="1">
+                      <textSettings spacing="0"/>
+                      <geometryInfo x="0.06250" y="1.18750" width="2.18750"
+                       height="0.18750"/>
+                      <visualSettings fillForegroundColor="red"/>
+                      <textSegment>
+                        <font face="Arial" size="10" bold="yes" italic="yes"/>
+                        <string>
+                        <![CDATA[Action Type:]]>
+                        </string>
+                      </textSegment>
+                    </text>
+                  </frame>
+                </frame>
+              </frame>
+              <text name="B_COMPLNT_RECVD_DT" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.06250" y="0.81250" width="1.18750"
+                 height="0.18750"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillForegroundColor="red"/>
+                <textSegment>
+                  <font face="Arial" size="11" bold="yes"/>
+                  <string>
+                  <![CDATA[Received Date:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CF_CONTRACTOR_NAME" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.06250" y="1.00000" width="0.87500"
+                 height="0.18750"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillForegroundColor="red"/>
+                <textSegment>
+                  <font face="Arial" size="11" bold="yes"/>
+                  <string>
+                  <![CDATA[Contractor:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_COMPLNT_OBSERVED_DT" source="COMPLNT_OBSERVED_DT"
+               minWidowLines="1" spacing="0" alignment="center">
+                <font face="Arial" size="10"/>
+                <geometryInfo x="4.37500" y="0.81250" width="1.81250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+              </field>
+              <text name="B_COMPLNT_OBSERVED_DT" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="3.56250" y="0.81250" width="0.81250"
+                 height="0.18750"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillForegroundColor="red"/>
+                <textSegment>
+                  <font face="Arial" size="11" bold="yes"/>
+                  <string>
+                  <![CDATA[Bust Date:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_LOCATION" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.06250" y="0.62500" width="0.75000"
+                 height="0.18750"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillForegroundColor="red"/>
+                <textSegment>
+                  <font face="Arial" size="11" bold="yes"/>
+                  <string>
+                  <![CDATA[Location:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CVID" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.06250" y="0.25000" width="1.06250"
+                 height="0.18750"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillForegroundColor="red"/>
+                <textSegment>
+                  <font face="Arial" size="11" bold="yes" italic="yes"
+                   textColor="darkblue"/>
+                  <string>
+                  <![CDATA[Complaint  ID:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CF_OWNER_NAME" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.06250" y="0.43750" width="0.56250"
+                 height="0.18750"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillForegroundColor="red"/>
+                <textSegment>
+                  <font face="Arial" size="11" bold="yes" textColor="r0g0b50"
+                  />
+                  <string>
+                  <![CDATA[Owner:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_STAT_TYPE_DESC" source="STAT_TYPE_DESC"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Arial" size="10"/>
+                <geometryInfo x="5.87500" y="0.43750" width="1.81250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+              </field>
+              <field name="F_ADDR_CITY" source="ADDR_CITY" minWidowLines="1"
+               spacing="0" alignment="start">
+                <font face="Arial" size="10" italic="yes"/>
+                <geometryInfo x="5.87500" y="0.62500" width="1.81250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+              </field>
+              <field name="F_COMPLNT_REFERRED_DT" source="COMPLNT_REFERRED_DT"
+               visible="no" minWidowLines="1" spacing="0" alignment="start">
+                <font face="Arial" size="11" bold="yes" italic="yes"/>
+                <geometryInfo x="6.81250" y="1.00000" width="0.12500"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+              </field>
+              <text name="B_STAT_TYPE_DESC" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="5.06250" y="0.43750" width="0.56250"
+                 height="0.18750"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillForegroundColor="red"/>
+                <textSegment>
+                  <font face="Arial" size="11" bold="yes"/>
+                  <string>
+                  <![CDATA[Status:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_ADDR_CITY" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="5.06250" y="0.62500" width="0.37500"
+                 height="0.18750"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillForegroundColor="red"/>
+                <textSegment>
+                  <font face="Arial" size="11" bold="yes"/>
+                  <string>
+                  <![CDATA[City:]]>
+                  </string>
+                </textSegment>
+              </text>
+            </repeatingFrame>
+          </frame>
+          <text name="B_CNTY_NM" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.00000" y="0.02136" width="0.62500"
+             height="0.16614"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <visualSettings fillForegroundColor="red"/>
+            <textSegment>
+              <font face="Arial" size="11" bold="yes" italic="yes"
+               textColor="yellow"/>
+              <string>
+              <![CDATA[County:]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_CountCVIDPerCNTY_NM" source="CountCVIDPerCNTY_NM"
+           minWidowLines="1" spacing="0" alignment="start">
+            <font face="Arial" size="11" bold="yes" italic="yes"
+             textColor="yellow"/>
+            <geometryInfo x="6.37500" y="0.02136" width="1.56250"
+             height="0.16614"/>
+            <generalLayout verticalElasticity="expand"/>
+            <visualSettings fillPattern="transparent"
+             fillForegroundColor="gray16" fillBackgroundColor="darkblue"/>
+          </field>
+          <text name="B_CountCVIDPerCNTY_NM" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="4.62500" y="0.02136" width="1.75000"
+             height="0.16614"/>
+            <visualSettings fillPattern="transparent"
+             fillForegroundColor="gray16" fillBackgroundColor="darkblue"/>
+            <textSegment>
+              <font face="Arial" size="11" bold="yes" italic="yes"
+               textColor="yellow"/>
+              <string>
+              <![CDATA[Total For County:]]>
+              </string>
+            </textSegment>
+          </text>
+        </repeatingFrame>
+      </frame>
+    </body>
+    <margin>
+      <text name="B_OR$BODY_SECTION" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="0.00000" y="0.12500" width="8.50000" height="0.68750"
+        />
+        <textSegment>
+          <font face="Verdana" size="11" bold="yes" textColor="darkblue"/>
+          <string>
+          <![CDATA[Methamphetamine Cleanup Program Detail Report]]>
+          </string>
+        </textSegment>
+        <textSegment>
+          <font face="Times New Roman" size="11" bold="yes"
+           textColor="darkblue"/>
+          <string>
+          <![CDATA[
+]]>
+          </string>
+        </textSegment>
+        <textSegment>
+          <font face="Verdana" size="11" bold="yes" textColor="darkblue"/>
+          <string>
+          <![CDATA[Montana Department of Environmental Quality
+]]>
+          </string>
+        </textSegment>
+        <textSegment>
+          <font face="Verdana" size="11" bold="yes" textColor="darkblue"/>
+          <string>
+          <![CDATA[Meth Cleanup Program]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_PAGENUM1_SEC2" minWidowLines="1" templateSection="main">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="3.37500" y="10.43750" width="2.02087"
+         height="0.16663"/>
+        <visualSettings lineWidth="1"/>
+        <textSegment>
+          <font face="Arial" size="10"/>
+          <string>
+          <![CDATA[Page &<PhysicalPageNumber>]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_DATE1_SEC2" minWidowLines="1" templateSection="main">
+        <textSettings spacing="0"/>
+        <geometryInfo x="0.25000" y="0.81250" width="0.93750" height="0.16663"
+        />
+        <textSegment>
+          <font face="Arial" size="10" italic="yes"/>
+          <string>
+          <![CDATA[Report run on:]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_DATE1_SEC2" source="CurrentDate" minWidowLines="1"
+       formatMask="fmMonth DD, RRRR HH:fmMI AM" spacing="0" alignment="start"
+       templateSection="main">
+        <font face="Arial" size="10" italic="yes"/>
+        <geometryInfo x="1.20825" y="0.81250" width="1.70837" height="0.16663"
+        />
+        <generalLayout horizontalElasticity="variable"/>
+      </field>
+      <text name="B_2" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="6.68750" y="0.81934" width="1.56250" height="0.16663"
+        />
+        <visualSettings fillBackgroundColor="gray"/>
+        <textSegment>
+          <font face="Verdana" size="8" bold="yes" italic="yes"
+           textColor="r0g0b50"/>
+          <string>
+          <![CDATA[Page &<PageNumber> of &<TotalPages>]]>
+          </string>
+        </textSegment>
+      </text>
+    </margin>
+  </section>
+  </layout>
+  <programUnits>
+    <function name="cf_owner_nameformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_OWNER_NAMEFormula return Char is
+
+	CURSOR c_owner_name
+	    IS
+  SELECT VOC.ORG_NAME
+    FROM V_ORG_CUR VOC
+   WHERE VOC.ORG_ID = :OWNER;
+
+      L_ORG_NAME VARCHAR2(80);
+
+begin
+	
+	 OPEN c_owner_name;
+  FETCH c_owner_name INTO L_ORG_NAME;
+  CLOSE c_owner_name;
+      
+  RETURN (L_ORG_NAME);
+  
+end;
+
+]]>
+      </textSource>
+    </function>
+    <function name="cf_contractor_nameformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_CONTRACTOR_NAMEFormula return Char is
+
+	CURSOR c_contractor_name
+	    IS
+  SELECT VOC.ORG_NAME
+    FROM V_ORG_CUR VOC
+ WHERE VOC.ORG_ID = :ORG_ID;
+    
+    
+      L_CONTRACTOR_NAME VARCHAR2(80);
+
+begin
+	
+	 OPEN c_contractor_name;
+  FETCH c_contractor_name INTO L_CONTRACTOR_NAME;
+  CLOSE c_contractor_name;
+      
+  RETURN (L_CONTRACTOR_NAME);
+  
+end;
+
+]]>
+      </textSource>
+    </function>
+    <function name="cf_actionformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_ACTIONFormula return Char is
+
+  CURSOR C_ACTION
+  IS
+     SELECT ACT.ACTION_TYPE_DESC  --new
+FROM V_METH_HEADER VMH,
+     ACTION_TYPE ACT,   --new
+     ACTION_HISTORY AH   --new
+WHERE ah.METH_ID = :METH_ID
+and ah.ACTION_TYPE_ID = act.ACTION_TYPE_ID;
+     
+  L_ACTION_REC       C_ACTION%ROWTYPE;
+  
+begin
+	
+	OPEN C_ACTION;
+	FETCH C_ACTION INTO L_ACTION_REC;
+	
+	IF C_ACTION%NOTFOUND THEN
+		 L_ACTION_REC.ACTION_TYPE_DESC := NULL;
+	END IF;
+	
+	CLOSE C_ACTION;
+	
+	RETURN (L_ACTION_REC.ACTION_TYPE_DESC);
+  
+end;]]>
+      </textSource>
+    </function>
+    <function name="beforepform">
+      <textSource>
+      <![CDATA[function BeforePForm return boolean is
+begin
+  
+ :PARM_USER := USER;
+  
+   return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+  </programUnits>
+  <webSource>
+  <![CDATA[<%@ taglib uri="/WEB-INF/lib/reports_tld.jar" prefix="rw" %> 
+<%@ page language="java" import="java.io.*" errorPage="/rwerror.jsp" session="false" %>
+<%@ page contentType="text/html;charset=ISO-8859-1" %>
+<!--
+<rw:report id="report"> 
+<rw:objects id="objects">
+</rw:objects>
+-->
+
+<html>
+
+<head>
+<meta name="GENERATOR" content="Oracle 11gR1 Reports Developer"/>
+<title> Your Title </title>
+
+<rw:style id="yourStyle">
+   <!-- Report Wizard inserts style link clause here -->
+</rw:style>
+
+</head>
+
+
+<body>
+
+<rw:dataArea id="yourDataArea">
+   <!-- Report Wizard inserts the default jsp here -->
+</rw:dataArea>
+
+
+
+</body>
+</html>
+
+<!--
+</rw:report> 
+-->
+]]>
+  </webSource>
+  <reportPrivate defaultReportType="masterDetail" versionFlags2="0"
+   sectionTitle="Methamphetamine Cleanup Program Detail Report"/>
+  <reportWebSettings>
+  <![CDATA[#NULL#]]>
+  </reportWebSettings>
+</report>

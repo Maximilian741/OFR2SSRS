@@ -650,6 +650,50 @@ def _default_value_text(p, dtype: str) -> str:
     return "=Nothing"           # all non-String types use VB null literal
 
 
+def _augment_parameters_from_binds(report: ParsedReport) -> None:
+    """Add a ReportParameter for any bind variable that is referenced in a
+    query's SQL but NOT declared in the source XML's <userParameter> list.
+
+    Oracle Reports tolerates "implicit" binds -- a sub-query can reference
+    :ORG_ID or :p_perm_num without the report ever declaring it as a
+    user parameter. Oracle Reports' bind layer just routes those binds to
+    column values or session context. SSRS does NOT tolerate this: every
+    QueryParameter in a DataSet must point to a declared ReportParameter
+    via =Parameters!X.Value, or the dataset binds to an empty string and
+    silently returns no rows.
+
+    Perplexity's hand-tweaked RDLs auto-declare these as
+    String / AllowBlank=true (we verified this against the user's known-
+    working METH_DETAILS and JV_PERMIT RDLs). We replicate that pattern
+    here so the generator produces an SSRS-runnable RDL for any Oracle
+    Reports XML, no per-report knowledge required.
+    """
+    if not report.queries:
+        return
+    declared = {p.name.upper() for p in (report.parameters or [])}
+    seen_extra: Set[str] = set()
+    for q in report.queries:
+        for sql in (q.sql, q.tsql):
+            if not sql:
+                continue
+            for bind in _detect_oracle_bind_vars(sql):
+                up = bind.upper()
+                if up in declared or up in seen_extra:
+                    continue
+                seen_extra.add(up)
+                # Synthesize a String/AllowBlank parameter using the bind
+                # name verbatim. datatype="character" maps to ssrs_datatype
+                # "String" via models.ReportParameter; AllowBlank handling
+                # happens later in _build_report_parameters.
+                rp = ReportParameter(
+                    name=bind,
+                    datatype="character",
+                    label=bind,
+                    display=True,
+                )
+                report.parameters.append(rp)
+
+
 def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
     """Emit <ReportParameters> matching the perplexity-rebuilt RDL pattern.
 
@@ -2274,6 +2318,9 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
 def _build_page(report: ParsedReport, page_height_in: float = 11.0) -> ET.Element:
     page = ET.Element(_q("Page"))
 
+    # PageHeader: SSRS 2008/01 schema requires <ReportItems> to contain at
+    # least one child element. We never put anything in the header, so we
+    # omit <ReportItems> entirely (it is optional on PageHeader).
     ph = _sub(page, "PageHeader")
     _sub(ph, "Height", "0.25in")
     _sub(ph, "PrintOnFirstPage", "true")
@@ -2283,13 +2330,15 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0) -> ET.Elemen
     _sub(pf, "Height", "0.6in")
     _sub(pf, "PrintOnFirstPage", "true")
     _sub(pf, "PrintOnLastPage", "true")
-    pf_items = _sub(pf, "ReportItems")
 
+    # Same rule for PageFooter: only create <ReportItems> when we have a
+    # child to put inside. An empty <ReportItems /> triggers
+    # "deserialization failed: ReportItems has incomplete content" at
+    # upload time and blocks the report from being published.
     sig_q = _pick_signature_query(report)
     if sig_q is not None and sig_q.items:
+        pf_items = _sub(pf, "ReportItems")
         sf = sig_q.items[0].name
-        # Find the dataset that owns this field so we can scope the
-        # aggregate properly (page footer requires explicit scope).
         ds_name = None
         for q in (report.queries or []):
             if any((it.name or "").upper() == sf.upper() for it in (q.items or [])):
@@ -2323,13 +2372,36 @@ def _build_code() -> ET.Element:
     return ET.Element(_q("Code"))
 
 
+def _strip_empty_required_containers(root: ET.Element) -> None:
+    """Belt-and-suspenders pass: remove any empty <ReportItems> /
+    <CellContents> / etc. that slipped through individual emitters.
+
+    SSRS 2008/01 rejects these containers with "deserialization failed:
+    <X> has incomplete content" if they have no children. Targeted
+    callers already avoid emitting them empty, but this final sweep
+    guarantees the upload-blocking error never reappears.
+    """
+    must_have_child = {
+        "ReportItems", "CellContents", "DataSources", "DataSets",
+        "ReportParameters",
+    }
+    for parent in root.iter():
+        for child in list(parent):
+            tag = child.tag.split("}", 1)[-1]
+            if tag in must_have_child and len(list(child)) == 0:
+                parent.remove(child)
+
+
 def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.Element:
     """Build the root <Report> element with namespaces and all children in
     the SSRS 2008/01 schema order."""
+    # Auto-declare any bind vars referenced in SQL but not declared in the
+    # source XML's parameter list (Oracle Reports tolerates this; SSRS
+    # does not). MUST run before _build_data_sets / _build_report_parameters
+    # so they see the synthetic params.
+    _augment_parameters_from_binds(report)
+
     root = ET.Element(_q("Report"))
-    # Namespaces are registered at module load via ET.register_namespace;
-    # do NOT add a redundant xmlns:rd attribute -- it produces a duplicate
-    # attribute and SSRS / ElementTree both reject the document.
 
     root.append(_build_data_sources(target_db=target_db))
     root.append(_build_data_sets(report, target_db=target_db))
@@ -2356,6 +2428,8 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
     _sub(root, "Language", "en-US")
     _rdsub(root, "DrawGrid", "true")
     _rdsub(root, "GridSpacing", "0.083333in")
+
+    _strip_empty_required_containers(root)
     return root
 
 

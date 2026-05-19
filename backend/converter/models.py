@@ -34,11 +34,21 @@ class ReportParameter:
 
     @property
     def ssrs_datatype(self) -> str:
-        return {
-            "character": "String",
-            "number": "Integer",
-            "date": "DateTime",
-        }.get(self.datatype.lower(), "String")
+        """Map an Oracle Reports parameter datatype to an SSRS DataType.
+
+        Defaults to String for everything except Date/DateTime so the
+        SSRS parameter widget accepts a blank input. SSRS's Integer
+        widget rejects empty values, which forces the user to type a
+        placeholder before they can run the report -- exactly the
+        runtime friction perplexity's hand-tweaked RDLs avoid by
+        declaring numeric/ID params as String. Oracle's implicit
+        type coercion turns the string-form numeric back into a number
+        when the bind is forwarded.
+        """
+        dt = (self.datatype or "").lower()
+        if dt in ("date", "datetime", "timestamp"):
+            return "DateTime"
+        return "String"
 
 
 # ---------------------------------------------------------------------------
