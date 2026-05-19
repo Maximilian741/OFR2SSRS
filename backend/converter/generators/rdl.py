@@ -435,6 +435,15 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
             cmd_text,
             flags=re.IGNORECASE,
         )
+        # Strip trailing semicolons + whitespace. Oracle Reports XMLs preserve
+        # the source SQL as the developer typed it, often ending with ";".
+        # That terminator is fine in SQL*Plus / PL/SQL anonymous blocks but
+        # the SSRS Oracle data extension sends each CommandText as a single
+        # statement through ADO.NET — Oracle's parser rejects the trailing
+        # ";" with "ORA-00933: SQL command not properly ended", which is
+        # exactly what blocks Refresh Fields and report execution. Strip ALL
+        # trailing ";" + whitespace (some XMLs have multiple).
+        cmd_text = re.sub(r"[;\s]+$", "", cmd_text)
         _sub(q_el, "CommandText", cmd_text)
 
         # Oracle bind vars look like :P_FOO. Declare each one referenced in
@@ -468,6 +477,10 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         cmd_text = (query.tsql or query.sql or "").strip()
         if not cmd_text:
             cmd_text = f"-- empty query for {query.name}"
+        # Same trailing-semicolon strip as the Oracle path. SQL Server tends
+        # to be more forgiving of trailing ";" but it can still trip up
+        # parameter binding in some ADO.NET providers, so strip for safety.
+        cmd_text = re.sub(r"[;\s]+$", "", cmd_text)
         _sub(q_el, "CommandText", cmd_text)
 
         # <QueryParameters> from @P_FOO references in tsql
@@ -2296,17 +2309,11 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
     _sub(root, "Language", "en-US")
     _rdsub(root, "DrawGrid", "true")
     _rdsub(root, "GridSpacing", "0.083333in")
-
     return root
 
 
 def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
-    """Return a complete RDL XML document as a string.
-
-    target_db: "oracle" (default) emits original Oracle SQL with :P_ bind
-    vars; "sqlserver" emits translated T-SQL with @P_ bind vars. Anything
-    else falls back to "oracle".
-    """
+    """Return a complete RDL XML document as a string."""
     target_db = (target_db or "oracle").lower()
     if target_db not in ("oracle", "sqlserver"):
         target_db = "oracle"
