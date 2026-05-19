@@ -129,15 +129,11 @@ def test_convert_default_target_is_oracle(synthetic_xml_bytes):
     # Oracle SQL keeps :P_FOO bind vars; T-SQL @P_FOO must NOT appear in CT.
     assert re.search(r":P_[A-Z_]+", joined), "Expected :P_ bind var in Oracle CommandText"
     assert not re.search(r"@P_[A-Z_]+", joined), "T-SQL @P_ bind vars must not appear in Oracle CommandText"
-    # DataProvider stays "SQL" regardless of target_db. Real-world usage:
-    # the user swaps the embedded DataSource for a SHARED data source on
-    # their report server after upload, and that shared source carries
-    # its own provider/connect-string. The embedded provider only matters
-    # insofar as Report Builder needs to RECOGNIZE the value to open the
-    # Data Source Properties dialog. "SQL" is universally registered on
-    # every SSRS edition; "OracleClient" is not, and setting it broke the
-    # swap-to-shared-connection workflow on servers lacking the extension.
-    assert "SQL" in _extract_data_providers(rdl)
+    # DataSource is now emitted as a SHARED reference (DataSourceReference)
+    # not an embedded ConnectionProperties block. This is the perplexity-
+    # rebuilt-RDL pattern that suppresses the Refresh Fields dialog.
+    assert "<DataSourceReference>" in rdl
+    assert "<DataProvider>" not in rdl  # no embedded provider
 
 
 def test_convert_sqlserver_target_uses_tsql(synthetic_xml_bytes):
@@ -152,8 +148,8 @@ def test_convert_sqlserver_target_uses_tsql(synthetic_xml_bytes):
     # T-SQL CommandText uses @P_FOO; Oracle :P_FOO must NOT appear.
     assert re.search(r"@P_[A-Z_]+", joined), "Expected @P_ bind var in T-SQL CommandText"
     assert not re.search(r":P_[A-Z_]+", joined), "Oracle :P_ bind vars must not appear in T-SQL CommandText"
-    # DataProvider should be SQL
-    assert "SQL" in _extract_data_providers(rdl)
+    # DataSource is a shared reference regardless of target_db.
+    assert "<DataSourceReference>" in rdl
 
 
 def test_generate_rdl_oracle_emits_colon_query_param_names(translated_report):
@@ -174,9 +170,9 @@ def test_generate_rdl_sqlserver_emits_at_query_param_names(translated_report):
 def test_generate_rdl_invalid_target_db_falls_back_to_oracle(translated_report):
     """An unrecognized target_db normalizes to the safe Oracle default.
 
-    "Safe default" here means CommandText is Oracle SQL with :P_ bind vars
-    (i.e. NOT the T-SQL @P_ variant). The embedded DataProvider stays "SQL"
-    regardless — see _build_data_sources for why.
+    "Safe default" means CommandText is Oracle SQL with :P_ bind vars
+    (not the T-SQL @P_ variant). The DataSource is always a shared
+    reference regardless of target_db — see _build_data_sources.
     """
     import re
     from converter.generators.rdl import generate_rdl
@@ -185,4 +181,4 @@ def test_generate_rdl_invalid_target_db_falls_back_to_oracle(translated_report):
     joined = "\n".join(cmds)
     assert not re.search(r"@P_[A-Z_]+", joined), \
         "Invalid target_db should fall back to Oracle (no @P_ in CommandText)"
-    assert "SQL" in _extract_data_providers(rdl)
+    assert "<DataSourceReference>" in rdl

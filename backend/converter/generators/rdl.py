@@ -352,32 +352,39 @@ def _layout_format_triggers(report: ParsedReport) -> List[Tuple[str, str]]:
 # ---------------------------------------------------------------------------
 
 def _build_data_sources(target_db: str = "oracle") -> ET.Element:
-    """Emit <DataSources>.
+    """Emit <DataSources> as a SHARED DataSourceReference (NOT an embedded
+    connection-properties block).
 
-    IMPORTANT: We always emit ``<DataProvider>SQL</DataProvider>`` regardless
-    of ``target_db``. Why: the user's normal workflow is to upload the RDL,
-    then in Report Builder swap the embedded DataSource for a SHARED data
-    source on their report server. That shared data source carries its own
-    provider/connect-string. The embedded provider only matters for one
-    thing: Report Builder needs to RECOGNIZE the value so it can open the
-    Data Source Properties dialog. ``SQL`` is universally registered on
-    every SSRS edition. Setting it to ``OracleClient`` previously caused
-    "Select connection type" / "rsDataExtensionNotFound" errors on servers
-    where the Oracle data extension wasn't installed — which broke the
-    swap-to-shared-connection workflow entirely.
+    Why this shape: two perplexity-rebuilt RDLs the user got running in
+    SSRS without the "Define Query Parameters" dialog popping at Refresh
+    Fields BOTH used the same DataSource structure -- a reference to a
+    named shared data source on the report server, with cached creds.
+    The embedded ``<ConnectionProperties>`` form forces SSRS to evaluate
+    query parameters at design time (it doesn't have cached credentials
+    to use) and pops the prompt. A ``<DataSourceReference>`` lets SSRS
+    use the shared DS's stored credentials silently.
+
+    The user's workflow already swaps the data source post-upload to
+    point at the right shared DS in their folder. Emitting a placeholder
+    name here just means they confirm/repoint it as a single step, which
+    is what they were already doing.
 
     ``target_db`` is preserved on the signature because _build_dataset
-    still uses it to pick the CommandText flavor (Oracle SQL vs T-SQL),
-    which is the part of the RDL that actually has to match the runtime
-    backend.
+    still uses it for the CommandText flavor (Oracle SQL vs T-SQL).
     """
     ds_root = ET.Element(_q("DataSources"))
     ds = _sub(ds_root, "DataSource")
-    ds.set("Name", "DS_Main")
-    cp = _sub(ds, "ConnectionProperties")
-    _sub(cp, "DataProvider", "SQL")
-    _sub(cp, "ConnectString", "Data Source=localhost;Initial Catalog=AppDb")
-    _rdsub(ds, "SecurityType", "Integrated")
+    # Placeholder name. User repoints to their actual shared DS on the
+    # report server (e.g. "BETA") via Report Builder's Data Source
+    # Properties dialog. SSRS only cares that the reference NAME exists
+    # in the deployed folder; the local placeholder string doesn't matter.
+    ds.set("Name", "SharedDataSource")
+    _sub(ds, "DataSourceReference", "SharedDataSource")
+    _rdsub(ds, "SecurityType", "None")
+    # Placeholder GUID; SSRS regenerates this when the data source is
+    # actually wired up at deploy time. Keeping a stable value here so
+    # the RDL diff stays clean across regenerations.
+    _rdsub(ds, "DataSourceID", "00000000-0000-0000-0000-000000000001")
     return ds_root
 
 
@@ -435,13 +442,15 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
             cmd_text,
             flags=re.IGNORECASE,
         )
-        # PRESERVE the source SQL verbatim, including any trailing ";"
-        # the Oracle Reports developer typed. Empirically (verified against
-        # a working hand-tweaked RDL the user deployed successfully), the
-        # SSRS Oracle data extension accepts trailing semicolons just fine
-        # — they do NOT cause ORA-00933. A prior cycle stripped them based
-        # on a wrong hypothesis and that change broke query execution on
-        # reports that the source-of-truth RDL ran fine. Don't strip.
+        # Strip trailing semicolons + whitespace. Oracle Reports XMLs preserve
+        # the SQL the developer typed in SQL*Plus / PL/SQL, often ending with
+        # ";". The SSRS Oracle data extension sends each CommandText as a
+        # single statement via ADO.NET; Oracle's parser rejects the trailing
+        # ";" with ORA-00933 "SQL command not properly ended" at refresh
+        # fields + report execution. User verified this is the actual issue
+        # (the source-of-truth RDL happened to also have it but the user
+        # works around it manually). Strip ALL trailing ";" + whitespace.
+        cmd_text = re.sub(r"[;\s]+$", "", cmd_text)
         _sub(q_el, "CommandText", cmd_text)
 
         # Oracle bind vars look like :P_FOO. Declare each one referenced in
@@ -475,6 +484,9 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         cmd_text = (query.tsql or query.sql or "").strip()
         if not cmd_text:
             cmd_text = f"-- empty query for {query.name}"
+        # Same trailing-semicolon strip as Oracle path (Oracle Reports XMLs
+        # can carry a ";" in the SQL whether we target Oracle or SQL Server).
+        cmd_text = re.sub(r"[;\s]+$", "", cmd_text)
         _sub(q_el, "CommandText", cmd_text)
 
         # <QueryParameters> from @P_FOO references in tsql
@@ -563,40 +575,35 @@ def _default_value_text(p, dtype: str) -> str:
 
 
 def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
+    """Emit <ReportParameters> using ONLY {DataType, AllowBlank, Prompt}.
+
+    Why this minimal shape: the two perplexity-rebuilt RDLs that run in
+    SSRS without the design-time parameter prompt both omit <Nullable>
+    AND <DefaultValue> on every parameter. When there's no DefaultValue
+    expression to evaluate, Report Builder has nothing to ask the user
+    about at Refresh Fields time -- it silently uses an empty/blank value
+    for design-time schema retrieval. AllowBlank=true (String only) lets
+    the runtime user submit empty input that SSRS forwards as NULL into
+    the SQL's standard (:P IS NULL OR col IN (:P)) pattern.
+
+    SSRS 2008/01 schema element order for ReportParameter is:
+    DataType -> Nullable -> DefaultValue -> AllowBlank -> Prompt -> Hidden.
+    We skip Nullable and DefaultValue entirely and emit just the three
+    elements perplexity's working RDLs have.
+    """
     if not report.parameters:
         return None
     root = ET.Element(_q("ReportParameters"))
     for p in report.parameters:
         rp = _sub(root, "ReportParameter")
         rp.set("Name", p.name)
-        # SSRS 2008/01 ReportParameter element order: DataType, Nullable,
-        # DefaultValue, AllowBlank, Prompt, Hidden, MultiValue, ValidValues,
-        # UsedInQuery. Emitting elements out of order fails schema
-        # validation in Report Builder.
         ptype = _ssrs_param_type(p)
         _sub(rp, "DataType", ptype)
-        has_initial = not (p.initial_value is None or p.initial_value == "")
-        if not has_initial:
-            _sub(rp, "Nullable", "true")
-        # DefaultValue: pick a Value text that matches the parameter's
-        # declared DataType. Empty <Value/> is only valid for String type;
-        # for Integer/Float/DateTime/Boolean we emit '=Nothing' (VB null
-        # literal) which SSRS accepts as a valid expression for any type.
-        dv_text = _default_value_text(p, ptype)
-        dv = _sub(rp, "DefaultValue")
-        values = _sub(dv, "Values")
-        v_el = _sub(values, "Value")
-        if dv_text:
-            v_el.text = dv_text
-        # else: leave as empty <Value/> which is only emitted for String DataType
-        if not has_initial and ptype == "String":
+        # AllowBlank ONLY valid for String type in SSRS 2008/01 schema.
+        if ptype == "String":
             _sub(rp, "AllowBlank", "true")
-        # Use the parameter's declared name verbatim as the prompt (matches
-        # the working source-of-truth RDL behavior). SSRS Report Server
-        # auto-renders underscores as spaces in the parameter form so a
-        # name like "PARM_ADDR_CITY" displays as "PARM ADDR CITY". A prior
-        # cycle stripped prefixes + Title-cased the prompt, but that
-        # diverged from the working RDL and didn't actually help users.
+        # Use the parameter's declared name verbatim as the prompt; SSRS
+        # auto-renders underscores as spaces in the parameter form.
         _sub(rp, "Prompt", p.label or p.name)
         if not p.display:
             _sub(rp, "Hidden", "true")
