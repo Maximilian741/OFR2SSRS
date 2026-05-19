@@ -529,11 +529,24 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
 
 def _default_value_text(p, dtype: str) -> str:
     """Pick a DefaultValue Value text that matches the parameter's declared
-    DataType. Empty <Value/> is invalid for non-string types and triggers
-    'DefaultValue doesn't have the expected type' at upload. For String
-    types, an empty string (resulting in an empty <Value/> element) is
-    accepted as empty/NULL. For Integer/Float/DateTime/Boolean, emit the
-    VB.NET null literal '=Nothing' which SSRS accepts for any DataType."""
+    DataType. The value MUST be a concrete literal Report Builder can
+    evaluate at design-time without prompting; otherwise opening the report
+    and running 'Refresh Fields' pops the 'Define Query Parameters' dialog
+    asking for a value per :PARM_*. The VB.NET expression '=Nothing'
+    cannot be evaluated at design-time and triggers that prompt.
+
+    Concrete literals chosen per DataType:
+      * String   -> '' (empty string; emits an empty <Value/>)
+      * Integer  -> '0'
+      * Float    -> '0'
+      * DateTime -> '1/1/1900'  (literal date Report Builder parses cleanly)
+      * Boolean  -> 'false'
+
+    At runtime, every ReportParameter is still emitted with Nullable=true
+    (and AllowBlank=true for String), so a user who leaves the prompt blank
+    causes SSRS to pass NULL to the Oracle query. The query's
+    '(:PARM IS NULL OR col IN (:PARM))' branch then matches everything,
+    preserving the optional-filter semantics."""
     iv = (p.initial_value or "").strip() if p.initial_value else ""
     if iv:
         return iv  # explicit default from the source XML; keep verbatim
@@ -541,12 +554,12 @@ def _default_value_text(p, dtype: str) -> str:
     if dt == "String":
         return ""                    # empty string = NULL/empty for String
     if dt in ("Integer", "Float"):
-        return "=Nothing"            # VB null literal, accepted by Integer/Float
+        return "0"                   # literal zero; design-time evaluable
     if dt == "DateTime":
-        return "=Nothing"
+        return "1/1/1900"            # literal date; Report Builder parses cleanly
     if dt == "Boolean":
-        return "=Nothing"
-    return "=Nothing"                # safe fallback for any other DataType
+        return "false"               # literal false; design-time evaluable
+    return ""                        # safe fallback: treat unknown as String
 
 
 def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
