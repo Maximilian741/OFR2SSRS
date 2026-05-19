@@ -655,8 +655,7 @@ def _augment_parameters_from_binds(report: ParsedReport) -> None:
     query's SQL but NOT declared in the source XML's <userParameter> list.
 
     Oracle Reports tolerates "implicit" binds -- a sub-query can reference
-    :ORG_ID or :p_perm_num without the report ever declaring it as a
-    user parameter. Oracle Reports' bind layer just routes those binds to
+    a :BIND without the report ever declaring it as a user parameter. Oracle Reports' bind layer just routes those binds to
     column values or session context. SSRS does NOT tolerate this: every
     QueryParameter in a DataSet must point to a declared ReportParameter
     via =Parameters!X.Value, or the dataset binds to an empty string and
@@ -664,7 +663,7 @@ def _augment_parameters_from_binds(report: ParsedReport) -> None:
 
     Perplexity's hand-tweaked RDLs auto-declare these as
     String / AllowBlank=true (we verified this against the user's known-
-    working METH_DETAILS and JV_PERMIT RDLs). We replicate that pattern
+    working RDLs the user staged as source-of-truth fixtures). We replicate that pattern
     here so the generator produces an SSRS-runnable RDL for any Oracle
     Reports XML, no per-report knowledge required.
     """
@@ -1155,17 +1154,82 @@ def _build_token_resolver(report: ParsedReport):
 
 
 def _find_section_main(report: ParsedReport) -> Optional[LayoutGroup]:
-    """Return the section_main LayoutGroup if it has at least one frame child."""
-    def has_frame(g: LayoutGroup) -> bool:
-        return any((c.kind or "").lower() == "frame" for c in g.children or [])
+    """Return the section_main LayoutGroup ONLY if the report is shaped like a
+    positional/letter layout that benefits from the stacked-Tablix
+    certificate body.
 
+    A tabular report ALSO has a section_main with frame children -- the
+    detection used to be "has section_main + at least one frame" which
+    routed every single Oracle Reports XML to the cert path. That fills
+    the body with positional textbox stacks pulled from the layout
+    fields, which is wrong for reports whose primary deliverable is a
+    flat data grid. Those reports
+    need _build_body's flat Tablix instead.
+
+    Shape-based gate (no per-report hardcoding):
+
+      * A repeating-frame layout (kind contains "repeating") OR a
+        single large frame that hosts a tabular grid -> NOT cert path.
+        Detected by: the section's frame children contain at least one
+        repeating frame or a frame with >= 6 fields laid out roughly
+        on the same horizontal band (i.e. a row of column headers).
+      * Otherwise, if the section has free-standing text/field blocks
+        positioned at varying y coordinates (typical of letters and
+        certificates) AND the main query has <= 8 columns, take the
+        cert path.
+
+    Returns the section_main LayoutGroup when cert-routing is
+    appropriate, None otherwise.
+    """
+    def _frame_children(g: LayoutGroup) -> List[LayoutGroup]:
+        return [c for c in (g.children or [])
+                if (c.kind or "").lower() == "frame"
+                or "frame" in (c.kind or "").lower()]
+
+    def _looks_tabular(section: LayoutGroup) -> bool:
+        # Any repeating-frame anywhere under the section -> tabular.
+        stack = list(section.children or [])
+        while stack:
+            node = stack.pop()
+            k = (node.kind or "").lower()
+            if "repeat" in k or k.endswith("_repeating") or k == "repeating_frame":
+                return True
+            # A frame holding >= 6 fields is almost certainly a grid row /
+            # column-header band, not a positional letter block.
+            if "frame" in k and len(node.fields or []) >= 6:
+                return True
+            stack.extend(node.children or [])
+        return False
+
+    def _looks_positional(section: LayoutGroup) -> bool:
+        # Count standalone text fields whose y-positions vary a lot
+        # (letter / certificate bodies have stacked paragraphs).
+        ys = []
+        stack = list(section.children or [])
+        while stack:
+            node = stack.pop()
+            for f in (node.fields or []):
+                if getattr(f, "kind", "") in ("text", "field"):
+                    ys.append(getattr(f, "y", 0) or 0)
+            stack.extend(node.children or [])
+        if len(ys) < 4:
+            return False
+        return (max(ys) - min(ys)) > 100  # spread across the page
+
+    candidates = []
     for g in report.layout or []:
         kind = (g.kind or "").lower()
-        if kind == "section_main" and has_frame(g):
-            return g
+        if kind == "section_main" and _frame_children(g):
+            candidates.append(g)
         for child in g.children or []:
-            if (child.kind or "").lower() == "section_main" and has_frame(child):
-                return child
+            if (child.kind or "").lower() == "section_main" and _frame_children(child):
+                candidates.append(child)
+
+    for section in candidates:
+        if _looks_tabular(section):
+            continue  # tabular reports fall through to flat Tablix path
+        if _looks_positional(section):
+            return section
     return None
 
 
@@ -2373,32 +2437,27 @@ def _build_code() -> ET.Element:
 
 
 def _strip_empty_required_containers(root: ET.Element) -> None:
-    """Belt-and-suspenders pass: remove any empty <ReportItems> /
-    <CellContents> / etc. that slipped through individual emitters.
-
-    SSRS 2008/01 rejects these containers with "deserialization failed:
-    <X> has incomplete content" if they have no children. Targeted
-    callers already avoid emitting them empty, but this final sweep
-    guarantees the upload-blocking error never reappears.
-    """
+    """Remove any empty must-have-child container that slipped through.
+    SSRS rejects empty <ReportItems>/<CellContents>/<DataSources>/<DataSets>/
+    <ReportParameters> at upload with "has incomplete content"."""
     must_have_child = {
         "ReportItems", "CellContents", "DataSources", "DataSets",
         "ReportParameters",
     }
     for parent in root.iter():
         for child in list(parent):
-            tag = child.tag.split("}", 1)[-1]
-            if tag in must_have_child and len(list(child)) == 0:
+            tag = child.tag
+            # Comments / PIs have a callable .tag; skip them.
+            if not isinstance(tag, str):
+                continue
+            local = tag.split("}", 1)[-1]
+            if local in must_have_child and len(list(child)) == 0:
                 parent.remove(child)
 
 
 def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.Element:
     """Build the root <Report> element with namespaces and all children in
     the SSRS 2008/01 schema order."""
-    # Auto-declare any bind vars referenced in SQL but not declared in the
-    # source XML's parameter list (Oracle Reports tolerates this; SSRS
-    # does not). MUST run before _build_data_sets / _build_report_parameters
-    # so they see the synthetic params.
     _augment_parameters_from_binds(report)
 
     root = ET.Element(_q("Report"))

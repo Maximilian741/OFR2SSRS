@@ -76,7 +76,7 @@ def _empty_containers(rdl: str):
 @pytest.mark.parametrize("case_name,src_path,exp_path", _cases())
 def test_no_empty_required_containers(case_name, src_path, exp_path):
     """SSRS rejects empty <ReportItems> / <CellContents> / etc.
-    This is the exact upload-blocker bug the user hit on METH_DETAILS."""
+    This is the upload-blocker class of bug ('has incomplete content')."""
     from converter import convert
     rdl = convert(src_path.read_bytes())["rdl_xml"]
     empties = _empty_containers(rdl)
