@@ -124,6 +124,126 @@ def _ssrs_param_type(p: ReportParameter) -> str:
     return p.ssrs_datatype if hasattr(p, "ssrs_datatype") else "String"
 
 
+
+def _alias_select_items(sql: str, item_names) -> str:
+    """Ensure every item in the top-level SELECT list has an SQL alias
+    matching the dataset Field name we declared in the RDL.
+
+    Why this is mandatory for SSRS: when the user clicks "Refresh Fields"
+    in Report Builder, SSRS rebuilds the dataset's Fields collection from
+    the column names Oracle returns. For a simple column like VMH.CVID,
+    Oracle returns "CVID" and Report Builder agrees with our <Field
+    Name="CVID"> declaration. But for an expression like
+    UPPER(ST.STAT_TYPE_DESC) with no alias, Oracle returns the column
+    name as the verbatim expression text. Report Builder normalizes that
+    one way; our converter normalized it another way. After a Refresh
+    Fields the dataset Field is named one thing and every Tablix cell
+    still references the other -> "Report item expressions can only
+    refer to fields within the current dataset scope" and Save is blocked.
+
+    The fix is what every hand-tweaked working RDL does: add
+    ``AS <field_name>`` to each unaliased SELECT item so Oracle returns
+    exactly the column name we declared. Pure string rewrite, no SQL
+    parser needed. Driven entirely by ``item_names`` (the order the
+    parser populated query.items) -- no per-report knowledge anywhere.
+    """
+    if not sql or not item_names:
+        return sql
+
+    upper = sql.upper()
+    sel_idx = upper.find("SELECT")
+    if sel_idx < 0:
+        return sql
+
+    depth = 0
+    from_idx = -1
+    i = sel_idx + len("SELECT")
+    while i < len(sql):
+        ch = sql[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif depth == 0 and upper[i:i + 4] == "FROM" and (
+            i + 4 == len(sql) or not sql[i + 4].isalnum()
+        ):
+            from_idx = i
+            break
+        i += 1
+    if from_idx < 0:
+        return sql
+
+    sel_body = sql[sel_idx + len("SELECT"):from_idx]
+    parts = []
+    cur = []
+    depth = 0
+    for ch in sel_body:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            parts.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    if cur:
+        parts.append("".join(cur))
+
+    new_parts = []
+    for idx, raw in enumerate(parts):
+        stripped = raw.strip()
+        if not stripped:
+            new_parts.append(raw)
+            continue
+        # Already aliased? Oracle SQL allows BOTH explicit "expr AS name"
+        # AND implicit "expr name" (a bare trailing identifier). We must
+        # detect both -- the implicit form previously slipped through and
+        # got double-aliased ("Pkg_JV_Util.F(...) Violations AS DERIVED").
+        # The implicit form is recognized as: ")" or a word char, then
+        # whitespace, then an identifier at end of item.
+        if re.search(r"\bAS\b\s+[A-Za-z_][A-Za-z0-9_]*\s*$", stripped, re.IGNORECASE):
+            new_parts.append(raw)
+            continue
+        if re.search(r"(?:\)|[A-Za-z0-9_])\s+[A-Za-z_][A-Za-z0-9_]*\s*$", stripped):
+            # Trailing identifier following ")" or another word char =
+            # implicit Oracle alias. Don't add a second one.
+            # Caveat: a bare "TABLE.COL" also matches, but bare column
+            # refs were already short-circuited above.
+            new_parts.append(raw)
+            continue
+        # Bare column ref (TABLE.COL or COL) -- Oracle returns the COL
+        # part as the column name, which matches what our parser
+        # already extracted as item.name. No alias needed.
+        if re.fullmatch(
+            r"\s*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\s*",
+            stripped,
+        ):
+            new_parts.append(raw)
+            continue
+        # Derive a deterministic alias from the expression itself --
+        # the same normalization Oracle Reports uses when it auto-names
+        # an unaliased column (strip non-word chars, uppercase, collapse
+        # runs of underscores). This guarantees the alias matches the
+        # <Field Name="..."> our parser declared, regardless of where
+        # item_names puts this item in its own ordering.
+        derived = re.sub(r"[^A-Za-z0-9]+", "_", stripped).strip("_").upper()
+        # Avoid SQL-reserved or absurd aliases. Cap at 30 chars
+        # (Oracle pre-12c identifier limit) and ensure it starts with
+        # a letter.
+        if not derived or not re.match(r"^[A-Za-z]", derived):
+            new_parts.append(raw)
+            continue
+        derived = derived[:30]
+        alias = derived
+        # Preserve trailing whitespace so re-join doesn't shift formatting.
+        m_trail = re.match(r"(.*?)(\s*)$", raw, re.DOTALL)
+        body_part, trail = m_trail.group(1), m_trail.group(2)
+        new_parts.append(f"{body_part} AS {alias}{trail}")
+
+    return sql[:sel_idx + len("SELECT")] + ",".join(new_parts) + sql[from_idx:]
+
+
 def _make_ssrs_oracle_compatible(sql: str, param_types: dict) -> str:
     """Rewrite an Oracle SQL CommandText so it actually runs through the
     SSRS Oracle data extension.
@@ -521,6 +641,14 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         # report-specific bind names are hardcoded.
         if param_types:
             cmd_text = _make_ssrs_oracle_compatible(cmd_text, param_types)
+        # Alias unaliased SELECT expressions so Refresh Fields produces
+        # column names matching our <Field Name="..."> declarations.
+        # Without this, expressions like UPPER(col) come back from Oracle
+        # as the verbatim expression text and Tablix cells lose their
+        # field bindings on Save in Report Builder.
+        item_names = [it.name for it in (query.items or [])]
+        if item_names:
+            cmd_text = _alias_select_items(cmd_text, item_names)
         _sub(q_el, "CommandText", cmd_text)
 
         # Oracle bind vars look like :P_FOO. Declare each one referenced in
