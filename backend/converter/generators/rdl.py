@@ -579,21 +579,23 @@ def _default_value_text(p, dtype: str) -> str:
 
 
 def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
-    """Emit <ReportParameters> using ONLY {DataType, AllowBlank, Prompt}.
+    """Emit <ReportParameters> matching the perplexity-rebuilt RDL pattern.
 
-    Why this minimal shape: the two perplexity-rebuilt RDLs that run in
-    SSRS without the design-time parameter prompt both omit <Nullable>
-    AND <DefaultValue> on every parameter. When there's no DefaultValue
-    expression to evaluate, Report Builder has nothing to ask the user
-    about at Refresh Fields time -- it silently uses an empty/blank value
-    for design-time schema retrieval. AllowBlank=true (String only) lets
-    the runtime user submit empty input that SSRS forwards as NULL into
-    the SQL's standard (:P IS NULL OR col IN (:P)) pattern.
+    Each parameter gets exactly what is needed to make it optional at
+    run time so the user can fill in only the fields they care about:
+
+      * String  -> <AllowBlank>true</AllowBlank>     (empty input -> NULL)
+      * other   -> <Nullable>true</Nullable>         (blank field -> NULL)
+
+    No <DefaultValue> is emitted -- that's what suppresses the
+    "Define Query Parameters" dialog at Refresh-Fields time and lets the
+    runtime user leave any combination of fields blank. The SQL
+    CommandText handles the rest via the standard
+    (:P IS NULL OR col = :P) pattern, so an unfilled parameter widens
+    the result set instead of erroring or returning nothing.
 
     SSRS 2008/01 schema element order for ReportParameter is:
     DataType -> Nullable -> DefaultValue -> AllowBlank -> Prompt -> Hidden.
-    We skip Nullable and DefaultValue entirely and emit just the three
-    elements perplexity's working RDLs have.
     """
     if not report.parameters:
         return None
@@ -603,9 +605,14 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
         rp.set("Name", p.name)
         ptype = _ssrs_param_type(p)
         _sub(rp, "DataType", ptype)
-        # AllowBlank ONLY valid for String type in SSRS 2008/01 schema.
+        # Nullable is valid for every type EXCEPT String; AllowBlank is
+        # valid ONLY for String. Either makes the param optional at
+        # runtime -- SSRS forwards an unfilled value as NULL into the
+        # SQL's (:P IS NULL OR col = :P) guards.
         if ptype == "String":
             _sub(rp, "AllowBlank", "true")
+        else:
+            _sub(rp, "Nullable", "true")
         # Use the parameter's declared name verbatim as the prompt; SSRS
         # auto-renders underscores as spaces in the parameter form.
         _sub(rp, "Prompt", p.label or p.name)
