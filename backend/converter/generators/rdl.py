@@ -541,38 +541,31 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
 # ---------------------------------------------------------------------------
 
 def _default_value_text(p, dtype: str) -> str:
-    """Pick a DefaultValue Value text that matches the parameter's declared
-    DataType. The value MUST be a concrete literal Report Builder can
-    evaluate at design-time without prompting; otherwise opening the report
-    and running 'Refresh Fields' pops the 'Define Query Parameters' dialog
-    asking for a value per :PARM_*. The VB.NET expression '=Nothing'
-    cannot be evaluated at design-time and triggers that prompt.
+    """Pick a DefaultValue Value text for the parameter's declared DataType.
 
-    Concrete literals chosen per DataType:
+    Empirically (verified against a working hand-tweaked RDL the user
+    deployed successfully):
       * String   -> '' (empty string; emits an empty <Value/>)
-      * Integer  -> '0'
-      * Float    -> '0'
-      * DateTime -> '1/1/1900'  (literal date Report Builder parses cleanly)
-      * Boolean  -> 'false'
+      * Integer/Float/DateTime/Boolean -> '=Nothing' (VB null literal)
 
-    At runtime, every ReportParameter is still emitted with Nullable=true
-    (and AllowBlank=true for String), so a user who leaves the prompt blank
-    causes SSRS to pass NULL to the Oracle query. The query's
-    '(:PARM IS NULL OR col IN (:PARM))' branch then matches everything,
-    preserving the optional-filter semantics."""
+    We previously tried concrete literals (0, 1/1/1900, false) hoping to
+    suppress Report Builder's "Define Query Parameters" dialog. That dialog
+    appears regardless — it's SSRS's design-time caching prompt and the
+    user just clicks "Pass NULL" + OK on first refresh. But concrete-literal
+    defaults BROKE actual runtime execution: SSRS would pass 0 / 1/1/1900 /
+    false to Oracle instead of NULL, making the (:P IS NULL OR col IN (:P))
+    branch never match and returning empty result sets.
+
+    Nullable=true on the parameter + '=Nothing' default lets SSRS pass NULL
+    correctly at runtime. AllowBlank=true on String params lets the user
+    submit an empty value that SSRS also forwards as NULL."""
     iv = (p.initial_value or "").strip() if p.initial_value else ""
     if iv:
         return iv  # explicit default from the source XML; keep verbatim
     dt = (dtype or "String").strip()
     if dt == "String":
-        return ""                    # empty string = NULL/empty for String
-    if dt in ("Integer", "Float"):
-        return "0"                   # literal zero; design-time evaluable
-    if dt == "DateTime":
-        return "1/1/1900"            # literal date; Report Builder parses cleanly
-    if dt == "Boolean":
-        return "false"               # literal false; design-time evaluable
-    return ""                        # safe fallback: treat unknown as String
+        return ""               # empty Value element = NULL/empty for String
+    return "=Nothing"           # all non-String types use VB null literal
 
 
 def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
@@ -604,7 +597,19 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
         # else: leave as empty <Value/> which is only emitted for String DataType
         if not has_initial and ptype == "String":
             _sub(rp, "AllowBlank", "true")
-        _sub(rp, "Prompt", p.label or p.name)
+        # Humanize the prompt the end user sees in the parameter form.
+        # Source XML usually labels params as "PARM_ADDR_CITY", "P_METH_ID",
+        # etc. Strip the common Oracle Reports prefixes (P_, PARM_, IN_)
+        # and Title-case the rest so the form reads "Addr City" / "Meth Id"
+        # instead of "PARM_ADDR_CITY". Explicit .label from the XML wins.
+        prompt_raw = p.label or p.name or ""
+        if not p.label:
+            for prefix in ("PARM_", "PARAM_", "IN_", "P_"):
+                if prompt_raw.upper().startswith(prefix):
+                    prompt_raw = prompt_raw[len(prefix):]
+                    break
+            prompt_raw = prompt_raw.replace("_", " ").strip().title()
+        _sub(rp, "Prompt", prompt_raw or p.name)
         if not p.display:
             _sub(rp, "Hidden", "true")
     return root
