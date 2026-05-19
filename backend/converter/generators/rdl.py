@@ -435,15 +435,13 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
             cmd_text,
             flags=re.IGNORECASE,
         )
-        # Strip trailing semicolons + whitespace. Oracle Reports XMLs preserve
-        # the source SQL as the developer typed it, often ending with ";".
-        # That terminator is fine in SQL*Plus / PL/SQL anonymous blocks but
-        # the SSRS Oracle data extension sends each CommandText as a single
-        # statement through ADO.NET — Oracle's parser rejects the trailing
-        # ";" with "ORA-00933: SQL command not properly ended", which is
-        # exactly what blocks Refresh Fields and report execution. Strip ALL
-        # trailing ";" + whitespace (some XMLs have multiple).
-        cmd_text = re.sub(r"[;\s]+$", "", cmd_text)
+        # PRESERVE the source SQL verbatim, including any trailing ";"
+        # the Oracle Reports developer typed. Empirically (verified against
+        # a working hand-tweaked RDL the user deployed successfully), the
+        # SSRS Oracle data extension accepts trailing semicolons just fine
+        # — they do NOT cause ORA-00933. A prior cycle stripped them based
+        # on a wrong hypothesis and that change broke query execution on
+        # reports that the source-of-truth RDL ran fine. Don't strip.
         _sub(q_el, "CommandText", cmd_text)
 
         # Oracle bind vars look like :P_FOO. Declare each one referenced in
@@ -477,10 +475,6 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         cmd_text = (query.tsql or query.sql or "").strip()
         if not cmd_text:
             cmd_text = f"-- empty query for {query.name}"
-        # Same trailing-semicolon strip as the Oracle path. SQL Server tends
-        # to be more forgiving of trailing ";" but it can still trip up
-        # parameter binding in some ADO.NET providers, so strip for safety.
-        cmd_text = re.sub(r"[;\s]+$", "", cmd_text)
         _sub(q_el, "CommandText", cmd_text)
 
         # <QueryParameters> from @P_FOO references in tsql
@@ -597,19 +591,13 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
         # else: leave as empty <Value/> which is only emitted for String DataType
         if not has_initial and ptype == "String":
             _sub(rp, "AllowBlank", "true")
-        # Humanize the prompt the end user sees in the parameter form.
-        # Source XML usually labels params as "PARM_ADDR_CITY", "P_METH_ID",
-        # etc. Strip the common Oracle Reports prefixes (P_, PARM_, IN_)
-        # and Title-case the rest so the form reads "Addr City" / "Meth Id"
-        # instead of "PARM_ADDR_CITY". Explicit .label from the XML wins.
-        prompt_raw = p.label or p.name or ""
-        if not p.label:
-            for prefix in ("PARM_", "PARAM_", "IN_", "P_"):
-                if prompt_raw.upper().startswith(prefix):
-                    prompt_raw = prompt_raw[len(prefix):]
-                    break
-            prompt_raw = prompt_raw.replace("_", " ").strip().title()
-        _sub(rp, "Prompt", prompt_raw or p.name)
+        # Use the parameter's declared name verbatim as the prompt (matches
+        # the working source-of-truth RDL behavior). SSRS Report Server
+        # auto-renders underscores as spaces in the parameter form so a
+        # name like "PARM_ADDR_CITY" displays as "PARM ADDR CITY". A prior
+        # cycle stripped prefixes + Title-cased the prompt, but that
+        # diverged from the working RDL and didn't actually help users.
+        _sub(rp, "Prompt", p.label or p.name)
         if not p.display:
             _sub(rp, "Hidden", "true")
     return root
