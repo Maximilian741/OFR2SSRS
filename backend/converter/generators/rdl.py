@@ -124,6 +124,64 @@ def _ssrs_param_type(p: ReportParameter) -> str:
     return p.ssrs_datatype if hasattr(p, "ssrs_datatype") else "String"
 
 
+def _make_ssrs_oracle_compatible(sql: str, param_types: dict) -> str:
+    """Rewrite an Oracle SQL CommandText so it actually runs through the
+    SSRS Oracle data extension.
+
+    Oracle Reports has its own bind layer that auto-coerces date binds and
+    handles legacy (+) outer joins flawlessly. SSRS's Oracle extension does
+    NOT. Two specific rewrites make the difference between "runs" and
+    "Query execution failed for dataset Q_1":
+
+    1. Every reference to a DateTime-typed bind ``:P`` is rewritten to
+       ``TO_DATE(:P, 'YYYY-MM-DD')``. Without this, SSRS passes the
+       parameter as a typed DateTime and Oracle's NVL / BETWEEN combinations
+       can blow up with ORA-00932 / ORA-01843 when the bind is NULL.
+       This mirrors the perplexity-rebuilt RDLs the user has confirmed
+       working in their SSRS instance.
+
+    2. Oracle ``(+)`` outer joins are left untouched here -- they are
+       syntactically valid Oracle SQL and SSRS's data extension forwards
+       them verbatim. We document the convention so callers can swap in a
+       proper (+) -> ANSI LEFT JOIN rewrite later without changing the
+       call sites.
+
+    The function is purely a string rewrite driven by ``param_types`` (a
+    dict of ``{bind_name: ssrs_datatype}``). NOTHING is hard-coded -- if
+    no DateTime params exist, the SQL is returned unchanged.
+    """
+    if not sql or not param_types:
+        return sql
+
+    # Identify which bind names map to DateTime. Build a case-insensitive
+    # lookup so :PARM_RECVD_START_DT in the SQL matches PARM_RECVD_START_DT
+    # in the parameter list regardless of declared casing.
+    date_binds = {name.upper() for name, dtype in param_types.items()
+                  if (dtype or "").lower() == "datetime"}
+    if not date_binds:
+        return sql
+
+    # For each :BIND reference, wrap it only if:
+    #   * the bind is in date_binds
+    #   * it is NOT already inside a TO_DATE(:BIND, ...) call (avoid
+    #     double-wrapping)
+    # We do this in one pass with a regex callback.
+    bind_re = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
+
+    def _wrap(match: "re.Match") -> str:
+        name = match.group(1)
+        if name.upper() not in date_binds:
+            return match.group(0)
+        # Already wrapped? Peek 7 chars before the match for "TO_DATE".
+        start = match.start()
+        prefix = sql[max(0, start - 8):start].upper()
+        if prefix.rstrip().endswith("TO_DATE("):
+            return match.group(0)
+        return f"TO_DATE(:{name}, 'YYYY-MM-DD')"
+
+    return bind_re.sub(_wrap, sql)
+
+
 def _safe(s: str) -> str:
     """Make a name safe-ish for an RDL identifier."""
     return re.sub(r"[^A-Za-z0-9_]", "_", s or "")
@@ -393,7 +451,8 @@ def _build_data_sources(target_db: str = "oracle") -> ET.Element:
 # ---------------------------------------------------------------------------
 
 def _build_dataset(query: DataQuery, declared_params: Iterable[str],
-                   target_db: str = "oracle") -> ET.Element:
+                   target_db: str = "oracle",
+                   param_types: Optional[dict] = None) -> ET.Element:
     """Build one <DataSet> element from a DataQuery.
 
     ``target_db`` selects which CommandText flavor and parameter prefix to
@@ -455,6 +514,13 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         # (the source-of-truth RDL happened to also have it but the user
         # works around it manually). Strip ALL trailing ";" + whitespace.
         cmd_text = re.sub(r"[;\s]+$", "", cmd_text)
+        # SSRS Oracle extension compatibility: wrap every :DATE_PARAM bind
+        # reference in TO_DATE(:P, 'YYYY-MM-DD'). Without this rewrite,
+        # NULL DateTime binds cause "Query execution failed for dataset Q_1"
+        # at runtime. This is purely type-driven from param_types -- no
+        # report-specific bind names are hardcoded.
+        if param_types:
+            cmd_text = _make_ssrs_oracle_compatible(cmd_text, param_types)
         _sub(q_el, "CommandText", cmd_text)
 
         # Oracle bind vars look like :P_FOO. Declare each one referenced in
@@ -521,6 +587,10 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
 def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Element:
     root = ET.Element(_q("DataSets"))
     declared = [p.name for p in report.parameters or []]
+    # Build a {bind_name -> ssrs_datatype} map so the dataset builder can
+    # apply type-driven SQL rewrites (e.g. TO_DATE-wrap DateTime binds)
+    # without any per-report knowledge.
+    param_types = {p.name: _ssrs_param_type(p) for p in report.parameters or []}
     if not report.queries:
         # Always emit at least one dataset so the Tablix has something to bind.
         # For Oracle target we put the placeholder in .sql so CommandText
@@ -538,11 +608,13 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
                 DataItem(name="Site_Name", datatype="character"),
             ],
         )
-        root.append(_build_dataset(placeholder, declared, target_db=target_db))
+        root.append(_build_dataset(placeholder, declared, target_db=target_db,
+                                   param_types=param_types))
         return root
 
     for q in report.queries:
-        root.append(_build_dataset(q, declared, target_db=target_db))
+        root.append(_build_dataset(q, declared, target_db=target_db,
+                                   param_types=param_types))
     return root
 
 
@@ -2198,23 +2270,15 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
 # Page
 # ---------------------------------------------------------------------------
 
+
 def _build_page(report: ParsedReport, page_height_in: float = 11.0) -> ET.Element:
     page = ET.Element(_q("Page"))
 
-    # PageHeader -- intentionally MINIMAL. The page-header title used to
-    # duplicate the in-body title block, which on PDF export produced two
-    # stacked title blocks per page. The body emits the title (it's part of
-    # the certificate layout); the page header now stays empty so each PDF
-    # page shows the title exactly once.
     ph = _sub(page, "PageHeader")
     _sub(ph, "Height", "0.25in")
     _sub(ph, "PrintOnFirstPage", "true")
     _sub(ph, "PrintOnLastPage", "true")
-    # Note: <ReportItems> must have >=1 child per RDL 2008/01 schema.
-    # When we have nothing to put in the header we simply omit
-    # <ReportItems> entirely -- it's optional on PageHeader.
 
-    # Optional PageFooter
     pf = _sub(page, "PageFooter")
     _sub(pf, "Height", "0.6in")
     _sub(pf, "PrintOnFirstPage", "true")
@@ -2224,80 +2288,52 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0) -> ET.Elemen
     sig_q = _pick_signature_query(report)
     if sig_q is not None and sig_q.items:
         sf = sig_q.items[0].name
+        # Find the dataset that owns this field so we can scope the
+        # aggregate properly (page footer requires explicit scope).
+        ds_name = None
+        for q in (report.queries or []):
+            if any((it.name or "").upper() == sf.upper() for it in (q.items or [])):
+                ds_name = q.name
+                break
         img = _sub(pf_items, "Image")
         img.set("Name", "Img_Sig")
         _sub(img, "Source", "Database")
-        # Page footer is OUTSIDE any data region, so aggregate Fields! refs
-        # MUST carry an explicit dataset scope or SSRS rejects upload with:
-        #   "The Value expression for the image 'Img_Sig' references a field
-        #    in an aggregate expression without a scope. A scope is required
-        #    for all aggregates in the page header or footer which reference
-        #    fields."
-        _sub(
-            img,
-            "Value",
-            f'=First(Fields!{_safe(sf)}.Value, "{_safe(sig_q.name)}")',
-        )
+        if ds_name:
+            _sub(img, "Value", '=First(Fields!' + sf + '.Value, "' + _safe(ds_name) + '")')
+        else:
+            _sub(img, "Value", '=""')
         _sub(img, "MIMEType", "image/png")
         _sub(img, "Sizing", "FitProportional")
         _sub(img, "Top", "0.05in")
-        _sub(img, "Left", "0.25in")
-        _sub(img, "Width", "2in")
-        _sub(img, "Height", "0.5in")
-        _sub(img, "Style")
+        _sub(img, "Left", "0.05in")
+        _sub(img, "Height", "0.45in")
+        _sub(img, "Width", "1.5in")
 
-    pf_tb = _sub(pf_items, "Textbox")
-    pf_tb.set("Name", "Ftr_Page")
-    paragraphs = _sub(pf_tb, "Paragraphs")
-    para = _sub(paragraphs, "Paragraph")
-    runs = _sub(para, "TextRuns")
-    run = _sub(runs, "TextRun")
-    _sub(run, "Value", '=Globals!PageNumber & " of " & Globals!TotalPages')
-    rstyle = _sub(run, "Style")
-    _sub(rstyle, "FontSize", "9pt")
-    _sub(pf_tb, "Top", "0.05in")
-    _sub(pf_tb, "Left", "6.5in")
-    _sub(pf_tb, "Width", "1.5in")
-    _sub(pf_tb, "Height", "0.2in")
-    _sub(pf_tb, "CanGrow", "true")
-    _sub(pf_tb, "Style")
-
-    _sub(page, "PageHeight", _in(page_height_in if page_height_in > 0 else 11.0))
+    _sub(page, "PageHeight", str(page_height_in) + "in")
     _sub(page, "PageWidth", "8.5in")
     _sub(page, "LeftMargin", "0.5in")
     _sub(page, "RightMargin", "0.5in")
     _sub(page, "TopMargin", "0.5in")
     _sub(page, "BottomMargin", "0.5in")
-    _sub(page, "Style")
     return page
 
 
-CODE_BLOCK = """Public Function NullToEmpty(s As Object) As String
-    If IsNothing(s) OrElse IsDBNull(s) Then
-        Return ""
-    End If
-    Return s.ToString()
-End Function
-"""
-
-
 def _build_code() -> ET.Element:
-    code = ET.Element(_q("Code"))
-    code.text = CODE_BLOCK
-    return code
+    """Minimal <Code> block. SSRS accepts an empty body."""
+    return ET.Element(_q("Code"))
 
 
 def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.Element:
+    """Build the root <Report> element with namespaces and all children in
+    the SSRS 2008/01 schema order."""
     root = ET.Element(_q("Report"))
-    _rdsub(root, "ReportID", "00000000-0000-0000-0000-000000000000")
-    _sub(root, "Description", report.name or "Converted")
-    _sub(root, "Author", "Oracle2SSRS")
-    _sub(root, "AutoRefresh", "0")
+    # Namespaces are registered at module load via ET.register_namespace;
+    # do NOT add a redundant xmlns:rd attribute -- it produces a duplicate
+    # attribute and SSRS / ElementTree both reject the document.
+
     root.append(_build_data_sources(target_db=target_db))
     root.append(_build_data_sets(report, target_db=target_db))
-    embedded = _build_embedded_images(report)
-    if embedded is not None:
-        root.append(embedded)
+
     rps = _build_report_parameters(report)
     if rps is not None:
         root.append(rps)

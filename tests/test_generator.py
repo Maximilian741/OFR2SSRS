@@ -182,3 +182,71 @@ def test_generate_rdl_invalid_target_db_falls_back_to_oracle(translated_report):
     assert not re.search(r"@P_[A-Z_]+", joined), \
         "Invalid target_db should fall back to Oracle (no @P_ in CommandText)"
     assert "<DataSourceReference>" in rdl
+
+
+# ---------------------------------------------------------------------------
+# SSRS Oracle extension compatibility (regression tests)
+#
+# These guard against the class of bug that breaks the report at runtime
+# even when the RDL parses and uploads cleanly. Specifically: SSRS's Oracle
+# data extension cannot bind a NULL DateTime parameter into NVL(:P, <date>)
+# without an explicit TO_DATE(:P, 'YYYY-MM-DD') wrapper. Without the
+# wrapper the SQL fails with "Query execution failed for dataset Q_1" at
+# run time. The generator must wrap every DateTime bind reference.
+# ---------------------------------------------------------------------------
+
+def test_generate_rdl_wraps_datetime_binds_in_to_date(translated_report):
+    """Every :DATE_PARAM bind in CommandText must be wrapped in TO_DATE(...).
+
+    Driven purely by the parameter's declared DataType -- if the report has
+    no DateTime parameters the test is vacuously true. NOTHING is keyed off
+    a specific parameter name.
+    """
+    import re as _re
+    import html as _html
+    from converter.generators.rdl import generate_rdl
+    rdl = generate_rdl(translated_report, target_db="oracle")
+
+    # Find which params are DateTime by scanning the emitted
+    # <ReportParameter> blocks (the canonical source-of-truth for what the
+    # RDL believes each param's type is).
+    rp_blocks = _re.findall(
+        r'<ReportParameter Name="([^"]+)">(.*?)</ReportParameter>',
+        rdl, _re.DOTALL,
+    )
+    date_params = {name for name, body in rp_blocks
+                   if "<DataType>DateTime</DataType>" in body}
+    if not date_params:
+        return  # nothing to check for this report
+
+    cmds = _extract_command_texts(rdl)
+    joined = _html.unescape("\n".join(cmds))
+
+    unwrapped = []
+    for name in date_params:
+        for m in _re.finditer(r":" + _re.escape(name) + r"\b", joined):
+            prefix = joined[max(0, m.start() - 10):m.start()].upper().rstrip()
+            if not prefix.endswith("TO_DATE("):
+                unwrapped.append((name, joined[max(0, m.start() - 30):m.end() + 5]))
+
+    assert not unwrapped, (
+        "DateTime bind(s) referenced without TO_DATE wrapper -- SSRS Oracle "
+        "extension will fail at runtime when the param is NULL.\n"
+        + "\n".join(f"  {n}: ...{ctx}..." for n, ctx in unwrapped[:5])
+    )
+
+
+def test_generate_rdl_does_not_double_wrap_to_date(translated_report):
+    """Idempotency: regenerating the RDL must never produce TO_DATE(TO_DATE(...)).
+
+    Catches a regression where the SQL rewrite is applied twice (e.g. once
+    in the translator and once in the generator).
+    """
+    import re as _re
+    import html as _html
+    from converter.generators.rdl import generate_rdl
+    rdl = generate_rdl(translated_report, target_db="oracle")
+    cmds = _html.unescape("\n".join(_extract_command_texts(rdl)))
+    assert "TO_DATE(TO_DATE(" not in cmds.upper().replace(" ", ""), \
+        "Double-wrapped TO_DATE detected -- _make_ssrs_oracle_compatible " \
+        "is not idempotent."
