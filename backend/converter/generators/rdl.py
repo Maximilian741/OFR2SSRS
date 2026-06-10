@@ -4355,6 +4355,17 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
         # bug (and the user can't reach the child report without it).
         dt = _drillthrough_for(report, value_field) \
             if value_field is not None else None
+        if dt:
+            # The link's display text usually comes from an Oracle URL/label
+            # formula that needs live data or wired formulas to compute. On
+            # a fresh server deployment it computes to EMPTY -> a clickable
+            # but INVISIBLE textbox (user-reported: "the link did not
+            # work"). Guarantee something visible to click.
+            child_lbl = (dt.get("report_name") or "sub-report").replace('"', "")
+            inner = value_expr[1:] if value_expr.startswith("=") \
+                else '"' + value_expr.replace('"', '""') + '"'
+            value_expr = (f'=IIf(Len(Trim(CStr(({inner}) & ""))) = 0, '
+                          f'"Open {child_lbl}", CStr(({inner}) & ""))')
         link_kw = ({"fg": "#0b5cad", "underline": True, "drillthrough": dt}
                    if dt else {"fg": INK})
         if label_txt:
