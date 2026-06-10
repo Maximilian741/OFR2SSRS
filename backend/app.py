@@ -756,6 +756,42 @@ def api_subreport_build(child_name):
     _SUBREPORT_BUILT[_sub_key(safe)] = {"rdl": result.get("rdl_xml", ""),
                                         "name": result.get("report_name") or safe}
     _evict(_SUBREPORT_BUILT)
+
+    # ---- Chicken-and-egg killer: re-sync the PARENT to the child that was
+    # ACTUALLY built. The parent's <Drillthrough><ReportName> references the
+    # child by the name detected from the Oracle URL formula; if the
+    # artifacts yield a different report name (e.g. the SQL doc names it
+    # differently), the link 404s on the server. Patch the cached parent in
+    # place so the NEXT parent download is the completed RDL — build order
+    # no longer matters.
+    actual = result.get("report_name") or safe
+    issues = list(result.get("issues") or [])
+    parent_rdl_out = None
+    last = _last()
+    prdl = (last or {}).get("rdl_xml") or ""
+    ref = f"<ReportName>{child_name}</ReportName>"
+    if prdl and ref in prdl:
+        if actual != child_name:
+            prdl = prdl.replace(ref, f"<ReportName>{actual}</ReportName>")
+            last["rdl_xml"] = prdl
+            _set_last(last)
+            parent_rdl_out = prdl
+            issues.append(
+                f"PARENT RE-SYNCED: its drill-through now opens '{actual}' "
+                f"(was '{child_name}'). Re-download the parent .rdl before "
+                f"uploading — both files must sit in the same server folder.")
+        else:
+            issues.append(
+                f"Drill-through link VERIFIED: the parent opens '{actual}' "
+                f"and this child downloads as '{actual}.rdl'. Upload both "
+                f"to the SAME server folder and the link works as-is.")
+    elif prdl:
+        issues.append(
+            f"NOTE: the most recent converted report has no drill-through "
+            f"referencing '{child_name}' — if this child belongs to a "
+            f"different parent, convert that parent in this session so its "
+            f"link can be verified.")
+
     return jsonify({
         "rdl_xml": result.get("rdl_xml", ""),
         "mockup_html": result.get("mockup_html", ""),
@@ -764,10 +800,13 @@ def api_subreport_build(child_name):
         "binds": result.get("binds", []),
         "forwarded_params": result.get("forwarded_params", []),
         "sql": result.get("sql", ""),
-        "issues": result.get("issues", []),
+        "issues": issues,
         "source": result.get("source", ""),
-        "report_name": result.get("report_name") or safe,
-        "artifacts": [a["name"] for a in _SUBREPORT_ARTIFACTS.get(safe, [])],
+        "report_name": actual,
+        "parent_rdl_xml": parent_rdl_out,
+        "parent_synced": bool(parent_rdl_out),
+        "artifacts": [a["name"] for a in
+                      _SUBREPORT_ARTIFACTS.get(_sub_key(safe), [])],
     })
 
 

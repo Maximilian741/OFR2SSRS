@@ -1153,15 +1153,31 @@ def _extract_url_params(report, formula_names_upper):
 
 
 def _drillthrough_for(report, lf):
-    """Build a Drillthrough dict for a layout field carrying a parsed
-    <webSettings hyperlink="&CF_URL_X">. PREFERS the REAL parameters the child
-    report takes, parsed from the URL-builder formula's ``'&PARAM=' || src``
-    pairs (e.g. P_ORG_ID=Org_Id, P_SITE_ID=SA_Site_Id), each resolved to its
-    correct SSRS expression (a per-row Fields! ref, a cross-dataset Lookup(), or
-    a Parameter). Falls back to forwarding declared parent params when the URL
-    has no explicit pairs. Generic -- everything comes from the parsed report."""
+    """Build a Drillthrough dict for a layout field that participates in a
+    detected sub-report link, matched TWO ways:
+
+      * the field carries ``<webSettings hyperlink="&CF_URL_X">`` (the
+        Oracle click surface), OR
+      * the field's SOURCE *is* one of the link's URL-builder formulas
+        (the cover textbox that displays the computed URL text — in Oracle
+        that text is itself the clickable link, so it must be clickable in
+        SSRS too; this is the cover-page "Generate Envelopes" line).
+
+    PREFERS the REAL parameters the child report takes, parsed from the
+    URL-builder formula's ``'&PARAM=' || src`` pairs (e.g.
+    P_ORG_ID=Org_Id), each resolved to its correct SSRS expression (a
+    per-row Fields! ref, a cross-dataset Lookup(), or a Parameter). Falls
+    back to forwarding declared parent params when the URL has no explicit
+    pairs. Generic -- everything comes from the parsed report."""
+    candidates = set()
     formula = (getattr(lf, "hyperlink", "") or "").strip()
-    if not formula:
+    if formula:
+        candidates.add(formula.upper().lstrip("&"))
+        candidates.add(formula.upper())
+    src = (getattr(lf, "source", "") or "").strip()
+    if src:
+        candidates.add(src.upper())
+    if not candidates:
         return None
     try:
         from ..subreports import detect_subreport_links
@@ -1170,10 +1186,9 @@ def _drillthrough_for(report, lf):
         return None
     declared = {(getattr(p, "name", "") or "").upper(): getattr(p, "name", "")
                 for p in (report.parameters or []) if getattr(p, "name", "")}
-    fu = formula.upper().lstrip("&")
     for ln in links:
         names = {x.strip().upper() for x in (ln.get("url_formula") or "").split(",")}
-        if not ((fu in names or formula.upper() in names) and ln.get("child_name")):
+        if not ((candidates & names) and ln.get("child_name")):
             continue
         params = []
         url_params = _extract_url_params(report, names)
@@ -1217,6 +1232,7 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
                    padding: str = "4pt",
                    can_grow: bool = True,
                    font_family: Optional[str] = None,
+                   underline: bool = False,
                    drillthrough: Optional[dict] = None) -> ET.Element:
     """Emit a styled Textbox.
 
@@ -1243,6 +1259,8 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
         _sub(style, "FontFamily", font_family)
     if bold:
         _sub(style, "FontWeight", "Bold")
+    if underline:
+        _sub(style, "TextDecoration", "Underline")
     if fg:
         _sub(style, "Color", fg)
     tb_style = _sub(tb, "Style")
@@ -1375,9 +1393,24 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
         '=IIf(RowNumber(Nothing) Mod 2 = 0, "'
         + alt_row_bg + '", "' + detail_bg + '")'
     )
+    # Sub-report links on tabular reports: an Oracle column rendered
+    # through a layout field carrying <webSettings hyperlink="&CF_URL_X">
+    # must stay clickable in the SSRS table — the same Drillthrough the
+    # per-record path emits. Map column -> its layout field once.
+    col_dt = {}
+    try:
+        for _y, _x, _d, lf in _layout_fields_in_order(report):
+            src = (getattr(lf, "source", "") or "").upper()
+            if src and src not in col_dt:
+                dt = _drillthrough_for(report, lf)
+                if dt:
+                    col_dt[src] = dt
+    except Exception:  # noqa: BLE001 -- links must never break the table
+        col_dt = {}
     for col in columns:
         cell = _sub(detail_cells, "TablixCell")
         contents = _sub(cell, "CellContents")
+        dt = col_dt.get(col.upper())
         _build_textbox(
             contents,
             f"Cell_{_safe(col)}",
@@ -1386,6 +1419,9 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             vertical_align="Middle",
             border_color="#d0d0d0",
             padding="4pt",
+            fg="#0b5cad" if dt else None,
+            underline=bool(dt),
+            drillthrough=dt,
         )
 
     # TablixColumnHierarchy
@@ -4183,28 +4219,29 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
             cont_text = sorted(right_texts, key=lambda t: t[0])[0][1]
             ct = (cont_text.text or "").strip().replace('"', '""')
             if pairs and ct:
-                prev_lbl, prev_val = pairs[-1]
+                prev_lbl, prev_val, prev_vf = pairs[-1]
                 # Append as a continuation line in the value expression
                 if prev_val.startswith('="'):
                     # Static text — chain with &
-                    pairs[-1] = (prev_lbl, prev_val[:-1] + ' ' + ct + '"')
+                    pairs[-1] = (prev_lbl, prev_val[:-1] + ' ' + ct + '"',
+                                 prev_vf)
                 else:
                     # Field expression — can't easily append; emit as
                     # separate note row with empty label
-                    pairs.append(("", f'="{ct}"'))
+                    pairs.append(("", f'="{ct}"', None))
             elif ct:
-                pairs.append(("", f'="{ct}"'))
+                pairs.append(("", f'="{ct}"', None))
             continue
 
-        # Standalone field with no label (e.g. CP_URL_ALL_ENVELOPE at
-        # y=5.06 is the clickable URL below "Hyperlinks in Permits").
-        # Emit with an empty label.
+        # Standalone field with no label (e.g. the URL line below
+        # "Hyperlinks" headings). Emit with an empty label; the FIELD
+        # OBJECT rides along so a sub-report URL becomes clickable below.
         if label_field is None and value_field is not None:
             value_expr = _field_value_for(
                 value_field, report,
                 dataset_name=(report.queries[0].name if report.queries else ""),
             )
-            pairs.append(("", value_expr or "=Nothing"))
+            pairs.append(("", value_expr or "=Nothing", value_field))
             continue
 
         # Normal label + value pair.
@@ -4229,7 +4266,7 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
         else:
             continue
 
-        pairs.append((label_txt, value_expr))
+        pairs.append((label_txt, value_expr, value_field))
 
     if not pairs:
         return None
@@ -4310,7 +4347,16 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
 
     # Layout-driven label:value rows.
     lbl_idx = 0
-    for label_txt, value_expr in pairs:
+    for label_txt, value_expr, value_field in pairs:
+        # Sub-report link surface? (field carries an Oracle hyperlink, OR
+        # the field's source IS a link's URL-builder formula). Make the
+        # textbox a real SSRS Drillthrough + style it like a link --
+        # Oracle's cover URL was clickable, dead text here is a fidelity
+        # bug (and the user can't reach the child report without it).
+        dt = _drillthrough_for(report, value_field) \
+            if value_field is not None else None
+        link_kw = ({"fg": "#0b5cad", "underline": True, "drillthrough": dt}
+                   if dt else {"fg": INK})
         if label_txt:
             # Normal label:value pair — label on the left, value on the right.
             _build_textbox(
@@ -4324,22 +4370,24 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
             _sub(ltb, "Width", "2.40in"); _sub(ltb, "Height", "0.26in")
             _build_textbox(
                 ri, f"LcCov_Val_{lbl_idx}", value_expr,
-                font_size="10pt", fg=INK,
+                font_size="10pt",
                 text_align="Left", vertical_align="Middle",
                 border_color="#ffffff", padding="2pt", can_grow=True,
+                **link_kw,
             )
             vtb = ri[-1]
             _sub(vtb, "Top", f"{y:.2f}in"); _sub(vtb, "Left", "2.95in")
             _sub(vtb, "Width", "3.60in"); _sub(vtb, "Height", "0.26in")
         else:
-            # Standalone value with no label (continuation note or a
-            # field like CP_URL_ALL_ENVELOPE). Render as a full-width
-            # textbox spanning the value column.
+            # Standalone value with no label (continuation note or the
+            # URL line itself). Render as a full-width textbox spanning
+            # the value column.
             _build_textbox(
                 ri, f"LcCov_Val_{lbl_idx}", value_expr,
-                font_size="9pt", fg=INK,
+                font_size="9pt",
                 text_align="Left", vertical_align="Middle",
                 border_color="#ffffff", padding="2pt", can_grow=True,
+                **link_kw,
             )
             vtb = ri[-1]
             _sub(vtb, "Top", f"{y:.2f}in"); _sub(vtb, "Left", "2.95in")

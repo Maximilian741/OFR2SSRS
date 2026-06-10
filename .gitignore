@@ -66,6 +66,10 @@ tools/renderlab/out/
 # Local scratch runner (never commit)
 _scratch_run.py
 
+# Private pre-push watchlist (tools/preflight_push.py) -- contains the very
+# terms that must never appear in this public repo, so it NEVER ships.
+.canary_local
+
 # Local-only worktree artifacts
 .claude/worktrees/
 

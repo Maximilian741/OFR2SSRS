@@ -1472,7 +1472,20 @@ async function subBuildAndPreview(child, opts) {
     if (tabBtn) tabBtn.hidden = false;
     renderSubreportsTab();
     if (opts.activate) activateTab("subreports");
-    setMsg("Built — preview ready.");
+    // Chicken-and-egg killer: when the child's actual report name differs
+    // from what the parent's drill-through referenced, the backend patches
+    // the cached parent RDL and ships it back. Refresh the RDL pane so the
+    // user re-downloads the COMPLETED parent, not the stale one.
+    if (j.parent_synced && j.parent_rdl_xml && state.data) {
+      state.data.rdl_xml = j.parent_rdl_xml;
+      try { renderRdlTab(state.data); } catch (e) { console.error(e); }
+      toast("Parent RDL re-synced — its link now opens '" +
+            (j.report_name || child) + "'. RE-DOWNLOAD the parent .rdl.",
+            "ok");
+      setMsg("Built. Parent re-synced — re-download the parent .rdl too.");
+    } else {
+      setMsg("Built — preview ready.");
+    }
     toast("Sub-report " + child + " generated", "ok");
     return j;
   } catch (err) {
