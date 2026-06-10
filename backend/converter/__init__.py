@@ -129,6 +129,62 @@ def _image_slots(parsed: ParsedReport) -> list:
     return slots
 
 
+def _classify_source_artifact(parsed) -> Optional[Dict[str, str]]:
+    """Recognize PARTIAL Oracle Reports XML — files that are NOT a complete,
+    convertible report. These are real exports people drop in (wild-corpus
+    verified) and deserve a plain answer, not a near-blank RDL.
+
+      * customization overlay: <customize> blocks / a handful of styling
+        fields, no <data>. Patches an existing report on the server.
+      * data-model-only: <data> with queries but ZERO layout. The query
+        side of a report saved without its paper layout.
+
+    A normal report (has both data and layout) returns None — unchanged."""
+    raw = (getattr(parsed, "raw_xml", "") or "")
+    n_queries = len(getattr(parsed, "queries", None) or [])
+
+    def _count_fields(g) -> int:
+        t = len(getattr(g, "fields", None) or [])
+        for c in (getattr(g, "children", None) or []):
+            t += _count_fields(c)
+        return t
+
+    layout = getattr(parsed, "layout", None) or []
+    total_fields = sum(_count_fields(lg) for lg in layout)
+    has_data = "<data>" in raw or "<data " in raw
+    has_customize = "<customize" in raw
+
+    if has_customize and not has_data:
+        return {
+            "kind": "customization_overlay",
+            "message": (
+                "This is an Oracle Reports CUSTOMIZATION overlay (<customize> "
+                "blocks), not a complete report — it patches an existing "
+                "report's objects at runtime. Convert the FULL report XML "
+                "instead; apply these customizations as edits in Report "
+                "Builder afterward."),
+        }
+    if has_data and n_queries and total_fields == 0 and not layout:
+        return {
+            "kind": "data_model_only",
+            "message": (
+                "This file has a data model (queries/groups) but NO paper "
+                "layout — it's the data side of a report saved without its "
+                "layout. The dataset(s) converted, but there's nothing to "
+                "render. Re-export the report WITH its layout for a 1:1 "
+                "conversion."),
+        }
+    if not has_data and total_fields and total_fields <= 4 and not n_queries:
+        return {
+            "kind": "layout_fragment",
+            "message": (
+                "This looks like a layout fragment / advanced-layout example "
+                "(a few fields, no data model). Drop the complete report XML "
+                "for a full conversion."),
+        }
+    return None
+
+
 def convert(xml_bytes: bytes, target_db: str = "oracle",
             images: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """End-to-end conversion. Returns a dict ready to ship to the frontend.
@@ -262,6 +318,17 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
     except Exception as e:  # noqa: BLE001
         bursting_info = {"is_bursting": False, "error": f"{type(e).__name__}: {e}"}
 
+    preflight = preflight_audit(rdl_xml, target_db=target_db)
+    # Honest verdict for PARTIAL Oracle artifacts (wild-corpus verified):
+    # a customization overlay or a data-model-only export is not a full
+    # report. Tell the user plainly instead of shipping a near-blank RDL
+    # under a scary RED.
+    source_kind = _classify_source_artifact(parsed)
+    if source_kind:
+        preflight = dict(preflight)
+        preflight["source_kind"] = source_kind["kind"]
+        preflight["source_kind_message"] = source_kind["message"]
+
     return {
         "report": parsed.to_dict(),
         "rdl_xml": rdl_xml,
@@ -274,7 +341,7 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
         "deployment_checklist": deployment_checklist,
         "audit_trail": audit_trail,
         "fidelity_report": fidelity_report,
-        "preflight": preflight_audit(rdl_xml, target_db=target_db),
+        "preflight": preflight,
         "ai_prompts": ai_prompts,
         "bursting": bursting_info,
         "target_db": target_db,

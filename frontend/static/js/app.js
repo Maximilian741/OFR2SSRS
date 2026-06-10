@@ -738,6 +738,21 @@ function renderPreflight(data) {
   const banner = document.getElementById("preflight-banner");
   if (banner) {
     let cls, label, sub;
+    if (pf.source_kind) {
+      // Partial Oracle artifact (customization overlay / data-model-only /
+      // layout fragment) — be honest: it's not a full report.
+      cls = "pf-red";
+      const nice = { customization_overlay: "Customization overlay",
+                     data_model_only: "Data-model-only export",
+                     layout_fragment: "Layout fragment" }[pf.source_kind]
+                   || "Partial artifact";
+      label = "ⓘ " + nice + " — not a full report";
+      sub = pf.source_kind_message || "Provide the complete report XML.";
+      banner.className = "preflight-banner " + cls;
+      banner.innerHTML = "<b>" + label + "</b><span>" + sub + "</span>";
+      banner.hidden = false;
+      return;
+    }
     if (blockers) {
       cls = "pf-blocker";
       label = "⚠ " + blockers + " blocker" + (blockers > 1 ? "s" : "");

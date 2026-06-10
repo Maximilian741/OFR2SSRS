@@ -93,6 +93,18 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
                       and not re.match(r"^&", s)})
     cats["layout_fields"] = {"bound": len(lsrcs) - len([s for s in lsrcs if not _bound(s)]),
                              "total": len(lsrcs), "unbound_nonformula": unbound}
+    # A layout field is a column Oracle EXPLICITLY placed on the page. If
+    # it is a real data column (declared by a query) yet appears nowhere in
+    # the generated RDL, the generator dropped it from the display — a true
+    # 1:1 miss (wild-corpus verified: a 54-column report that rendered 10).
+    # Surfaced in needs_attention so it can never hide behind a 1.0 score
+    # again. Excludes formula/param/lexical sources (handled separately).
+    _col_up = {c.upper() for c in cols}
+    real_unbound = [s for s in unbound if s.upper() in _col_up]
+    if real_unbound:
+        needs.append(
+            f"{len(real_unbound)} data column(s) placed in the Oracle layout "
+            f"are not displayed in the RDL — likely dropped: {real_unbound[:12]}")
 
     # 4) Oracle PL/SQL formulas (CF_/CP_) -> NULL placeholders (wireable 1:1).
     formula_srcs = sorted({s.lstrip("&") for s in lsrcs

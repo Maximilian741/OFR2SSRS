@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic Oracle cross-tab (matrix) report. No client data. Mirrors the
+     6i inline matrix dialect: <matrix> nesting matrixCol/matrixRow/matrixCell,
+     each holding the dimension/measure <field>s. Region across, Product down,
+     Sum(Amount) in cells. -->
+<report name="SAMPLE_MATRIX" DTDVersion="1.0">
+  <data>
+    <dataSource name="Q_SALES">
+      <select><![CDATA[SELECT Region, Product, Amount FROM Sales]]></select>
+      <group name="G_SALES">
+        <dataItem name="Region" datatype="vchar2"/>
+        <dataItem name="Product" datatype="vchar2"/>
+        <dataItem name="Amount" datatype="number"/>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+  <section name="main">
+    <body width="7.50000" height="9.00000">
+      <matrix name="M_sales">
+        <geometryInfo x="0.00000" y="0.00000" width="6.00000" height="1.00000"/>
+        <matrixCol name="g_region">
+          <field name="f_region" source="Region">
+            <geometryInfo x="1.50000" y="0.00000" width="1.50000" height="0.25000"/>
+          </field>
+        </matrixCol>
+        <matrixRow name="g_product">
+          <field name="f_product" source="Product">
+            <geometryInfo x="0.00000" y="0.25000" width="1.50000" height="0.25000"/>
+          </field>
+        </matrixRow>
+        <matrixCell name="g_amount">
+          <field name="f_amount" source="Amount">
+            <geometryInfo x="1.50000" y="0.25000" width="1.50000" height="0.25000"/>
+          </field>
+        </matrixCell>
+      </matrix>
+    </body>
+  </section>
+  </layout>
+</report>

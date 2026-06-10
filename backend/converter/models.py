@@ -247,6 +247,12 @@ class LayoutGroup:
     repeat_on: str = ""
     # Format trigger name (PL/SQL function controlling visibility)
     format_trigger: str = ""
+    # Matrix (cross-tab) wiring. On kind="matrix" groups: the Oracle
+    # attributes linking the matrix to its dimension frames/cross-product
+    # group (9.0.2 style: horizontalFrame/verticalFrame/xProductGroup).
+    # The 6i style instead nests kind="matrix_col"/"matrix_row"/
+    # "matrix_cell" child groups whose fields carry the dimensions/cells.
+    matrix_attrs: Dict[str, str] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------

@@ -905,6 +905,33 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                 target.fields.append(lf)
             except Exception as exc:  # pragma: no cover - defensive
                 warnings.append(f"failed to parse image: {exc}")
+        elif tag in ("matrix", "matrixCol", "matrixRow", "matrixCell"):
+            # Oracle cross-tab. Two dialects (wild-corpus verified):
+            #   * 6i: <matrix> nests <matrixCol>/<matrixRow>/<matrixCell>,
+            #     each holding the dimension/cell <field>s directly.
+            #   * 9.0.2+: <matrix horizontalFrame=... verticalFrame=...
+            #     xProductGroup=...> references repeatingFrames parsed
+            #     elsewhere; dimensions come from those frames.
+            try:
+                kindmap = {"matrix": "matrix", "matrixCol": "matrix_col",
+                           "matrixRow": "matrix_row",
+                           "matrixCell": "matrix_cell"}
+                grp = LayoutGroup(
+                    name=_attr(child, "name") or tag,
+                    kind=kindmap[tag],
+                    matrix_attrs={k: v for k, v in child.attrib.items()
+                                  if k in ("horizontalFrame", "verticalFrame",
+                                           "xProductGroup", "crossProduct",
+                                           "template")},
+                )
+                if current_group is not None:
+                    current_group.children.append(grp)
+                else:
+                    root_groups.append(grp)
+                _walk_layout_node(child, grp, groups_by_name, root_groups,
+                                  warnings, embedded_images)
+            except Exception as exc:  # pragma: no cover - defensive
+                warnings.append(f"failed to parse matrix: {exc}")
         else:
             _walk_layout_node(child, current_group, groups_by_name, root_groups,
                               warnings, embedded_images)
@@ -951,10 +978,50 @@ def _parse_layout(root, warnings: List[str],
 # Top-level
 # ---------------------------------------------------------------------------
 
+def _extract_embedded_report(raw_xml: str) -> Optional[str]:
+    """Pull the real ``<report ...>...</report>`` out of a wrapper document.
+
+    Oracle Reports is VERY commonly stored as a ``.jsp`` "Reports Web
+    Source" file: the full report definition sits verbatim inside an HTML
+    comment between ``<rw:report>/<rw:objects>`` tags, followed by the
+    paper-layout HTML template. Feeding the whole .jsp to the XML parser
+    yields junk (blank conversion). Also handles a stray XML prolog or
+    leading ``<%@ ... %>`` JSP directives before the report.
+
+    Returns the report substring when the document is NOT already a clean
+    ``<report>`` root, else None (normal path untouched). Generic — keyed
+    only on the standard tag, no per-report logic."""
+    s = raw_xml.lstrip()
+    low = s.lower()
+    # Already a clean report doc (optionally with an <?xml?> prolog).
+    if low.startswith("<report") or low.startswith("<?xml"):
+        # But a prolog could still precede a JSP wrapper, so only fast-path
+        # when a <report> actually heads the content after the prolog.
+        after = low.split("?>", 1)[-1].lstrip() if low.startswith("<?xml") else low
+        if after.startswith("<report"):
+            return None
+    m = re.search(r"<report\b", raw_xml, re.IGNORECASE)
+    if not m:
+        return None
+    end = raw_xml.lower().rfind("</report>")
+    if end == -1 or end < m.start():
+        return None
+    return raw_xml[m.start():end + len("</report>")]
+
+
 def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
     """Parse an Oracle Reports XML byte string into a ParsedReport."""
     warnings: List[str] = []
     raw_xml = _decode(xml_bytes)
+
+    # Unwrap a .jsp "Reports Web Source" (or any wrapper) down to the real
+    # <report> block before parsing. No-op for clean report documents.
+    embedded = _extract_embedded_report(raw_xml)
+    if embedded is not None:
+        warnings.append("extracted the <report> definition from a wrapper "
+                        "document (e.g. a .jsp Reports Web Source)")
+        raw_xml = embedded
+        xml_bytes = embedded.encode("utf-8")
 
     # Use a tolerant parser; recover=True keeps going past malformed bits.
     parser = etree.XMLParser(recover=True, huge_tree=True, resolve_entities=False)

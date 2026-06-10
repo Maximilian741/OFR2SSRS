@@ -746,12 +746,25 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
     # <Fields>
     fields = _sub(ds, "Fields")
     for item in query.items or []:
+        # Wild-corpus net: a <dataItem> with no usable name (Oracle's own
+        # docs ship one with the name attribute missing) must be SKIPPED —
+        # it otherwise becomes a field named "_", which SSRS rejects at
+        # publish time ("Field names must be CLS-compliant identifiers").
+        nm = (item.name or "").strip()
+        if not nm:
+            continue
         f = _sub(fields, "Field")
-        f.set("Name", _safe(item.name) or "Field1")
-        _sub(f, "DataField", item.name)
+        f.set("Name", _safe(nm) or "Field1")
+        _sub(f, "DataField", nm)
         _rdsub(f, "TypeName", _ssrs_field_type(item))
     if len(fields) == 0:
-        ds.remove(fields)  # an empty <Fields/> is XSD-invalid (needs >=1 Field)
+        # A dataset with ZERO fields can't feed any data region and the
+        # report engine can't even create a data reader for it. Guarantee
+        # one placeholder field (same convention the sub-report stub uses).
+        ph = _sub(fields, "Field")
+        ph.set("Name", "PLACEHOLDER")
+        _sub(ph, "DataField", "PLACEHOLDER")
+        _rdsub(ph, "TypeName", "System.String")
     return ds
 
 
@@ -1097,16 +1110,20 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
 # ---------------------------------------------------------------------------
 
 def _column_names_for_main(report: ParsedReport, main: DataQuery) -> List[str]:
-    """Decide what columns the main Tablix should show."""
+    """Decide what columns the main Tablix should show.
+
+    NEVER silently drop data columns. A wide source report (e.g. a
+    warehouse roll-up with 54 measures, wild-corpus verified) must keep
+    EVERY column — dropping them is exactly the silent-column-loss the
+    converter promises not to do. SSRS paginates wide tables horizontally,
+    and the user can adjust widths in Report Builder; an honest wide table
+    beats a lossy narrow one. Column WIDTH is adapted to the count in
+    _build_tablix; here we only choose WHICH columns (all of them)."""
     layout_cols = _collect_layout_columns(report, main.name)
     if layout_cols:
         return layout_cols
     if main.items:
-        # Filter to only "interesting" visible fields if possible. Since we
-        # don't know which are hidden, take all but cap at 10 to keep the
-        # layout reasonable.
-        names = [it.name for it in main.items][:10]
-        return names
+        return [it.name for it in main.items]
     return list(DEFAULT_COLUMNS)
 
 
@@ -1358,9 +1375,19 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     # TablixBody
     body = _sub(tablix, "TablixBody")
     cols_el = _sub(body, "TablixColumns")
+    # Adaptive column width: a few columns get a comfortable 1.5in; a wide
+    # report (dozens of measures) shrinks toward a 0.6in floor so the whole
+    # table stays legible and SSRS paginates it horizontally, rather than a
+    # fixed 1.5in that would make a 54-column table 81in wide. Never drops
+    # columns — width adapts, data is complete.
+    _ncol = max(1, len(columns))
+    if _ncol <= 6:
+        _colw = 1.5
+    else:
+        _colw = max(0.6, round(9.0 / _ncol, 2))
     for _ in columns:
         c = _sub(cols_el, "TablixColumn")
-        _sub(c, "Width", "1.5in")
+        _sub(c, "Width", f"{_colw}in")
 
     rows_el = _sub(body, "TablixRows")
 
@@ -2247,6 +2274,114 @@ def _apply_field_formats(root, report) -> None:
             style = _sub(run, "Style")
         if style.find(_q("Format")) is None:
             _sub(style, "Format", net)
+
+
+_ORACLE_PAGE_BUILTINS = {
+    "PAGENUMBER", "PHYSICALPAGENUMBER", "LOGICALPAGENUMBER",
+    "TOTALPHYSICALPAGES", "TOTALLOGICALPAGES", "TOTALPAGES",
+    "PANELNUMBER", "TOTALPANELS",
+}
+
+
+def _repair_dangling_field_refs(root, report) -> None:
+    """Generic publish-safety net (wild-corpus verified): rewrite every
+    ``Fields!X.Value`` whose X is NOT a field of the textbox's dataset scope.
+
+    Secondary layout builders bind layout sources verbatim; in the wild, X
+    is frequently really:
+      * a report PARAMETER (case/prefix variants)    -> Parameters!P.Value
+      * a field of ANOTHER dataset                   -> First(F, "ThatDS")
+      * the same field with different CASING         -> exact-cased field
+      * an Oracle page builtin (PageNumber etc.)     -> Nothing (body scope)
+      * unknown                                       -> Nothing (honest)
+    Every one of these as a raw Fields! ref is a PUBLISH-time rejection on
+    the server ("refers to the field X ... not in the dataset") — caught by
+    rendering hunted internet artifacts through the real MS engine."""
+    # Truth = what was actually EMITTED into the RDL.
+    ds_fields: dict = {}
+    for ds in root.iter(_q("DataSet")):
+        nm = ds.get("Name") or ""
+        ds_fields[nm] = {f.get("Name") for f in ds.iter(_q("Field"))
+                         if f.get("Name")}
+    params = {}
+    for rp in root.iter(_q("ReportParameter")):
+        nm = rp.get("Name") or ""
+        if nm:
+            params[nm.upper()] = nm
+    parent = {c: p for p in root.iter() for c in p}
+
+    def scope_of(el) -> str:
+        cur = el
+        while cur is not None:
+            if cur.tag == _q("Tablix"):
+                return cur.findtext(_q("DataSetName")) or ""
+            cur = parent.get(cur)
+        return ""
+
+    ref_re = re.compile(r"Fields!([A-Za-z_][A-Za-z0-9_]*)\.Value")
+    _CALL_RE = re.compile(
+        r"\b(First|Last|Sum|Avg|Min|Max|Count|CountDistinct|CountRows|"
+        r"StDev|StDevP|Var|VarP|Aggregate|RunningValue|Previous|"
+        r"Lookup|LookupSet|MultiLookup)\s*\(")
+
+    def _protected_spans(text: str):
+        """Spans of aggregate/Lookup calls that carry a top-level string
+        argument (a dataset scope). Refs inside them are ALREADY scoped —
+        rewriting one nests an aggregate inside an aggregate/Lookup, which
+        SSRS rejects at publish time."""
+        spans = []
+        for m in _CALL_RE.finditer(text):
+            depth, i, has_str = 1, m.end(), False
+            while i < len(text) and depth:
+                ch = text[i]
+                if ch == '"':
+                    j = text.find('"', i + 1)
+                    if depth == 1 and j > i:
+                        has_str = True
+                    i = j if j > i else len(text)
+                elif ch == "(":
+                    depth += 1
+                elif ch == ")":
+                    depth -= 1
+                i += 1
+            if has_str and depth == 0:
+                spans.append((m.start(), i))
+        return spans
+
+    for v in root.iter(_q("Value")):
+        text = v.text or ""
+        if "Fields!" not in text:
+            continue
+        scope_ds = scope_of(v)
+        scope_fields = ds_fields.get(scope_ds, set())
+        spans = _protected_spans(text)
+
+        def _fix_one(m):
+            if any(s <= m.start() < e for s, e in spans):
+                return m.group(0)        # already inside a scoped call
+            nm = m.group(1)
+            if nm in scope_fields:
+                return m.group(0)
+            up = nm.upper()
+            # Same field, different casing, in the scope dataset.
+            cased = next((f for f in scope_fields if f.upper() == up), None)
+            if cased:
+                return f"Fields!{cased}.Value"
+            if up in params:
+                return f"Parameters!{params[up]}.Value"
+            if ("P_" + up) in params:
+                return f"Parameters!{params['P_' + up]}.Value"
+            if up in _ORACLE_PAGE_BUILTINS:
+                return "Nothing"
+            for d, fs in ds_fields.items():
+                hit = next((f for f in fs if f.upper() == up), None)
+                if hit:
+                    return f'First(Fields!{hit}.Value, "{d}")'
+            return "Nothing"
+
+        new_text = ref_re.sub(_fix_one, text)
+        if new_text != text:
+            v.text = new_text
 
 
 def _scope_body_direct_field_refs(root, report) -> None:
@@ -5592,6 +5727,206 @@ def _build_multi_section_body(report: ParsedReport, sections) -> ET.Element:
     return body
 
 
+def _find_matrix_spec(report) -> Optional[dict]:
+    """Locate an Oracle cross-tab (matrix) and derive its SSRS wiring.
+
+    Returns {row, col, cells, query, dominant} or None. Handles BOTH wild
+    dialects: 6i inline (<matrix> nesting matrixCol/matrixRow/matrixCell
+    with the dimension/cell fields) and 9.0.2 frame-ref (<matrix
+    horizontalFrame=... verticalFrame=...> pointing at repeatingFrames).
+    ``dominant`` is True only when the matrix is its section's primary
+    content — mixed layouts keep the existing (safe) rendering path."""
+    matrices = []
+
+    def walk(g, root):
+        if (getattr(g, "kind", "") or "") == "matrix":
+            matrices.append((g, root))
+        for c in (getattr(g, "children", None) or []):
+            walk(c, root)
+
+    for lg in (report.layout or []):
+        walk(lg, lg)
+    if not matrices:
+        return None
+    mx, sec_root = matrices[0]
+
+    def dim_fields(kind):
+        out = []
+        for c in (mx.children or []):
+            if (getattr(c, "kind", "") or "") == kind:
+                out.extend([(f.source or "").strip()
+                            for f in (c.fields or [])
+                            if (f.source or "").strip()])
+        return out
+
+    col_fields = dim_fields("matrix_col")
+    row_fields = dim_fields("matrix_row")
+    cell_fields = dim_fields("matrix_cell")
+
+    if not (col_fields and row_fields):
+        attrs = getattr(mx, "matrix_attrs", {}) or {}
+
+        def frame_fields(frame_name):
+            if not frame_name:
+                return []
+            found = []
+
+            def w(g):
+                if (g.name or "") == frame_name:
+                    found.extend([(f.source or "").strip()
+                                  for f in (g.fields or [])
+                                  if (f.source or "").strip()])
+                for c in (g.children or []):
+                    w(c)
+
+            for lg in (report.layout or []):
+                w(lg)
+            return found
+
+        col_fields = col_fields or frame_fields(attrs.get("horizontalFrame"))
+        row_fields = row_fields or frame_fields(attrs.get("verticalFrame"))
+
+    if not (col_fields and row_fields):
+        return None
+    cells = cell_fields or col_fields[1:2] or row_fields[1:2]
+    if not cells:
+        return None
+
+    # Dominance: any field-bearing NON-matrix group in the same section?
+    def count_others(g, inside_mx):
+        ins = inside_mx or (g is mx)
+        n = 0
+        if (not ins and (g.fields or [])
+                and (getattr(g, "kind", "") or "")
+                not in ("matrix", "matrix_col", "matrix_row", "matrix_cell")):
+            n = 1
+        for c in (getattr(g, "children", None) or []):
+            n += count_others(c, ins)
+        return n
+
+    dominant = count_others(sec_root, False) == 0
+
+    query = None
+    for q in (report.queries or []):
+        names = {(it.name or "").upper() for it in (q.items or [])}
+        if cells[0].upper() in names or col_fields[0].upper() in names:
+            query = q
+            break
+    if query is None:
+        query = _pick_main_query(report)
+    if query is None:
+        return None
+    return {"row": row_fields[0], "col": col_fields[0], "cells": cells,
+            "query": query, "dominant": dominant}
+
+
+def _prepare_matrix(report) -> None:
+    """Pre-pass (BEFORE datasets are built): stash the matrix spec and make
+    sure the bound dataset declares every dimension/measure column — wild
+    cross-products often keep these only in <summary>/crossProduct items
+    that no plain query group declares."""
+    spec = _find_matrix_spec(report)
+    report._matrix_spec = spec
+    if not spec or not spec.get("dominant"):
+        return
+    from ..models import DataItem
+    q = spec["query"]
+    have = {(it.name or "").upper() for it in (q.items or [])}
+    for cname in [spec["row"], spec["col"], *spec["cells"]]:
+        if cname.upper() not in have:
+            is_measure = cname in spec["cells"]
+            q.items.append(DataItem(
+                name=cname, expression=cname,
+                datatype="number" if is_measure else "vchar2"))
+            have.add(cname.upper())
+
+
+def _build_matrix_tablix(report, spec) -> ET.Element:
+    """A REAL two-axis SSRS cross-tab: dynamic row group (down), dynamic
+    column group (across), Sum() cells. Multiple measures stack inside the
+    cell as labeled lines (data-complete; geometry approximated)."""
+    ds = _safe(spec["query"].name)
+    row_f, col_f = _safe(spec["row"]), _safe(spec["col"])
+    cells = [_safe(c) for c in spec["cells"]]
+
+    t = ET.Element(_q("Tablix"))
+    t.set("Name", "Tablix_Matrix")
+    body = _sub(t, "TablixBody")
+    cols_el = _sub(body, "TablixColumns")
+    for w in ("1.8in", "1.5in"):
+        _sub(_sub(cols_el, "TablixColumn"), "Width", w)
+    rows_el = _sub(body, "TablixRows")
+
+    hdr_bg, hdr_fg = "#4a6a8a", "#ffffff"
+    r0 = _sub(rows_el, "TablixRow")
+    _sub(r0, "Height", "0.30in")
+    c0 = _sub(r0, "TablixCells")
+    cont = _sub(_sub(c0, "TablixCell"), "CellContents")
+    _build_textbox(cont, "Mx_Corner", spec["row"].replace("_", " "),
+                   bold=True, bg=hdr_bg, fg=hdr_fg, text_align="Left",
+                   vertical_align="Middle", border_color="#a0a0a0",
+                   padding="5pt")
+    cont = _sub(_sub(c0, "TablixCell"), "CellContents")
+    _build_textbox(cont, "Mx_ColHdr", f"=Fields!{col_f}.Value",
+                   bold=True, bg=hdr_bg, fg=hdr_fg, text_align="Center",
+                   vertical_align="Middle", border_color="#a0a0a0",
+                   padding="5pt")
+
+    r1 = _sub(rows_el, "TablixRow")
+    _sub(r1, "Height", f"{0.25 + 0.15 * max(0, len(cells) - 1):.2f}in")
+    c1 = _sub(r1, "TablixCells")
+    cont = _sub(_sub(c1, "TablixCell"), "CellContents")
+    _build_textbox(cont, "Mx_RowHdr", f"=Fields!{row_f}.Value",
+                   bold=True, text_align="Left", vertical_align="Middle",
+                   border_color="#d0d0d0", padding="4pt")
+    if len(cells) == 1:
+        expr = f"=Sum(Fields!{cells[0]}.Value)"
+    else:
+        parts = [f'"{c.replace("_", " ")}: " & Sum(Fields!{c}.Value)'
+                 for c in cells]
+        expr = "=" + " & vbCrLf & ".join(parts)
+    cont = _sub(_sub(c1, "TablixCell"), "CellContents")
+    _build_textbox(cont, "Mx_Cell", expr, text_align="Right",
+                   vertical_align="Middle", border_color="#d0d0d0",
+                   padding="4pt")
+
+    ch = _sub(t, "TablixColumnHierarchy")
+    chm = _sub(ch, "TablixMembers")
+    _sub(chm, "TablixMember")                      # static row-header column
+    dyn = _sub(chm, "TablixMember")
+    g = _sub(dyn, "Group")
+    g.set("Name", "MxColG")
+    _sub(_sub(g, "GroupExpressions"), "GroupExpression",
+         f"=Fields!{col_f}.Value")
+    se = _sub(dyn, "SortExpressions")
+    s = _sub(se, "SortExpression")
+    _sub(s, "Value", f"=Fields!{col_f}.Value")
+
+    rh = _sub(t, "TablixRowHierarchy")
+    rhm = _sub(rh, "TablixMembers")
+    # NOTE: the column-header member carries NO KeepWithGroup/RepeatOnNewPage.
+    # On a self-contained matrix those properties make SSRS reserve a
+    # follow-on page for "repeated headers" that never materializes ->
+    # trailing blank page (engine-measured). The dynamic column header
+    # already repeats naturally with horizontal pagination.
+    _sub(rhm, "TablixMember")
+    dynr = _sub(rhm, "TablixMember")
+    gr = _sub(dynr, "Group")
+    gr.set("Name", "MxRowG")
+    _sub(_sub(gr, "GroupExpressions"), "GroupExpression",
+         f"=Fields!{row_f}.Value")
+    ser = _sub(dynr, "SortExpressions")
+    sr = _sub(ser, "SortExpression")
+    _sub(sr, "Value", f"=Fields!{row_f}.Value")
+
+    _sub(t, "DataSetName", ds)
+    _sub(t, "Top", "0.10in")
+    _sub(t, "Left", "0.05in")
+    _sub(t, "Height", "0.55in")
+    _sub(t, "Width", "3.3in")
+    return t
+
+
 def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
     """Build the <Body> for a tabular grouped-card report. Letter /
     certificate reports use _build_certificate_body via the caller.
@@ -5624,7 +5959,11 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
         # table (no group break, no detail sub-table) renders as a plain column
         # grid -- the card path would otherwise collapse every row but the
         # first via =First(), silently dropping the report's data.
-        if _is_nested_master_detail(main):
+        _mspec = getattr(report, "_matrix_spec", None)
+        _is_matrix = bool(_mspec and _mspec.get("dominant"))
+        if _is_matrix:
+            tablix = _build_matrix_tablix(report, _mspec)
+        elif _is_nested_master_detail(main):
             tablix = _build_nested_group_tablix(report, main)
         elif _is_grouped_card_report(main, report):
             tablix = _build_grouped_card_tablix(report, main)
@@ -5636,9 +5975,14 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
             tablix.remove(t)
         _sub(tablix, "Top", f"{next_top:.2f}in")
         items.append(tablix)
+    else:
+        _is_matrix = False
 
-    # Body height encloses cover + Tablix bottom + small pad.
-    body_height_in = max(9.0, next_top + 2.0)
+    # Body height encloses cover + Tablix bottom + small pad. A matrix
+    # grows BOTH directions at render time from a tiny design footprint —
+    # the 9in floor would leave trailing blank pages (engine-verified).
+    body_height_in = (round(next_top + 1.0, 2) if _is_matrix
+                      else max(9.0, next_top + 2.0))
     _sub(body, "Height", f"{body_height_in}in")
     _sub(body, "Style")
     return body
@@ -5804,6 +6148,12 @@ def _build_embedded_images(report) -> Optional[ET.Element]:
 def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.Element:
     """Root <Report> element with all children in SSRS schema order."""
     _augment_parameters_from_binds(report)
+    # Matrix pre-pass MUST run before datasets are built (it may add the
+    # cross-product dimension/measure columns to the bound query).
+    try:
+        _prepare_matrix(report)
+    except Exception:  # noqa: BLE001 -- matrix support must never block
+        report._matrix_spec = None
     root = ET.Element(_q("Report"))
     root.append(_build_data_sources(target_db=target_db))
     datasets_el = _build_data_sets(report, target_db=target_db)
@@ -5840,6 +6190,29 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
     # to tabular reports only. ``deep`` (>=3 levels, e.g. County/Complaint/
     # Action) is the unambiguous master-detail signal we also honor when the
     # kind heuristic fell back to certificate on a thin/absent layout.
+    # A DOMINANT cross-tab outranks every other archetype: the matrix IS
+    # the report (e.g. the classic videosales demo). Mixed layouts where a
+    # matrix is just one frame among many keep their existing path.
+    _mspec0 = getattr(report, "_matrix_spec", None)
+    if _mspec0 and _mspec0.get("dominant") and main is not None:
+        body = _build_body(report, main)  # matrix-aware
+        root.append(body)
+        _sub(root, "Width", "7.0in")
+        # Collapse the empty whitespace the dynamic matrix leaves around
+        # itself -- without this SSRS emits a trailing blank page from the
+        # design-time slack below/right of the tiny matrix footprint
+        # (engine-measured: page 2 had zero words before this).
+        _rdsub(root, "ConsumeContainerWhitespace", "true")
+        root.append(_build_page(report, page_height_in=11.0,
+                                footer_on_first_page=True,
+                                signature_in_footer=False))
+        root.append(_build_code())
+        _sub(root, "Language", "en-US")
+        _rdsub(root, "DrawGrid", "true")
+        _rdsub(root, "GridSpacing", "0.083333in")
+        _strip_empty_required_containers(root)
+        return root
+
     _nested = main is not None and _is_nested_master_detail(main)
     _deep = _nested and len(_flatten_group_chain(main.groups)) >= 3
     if _nested and (kind == "tabular_details" or _deep):
@@ -5977,8 +6350,12 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
         target_db = "oracle"
     root = _build_report_root(report, target_db=target_db)
     _ensure_layout_images_emitted(root, report)
-    # Upload-safety net: scope any body-direct Fields! refs the per-archetype
-    # builders left unscoped (guards future shapes against the #1 blocker class).
+    # Publish-safety nets, in order: (1) repair dangling Fields! refs
+    # (params / formulas / other-dataset columns / page builtins bound as
+    # raw fields by secondary builders), THEN (2) scope any remaining
+    # body-direct Fields! refs. Order matters: repairs first so the scoper
+    # only sees genuinely-in-scope refs.
+    _repair_dangling_field_refs(root, report)
     _scope_body_direct_field_refs(root, report)
     # Fidelity: stamp <Format> onto field values that carried an Oracle
     # formatMask, so currency / dates / thousands render like the original.

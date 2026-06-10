@@ -277,10 +277,32 @@ class _Parser:
         args = []
         if self._peek() == ("op", ")"):
             return args
-        args.append(self._or())
+        args.append(self._named_or_pos())
         while self._eat_op(","):
-            args.append(self._or())
+            args.append(self._named_or_pos())
         return args
+
+    def _named_or_pos(self) -> str:
+        """One call argument, allowing Oracle named-parameter association
+        ``name => value``. Named params appear ONLY in package/procedure
+        calls (which have no VB equivalent and resolve to an unresolved
+        placeholder anyway), so we consume the ``=>`` and keep just the
+        value — without this the lone ``>`` crashed the whole formula
+        parse, dropping otherwise-computable IF/CASE logic around the call
+        (wild-corpus verified: CF_Permittees etc.)."""
+        save = self.i
+        k, v = self._peek()
+        if k == "id":
+            self._next()
+            # Oracle named-param association is '=' immediately followed by
+            # '>' (tokenized separately). Only treat as a name when both
+            # appear back-to-back with the value following.
+            if self._peek() == ("op", "=") and \
+                    self.i + 1 < len(self.toks) and self.toks[self.i + 1] == ("op", ">"):
+                self.i += 2  # consume '=' '>'
+                return self._or()
+            self.i = save  # not a named arg -> reparse as a normal expression
+        return self._or()
 
     def _case(self) -> str:
         # CASE WHEN c THEN r ... [ELSE e] END   (searched CASE)
