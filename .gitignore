@@ -1,0 +1,73 @@
+# Secrets / credentials -- NEVER commit these (the repo is public)
+.env
+*.env
+!.env.example
+backend/.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+.venv/
+venv/
+ENV/
+env/
+.pytest_cache/
+pytest-cache-files-*/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# OS / mount artifacts that bit us all session
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# Logs
+*.log
+flask.log
+
+# Don't commit user-uploaded artifacts (only the bundled samples)
+backend/uploads/
+
+# Local Flask runtime
+instance/
+
+# Optional: ignore generated RDL outputs (keep the canonical sample)
+samples/expected_rdl/*.rdl
+!samples/expected_rdl/SAMPLE_INSPECTION.rdl
+
+# RenderLab: fetched Microsoft DLLs + rendered verification output
+tools/renderlab/lib/
+tools/renderlab/out/
+
+# Local scratch runner (never commit)
+_scratch_run.py
+
+# Local-only worktree artifacts
+.claude/worktrees/
+
+# Claude Code per-machine settings (leaks local username/paths + allowlist)
+.claude/settings.local.json

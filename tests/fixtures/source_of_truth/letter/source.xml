@@ -1,0 +1,202 @@
+<?xml version="1.0" encoding="WINDOWS-1252" ?>
+<report name="SAMPLE_LETTER" DTDVersion="9.0.2.0.10"
+ afterParameterFormTrigger="after_param_form">
+  <xmlSettings xmlTag="SAMPLE_LETTER" xmlPrologType="text">
+  <![CDATA[<?xml version="1.0"?>]]>
+  </xmlSettings>
+  <data>
+    <userParameter name="P_RECIPIENT_ID" datatype="number" width="22"
+     precision="10" label="Recipient Id" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_REGION" datatype="character" width="20"
+     precision="10" initialValue="ALL" label="Region" defaultWidth="0"
+     defaultHeight="0"/>
+    <systemParameter name="ORIENTATION" initialValue="Portrait"/>
+    <dataSource name="Q_MAIN">
+      <select canParse="no">
+      <![CDATA[SELECT
+	R.Recipient_Id,
+	R.Recipient_Name,
+	R.Address_Line,
+	R.City_State_Zip
+FROM
+	Sample_Recipient R
+WHERE
+	R.Recipient_Id = :P_RECIPIENT_ID]]>
+      </select>
+      <displayInfo x="0.50000" y="0.25000" width="1.80000" height="0.20000"/>
+      <group name="G_MAIN">
+        <displayInfo x="0.50000" y="1.00000" width="1.80000" height="3.00000"/>
+        <dataItem name="RECIPIENT_ID" oracleDatatype="number" columnOrder="1"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Recipient Id">
+          <dataDescriptor expression="RECIPIENT_ID"
+           descriptiveExpression="RECIPIENT_ID" order="1" oracleDatatype="number"
+           width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="RECIPIENT_NAME" datatype="vchar2" columnOrder="2"
+         width="64" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Recipient Name" breakOrder="none">
+          <dataDescriptor expression="RECIPIENT_NAME"
+           descriptiveExpression="RECIPIENT_NAME" order="2" width="64"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ADDRESS_LINE" datatype="vchar2" columnOrder="3"
+         width="64" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Address Line" breakOrder="none">
+          <dataDescriptor expression="ADDRESS_LINE"
+           descriptiveExpression="ADDRESS_LINE" order="3" width="64"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="CITY_STATE_ZIP" datatype="vchar2" columnOrder="4"
+         width="64" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="City State Zip" breakOrder="none">
+          <dataDescriptor expression="CITY_STATE_ZIP"
+           descriptiveExpression="CITY_STATE_ZIP" order="4" width="64"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+  <section name="main" width="8.50000" height="11.00000" orientation="portrait">
+    <body width="7.50000" height="9.50000">
+      <location x="0.50000" y="0.50000"/>
+      <repeatingFrame name="R_G_MAIN" source="G_MAIN" printDirection="down"
+       minWidowRecords="1" columnMode="no" vertSpaceBetweenFrames="0.0500">
+        <geometryInfo x="0.00000" y="0.00000" width="7.50000" height="9.00000"/>
+        <generalLayout pageProtect="yes" verticalElasticity="variable"/>
+        <text name="B_HEAD1" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="2.25000" y="0.10000" width="3.00000" height="0.20000"/>
+          <textSegment>
+            <font face="Arial" size="12" bold="yes"/>
+            <string><![CDATA[SAMPLE STATE AGENCY]]></string>
+          </textSegment>
+        </text>
+        <text name="B_HEAD2" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="2.25000" y="0.32000" width="3.00000" height="0.16000"/>
+          <textSegment>
+            <font face="Arial" size="9" bold="yes"/>
+            <string><![CDATA[DIVISION OF SAMPLE SERVICES]]></string>
+          </textSegment>
+        </text>
+        <text name="B_HEAD3" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="2.25000" y="0.48000" width="3.00000" height="0.16000"/>
+          <textSegment>
+            <font face="Arial" size="9" bold="yes"/>
+            <string><![CDATA[PO BOX 0000 - SAMPLE CITY, ST 00000]]></string>
+          </textSegment>
+        </text>
+        <field name="F_CURRENT_DATE" source="CurrentDate" minWidowLines="1"
+         formatMask="MONTH dd, yyyy" spacing="0" alignment="start">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="0.00000" y="1.10000" width="3.00000" height="0.18000"/>
+        </field>
+        <field name="F_RECIPIENT_NAME" source="RECIPIENT_NAME" minWidowLines="1"
+         spacing="0" alignment="start">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="0.00000" y="1.70000" width="4.00000" height="0.18000"/>
+        </field>
+        <field name="F_ADDRESS_LINE" source="ADDRESS_LINE" minWidowLines="1"
+         spacing="0" alignment="start">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="0.00000" y="1.90000" width="4.00000" height="0.18000"/>
+        </field>
+        <field name="F_CITY_STATE_ZIP" source="CITY_STATE_ZIP" minWidowLines="1"
+         spacing="0" alignment="start">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="0.00000" y="2.10000" width="4.00000" height="0.18000"/>
+        </field>
+        <text name="B_SALUTATION" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.00000" y="2.60000" width="4.00000" height="0.18000"/>
+          <textSegment>
+            <font face="Arial" size="10"/>
+            <string><![CDATA[To whom it may concern:]]></string>
+          </textSegment>
+        </text>
+        <text name="B_BODY1" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.00000" y="3.00000" width="7.00000" height="0.60000"/>
+          <textSegment>
+            <font face="Arial" size="10"/>
+            <string><![CDATA[This letter confirms the current status of your sample account for the reporting
+period indicated above. Our records show that all required materials were received.]]></string>
+          </textSegment>
+        </text>
+        <text name="B_BODY2" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.00000" y="3.80000" width="7.00000" height="0.60000"/>
+          <textSegment>
+            <font face="Arial" size="10"/>
+            <string><![CDATA[No further action is required on your part at this time. If any information in this
+notice appears to be inaccurate, please contact the sample office within thirty days.]]></string>
+          </textSegment>
+        </text>
+        <text name="B_BODY3" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.00000" y="4.60000" width="7.00000" height="0.60000"/>
+          <textSegment>
+            <font face="Arial" size="10"/>
+            <string><![CDATA[We appreciate your continued cooperation and timely participation in the sample
+program. A copy of this notice has been retained for your file and for our records.]]></string>
+          </textSegment>
+        </text>
+        <text name="B_CLOSING" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.00000" y="5.60000" width="3.00000" height="0.18000"/>
+          <textSegment>
+            <font face="Arial" size="10"/>
+            <string><![CDATA[Sincerely,]]></string>
+          </textSegment>
+        </text>
+        <text name="B_SIGNER" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.00000" y="6.20000" width="3.00000" height="0.18000"/>
+          <textSegment>
+            <font face="Arial" size="10" bold="yes"/>
+            <string><![CDATA[Sample Administrator]]></string>
+          </textSegment>
+        </text>
+      </repeatingFrame>
+    </body>
+    <margin>
+      <text name="B_FOOTER" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="2.25000" y="10.40000" width="3.00000" height="0.16000"/>
+        <textSegment>
+          <font face="Arial" size="8"/>
+          <string><![CDATA[Page &<PageNumber> of &<TotalPages>]]></string>
+        </textSegment>
+      </text>
+    </margin>
+  </section>
+  </layout>
+  <parameterForm>
+  <text name="PB_Title" pageNumber="1" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="1.20000" y="0.16000" width="1.62000" height="0.22000"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="12" bold="yes"/>
+      <string><![CDATA[Report Parameters]]></string>
+    </textSegment>
+  </text>
+  <field name="PF_P_RECIPIENT_ID" source="P_RECIPIENT_ID" pageNumber="1"
+   minWidowLines="1" spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="0.78000" width="2.00000" height="0.26000"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_P_REGION" source="P_REGION" pageNumber="1" minWidowLines="1"
+   spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="1.11000" width="2.00000" height="0.26000"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  </parameterForm>
+  <reportPrivate defaultReportType="tabular" templateName="ncayel"
+   sectionTitle="Sample Notice Letter"/>
+</report>

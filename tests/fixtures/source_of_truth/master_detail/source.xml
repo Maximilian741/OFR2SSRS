@@ -1,0 +1,232 @@
+<?xml version="1.0" encoding="WINDOWS-1252" ?>
+<report name="SAMPLE_ORDERS" DTDVersion="9.0.2.0.10"
+ afterParameterFormTrigger="after_param_form">
+  <xmlSettings xmlTag="SAMPLE_ORDERS" xmlPrologType="text">
+  <![CDATA[<?xml version="1.0"?>]]>
+  </xmlSettings>
+  <data>
+    <userParameter name="P_START_DATE" datatype="date" precision="10"
+     inputMask="mm/dd/yyyy" label="Start Date" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_END_DATE" datatype="date" precision="10"
+     inputMask="mm/dd/yyyy" label="End Date" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_CITY" datatype="character" width="35"
+     precision="10" label="City" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_STATUS" datatype="character" width="20"
+     precision="10" initialValue="ALL" label="Status" defaultWidth="0" defaultHeight="0"/>
+    <systemParameter name="ORIENTATION" initialValue="Landscape"/>
+    <dataSource name="Q_CUSTOMER">
+      <select canParse="no">
+      <![CDATA[SELECT
+	C.Cust_Id,
+	C.Cust_Name,
+	C.City
+FROM
+	Sample_Customer C
+WHERE
+	C.Created_Date >= :P_START_DATE
+	AND C.Created_Date <= :P_END_DATE
+ORDER BY
+	C.Cust_Name]]>
+      </select>
+      <displayInfo x="0.50000" y="0.25000" width="1.80000" height="0.20000"/>
+      <group name="G_CUSTOMER">
+        <displayInfo x="0.50000" y="1.00000" width="1.80000" height="3.00000"/>
+        <dataItem name="CUST_ID" oracleDatatype="number" columnOrder="1"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Customer Id">
+          <dataDescriptor expression="CUST_ID" descriptiveExpression="CUST_ID"
+           order="1" oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="CUST_NAME" datatype="vchar2" columnOrder="2"
+         width="64" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Customer Name" breakOrder="none">
+          <dataDescriptor expression="CUST_NAME" descriptiveExpression="CUST_NAME"
+           order="2" width="64"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="CITY" datatype="vchar2" columnOrder="3"
+         width="35" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="City" breakOrder="none">
+          <dataDescriptor expression="CITY" descriptiveExpression="CITY"
+           order="3" width="35"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_ORDER">
+      <select canParse="no">
+      <![CDATA[SELECT
+	O.Order_Id,
+	O.Cust_Id,
+	TO_CHAR(O.Order_Date, 'MM/DD/YYYY') Order_Dt,
+	O.Amount,
+	O.Status
+FROM
+	Sample_Order O
+WHERE
+	O.Cust_Id = :CUST_ID
+ORDER BY
+	O.Order_Date]]>
+      </select>
+      <displayInfo x="3.00000" y="0.25000" width="1.50000" height="0.33000"/>
+      <group name="G_ORDER">
+        <displayInfo x="3.00000" y="0.90000" width="1.45000" height="1.45000"/>
+        <dataItem name="ORDER_ID" oracleDatatype="number" columnOrder="4"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Order Id">
+          <dataDescriptor expression="ORDER_ID" descriptiveExpression="ORDER_ID"
+           order="1" oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ORDER_DT" datatype="vchar2" columnOrder="5"
+         width="10" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Order Date" breakOrder="none">
+          <dataDescriptor expression="ORDER_DT" descriptiveExpression="ORDER_DT"
+           order="2" width="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="AMOUNT" oracleDatatype="number" columnOrder="6"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Amount" breakOrder="none">
+          <dataDescriptor expression="AMOUNT" descriptiveExpression="AMOUNT"
+           order="3" oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="STATUS" datatype="vchar2" columnOrder="7"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Status" breakOrder="none">
+          <dataDescriptor expression="STATUS" descriptiveExpression="STATUS"
+           order="4" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <link parentGroup="G_CUSTOMER" childQuery="Q_ORDER" condition="eq"
+     sqlClause="where"/>
+  </data>
+  <layout>
+  <section name="main" width="11.00000" height="8.50000" orientation="landscape">
+    <body width="10.42627" height="7.14587">
+      <location x="0.29248" y="0.76038"/>
+      <repeatingFrame name="R_G_CUSTOMER" source="G_CUSTOMER"
+       printDirection="down" minWidowRecords="1" columnMode="no"
+       vertSpaceBetweenFrames="0.0500">
+        <geometryInfo x="0.02075" y="0.44812" width="10.37512" height="0.68018"/>
+        <generalLayout pageProtect="yes" verticalElasticity="variable"/>
+        <field name="F_CUST_NAME" source="CUST_NAME" minWidowLines="1"
+         spacing="0" alignment="start">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="0.02075" y="0.44812" width="1.64587" height="0.18750"/>
+        </field>
+        <field name="F_CITY" source="CITY" minWidowLines="1" spacing="0"
+         alignment="start">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="1.80115" y="0.44812" width="3.59998" height="0.18750"/>
+        </field>
+        <repeatingFrame name="R_G_ORDER" source="G_ORDER"
+         printDirection="down" minWidowRecords="1" columnMode="no"
+         vertSpaceBetweenFrames="0.0500">
+          <geometryInfo x="5.56226" y="0.70044" width="4.83362" height="0.18799"/>
+          <generalLayout verticalElasticity="variable"/>
+          <field name="F_ORDER_DT" source="ORDER_DT" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="Arial" size="10"/>
+            <geometryInfo x="5.56226" y="0.70093" width="1.50000" height="0.18750"/>
+          </field>
+          <field name="F_AMOUNT" source="AMOUNT" minWidowLines="1" spacing="0"
+           alignment="end">
+            <font face="Arial" size="10"/>
+            <geometryInfo x="7.20000" y="0.70093" width="1.20000" height="0.18750"/>
+          </field>
+          <field name="F_STATUS" source="STATUS" minWidowLines="1" spacing="0"
+           alignment="start">
+            <font face="Arial" size="10"/>
+            <geometryInfo x="8.50000" y="0.70093" width="1.80000" height="0.18750"/>
+          </field>
+        </repeatingFrame>
+      </repeatingFrame>
+      <frame name="M_G_CUSTOMER_HDR">
+        <geometryInfo x="0.02075" y="0.00000" width="10.37512" height="0.38562"/>
+        <advancedLayout printObjectOnPage="allPage"
+         basePrintingOn="anchoringObject"/>
+        <visualSettings fillPattern="solid" fillForegroundColor="darkblue"
+         lineForegroundColor="white"/>
+        <text name="B_CUST_NAME" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.02075" y="0.00000" width="1.64990" height="0.17712"/>
+          <visualSettings lineForegroundColor="white"/>
+          <textSegment>
+            <font face="Arial" size="10" bold="yes"/>
+            <string><![CDATA[Customer]]></string>
+          </textSegment>
+        </text>
+        <text name="B_CITY" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="1.80115" y="0.00000" width="3.59998" height="0.17712"/>
+          <visualSettings lineForegroundColor="white"/>
+          <textSegment>
+            <font face="Arial" size="10" bold="yes"/>
+            <string><![CDATA[City]]></string>
+          </textSegment>
+        </text>
+        <text name="B_ORDERS" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="5.56226" y="0.00000" width="4.80000" height="0.17712"/>
+          <visualSettings lineForegroundColor="white"/>
+          <textSegment>
+            <font face="Arial" size="10" bold="yes"/>
+            <string><![CDATA[Orders (Date / Amount / Status)]]></string>
+          </textSegment>
+        </text>
+      </frame>
+    </body>
+    <margin>
+      <text name="B_Title" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="3.04431" y="0.24963" width="4.92700" height="0.19788"/>
+        <textSegment>
+          <font face="Arial" size="12" bold="yes"/>
+          <string><![CDATA[Customer Orders Report]]></string>
+        </textSegment>
+      </text>
+    </margin>
+  </section>
+  </layout>
+  <parameterForm>
+  <text name="PB_Title" pageNumber="1" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="1.20000" y="0.16000" width="1.62000" height="0.22000"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="12" bold="yes"/>
+      <string><![CDATA[Report Parameters]]></string>
+    </textSegment>
+  </text>
+  <field name="PF_P_START_DATE" source="P_START_DATE" pageNumber="1"
+   minWidowLines="1" spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="0.78000" width="2.00000" height="0.26000"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_P_END_DATE" source="P_END_DATE" pageNumber="1"
+   minWidowLines="1" spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="1.11000" width="2.00000" height="0.26000"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_P_CITY" source="P_CITY" pageNumber="1" minWidowLines="1"
+   spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="1.45000" width="2.00000" height="0.26000"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_P_STATUS" source="P_STATUS" pageNumber="1" minWidowLines="1"
+   spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="1.78000" width="2.00000" height="0.26000"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  </parameterForm>
+  <reportPrivate defaultReportType="tabular" templateName="ncayel"
+   sectionTitle="Customer Orders"/>
+</report>

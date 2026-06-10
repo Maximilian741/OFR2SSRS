@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python _scratch_run.py)",
+      "Bash(python -c ' *)",
+      "Bash(python -m pytest -q)",
+      "Bash(python -m pytest -q tests/test_per_record_layout.py)",
+      "Bash(python -m pytest tests/ -q)",
+      "Bash(python -c \"from backend.app import app; print\\('OK'\\)\")",
+      "Bash(python -m pytest tests/ -q --tb=short)",
+      "Bash(python -m pytest tests/ -q --tb=line)",
+      "Bash(python -c \"from backend.app import app; print\\('Flask import:', 'OK'\\)\")",
+      "Read(//c/Users/maxca/Downloads/**)"
+    ]
+  }
+}

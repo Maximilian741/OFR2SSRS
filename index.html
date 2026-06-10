@@ -1,0 +1,1319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Oracle2SSRS — Drag, drop, deploy</title>
+<meta name="description" content="A drag-and-drop web app that converts Oracle Reports XML into deployment-ready SSRS RDL — with PL/SQL to T-SQL translation, live preview, per-recipient bursting, and sub-report drill-through." />
+<meta name="theme-color" content="#0a2540" />
+
+<!-- Favicon: emoji as data URI -->
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%E2%9A%A1%3C/text%3E%3C/svg%3E" />
+
+<!-- Open Graph -->
+<meta property="og:title" content="Oracle2SSRS — Drag, drop, deploy" />
+<meta property="og:description" content="Convert Oracle Reports XML into deployment-ready SSRS RDL, with PL/SQL to T-SQL translation, live preview, per-recipient bursting, and sub-report drill-through — all in a drag-and-drop web app." />
+<meta property="og:type" content="website" />
+<meta property="og:image" content="https://raw.githubusercontent.com/Maximilian741/OFR2SSRS/master/docs/screenshots/hero-app-view.png" />
+<meta property="og:image:width" content="1440" />
+<meta property="og:image:height" content="900" />
+<meta name="twitter:card" content="summary_large_image" />
+<meta name="twitter:image" content="https://raw.githubusercontent.com/Maximilian741/OFR2SSRS/master/docs/screenshots/hero-app-view.png" />
+
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+
+<style>
+:root {
+  --navy:        #0a2540;
+  --navy-soft:   #1a365d;
+  --ink:         #0f172a;
+  --slate-700:   #334155;
+  --slate-500:   #64748b;
+  --slate-400:   #94a3b8;
+  --slate-200:   #e2e8f0;
+  --slate-100:   #f1f5f9;
+  --slate-50:    #f8fafc;
+  --white:       #ffffff;
+  --accent:      #2563eb;
+  --accent-soft: #dbeafe;
+  --accent-dark: #1e40af;
+  --teal:        #0d9488;
+  --green:       #059669;
+  --shadow-sm:   0 1px 2px rgba(15, 23, 42, 0.04), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-md:   0 4px 6px -1px rgba(15, 23, 42, 0.08), 0 2px 4px -2px rgba(15, 23, 42, 0.06);
+  --shadow-lg:   0 20px 40px -16px rgba(15, 23, 42, 0.18), 0 4px 12px -6px rgba(15, 23, 42, 0.08);
+  --radius-sm:   6px;
+  --radius-md:   12px;
+  --radius-lg:   18px;
+  --container:   1180px;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  font-size: 16px;
+  line-height: 1.6;
+  color: var(--ink);
+  background: var(--white);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+a { color: var(--accent); text-decoration: none; }
+a:hover { color: var(--accent-dark); }
+
+code, pre {
+  font-family: 'JetBrains Mono', 'Menlo', 'Consolas', monospace;
+  font-size: 0.9em;
+}
+
+.container {
+  max-width: var(--container);
+  margin: 0 auto;
+  padding: 0 24px;
+}
+
+/* ============== NAV ============== */
+.nav {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background: rgba(255,255,255,0.85);
+  backdrop-filter: saturate(180%) blur(14px);
+  -webkit-backdrop-filter: saturate(180%) blur(14px);
+  border-bottom: 1px solid var(--slate-200);
+}
+.nav-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  height: 64px;
+}
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-weight: 700;
+  font-size: 17px;
+  color: var(--navy);
+  letter-spacing: -0.01em;
+}
+.brand-mark {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: linear-gradient(135deg, var(--navy) 0%, var(--accent) 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: white;
+  font-weight: 800;
+  font-size: 14px;
+  letter-spacing: -0.5px;
+  box-shadow: var(--shadow-sm);
+}
+.nav-links {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+}
+.nav-links a {
+  color: var(--slate-700);
+  font-size: 14px;
+  font-weight: 500;
+  transition: color 0.15s;
+}
+.nav-links a:hover { color: var(--navy); }
+.nav-cta {
+  background: var(--navy);
+  color: white !important;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  font-size: 14px;
+  font-weight: 600;
+  transition: background 0.15s;
+}
+.nav-cta:hover { background: var(--navy-soft); color: white !important; }
+@media (max-width: 720px) {
+  .nav-links a:not(.nav-cta) { display: none; }
+}
+
+/* ============== HERO ============== */
+.hero {
+  position: relative;
+  padding: 96px 0 80px;
+  background:
+    radial-gradient(ellipse 900px 600px at 50% -10%, rgba(37, 99, 235, 0.10), transparent 60%),
+    linear-gradient(180deg, var(--white) 0%, var(--slate-50) 100%);
+  overflow: hidden;
+}
+.hero-inner {
+  text-align: center;
+  max-width: 880px;
+  margin: 0 auto;
+}
+.hero-eyebrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  padding: 6px 14px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  margin-bottom: 28px;
+}
+.hero-eyebrow-dot {
+  width: 6px; height: 6px;
+  background: var(--accent);
+  border-radius: 50%;
+  box-shadow: 0 0 0 4px rgba(37,99,235,0.15);
+}
+.hero h1 {
+  font-size: clamp(40px, 6vw, 64px);
+  font-weight: 800;
+  line-height: 1.05;
+  letter-spacing: -0.03em;
+  color: var(--navy);
+  margin-bottom: 24px;
+}
+.hero h1 .grad {
+  background: linear-gradient(90deg, var(--accent) 0%, var(--teal) 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+.hero-sub {
+  font-size: 19px;
+  line-height: 1.55;
+  color: var(--slate-700);
+  margin: 0 auto 36px;
+  max-width: 720px;
+}
+.hero-ctas {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+  margin-bottom: 40px;
+}
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 13px 22px;
+  border-radius: var(--radius-sm);
+  font-size: 15px;
+  font-weight: 600;
+  transition: all 0.15s;
+  cursor: pointer;
+  border: 1px solid transparent;
+}
+.btn-primary {
+  background: var(--navy);
+  color: white !important;
+}
+.btn-primary:hover {
+  background: var(--navy-soft);
+  transform: translateY(-1px);
+  box-shadow: var(--shadow-md);
+  color: white !important;
+}
+.btn-secondary {
+  background: var(--white);
+  color: var(--navy) !important;
+  border-color: var(--slate-200);
+}
+.btn-secondary:hover {
+  border-color: var(--slate-400);
+  background: var(--slate-50);
+}
+.hero-meta {
+  display: flex;
+  gap: 28px;
+  justify-content: center;
+  flex-wrap: wrap;
+  font-size: 13px;
+  color: var(--slate-500);
+}
+.hero-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.hero-meta-item svg {
+  width: 14px;
+  height: 14px;
+  color: var(--green);
+}
+
+/* hero visual: tab preview */
+.tab-preview {
+  margin-top: 56px;
+  background: var(--white);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  border: 1px solid var(--slate-200);
+  overflow: hidden;
+}
+.tab-chrome {
+  background: var(--slate-50);
+  border-bottom: 1px solid var(--slate-200);
+  padding: 10px 14px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.tab-dot {
+  width: 11px; height: 11px;
+  border-radius: 50%;
+  background: var(--slate-200);
+}
+.tab-dot.r { background: #ff5f57; }
+.tab-dot.y { background: #febc2e; }
+.tab-dot.g { background: #28c840; }
+.tab-url {
+  margin-left: 14px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--slate-500);
+  background: var(--white);
+  padding: 4px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--slate-200);
+}
+.tab-bar {
+  display: flex;
+  gap: 2px;
+  padding: 0 12px;
+  border-bottom: 1px solid var(--slate-200);
+  background: var(--white);
+  overflow-x: auto;
+}
+.tab-bar-item {
+  padding: 14px 18px;
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--slate-500);
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: color 0.15s;
+}
+.tab-bar-item.active {
+  color: var(--navy);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+.tab-body {
+  padding: 28px;
+  background: var(--slate-50);
+  min-height: 220px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.dropzone {
+  width: 100%;
+  border: 2px dashed var(--slate-400);
+  border-radius: var(--radius-md);
+  padding: 36px 24px;
+  text-align: center;
+  background: var(--white);
+}
+.dropzone-icon {
+  font-size: 32px;
+  margin-bottom: 8px;
+}
+.dropzone-text {
+  font-weight: 600;
+  color: var(--navy);
+  margin-bottom: 4px;
+}
+.dropzone-sub {
+  font-size: 13px;
+  color: var(--slate-500);
+}
+
+/* ============== SECTION BASE ============== */
+section { padding: 96px 0; }
+.section-header {
+  text-align: center;
+  max-width: 720px;
+  margin: 0 auto 56px;
+}
+.section-eyebrow {
+  display: inline-block;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 12px;
+}
+.section-title {
+  font-size: clamp(28px, 3.5vw, 40px);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+  color: var(--navy);
+  margin-bottom: 16px;
+  line-height: 1.15;
+}
+.section-sub {
+  font-size: 17px;
+  color: var(--slate-500);
+  line-height: 1.6;
+}
+
+/* ============== TAB FEATURES ============== */
+.tabs-section { background: var(--white); }
+.feature-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+.feature-card {
+  padding: 28px;
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-lg);
+  background: var(--white);
+  transition: all 0.2s;
+  position: relative;
+}
+.feature-card:hover {
+  border-color: var(--slate-400);
+  transform: translateY(-3px);
+  box-shadow: var(--shadow-md);
+}
+.feature-card.highlight {
+  background: linear-gradient(135deg, var(--navy) 0%, var(--navy-soft) 100%);
+  border-color: var(--navy);
+  color: white;
+}
+.feature-card.highlight h3,
+.feature-card.highlight .feature-tag { color: white; }
+.feature-card.highlight p { color: rgba(255,255,255,0.78); }
+.feature-card.highlight .feature-icon {
+  background: rgba(255,255,255,0.12);
+  color: #5eead4;
+}
+.feature-icon {
+  width: 44px; height: 44px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+  font-size: 22px;
+}
+.feature-tag {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent);
+  margin-bottom: 8px;
+}
+.feature-card h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--navy);
+  margin-bottom: 8px;
+  letter-spacing: -0.01em;
+}
+.feature-card p {
+  color: var(--slate-500);
+  font-size: 14.5px;
+  line-height: 1.55;
+}
+@media (max-width: 920px) { .feature-grid { grid-template-columns: repeat(2, 1fr); } }
+@media (max-width: 620px) { .feature-grid { grid-template-columns: 1fr; } }
+
+/* ============== HOW IT WORKS ============== */
+.how { background: var(--slate-50); }
+.steps {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 20px;
+}
+.step {
+  background: var(--white);
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-lg);
+  padding: 32px;
+  position: relative;
+}
+.step-num {
+  position: absolute;
+  top: -16px; left: 24px;
+  width: 36px; height: 36px;
+  background: linear-gradient(135deg, var(--navy) 0%, var(--accent) 100%);
+  color: white;
+  font-weight: 700;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  box-shadow: var(--shadow-sm);
+}
+.step h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--navy);
+  margin: 12px 0 12px;
+  letter-spacing: -0.01em;
+}
+.step p {
+  color: var(--slate-500);
+  font-size: 15px;
+  line-height: 1.55;
+  margin-bottom: 14px;
+}
+.step-tag {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  background: var(--slate-100);
+  color: var(--slate-700);
+  padding: 5px 10px;
+  border-radius: 4px;
+}
+@media (max-width: 800px) { .steps { grid-template-columns: 1fr; gap: 28px; } }
+
+/* ============== DIFFERENTIATORS ============== */
+.diff { background: var(--white); }
+.diff-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+.diff-card {
+  padding: 32px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--slate-200);
+  background: linear-gradient(180deg, var(--slate-50) 0%, var(--white) 100%);
+}
+.diff-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 18px;
+  font-weight: 700;
+  color: var(--navy);
+  margin-bottom: 12px;
+  letter-spacing: -0.01em;
+}
+.diff-badge {
+  font-size: 11px;
+  font-weight: 600;
+  background: var(--accent-soft);
+  color: var(--accent-dark);
+  padding: 3px 8px;
+  border-radius: 999px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+.diff-card p {
+  color: var(--slate-700);
+  font-size: 15px;
+  line-height: 1.6;
+  margin-bottom: 12px;
+}
+.diff-card p:last-child { margin-bottom: 0; }
+.diff-card code {
+  background: var(--slate-100);
+  color: var(--navy);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.85em;
+}
+@media (max-width: 800px) { .diff-grid { grid-template-columns: 1fr; } }
+
+/* ============== ADVANCED LIST ============== */
+.advanced { background: var(--slate-50); }
+.advanced-list {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 12px;
+}
+.advanced-item {
+  padding: 18px 16px;
+  background: var(--white);
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-md);
+  text-align: center;
+  transition: all 0.15s;
+}
+.advanced-item:hover {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-sm);
+}
+.advanced-item-name {
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--navy);
+  margin-bottom: 4px;
+}
+.advanced-item-desc {
+  font-size: 12px;
+  color: var(--slate-500);
+  line-height: 1.4;
+}
+@media (max-width: 900px) { .advanced-list { grid-template-columns: repeat(3, 1fr); } }
+@media (max-width: 540px) { .advanced-list { grid-template-columns: repeat(2, 1fr); } }
+
+/* ============== INSTALL ============== */
+.install { background: var(--navy); color: white; }
+.install .section-title { color: white; }
+.install .section-sub { color: rgba(255,255,255,0.7); }
+.install .section-eyebrow { color: #5eead4; }
+.install-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 24px;
+}
+.install-card {
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.1);
+  border-radius: var(--radius-md);
+  padding: 28px;
+}
+.install-card h3 {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 15px;
+  font-weight: 600;
+  color: white;
+  margin-bottom: 16px;
+}
+.install-card h3 .badge {
+  font-size: 10px;
+  font-weight: 700;
+  background: rgba(94, 234, 212, 0.16);
+  color: #5eead4;
+  padding: 3px 8px;
+  border-radius: 999px;
+  letter-spacing: 0.04em;
+}
+.install-code {
+  background: #06182f;
+  border: 1px solid rgba(255,255,255,0.06);
+  border-radius: var(--radius-sm);
+  padding: 16px;
+  color: #e2e8f0;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-x: auto;
+  white-space: pre;
+}
+.install-code .c { color: #94a3b8; }
+.install-code .k { color: #5eead4; }
+.install-code .s { color: #fbbf24; }
+@media (max-width: 800px) { .install-grid { grid-template-columns: 1fr; } }
+
+/* ============== CTA BAR ============== */
+.cta-bar {
+  background: linear-gradient(135deg, var(--navy) 0%, var(--accent-dark) 100%);
+  color: white;
+  padding: 72px 0;
+  text-align: center;
+}
+.cta-bar h2 {
+  font-size: clamp(26px, 3vw, 34px);
+  font-weight: 700;
+  margin-bottom: 14px;
+  letter-spacing: -0.02em;
+}
+.cta-bar p {
+  color: rgba(255,255,255,0.85);
+  font-size: 17px;
+  margin: 0 auto 28px;
+  max-width: 560px;
+}
+.cta-bar .btn-primary {
+  background: white;
+  color: var(--navy) !important;
+}
+.cta-bar .btn-primary:hover { background: var(--slate-100); color: var(--navy) !important; }
+
+/* ============== FOOTER ============== */
+footer {
+  background: var(--ink);
+  color: var(--slate-400);
+  padding: 56px 0 32px;
+  font-size: 14px;
+}
+.footer-inner {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 24px;
+}
+.footer-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: white;
+  font-weight: 600;
+}
+.footer-links {
+  display: flex;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+.footer-links a { color: var(--slate-400); }
+.footer-links a:hover { color: white; }
+.footer-bottom {
+  margin-top: 32px;
+  padding-top: 24px;
+  border-top: 1px solid rgba(255,255,255,0.08);
+  font-size: 12px;
+  color: var(--slate-500);
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.pages-note {
+  background: rgba(94, 234, 212, 0.06);
+  border: 1px solid rgba(94, 234, 212, 0.15);
+  border-radius: var(--radius-sm);
+  padding: 14px 18px;
+  margin-top: 24px;
+  font-size: 13px;
+  color: var(--slate-400);
+  line-height: 1.6;
+}
+.pages-note strong { color: #5eead4; }
+.pages-note code {
+  background: rgba(255,255,255,0.06);
+  color: #e2e8f0;
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 0.9em;
+}
+
+/* ============== CODE SHOWCASE (before / after) ============== */
+.showcase { background: var(--white); }
+.showcase-panes {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  gap: 16px;
+  align-items: stretch;
+}
+.code-pane {
+  background: #06182f;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+  box-shadow: var(--shadow-md);
+  min-width: 0;
+}
+.code-pane-head {
+  display: flex; align-items: center; gap: 8px;
+  padding: 11px 15px;
+  background: rgba(255,255,255,0.03);
+  border-bottom: 1px solid rgba(255,255,255,0.06);
+  font-size: 12px; font-weight: 600;
+  color: var(--slate-400);
+  font-family: 'JetBrains Mono', monospace;
+}
+.code-pane-head .pill {
+  margin-left: auto;
+  font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em;
+  padding: 2px 9px; border-radius: 999px; font-weight: 700;
+}
+.pill-oracle { background: rgba(251,191,36,0.15); color: #fbbf24; }
+.pill-rdl { background: rgba(94,234,212,0.15); color: #5eead4; }
+.code-pane pre {
+  margin: 0; padding: 18px 16px;
+  font-size: 12.5px; line-height: 1.62;
+  color: #cbd5e1; overflow-x: auto; white-space: pre;
+}
+.code-pane .c { color: #64748b; font-style: italic; }
+.code-pane .s { color: #fbbf24; }
+.code-pane .k { color: #5eead4; font-weight: 600; }
+.code-pane .d { color: #fca5a5; }
+.showcase-arrow {
+  display: flex; align-items: center; justify-content: center;
+  color: var(--accent); font-size: 26px; font-weight: 800;
+}
+.showcase-legend {
+  text-align: center; margin-top: 26px;
+  font-size: 13.5px; color: var(--slate-500);
+}
+.showcase-legend b { color: var(--navy); }
+@media (max-width: 860px) {
+  .showcase-panes { grid-template-columns: 1fr; }
+  .showcase-arrow { transform: rotate(90deg); padding: 2px 0; }
+}
+
+/* ============== PIPELINE ============== */
+.pipeline { background: var(--slate-50); }
+.pipe-flow { display: flex; flex-wrap: wrap; justify-content: center; }
+.pipe-stage {
+  flex: 1 1 0; min-width: 132px;
+  background: var(--white);
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-md);
+  padding: 22px 16px; text-align: center;
+  position: relative;
+}
+.pipe-stage + .pipe-stage { margin-left: 30px; }
+.pipe-stage + .pipe-stage::before {
+  content: "\2192";
+  position: absolute; left: -23px; top: 50%;
+  transform: translateY(-50%);
+  color: var(--slate-400); font-size: 18px; font-weight: 700;
+}
+.pipe-ico { font-size: 22px; margin-bottom: 9px; }
+.pipe-stage h4 { font-size: 14px; color: var(--navy); margin-bottom: 5px; font-weight: 700; }
+.pipe-stage p { font-size: 12px; color: var(--slate-500); line-height: 1.45; }
+.pipe-stage code { font-size: 10.5px; color: var(--accent-dark); background: var(--accent-soft); padding: 1px 5px; border-radius: 4px; }
+@media (max-width: 760px) {
+  .pipe-flow { flex-direction: column; }
+  .pipe-stage + .pipe-stage { margin-left: 0; margin-top: 28px; }
+  .pipe-stage + .pipe-stage::before { content: "\2193"; left: 50%; top: -22px; transform: translateX(-50%); }
+}
+
+/* ============== SAFETY / FIDELITY ============== */
+.safety { background: var(--white); }
+.safety-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+.safety-card {
+  border: 1px solid var(--slate-200);
+  border-radius: var(--radius-lg);
+  padding: 30px;
+  background: linear-gradient(180deg, var(--slate-50), var(--white));
+}
+.safety-card .ico {
+  width: 46px; height: 46px; border-radius: 11px;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 22px; margin-bottom: 15px;
+}
+.ico-green { background: rgba(5,150,105,0.1); color: var(--green); }
+.ico-teal { background: rgba(13,148,136,0.1); color: var(--teal); }
+.safety-card h3 { font-size: 18px; color: var(--navy); margin-bottom: 10px; font-weight: 700; letter-spacing: -0.01em; }
+.safety-card p { color: var(--slate-700); font-size: 14.5px; line-height: 1.6; margin-bottom: 14px; }
+.safety-card p:last-child { margin-bottom: 0; }
+.safety-card code { background: var(--slate-100); color: var(--navy); padding: 2px 6px; border-radius: 4px; font-size: 0.85em; }
+.fidelity-meter {
+  display: flex; align-items: center; gap: 13px;
+  background: var(--white); border: 1px solid var(--slate-200);
+  border-radius: var(--radius-sm); padding: 12px 15px; margin-top: 4px;
+}
+.fidelity-meter .bar { flex: 1; height: 8px; border-radius: 999px; background: var(--slate-100); overflow: hidden; }
+.fidelity-meter .bar > span { display: block; height: 100%; width: 100%; background: linear-gradient(90deg, var(--green), var(--teal)); border-radius: 999px; }
+.fidelity-meter b { font-family: 'JetBrains Mono', monospace; color: var(--green); font-size: 15px; }
+@media (max-width: 800px) { .safety-grid { grid-template-columns: 1fr; } }
+
+/* ============== FAQ ============== */
+.faq { background: var(--slate-50); }
+.faq-list { max-width: 820px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+.faq-item {
+  background: var(--white); border: 1px solid var(--slate-200);
+  border-radius: var(--radius-md); padding: 2px 22px;
+}
+.faq-item summary {
+  cursor: pointer; padding: 18px 0; font-weight: 600;
+  color: var(--navy); font-size: 16px; list-style: none;
+  display: flex; justify-content: space-between; align-items: center; gap: 16px;
+}
+.faq-item summary::-webkit-details-marker { display: none; }
+.faq-item summary::after { content: "+"; color: var(--accent); font-size: 22px; font-weight: 400; flex-shrink: 0; }
+.faq-item[open] summary::after { content: "\2212"; }
+.faq-item p { color: var(--slate-700); font-size: 14.5px; line-height: 1.6; padding: 0 0 20px; margin: 0; }
+.faq-item p code { background: var(--slate-100); color: var(--navy); padding: 2px 6px; border-radius: 4px; font-size: 0.86em; }
+</style>
+</head>
+<body>
+
+<!-- ============== NAV ============== -->
+<nav class="nav">
+  <div class="container nav-inner">
+    <div class="brand">
+      <div class="brand-mark">O2</div>
+      Oracle2SSRS
+    </div>
+    <div class="nav-links">
+      <a href="#tabs">Features</a>
+      <a href="#how">How it works</a>
+      <a href="#why">Why it's different</a>
+      <a href="#faq">FAQ</a>
+      <a href="#install">Install</a>
+      <a href="https://github.com/Maximilian741/OFR2SSRS" class="nav-cta" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- ============== HERO ============== -->
+<section class="hero">
+  <div class="container">
+    <div class="hero-inner">
+      <div class="hero-eyebrow">
+        <span class="hero-eyebrow-dot"></span>
+        Drag, drop, deploy
+      </div>
+      <h1>Oracle Reports in.<br /><span class="grad">SSRS RDL out.</span></h1>
+      <p class="hero-sub">
+        Convert Oracle Reports XML into deployment-ready SSRS RDL, with PL/SQL to T-SQL translation, live preview, per-recipient bursting, and sub-report drill-through — all in a drag-and-drop web app.
+      </p>
+      <div class="hero-ctas">
+        <a href="#install" class="btn btn-primary">
+          Get started
+          <span aria-hidden="true">→</span>
+        </a>
+        <a href="#tabs" class="btn btn-secondary">See the 4 tabs</a>
+      </div>
+      <div class="hero-meta">
+        <span class="hero-meta-item">
+          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+          SSRS 2016+ compatible RDL
+        </span>
+        <span class="hero-meta-item">
+          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+          No embedded credentials
+        </span>
+        <span class="hero-meta-item">
+          <svg viewBox="0 0 20 20" fill="currentColor"><path fill-rule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clip-rule="evenodd"/></svg>
+          Free for internal use (ELv2)
+        </span>
+      </div>
+
+      <!-- Tab preview mockup -->
+      <div class="tab-preview" aria-hidden="true">
+        <div class="tab-chrome">
+          <span class="tab-dot r"></span>
+          <span class="tab-dot y"></span>
+          <span class="tab-dot g"></span>
+          <span class="tab-url">localhost:5057 — Oracle2SSRS</span>
+        </div>
+        <div class="tab-bar">
+          <div class="tab-bar-item active">HTML Mockup</div>
+          <div class="tab-bar-item">RDL XML</div>
+          <div class="tab-bar-item">Bursting</div>
+          <div class="tab-bar-item">Sub-Reports</div>
+        </div>
+        <div class="tab-body">
+          <div class="dropzone">
+            <div class="dropzone-icon">📂</div>
+            <div class="dropzone-text">Drop an Oracle XML, folder, or supporting docs</div>
+            <div class="dropzone-sub">Accepts .xml · .sql · .docx · .rdf · .png · .jpg</div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+</section>
+
+<!-- ============== PROOF STRIP ============== -->
+<section style="padding:44px 0; border-bottom:1px solid var(--slate-200); background:linear-gradient(180deg, var(--slate-50), var(--white));">
+  <div class="container">
+    <p style="text-align:center; font-size:12px; font-weight:700; letter-spacing:0.09em; text-transform:uppercase; color:var(--accent-dark); margin:0 0 20px;">One generic engine — zero per-report hardcoding</p>
+    <div style="display:flex; flex-wrap:wrap; gap:10px; justify-content:center; margin-bottom:32px;">
+      <span style="display:inline-block; padding:7px 15px; border-radius:999px; background:var(--white); border:1px solid var(--slate-200); font-size:13px; font-weight:600; color:var(--slate-700); box-shadow:var(--shadow-sm);">Tabular</span>
+      <span style="display:inline-block; padding:7px 15px; border-radius:999px; background:var(--white); border:1px solid var(--slate-200); font-size:13px; font-weight:600; color:var(--slate-700); box-shadow:var(--shadow-sm);">Master-detail</span>
+      <span style="display:inline-block; padding:7px 15px; border-radius:999px; background:var(--white); border:1px solid var(--slate-200); font-size:13px; font-weight:600; color:var(--slate-700); box-shadow:var(--shadow-sm);">Letters</span>
+      <span style="display:inline-block; padding:7px 15px; border-radius:999px; background:var(--white); border:1px solid var(--slate-200); font-size:13px; font-weight:600; color:var(--slate-700); box-shadow:var(--shadow-sm);">Certificates</span>
+      <span style="display:inline-block; padding:7px 15px; border-radius:999px; background:var(--white); border:1px solid var(--slate-200); font-size:13px; font-weight:600; color:var(--slate-700); box-shadow:var(--shadow-sm);">Sub-report drill-through</span>
+      <span style="display:inline-block; padding:7px 15px; border-radius:999px; background:var(--white); border:1px solid var(--slate-200); font-size:13px; font-weight:600; color:var(--slate-700); box-shadow:var(--shadow-sm);">Per-recipient bursting</span>
+    </div>
+    <div style="display:flex; flex-wrap:wrap; gap:44px 52px; justify-content:center; text-align:center;">
+      <div>
+        <div style="font-size:36px; font-weight:800; color:var(--navy); letter-spacing:-0.02em; line-height:1;">0</div>
+        <div style="font-size:13px; color:var(--slate-500); margin-top:6px;">report names hardcoded<br/>in the conversion engine</div>
+      </div>
+      <div>
+        <div style="font-size:36px; font-weight:800; color:var(--navy); letter-spacing:-0.02em; line-height:1;">385+</div>
+        <div style="font-size:13px; color:var(--slate-500); margin-top:6px;">automated tests,<br/>all green</div>
+      </div>
+      <div>
+        <div style="font-size:36px; font-weight:800; color:var(--navy); letter-spacing:-0.02em; line-height:1;">100%</div>
+        <div style="font-size:13px; color:var(--slate-500); margin-top:6px;">RDL validated vs Microsoft's<br/>real RDL 2008 schema</div>
+      </div>
+      <div>
+        <div style="font-size:36px; font-weight:800; color:var(--navy); letter-spacing:-0.02em; line-height:1;">&lt;60s</div>
+        <div style="font-size:13px; color:var(--slate-500); margin-top:6px;">from Oracle XML to a<br/>deployable SSRS RDL</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== CODE SHOWCASE (before / after) ============== -->
+<section class="showcase" id="showcase">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">The transformation</span>
+      <h2 class="section-title">Oracle Reports XML in. Uploadable RDL out.</h2>
+      <p class="section-sub">Not a lossy export — a structural translation. SQL dialect, format masks, bind variables, and every layout field are carried across to their SSRS equivalents.</p>
+    </div>
+    <div class="showcase-panes">
+      <div class="code-pane">
+        <div class="code-pane-head">report.xml <span class="pill pill-oracle">Oracle</span></div>
+<pre><span class="c">&lt;!-- Oracle Reports XML --&gt;</span>
+&lt;report name=<span class="s">"WIDGET_ORDERS"</span>&gt;
+  &lt;dataSource name=<span class="s">"Q_ORDERS"</span>&gt;
+    &lt;select&gt;
+      SELECT order_id,
+             <span class="d">NVL</span>(amount, 0) amount,
+             <span class="d">TO_CHAR</span>(dt, <span class="s">'MM/DD/YYYY'</span>)
+        FROM orders
+       WHERE region = <span class="d">:P_REGION</span>
+    &lt;/select&gt;
+  &lt;field source=<span class="s">"AMOUNT"</span>
+         formatMask=<span class="s">"$NNN,NN0.00"</span>/&gt;
+&lt;/report&gt;</pre>
+      </div>
+      <div class="showcase-arrow" aria-hidden="true">&rarr;</div>
+      <div class="code-pane">
+        <div class="code-pane-head">report.rdl <span class="pill pill-rdl">SSRS</span></div>
+<pre><span class="c">&lt;!-- SSRS RDL 2008 — uploadable --&gt;</span>
+&lt;Report xmlns=<span class="s">"…/reportdefinition"</span>&gt;
+  &lt;DataSet Name=<span class="s">"Q_ORDERS"</span>&gt;
+    &lt;CommandText&gt;
+      SELECT order_id,
+             <span class="k">ISNULL</span>(amount, 0) amount,
+             <span class="k">FORMAT</span>(dt, <span class="s">'MM/dd/yyyy'</span>)
+        FROM orders
+       WHERE region = <span class="k">@P_REGION</span>
+    &lt;/CommandText&gt;
+    &lt;Field Name=<span class="s">"AMOUNT"</span>/&gt;
+  &lt;/DataSet&gt;
+  &lt;Textbox Name=<span class="s">"F_AMOUNT"</span>&gt;
+    &lt;Value&gt;<span class="k">=Fields!AMOUNT.Value</span>&lt;/Value&gt;
+    &lt;Format&gt;<span class="k">C2</span>&lt;/Format&gt;
+&lt;/Report&gt;</pre>
+      </div>
+    </div>
+    <p class="showcase-legend">Real translations in this example: <b>NVL&nbsp;&rarr;&nbsp;ISNULL</b> · <b>TO_CHAR&nbsp;&rarr;&nbsp;FORMAT</b> · Oracle <b>:bind&nbsp;&rarr;&nbsp;@param</b> · <b>formatMask&nbsp;&rarr;&nbsp;&lt;Format&gt;</b> · every field becomes an addressable <b>=Fields!…</b> textbox.<br/><span style="color:var(--slate-400);font-size:12.5px;">Synthetic sample — the engine carries zero per-report data; this is illustrative only.</span></p>
+  </div>
+</section>
+
+<!-- ============== TAB FEATURES ============== -->
+<section class="tabs-section" id="tabs">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">What you see</span>
+      <h2 class="section-title">Four tabs. Everything you need.</h2>
+      <p class="section-sub">After ingesting your artifacts, the app lays out a converted preview, the raw RDL, distribution logic, and drill-through generation — side-by-side.</p>
+    </div>
+
+    <div class="feature-grid">
+      <div class="feature-card">
+        <div class="feature-icon" aria-hidden="true">🖼️</div>
+        <span class="feature-tag">Tab 1</span>
+        <h3>HTML Mockup</h3>
+        <p>Rendered preview of how the converted report will look — frontend mode with sample data, plus a backend mode showing the Report Builder skeleton.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" aria-hidden="true">📄</div>
+        <span class="feature-tag">Tab 2</span>
+        <h3>RDL XML</h3>
+        <p>The raw generated RDL with one-click copy. Inspect every <code>DataSource</code>, <code>DataSet</code>, and Tablix before downloading.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" aria-hidden="true">📧</div>
+        <span class="feature-tag">Tab 3</span>
+        <h3>Bursting</h3>
+        <p>Detected per-recipient distribution with an editable Distribution Settings form and a downloadable Burst Pack (.zip) — SQL stub, PowerShell driver, email config.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" aria-hidden="true">🌿</div>
+        <span class="feature-tag">Tab 4</span>
+        <h3>Sub-Reports</h3>
+        <p>Drill-through child report stub generation. Drop child artifacts, get a child RDL wired up to the parent's parameters.</p>
+      </div>
+      <div class="feature-card highlight">
+        <div class="feature-icon" aria-hidden="true">🔒</div>
+        <span class="feature-tag">Key feature</span>
+        <h3>Data Source Binding</h3>
+        <p>Type your report server's shared data source path once — every generated RDL (main report, sub-reports, burst pack) ships pre-bound to it. Upload and run: no repointing, no refresh dance, and SSRS never prompts for a parameter value.</p>
+      </div>
+      <div class="feature-card highlight">
+        <div class="feature-icon" aria-hidden="true">🧪</div>
+        <span class="feature-tag">Key feature</span>
+        <h3>Render-Verified Output</h3>
+        <p>Every layout shape in the test suite is rendered through Microsoft's own ReportViewer processing engine — the same RDL code path SSRS runs — and the produced PDF is measured: page cadence, blank-page detection, geometry. Not "should work": rendered.</p>
+      </div>
+      <div class="feature-card highlight">
+        <div class="feature-icon" aria-hidden="true">📦</div>
+        <span class="feature-tag">Key feature</span>
+        <h3>Burst Pack</h3>
+        <p>Production-deployable zip: burst query SQL stub, PowerShell distribution driver, and email config. Designed for SSRS Standard via service account.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== HOW IT WORKS ============== -->
+<section class="how" id="how">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Workflow</span>
+      <h2 class="section-title">Three steps from XML to deployed report</h2>
+      <p class="section-sub">Designed to handle any Oracle Reports XML. Manual SSRS touch-up at the end keeps you in control of the deploy.</p>
+    </div>
+
+    <div class="steps">
+      <div class="step">
+        <div class="step-num">1</div>
+        <h3>Drop Oracle XML or a folder</h3>
+        <p>The ingest engine auto-classifies XML, SQL, DOCX, RDF, and PNG/JPG screenshots — drop a single file or a whole folder and let it sort itself out.</p>
+        <span class="step-tag">.xml · .sql · .docx · .rdf · .png</span>
+      </div>
+      <div class="step">
+        <div class="step-num">2</div>
+        <h3>Review the mockup, tweak if needed</h3>
+        <p>Check the HTML preview, scan the RDL, edit distribution settings, and generate sub-report stubs — all before downloading.</p>
+        <span class="step-tag">preview → tweak → download</span>
+      </div>
+      <div class="step">
+        <div class="step-num">3</div>
+        <h3>Upload, point, refresh</h3>
+        <p>Drop the RDL into Report Builder, point it at your shared data source, refresh fields, and publish. No "Define Query Parameters" dialog.</p>
+        <span class="step-tag">.rdl → Report Builder → deploy</span>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== PIPELINE ============== -->
+<section class="pipeline" id="pipeline">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Under the hood</span>
+      <h2 class="section-title">A six-stage conversion pipeline</h2>
+      <p class="section-sub">Each stage is a small, independently-tested module. An unfamiliar layout degrades to a clear note instead of crashing — so you always get a downloadable RDL.</p>
+    </div>
+    <div class="pipe-flow">
+      <div class="pipe-stage"><div class="pipe-ico" aria-hidden="true">📥</div><h4>Ingest</h4><p>Classify mixed artifacts<br/><code>.xml · .sql · .docx</code></p></div>
+      <div class="pipe-stage"><div class="pipe-ico" aria-hidden="true">🧩</div><h4>Parse</h4><p>Oracle XML → typed model<br/><code>ParsedReport</code></p></div>
+      <div class="pipe-stage"><div class="pipe-ico" aria-hidden="true">🔁</div><h4>Translate</h4><p>PL/SQL → T-SQL<br/><code>dbo.fn_*</code> stubs</p></div>
+      <div class="pipe-stage"><div class="pipe-ico" aria-hidden="true">🏗️</div><h4>Generate</h4><p>Emit SSRS RDL<br/>Tablix · datasets</p></div>
+      <div class="pipe-stage"><div class="pipe-ico" aria-hidden="true">🛡️</div><h4>Validate</h4><p>Real RDL 2008 XSD<br/>+ pre-flight rules</p></div>
+      <div class="pipe-stage"><div class="pipe-ico" aria-hidden="true">👁️</div><h4>Preview</h4><p>HTML mockup<br/>+ fidelity report</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== WHY DIFFERENT ============== -->
+<section class="diff" id="why">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Why it's different</span>
+      <h2 class="section-title">Built for the parts that other converters skip</h2>
+      <p class="section-sub">Most tools stop at "well-formed RDL." Oracle2SSRS keeps going — distribution, drill-through, and the credentials problem that wastes an afternoon every deploy.</p>
+    </div>
+
+    <div class="diff-grid">
+      <div class="diff-card">
+        <h3>SharedDataSourceReference design <span class="diff-badge">load-bearing</span></h3>
+        <p>RDL is emitted with a <code>DataSourceReference</code> pointed at the shared data source path <em>you</em> configure in the sidebar — no embedded connection string, no credentials block. When the path matches a shared data source on your server, the upload binds automatically. Every parameter carries a <code>=Nothing</code> default and every query bind is wired, so the "Define Query Parameters" dialog never pops — at upload, Refresh Fields, or run.</p>
+        <p>This is the difference between a 30-second deploy and a 30-minute one.</p>
+      </div>
+      <div class="diff-card">
+        <h3>Verified with Microsoft's rendering engine <span class="diff-badge">RenderLab</span></h3>
+        <p>The repo ships <code>tools/renderlab</code>: a harness that feeds generated RDLs to Microsoft's ReportViewer LocalReport engine — the same processing code SSRS runs — with synthetic data, renders real PDFs, and measures them: page cadence, blank pages, border-rect centering. Publish-time semantic rules that XSD validation can never catch (Lookup/aggregate restrictions, TablixMember consistency) are caught here, before you ever upload.</p>
+        <p>One command fetches the official Microsoft runtime from NuGet; the rendering checks then run as part of the standard pytest suite.</p>
+      </div>
+      <div class="diff-card">
+        <h3>Bursting that actually ships <span class="diff-badge">production</span></h3>
+        <p>Detects bursting patterns in the source Oracle layout and emits a Burst Pack: SQL stub for the recipient query, a PowerShell driver to render and email per-recipient, and an email config template.</p>
+        <p>Works against SSRS Standard via a service account — no SSRS Enterprise required.</p>
+      </div>
+      <div class="diff-card">
+        <h3>PL/SQL to T-SQL translation</h3>
+        <p>Handles <code>DECODE</code>, <code>NVL</code>, <code>TO_CHAR</code>, <code>TRUNC</code>, <code>SYSDATE</code>, <code>INSTR</code>, <code>SUBSTR</code>, <code>(+)</code> joins, <code>CONNECT BY</code>, <code>LISTAGG</code>, <code>ROWNUM</code>, lexical refs, bind variables, and package functions.</p>
+        <p>Output is plain T-SQL you can paste straight into SSMS.</p>
+      </div>
+      <div class="diff-card">
+        <h3>Pre-flight audit + cross-validation</h3>
+        <p>Before download, deterministic rules check parse health, namespace, datasources, datasets, Oracle leftovers, parameter consistency, and layout integrity.</p>
+        <p>Supporting docs (SQL .docx, PDFs, screenshots) get cross-checked against the parsed model to catch parser drift before it ships.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== SAFETY / FIDELITY ============== -->
+<section class="safety" id="safety">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Trust the output</span>
+      <h2 class="section-title">Upload-safe and faithful — by construction</h2>
+      <p class="section-sub">Two independent self-checks run on every conversion, so you know it will upload to SSRS and that nothing was silently dropped.</p>
+    </div>
+    <div class="safety-grid">
+      <div class="safety-card">
+        <div class="ico ico-teal" aria-hidden="true">🛡️</div>
+        <h3>Will it upload? — the schema gate</h3>
+        <p>Every generated RDL is validated against <b>Microsoft's real RDL 2008 schema</b> — the same definition Report Server uses — plus a pre-flight pass for the object-model rules a schema can't express: duplicate <code>DataSet</code>/<code>Field</code> names, invalid identifiers, parameter-case mismatches.</p>
+        <p>If it would fail at upload, you see a <b>blocker</b> here first — not a cryptic SSRS error an hour later.</p>
+      </div>
+      <div class="safety-card">
+        <div class="ico ico-green" aria-hidden="true">✓</div>
+        <h3>Is it faithful? — the fidelity report</h3>
+        <p>The converter re-parses its <em>own</em> RDL and compares it back to the source: every column, parameter, format mask, and formula is accounted for. You get a per-report <b>fidelity score</b> and an explicit list of anything that still needs manual wiring.</p>
+        <div class="fidelity-meter">
+          <span style="font-size:11px;text-transform:uppercase;letter-spacing:0.08em;color:var(--slate-500);">Fidelity</span>
+          <span class="bar"><span></span></span>
+          <b>100%</b>
+        </div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== ADVANCED VIEWS ============== -->
+<section class="advanced">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Power-user views</span>
+      <h2 class="section-title">Advanced tabs, one toggle away</h2>
+      <p class="section-sub">Hidden by default so the core flow stays clean. Flip them on when you need to debug a tricky conversion.</p>
+    </div>
+
+    <div class="advanced-list">
+      <div class="advanced-item">
+        <div class="advanced-item-name">Side-by-Side</div>
+        <div class="advanced-item-desc">Oracle XML ↔ RDL XML</div>
+      </div>
+      <div class="advanced-item">
+        <div class="advanced-item-name">Live Data</div>
+        <div class="advanced-item-desc">Preview with real DB</div>
+      </div>
+      <div class="advanced-item">
+        <div class="advanced-item-name">Validation</div>
+        <div class="advanced-item-desc">T-SQL validation results</div>
+      </div>
+      <div class="advanced-item">
+        <div class="advanced-item-name">Deploy Checklist</div>
+        <div class="advanced-item-desc">Post-download SSRS steps</div>
+      </div>
+      <div class="advanced-item">
+        <div class="advanced-item-name">Extras</div>
+        <div class="advanced-item-desc">Audit trail, AI prompts</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== INSTALL ============== -->
+<section class="install" id="install">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">Install</span>
+      <h2 class="section-title">Run it locally in under a minute</h2>
+      <p class="section-sub">No database required to try it. The seeded SQLite sample lets you see live previews immediately.</p>
+    </div>
+
+    <div class="install-grid">
+      <div class="install-card">
+        <h3>
+          Clone &amp; run
+          <span class="badge">web app</span>
+        </h3>
+<pre class="install-code"><span class="c"># clone the repo</span>
+<span class="k">git clone</span> https://github.com/Maximilian741/OFR2SSRS.git
+<span class="k">cd</span> OFR2SSRS
+
+<span class="c"># Windows</span>
+run.bat
+
+<span class="c"># macOS / Linux / WSL</span>
+./run.sh
+
+<span class="c"># then open</span>
+http://127.0.0.1:5057</pre>
+      </div>
+
+      <div class="install-card">
+        <h3>
+          Batch CLI
+          <span class="badge">optional</span>
+        </h3>
+<pre class="install-code"><span class="c"># convert a folder of XMLs</span>
+<span class="k">python</span> backend/cli.py samples/oracle \
+     --out ./out
+
+<span class="c"># or POST a single file via HTTP</span>
+<span class="k">curl</span> -F file=@report.xml \
+     http://localhost:5057/api/convert</pre>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============== FAQ ============== -->
+<section class="faq" id="faq">
+  <div class="container">
+    <div class="section-header">
+      <span class="section-eyebrow">FAQ</span>
+      <h2 class="section-title">Questions, answered</h2>
+    </div>
+    <div class="faq-list">
+      <details class="faq-item"><summary>Do I need Oracle installed to use it?</summary><p>No. It works from the <b>exported Oracle Reports XML</b> (or <code>.rdf</code> / <code>.sql</code>) — no Oracle client, database connection, or license required. Drop the file in and go.</p></details>
+      <details class="faq-item"><summary>Which SSRS versions can host the output?</summary><p>The generated RDL targets the <b>RDL 2008 schema</b>, which uploads to SQL Server Reporting Services 2008 R2 through 2016 / 2017 / 2019 / 2022, plus Power BI Report Server. Newer servers host the 2008 definition without complaint.</p></details>
+      <details class="faq-item"><summary>Is my report data safe?</summary><p>Yes. The app runs <b>entirely on your machine</b> (a local Flask server) — nothing is sent anywhere. And the project itself ships <b>zero real report data</b>: every fixture and sample is synthetic.</p></details>
+      <details class="faq-item"><summary>What doesn't convert automatically?</summary><p>Oracle PL/SQL formula bodies (<code>CF_</code> / <code>CP_</code>) become <b>wireable placeholders</b>, and package functions get <code>dbo.fn_*</code> T-SQL stubs to finish at deploy time. You're never guessing what's left — the <b>fidelity report</b> lists each item explicitly.</p></details>
+      <details class="faq-item"><summary>Does it handle bursting and drill-through?</summary><p>Both. Per-recipient distribution is detected and packaged as a downloadable <b>Burst Pack</b> (recipient SQL, a PowerShell driver, email config). Drill-through child reports are detected and generated as wired-up child RDL stubs.</p></details>
+      <details class="faq-item"><summary>Is it actually generic, or tuned to specific reports?</summary><p>Generic. <b>No report names are hardcoded</b> in the conversion engine — a standing test fails if any sneak in. Output is driven entirely by the parsed structure and layout geometry, never a per-report lookup table.</p></details>
+    </div>
+  </div>
+</section>
+
+<!-- ============== CTA BAR ============== -->
+<div class="cta-bar">
+  <div class="container">
+    <h2>Ready to move a report off Oracle?</h2>
+    <p>Clone the repo, drop in your first XML, and see how much of the migration just disappears.</p>
+    <a href="https://github.com/Maximilian741/OFR2SSRS" class="btn btn-primary" target="_blank" rel="noopener">
+      <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor"><path d="M12 .5C5.65.5.5 5.65.5 12c0 5.08 3.29 9.39 7.86 10.91.57.1.78-.25.78-.55v-2c-3.2.7-3.87-1.37-3.87-1.37-.52-1.32-1.27-1.67-1.27-1.67-1.04-.71.08-.7.08-.7 1.15.08 1.76 1.18 1.76 1.18 1.02 1.76 2.69 1.25 3.34.95.1-.74.4-1.25.73-1.54-2.55-.29-5.24-1.27-5.24-5.66 0-1.25.45-2.27 1.18-3.07-.12-.29-.51-1.46.11-3.04 0 0 .96-.31 3.15 1.17a10.95 10.95 0 0 1 5.74 0c2.18-1.48 3.14-1.17 3.14-1.17.62 1.58.23 2.75.11 3.04.74.8 1.18 1.82 1.18 3.07 0 4.4-2.69 5.36-5.25 5.65.41.36.78 1.06.78 2.13v3.16c0 .31.21.66.79.55C20.21 21.39 23.5 17.08 23.5 12 23.5 5.65 18.35.5 12 .5z"/></svg>
+      Star on GitHub
+    </a>
+  </div>
+</div>
+
+<!-- ============== FOOTER ============== -->
+<footer>
+  <div class="container">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <div class="brand-mark">O2</div>
+        Oracle2SSRS
+      </div>
+      <div class="footer-links">
+        <!-- Pages serves .md raw, so link to the repo blob view for rendered docs -->
+        <a href="https://github.com/Maximilian741/OFR2SSRS/blob/master/docs/ARCHITECTURE.md" target="_blank" rel="noopener">Architecture</a>
+        <a href="https://github.com/Maximilian741/OFR2SSRS/blob/master/docs/API.md" target="_blank" rel="noopener">API</a>
+        <a href="https://github.com/Maximilian741/OFR2SSRS/blob/master/docs/DEMO_SCRIPT.md" target="_blank" rel="noopener">Demo Script</a>
+        <a href="https://github.com/Maximilian741/OFR2SSRS/blob/master/docs/COWORKER_DEMO.md" target="_blank" rel="noopener">Coworker Demo</a>
+        <a href="https://github.com/Maximilian741/OFR2SSRS/blob/master/LICENSE" target="_blank" rel="noopener">License (Elastic License 2.0)</a>
+      </div>
+    </div>
+
+    <div class="pages-note">
+      <strong>Pages not loading?</strong> This site is served from the repo <em>root</em> (an <code>index.html</code> + a <code>.nojekyll</code> marker). In
+      <code>Settings → Pages → Source → Deploy from a branch</code>, set Branch <code>master</code>, Folder <code>/ (root)</code>, save, and wait ~60 seconds for the build.
+    </div>
+
+    <div class="footer-bottom">
+      <span>© 2026 Oracle2SSRS. Source-available under the Elastic License 2.0 — free for internal use.</span>
+      <span>Built at a hackathon. Hardened for the real world.</span>
+    </div>
+  </div>
+</footer>
+
+</body>
+</html>

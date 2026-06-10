@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic drill-through report: a field hyperlinks to ANOTHER report.
+     Has P_AS_PATH (which alone used to mis-trigger the bursting flag) but NO
+     per-row distribution/email markers, so it must be classified drill-through,
+     not bursting. No client data. -->
+<report name="SAMPLE_DRILLTHROUGH" DTDVersion="9.0.2.0.10">
+  <data>
+    <userParameter name="P_AS_PATH" datatype="character" initialValue="CHILD_REPORT"
+     label="Report Path" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_PERM_NUM" datatype="character" width="20"
+     label="Permit Number" defaultWidth="0" defaultHeight="0"/>
+    <dataSource name="Q_MAIN">
+      <select canParse="no"><![CDATA[SELECT PERM_NUM, PERMITTEE FROM PERMITS WHERE PERM_NUM = :P_PERM_NUM]]></select>
+      <group name="G_MAIN">
+        <dataItem name="PERM_NUM" datatype="vchar2" columnOrder="1" defaultLabel="Permit Number">
+          <dataDescriptor expression="PERM_NUM" width="20"/>
+        </dataItem>
+        <dataItem name="PERMITTEE" datatype="vchar2" columnOrder="2" defaultLabel="Permittee" breakOrder="none">
+          <dataDescriptor expression="PERMITTEE" width="64"/>
+        </dataItem>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+  <section name="main" width="8.50000" height="11.00000">
+    <body width="7.50000" height="9.00000">
+      <location x="0.50000" y="0.50000"/>
+      <repeatingFrame name="R_MAIN" source="G_MAIN" printDirection="down">
+        <geometryInfo x="0.00000" y="0.00000" width="7.00000" height="0.30000"/>
+        <field name="F_PERM_NUM" source="PERM_NUM" minWidowLines="1">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="0.00000" y="0.00000" width="2.00000" height="0.20000"/>
+        </field>
+        <field name="F_PERMITTEE" source="PERMITTEE" minWidowLines="1">
+          <webSettings hyperlink="&amp;CP_CHILD_ENVELOPE"/>
+          <font face="Arial" size="10"/>
+          <geometryInfo x="2.20000" y="0.00000" width="3.00000" height="0.20000"/>
+        </field>
+      </repeatingFrame>
+    </body>
+    <margin>
+      <text name="B_Title" minWidowLines="1">
+        <textSettings justify="center"/>
+        <geometryInfo x="2.50000" y="0.20000" width="2.50000" height="0.20000"/>
+        <textSegment><font face="Arial" size="12" bold="yes"/>
+          <string><![CDATA[Permit Roster]]></string></textSegment>
+      </text>
+    </margin>
+  </section>
+  </layout>
+</report>

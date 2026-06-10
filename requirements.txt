@@ -1,0 +1,11 @@
+Flask>=3.0.0
+lxml>=5.0.0
+python-docx>=1.1.0
+Werkzeug>=3.0.0
+pytest>=7.0.0
+anthropic>=0.40.0
+python-dotenv>=1.0.0
+# Used by the batch Migration Assessment's --render measurement step and the
+# RenderLab verification tests (both degrade gracefully without it, but it
+# should work out of the box).
+pypdf>=3.0.0
