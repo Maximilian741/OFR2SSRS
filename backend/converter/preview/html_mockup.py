@@ -554,6 +554,11 @@ def _sample_for_source(src, idx):
         (("id", "code", "key"),            SHORT_ID),
         (("nm", "name", "label", "group"), GROUP_POOL),
     ]
+    # Boolean indicator / flag columns (Oracle '*_Ind', '*_Indicator',
+    # '*_Flag', '*_YN'): a Yes/No marker, never a generic "Sample Value A"
+    # text block. Precise suffix match so 'binding'/'finding' don't trip it.
+    if re.search(r"(_|\b)(ind|indicator|flag|yn)$", u, re.IGNORECASE):
+        return ["Y", "N"][idx % 2]
     for keywords, pool in KEYWORD_MAP:
         for kw in keywords:
             if kw and kw in key:
@@ -1762,17 +1767,65 @@ def _decollide(elems):
     return elems
 
 
-def _doc_collect_positioned(report, section="section_main"):
+def _frame_has_content(g) -> bool:
+    """True if a frame (or its subtree) carries any field/text — i.e. it is
+    real page content, not an empty grouping wrapper."""
+    if [f for f in (getattr(g, "fields", None) or [])
+            if (getattr(f, "text", "") or getattr(f, "source", "") or "").strip()]:
+        return True
+    return any(_frame_has_content(c) for c in (getattr(g, "children", None) or []))
+
+
+def _is_footer_frame(g) -> bool:
+    """A page footer band (e.g. M_*_Footer_G at the bottom of the sheet):
+    attaches to every page, never its own page."""
+    nm = (getattr(g, "name", "") or "").lower()
+    if "footer" in nm:
+        return True
+    return float(getattr(g, "y", 0.0) or 0.0) >= 10.0 \
+        and float(getattr(g, "height", 0.0) or 0.0) <= 0.6
+
+
+def _section_page_groups(report, section="section_header"):
+    """Split a header-resident section into one PAGE PER top-level content
+    frame. Oracle packs several logical pages into one <section> — a criteria
+    cover, a stat table (pageBreakBefore="yes"), and sometimes a repeating
+    detail frame — all as sibling frames, some sharing y=0. y-banding can't
+    separate two frames at the same y, so we split by FRAME IDENTITY: each
+    top-level content frame becomes its own page (re-based to y=0), in
+    document order. Footer frames are excluded (they repeat on every page).
+    Returns a list of LayoutGroup roots; an empty list means 'render the
+    whole section as one page' (the normal, unchanged path)."""
+    sec = _find_section(report.layout or [], section)
+    if sec is None:
+        return []
+    roots = [c for c in (sec.children or [])
+             if not _is_footer_frame(c) and _frame_has_content(c)]
+    # Only treat as multi-page when there is genuinely more than one content
+    # frame (otherwise the single-page path is byte-identical to before).
+    return roots if len(roots) > 1 else []
+
+
+def _doc_collect_positioned(report, section="section_main", root=None):
     """Walk the given section and return every positioned element as a flat
     list of dicts: {kind, text|source, x, y, w, h, bold, size, color, align,
     bg}. Geometry is absolute within the section. Generic: nothing
     report-specific. ``section`` is "section_main" for a per-record document,
     or "section_header" for a header-resident summary report's leading page.
-    """
-    main = _find_section(report.layout or [], section)
+
+    ``root`` restricts collection to ONE top-level frame's subtree (one
+    physical page of a multi-page header section), re-basing y so the page
+    starts at the top of its own sheet."""
+    main = root if root is not None else _find_section(report.layout or [], section)
     if main is None:
         return [], 8.5, 11.0
     out = []
+    # Re-base AFTER collecting (below), using the real min-y of this frame's
+    # content -- a frame's DECLARED y is unreliable (nested children can sit
+    # above it, which produced negative y and upward bleed when we subtracted
+    # the declared y directly).
+    _ybase = 0.0
+    _y0, _y1 = 0.0, float("inf")
 
     def walk(g, frame_bg):
         gbg_raw = getattr(g, "background_color", "")
@@ -1782,13 +1835,15 @@ def _doc_collect_positioned(report, section="section_main"):
         # genuine MEANINGFUL band (dark, e.g. the #3D3D3D invoice shading).
         gbg = gbg_raw if (gbg_raw and _is_dark(gbg_raw)) else ""
         bg = gbg or frame_bg
+        _gy = float(g.y or 0)
         if gbg and (g.width or 0) > 0.2 and (g.height or 0) > 0.05:
-            out.append({"kind": "panel", "x": float(g.x or 0), "y": float(g.y or 0),
+            out.append({"kind": "panel", "x": float(g.x or 0),
+                        "y": max(0.0, _gy - _ybase),
                         "w": float(g.width or 0), "h": float(g.height or 0),
                         "bg": gbg})
         for f in (g.fields or []):
             x = float(getattr(f, "x", 0.0) or 0.0)
-            y = float(getattr(f, "y", 0.0) or 0.0)
+            y = float(getattr(f, "y", 0.0) or 0.0) - _ybase  # re-base to sheet top
             w = float(getattr(f, "width", 0.0) or 0.0)
             h = float(getattr(f, "height", 0.0) or 0.0)
             col = _normalize_color(getattr(f, "color", "") or "", "#000000")
@@ -1813,6 +1868,34 @@ def _doc_collect_positioned(report, section="section_main"):
             walk(c, bg)
 
     walk(main, "")
+    # Re-base to the real top of this frame's content when scoping to one
+    # page-root (subtract the minimum y so the page starts at a small top
+    # margin, never negative -- nested children can sit above the frame's
+    # declared y).
+    if root is not None and out:
+        _min_y = min(e["y"] for e in out)
+        _shift = _min_y - 0.25  # keep a 0.25in top margin
+        if abs(_shift) > 1e-6:
+            for e in out:
+                e["y"] = max(0.0, e["y"] - _shift)
+        # Collapse large empty vertical bands. Oracle container frames
+        # "shrink to fit" at render time, so a header block designed at y=0
+        # and a data block designed 4in lower print compactly together --
+        # but our static geometry keeps the design gap, leaving a big blank
+        # stripe (engine-verified on CMVGY's summary frame). Close any gap
+        # wider than 1.5in down to a normal 0.4in row gap. Conservative: a
+        # >1.5in band with zero elements is unintended whitespace.
+        ys = sorted(out, key=lambda e: e["y"])
+        cursor = ys[0]["y"]
+        shift_acc = 0.0
+        for e in ys:
+            top = e["y"] - shift_acc
+            gap = top - cursor
+            if gap > 1.5:
+                shift_acc += gap - 0.4
+                top = cursor + 0.4
+            e["y"] = top
+            cursor = max(cursor, top + (e["h"] or 0.2))
     out = _decollide(out)
     # page size from section body, fallback to letter
     pw, ph = 8.5, 11.0
@@ -1827,6 +1910,19 @@ def _doc_collect_positioned(report, section="section_main"):
     return out, max(8.0, maxx + 0.3), max(10.0, maxy + 0.4)
 
 
+def _humanize_report_title(name: str) -> str:
+    """'CMVGY_GRANT_STATUS' -> 'CMVGY Grant Status'. Underscores become
+    spaces; a pure-consonant all-caps token is treated as an acronym and kept
+    (CMVGY, MVWF), while a normal word is title-cased (GRANT -> Grant)."""
+    out = []
+    for tok in re.split(r"[_\s]+", (name or "").strip()):
+        if not tok:
+            continue
+        is_acronym = tok.isupper() and not re.search(r"[AEIOU]", tok)
+        out.append(tok if is_acronym else tok.capitalize())
+    return " ".join(out)
+
+
 def _doc_field_caption_and_value(src, report, label_map, idx):
     """For a data field, return 'Caption: value' sample text. Uses the Oracle
     defaultLabel when present, else the field name; value from _sample_for_source.
@@ -1834,6 +1930,13 @@ def _doc_field_caption_and_value(src, report, label_map, idx):
     u = (src or "").upper()
     if u in ("CURRENTDATE", "CURRENT_DATE"):
         return _sample_for_source("date", idx)
+    # A formula field named after the report (CP_<REPORTNAME> / CF_<REPORTNAME>)
+    # is the report's TITLE formula -- show the report's own title, never a
+    # keyword-matched sample (e.g. CP_CMVGY_GRANT_STATUS must read as the
+    # report name, not "Active" from a STATUS keyword match). Generic.
+    rname = (getattr(report, "name", "") or "").upper()
+    if rname and u.startswith(("CP_", "CF_")) and u[3:] == rname:
+        return _humanize_report_title(report.name)
     if u.startswith(("CF_", "CP_")):
         # PL/SQL-computed formula -> show a sample value (not a raw [CF_X]
         # token) so the sample-data preview reads as a finished document.
@@ -1844,12 +1947,13 @@ def _doc_field_caption_and_value(src, report, label_map, idx):
 
 
 def _render_generic_document_page(report, idx, page_num, total_pages,
-                                  section="section_main"):
+                                  section="section_main", root=None):
     """Paint a section's actual frames/texts/fields at their real positions.
     This is the GENERAL geometry-driven renderer -- it shows whatever the
     report contains (letterhead, address block, body, signature, invoice, or a
-    header-resident summary/criteria table), never hardcoded sample content."""
-    elems, pw, ph = _doc_collect_positioned(report, section)
+    header-resident summary/criteria table), never hardcoded sample content.
+    ``root`` restricts to one top-level frame when a section packs several."""
+    elems, pw, ph = _doc_collect_positioned(report, section, root=root)
     PAD = 0.0
     SCALE = 96.0  # px per inch on screen
 
@@ -2004,16 +2108,30 @@ def _is_header_summary_preview(report):
 
 
 def _render_header_summary_pages(report):
-    """Header-resident summary/accounting report: page 1 is the section_header
-    criteria cover + summary table (geometry-driven); page 2 is the
-    section_main detail layout, when present."""
+    """Header-resident summary/accounting report. The section_header itself
+    may pack SEVERAL physical pages (e.g. a criteria cover + a stat table
+    separated by Oracle's pageBreakBefore) -- split it on those breaks so
+    each renders on its own sheet, matching the Oracle output 1:1. Then the
+    section_main detail layout, when present, is a further page."""
+    roots = _section_page_groups(report, "section_header")
     main = _find_section(report.layout or [], "section_main")
-    total = 2 if main is not None else 1
-    pages = [_render_generic_document_page(report, 0, 1, total,
-                                           section="section_header")]
-    if main is not None:
-        pages.append(_render_generic_document_page(report, 0, 2, total,
-                                                   section="section_main"))
+    pages = []
+    if roots:
+        total = len(roots) + (1 if main is not None else 0)
+        for i, r in enumerate(roots):
+            pages.append(_render_generic_document_page(
+                report, 0, i + 1, total, section="section_header", root=r))
+        if main is not None:
+            pages.append(_render_generic_document_page(
+                report, 0, len(roots) + 1, total, section="section_main"))
+    else:
+        # Single content frame -> whole-section render (unchanged path).
+        total = 2 if main is not None else 1
+        pages.append(_render_generic_document_page(
+            report, 0, 1, total, section="section_header"))
+        if main is not None:
+            pages.append(_render_generic_document_page(
+                report, 0, 2, total, section="section_main"))
     return _render_pages_wrapper(pages)
 
 

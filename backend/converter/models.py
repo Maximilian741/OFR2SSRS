@@ -253,6 +253,12 @@ class LayoutGroup:
     # The 6i style instead nests kind="matrix_col"/"matrix_row"/
     # "matrix_cell" child groups whose fields carry the dimensions/cells.
     matrix_attrs: Dict[str, str] = field(default_factory=dict)
+    # Oracle <generalLayout pageBreakBefore="yes"/>: this frame starts a NEW
+    # physical page. Load-bearing for reports that pack several logical pages
+    # (e.g. a criteria cover + a stat table) into one <section>; without it
+    # the preview/RDL stack them on one sheet. The authoritative page-split
+    # signal Oracle itself uses.
+    page_break_before: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -280,6 +286,11 @@ class ParsedReport:
     layout: List[LayoutGroup] = field(default_factory=list)
     triggers: List[TriggerCode] = field(default_factory=list)
     embedded_images: List[EmbeddedImage] = field(default_factory=list)
+    # Oracle <graph>/<chart>/<rw:graph> objects. We don't auto-translate the
+    # full chart definition (SSRS Chart is a different model), but we MUST
+    # surface them so a chart is never silently dropped -- each is
+    # {title, plot_value, category, type}.
+    charts: List[Dict[str, str]] = field(default_factory=list)
     raw_xml: str = ""               # for the side-by-side view
     warnings: List[str] = field(default_factory=list)
 

@@ -115,14 +115,51 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
         needs.append(f"{len(formula_srcs)} Oracle PL/SQL formula(s) wired as NULL placeholders "
                      "(DS_REPORT_FORMULAS) -- supply the SQL/UDF at deploy time")
 
-    # 5) Declared <summary> totals -> an aggregate expression (informational).
+    # 5) Declared <summary> totals -> an aggregate expression. Each Oracle
+    # <summary> (group subtotal or grand total) should surface as an SSRS
+    # aggregate over its source column. If a declared summary's SOURCE
+    # column appears in NO aggregate expression in the RDL, that total was
+    # dropped -- surface it so a missing subtotal/grand-total never hides
+    # behind a 1.0 score (wild-corpus verified: group-break count subtotals).
     summ: List[dict] = []
     for q in (parsed.queries or []):
         summ.extend(_walk_summaries(getattr(q, "groups", None) or []))
     SSRS_AGG = re.compile(r"(?:Sum|Avg|Count|CountDistinct|Min|Max|First|Last|StDev|Var)"
                           r"\(Fields!", re.I)
     n_agg = len(SSRS_AGG.findall(rdl_xml or ""))
-    cats["summaries"] = {"declared": len(summ), "aggregates_in_rdl": n_agg}
+    agg_sources = {m.upper() for m in re.findall(
+        r"(?:Sum|Avg|Count|CountDistinct|Min|Max)\(Fields!([A-Za-z0-9_]+)\.Value",
+        rdl_xml or "", re.I)}
+    missing_tot = sorted({(s.get("source") or "").strip() for s in summ
+                          if (s.get("source") or "").strip()
+                          # Skip CF_/CP_ formula sources -- those are wired
+                          # as placeholders (category 4), not data-column
+                          # totals, so they're not "dropped" aggregates.
+                          and not re.match(r"(?i)^(CF|CP)_", (s.get("source") or "").strip())
+                          and (s.get("source") or "").strip().upper() not in agg_sources
+                          and _safe_up(s.get("source") or "") not in agg_sources})
+    cats["summaries"] = {"declared": len(summ), "aggregates_in_rdl": n_agg,
+                         "dropped_totals": missing_tot}
+    if missing_tot:
+        needs.append(
+            f"{len(missing_tot)} Oracle subtotal/grand-total summary(ies) "
+            f"not rendered as an aggregate -- add the total row(s) in Report "
+            f"Builder: {missing_tot[:8]}")
+
+    # 6) Charts / graphs -> not auto-built (SSRS Chart is a different model).
+    # Surface every one so a chart is never silently lost.
+    charts = list(getattr(parsed, "charts", None) or [])
+    cats["charts"] = {"count": len(charts),
+                      "titles": [c.get("title") or "(untitled)" for c in charts]}
+    if charts:
+        _desc = []
+        for c in charts:
+            t = c.get("title") or "(untitled)"
+            pv = c.get("plot_value") or ""
+            _desc.append(f"{t}" + (f" [plots {pv}]" if pv else ""))
+        needs.append(
+            f"{len(charts)} chart/graph(s) detected -- not auto-built; recreate "
+            f"as an SSRS Chart in Report Builder: {_desc[:6]}")
 
     # HARD score = the must-not-drop categories (params + columns).
     hard_total = cats["parameters"]["total"] + cats["columns"]["total"]

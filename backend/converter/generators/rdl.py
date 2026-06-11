@@ -5788,23 +5788,67 @@ def _find_matrix_spec(report) -> Optional[dict]:
 
     if not (col_fields and row_fields):
         return None
-    cells = cell_fields or col_fields[1:2] or row_fields[1:2]
+    row0, col0 = row_fields[0], col_fields[0]
+
+    # CELL = the measure. The 6i inline form names it explicitly
+    # (matrix_cell). The 9.0.2 frame-ref form does NOT, so pick a numeric
+    # data column that is NOT the row/col dimension (a leave-balance /
+    # amount / count) -- never a dimension's neighbor field like a name.
+    cells = list(cell_fields)
+    if not cells:
+        _dims = {row0.upper(), col0.upper()}
+        _NUMERIC = {"number", "integer", "float", "decimal", "long", "money"}
+        for q in (report.queries or []):
+            for it in (q.items or []):
+                nm = (it.name or "").strip()
+                if (nm and nm.upper() not in _dims
+                        and (getattr(it, "datatype", "") or "").lower() in _NUMERIC):
+                    cells.append(nm)
+            if cells:
+                break
+        # Last resort: a non-dimension dimension-frame neighbor.
+        if not cells:
+            cells = [f for f in (col_fields[1:] + row_fields[1:])
+                     if f.upper() not in _dims][:1]
     if not cells:
         return None
 
-    # Dominance: any field-bearing NON-matrix group in the same section?
-    def count_others(g, inside_mx):
-        ins = inside_mx or (g is mx)
+    # Dominance: is the matrix the section's primary content? A matrix
+    # report ALWAYS has supporting frames -- the dimension frames, a measure
+    # repeating frame, header-label frames -- all bound to the matrix's own
+    # fields. Those are NOT competing content. Only a frame carrying a DATA
+    # field OUTSIDE the matrix's {row, col, cells} set is an independent
+    # region that should keep the tabular path (wild-corpus verified: the
+    # HRMS leave-status matrix was wrongly judged mixed because its header
+    # and measure frames counted as "others").
+    _mx_fields = {row0.upper(), col0.upper()} | {c.upper() for c in cells}
+    attrs = getattr(mx, "matrix_attrs", {}) or {}
+    _own_frames = {(attrs.get("horizontalFrame") or "").strip(),
+                   (attrs.get("verticalFrame") or "").strip(),
+                   (mx.name or "").strip()}
+    _own_frames.discard("")
+
+    def count_outside(g, inside_mx):
+        # A frame is the matrix's own if it's the matrix, nested in it, or is
+        # named as a dimension frame (its extra fields are column/row header
+        # labels, e.g. an employee NAME beside the EMP_NO column key).
+        ins = inside_mx or (g is mx) or ((g.name or "").strip() in _own_frames)
         n = 0
-        if (not ins and (g.fields or [])
-                and (getattr(g, "kind", "") or "")
-                not in ("matrix", "matrix_col", "matrix_row", "matrix_cell")):
-            n = 1
+        # Only an independent REPEATING data region (its own detail table)
+        # competes with the matrix. A lone static field -- a company-name
+        # title, a page heading -- is not competing content and must not
+        # veto the pivot (wild-corpus verified: HRMS had a CO_NAME title).
+        if not ins and (getattr(g, "kind", "") or "") == "repeating_frame":
+            for f in (g.fields or []):
+                src = (getattr(f, "source", "") or "").strip().upper()
+                if src and src not in _mx_fields:
+                    n += 1
+                    break
         for c in (getattr(g, "children", None) or []):
-            n += count_others(c, ins)
+            n += count_outside(c, ins)
         return n
 
-    dominant = count_others(sec_root, False) == 0
+    dominant = count_outside(sec_root, False) == 0
 
     query = None
     for q in (report.queries or []):

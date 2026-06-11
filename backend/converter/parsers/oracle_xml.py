@@ -785,6 +785,14 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                      warnings: List[str],
                      embedded_images: List[EmbeddedImage]) -> None:
     """Walk the layout subtree, attaching fields to the most specific group."""
+    def _page_break_before(el) -> bool:
+        # Oracle stores it on a child <generalLayout pageBreakBefore="yes"/>.
+        for gl in el:
+            if _localname(gl) == "generalLayout":
+                if _attr(gl, "pageBreakBefore").lower() in ("yes", "true"):
+                    return True
+        return False
+
     for child in node:
         tag = _localname(child)
         if tag == "repeatingFrame":
@@ -799,6 +807,7 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                         kind="repeating_frame",
                         source_query=rf_source,
                         format_trigger=_format_trigger_of(child),
+                        page_break_before=_page_break_before(child),
                     )
                     _apply_geometry(grp, child)
                     _apply_visual_settings(grp, child)
@@ -818,6 +827,7 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                     name=fr_name,
                     kind="frame",
                     format_trigger=_format_trigger_of(child),
+                    page_break_before=_page_break_before(child),
                 )
                 _apply_geometry(grp, child)
                 _apply_visual_settings(grp, child)
@@ -1089,6 +1099,47 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
             EmbeddedImage(id=safe_id, mime_type=mime, hex_data=raw_hex))
         have_ids.add(safe_id.upper())
 
+    # Charts / graphs. Oracle stores these as <graph>/<chart>/<rw:graph>
+    # (paper layout) or <rw:graph src=.. series=.. dataValues=..> (web).
+    # We don't auto-build an SSRS Chart (a different model), but a chart
+    # must NEVER be silently dropped -- capture it so the user is told to
+    # recreate it. Generic: keyed on the standard element/attribute names.
+    charts = []
+    _CHART_TAGS = ("graph", "chart", "graphobject", "chartobject")
+    for el in root.iter():
+        ln = _localname(el).lower()
+        if ln not in _CHART_TAGS:
+            continue
+        # A chart object nests an inner config element (Oracle's <Graph>
+        # inside <graph>); count the OUTERMOST object once -- skip any
+        # graph/chart whose ancestor is also a graph/chart.
+        anc = el.getparent()
+        nested = False
+        while anc is not None:
+            if _localname(anc).lower() in _CHART_TAGS:
+                nested = True
+                break
+            anc = anc.getparent()
+        if nested:
+            continue
+        title = ""
+        for sub in el.iter():
+            if _localname(sub).lower() == "title":
+                title = _attr(sub, "text") or (sub.text or "").strip()
+                if title:
+                    break
+        charts.append({
+            "title": title,
+            "category": _attr(el, "series") or _attr(el, "src") or "",
+            "plot_value": _attr(el, "dataValues") or _attr(el, "value") or "",
+            "type": _attr(el, "graphType") or _attr(el, "chartType")
+                    or _attr(el, "type") or "chart",
+        })
+    if charts:
+        warnings.append(
+            f"{len(charts)} chart/graph object(s) detected -- not auto-built "
+            "(recreate as an SSRS Chart in Report Builder)")
+
     return ParsedReport(
         name=name,
         dtd_version=dtd_version,
@@ -1098,6 +1149,7 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
         layout=layout,
         triggers=triggers,
         embedded_images=embedded_images,
+        charts=charts,
         raw_xml=raw_xml,
         warnings=warnings,
     )

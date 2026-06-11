@@ -76,3 +76,38 @@ def test_detector_catches_a_dropped_column():
     assert fr["score"] < 1.0
     assert "DROPPED_COL" in fr["categories"]["columns"]["dropped"]
     assert fr["needs_attention"]
+
+
+def test_dropped_subtotal_is_surfaced_but_formula_summaries_are_not():
+    """A declared <summary> over a data column that the RDL never aggregates
+    must be surfaced (a missing subtotal/grand total). A CF_/CP_ formula
+    summary source must NOT be flagged -- those are wired separately."""
+    class _Grp:
+        def __init__(self, summaries):
+            self.summaries = summaries
+            self.children: list = []
+            self.items: list = []
+
+    class _Q:
+        items: list = []
+        def __init__(self, groups):
+            self.groups = groups
+
+    class _R:
+        parameters: list = []
+        layout: list = []
+        def __init__(self, q):
+            self.queries = [q]
+
+    grp = _Grp([
+        {"name": "SumSALARY", "source": "SALARY", "function": "sum"},
+        {"name": "CntCF", "source": "CF_Thing", "function": "count"},
+    ])
+    rdl = (f'<Report xmlns="{RD[1:-1]}"><DataSets><DataSet Name="Q"><Fields>'
+           f'<Field Name="SALARY"><DataField>SALARY</DataField></Field>'
+           f'</Fields></DataSet></DataSets></Report>')  # no aggregate of SALARY
+    fr = build_fidelity_report(_R(_Q([grp])), rdl)
+    dt = fr["categories"]["summaries"]["dropped_totals"]
+    assert "SALARY" in dt
+    assert "CF_Thing" not in dt
+    assert any("subtotal/grand-total" in n for n in fr["needs_attention"])
