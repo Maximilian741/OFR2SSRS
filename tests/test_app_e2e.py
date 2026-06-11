@@ -199,3 +199,99 @@ def test_bursting_detected_and_pack_generates(client):
     ps = zf.read("Send-Reports.ps1").decode("utf-8", "replace")
     assert "__BURST_SQL__" not in ps, "PS template placeholder not substituted"
     assert "__REPORT_NAME__" not in ps, "PS template placeholder not substituted"
+
+
+def test_oracle_xml_subreport_declares_forwarded_drillthrough_params():
+    """An Oracle-XML sub-report (the highest-fidelity path) must DECLARE the
+    parent's forwarded drill-through params, else the parent's <Drillthrough>
+    errors "parameter not declared" the instant it is clicked. Regression:
+    that path used to silently drop them and surface 0 fields."""
+    from converter.subreports import build_subreport
+    src = ROOT / "tests" / "fixtures" / "source_of_truth" / "master_detail" / "source.xml"
+    if not src.exists():
+        import pytest
+        pytest.skip("fixture missing")
+    res = build_subreport("Child", [str(src)],
+                          drillthrough_params=["P_DRILL_KEY", "P_ORG_ID"])
+    assert res["source"] == "oracle_xml"
+    rdl = res["rdl_xml"]
+    for p in ("P_DRILL_KEY", "P_ORG_ID"):
+        assert f'<ReportParameter Name="{p}">' in rdl, f"{p} not declared"
+        assert p in res["forwarded_params"]
+    # fields are now surfaced (was hardcoded [])
+    assert res["fields"], "expected dataset field names to be surfaced"
+
+
+def test_rdl_as_is_subreport_injects_forwarded_drillthrough_params():
+    """The RDL-as-is sub-report path (user uploads a built .rdl) must ALSO
+    declare the parent's forwarded drill-through params -- injecting a hidden
+    ReportParameter if absent -- and the result must stay XSD-valid. Same gap
+    the Oracle-XML path had; covers both 'no params yet' and 'append'."""
+    import tempfile, os
+    from converter import convert
+    from converter.subreports import build_subreport, _inject_report_parameters
+    src = ROOT / "tests" / "fixtures" / "source_of_truth" / "master_detail" / "source.xml"
+    if not src.exists():
+        pytest.skip("fixture missing")
+    rdl = convert(src.read_bytes())["rdl_xml"]
+    with tempfile.TemporaryDirectory() as td:
+        rp = os.path.join(td, "child.rdl")
+        with open(rp, "w", encoding="utf-8") as fh:
+            fh.write(rdl)
+        res = build_subreport("Child", [rp],
+                              drillthrough_params=["P_DRILL_KEY", "P_ORG_ID"])
+    assert res["source"] == "rdl"
+    for p in ("P_DRILL_KEY", "P_ORG_ID"):
+        assert f'Name="{p}"' in res["rdl_xml"], f"{p} not declared"
+        assert p in res["forwarded_params"]
+    # unit: a param already present is NOT duplicated
+    once = _inject_report_parameters(res["rdl_xml"], ["P_DRILL_KEY"])
+    assert once.count('Name="P_DRILL_KEY"') == 1
+
+
+def test_stub_subreport_path_declares_forwarded_drillthrough_params():
+    """The STUB fallback path (no parseable artifact) must also declare the
+    parent's forwarded drill-through params. Completes the sweep: all four
+    sub-report input paths (oracle_xml, rdl, sql, stub) declare them, so a
+    parent drill-through never errors regardless of child source."""
+    import tempfile, os
+    from converter.subreports import build_subreport
+    with tempfile.TemporaryDirectory() as td:
+        p = os.path.join(td, "notes.txt")
+        with open(p, "w", encoding="utf-8") as fh:
+            fh.write("just notes, no query here")
+        res = build_subreport("Child", [p],
+                              drillthrough_params=["P_DRILL_KEY", "P_ORG_ID"])
+    assert res["source"] == "stub"
+    for p in ("P_DRILL_KEY", "P_ORG_ID"):
+        assert f'Name="{p}"' in res["rdl_xml"], f"{p} not declared in stub"
+
+
+def test_endpoints_never_500_on_bad_input(client):
+    """Security/robustness: no endpoint may return a 500 (which can leak a
+    stack trace) on missing/garbage input. Bad input -> a clean 4xx, or a
+    graceful 200 fallback -- never an unhandled server error."""
+    import io as _io
+    probes = [
+        ("post", "/api/convert", {}),
+        ("post", "/api/convert", {"json": {}}),
+        ("post", "/api/batch", {}),
+        ("post", "/api/run-query", {"json": {}}),
+        ("post", "/api/auto-fix", {"json": {}}),
+        ("post", "/api/apply-fix", {"json": {}}),
+        ("post", "/api/report-images/upload", {}),
+        ("post", "/api/burst-preview", {"json": {}}),
+        ("post", "/api/subreport/Child/build", {"json": {}}),
+        ("get", "/api/download/rdl", {}),
+        ("get", "/api/download/bundle", {}),
+        ("get", "/api/download/batch-pack", {}),
+        ("get", "/api/mockup/bogus", {}),
+    ]
+    for method, path, kw in probes:
+        resp = getattr(client, method)(path, **kw)
+        assert resp.status_code < 500, f"{method.upper()} {path} -> {resp.status_code}"
+    # garbage XML upload must convert to a fallback, not crash
+    g = client.post("/api/convert",
+                    data={"file": (_io.BytesIO(b"not xml at all"), "x.xml")},
+                    content_type="multipart/form-data")
+    assert g.status_code < 500

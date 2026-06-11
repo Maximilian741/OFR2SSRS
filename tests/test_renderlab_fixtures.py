@@ -40,6 +40,10 @@ _FIXTURES = [
     ROOT / "tests" / "fixtures" / "subreports" / "SAMPLE_DRILLTHROUGH.xml",
     ROOT / "tests" / "fixtures" / "subreports" / "SAMPLE_LETTER_CHILD.xml",
     ROOT / "tests" / "fixtures" / "subreports" / "SAMPLE_MASTER_DETAIL.xml",
+    # Chart archetype: a real <Chart> must render clean through the MS engine.
+    # (Matrix is intentionally NOT here -- its LocalReport renders a documented
+    # trailing-blank phantom that this blank-page gate would flag.)
+    ROOT / "tests" / "fixtures" / "chart" / "source.xml",
 ]
 
 

@@ -100,6 +100,20 @@ def test_902_frameref_matrix_dominance_and_measure_cell():
     assert '<Group Name="MxColG">' in rdl and '<Group Name="MxRowG">' in rdl
 
 
+def test_matrix_mockup_shows_a_pivot_grid_not_scattered_fields():
+    """The HTML mockup of a matrix report must render a real cross-tab PIVOT
+    (an HTML table with the row dim down the left, col dim across the top),
+    matching the RDL's Tablix_Matrix -- not scatter the dimension fields."""
+    out = convert(FIX.read_bytes())
+    html = out["mockup_html"]
+    assert "<table" in html.lower()
+    assert "Cross-tab:" in html
+    # both dimensions named in the caption
+    assert "Region" in html and "Product" in html
+    # and the RDL agrees it's a matrix (mockup ↔ RDL consistency)
+    assert '<Tablix Name="Tablix_Matrix">' in out["rdl_xml"]
+
+
 def test_matrix_renders_through_ms_engine():
     sys.path.insert(0, str(ROOT / "tools" / "renderlab"))
     try:

@@ -228,8 +228,19 @@ def _alias_select_items(sql: str, item_names) -> str:
         # Bare column ref (TABLE.COL or COL) -- Oracle returns the COL
         # part as the column name, which matches what our parser
         # already extracted as item.name. No alias needed.
+        #
+        # Oracle identifiers legally include '$' and '#' (e.g. the classic
+        # legacy columns EMP#, DEPT#, INV#, or AMT$). Those chars MUST be in
+        # the char class here: if a bare "emp#" slips through to the alias
+        # deriver below it becomes "emp# AS EMP", renaming the result column
+        # to EMP -- but the <Field>'s DataField keeps the raw "EMP#" (see
+        # _safe's contract), so the field binds to a column that no longer
+        # exists and renders BLANK. Treating emp#/amt$ as the bare column
+        # they are means NO alias, Oracle returns EMP#/AMT$ verbatim, and the
+        # DataField matches. (Leading char stays letter/_ -- Oracle forbids a
+        # leading $ or #.)
         if re.fullmatch(
-            r"\s*[A-Za-z_][A-Za-z0-9_]*(\.[A-Za-z_][A-Za-z0-9_]*)?\s*",
+            r"\s*[A-Za-z_][A-Za-z0-9_$#]*(\.[A-Za-z_][A-Za-z0-9_$#]*)?\s*",
             stripped,
         ):
             new_parts.append(raw)
@@ -606,6 +617,27 @@ def _build_data_sources(target_db: str = "oracle") -> ET.Element:
 # DataSets
 # ---------------------------------------------------------------------------
 
+def _empty_query_placeholder(query) -> str:
+    """A query with COLUMNS but no SQL came from a NON-SQL source (a text/CSV/
+    XML pluggable data source). Emit a COMMENTED scaffold -- the expected
+    columns + a starter SELECT -- so the dataset is easy to wire in Report
+    Builder, instead of a bare '-- empty query' the user has to decode."""
+    cols = [(getattr(it, "name", "") or "").strip()
+            for it in (getattr(query, "items", None) or [])
+            if (getattr(it, "name", "") or "").strip()]
+    if not cols:
+        return f"-- empty query for {getattr(query, 'name', 'dataset')}"
+    shown = ", ".join(cols[:16]) + (" /* ...more... */" if len(cols) > 16 else "")
+    return (
+        "-- This dataset originally read from a NON-SQL source (a text/CSV/XML\n"
+        "-- pluggable data source). It has no relational query. To make it\n"
+        "-- return data: point this dataset at your data source in Report\n"
+        "-- Builder, OR replace the lines below with a real query.\n"
+        f"-- Columns the report expects: {shown}\n"
+        f"-- SELECT {shown} FROM <your_source>"
+    )
+
+
 def _build_dataset(query: DataQuery, declared_params: Iterable[str],
                    target_db: str = "oracle",
                    param_types: Optional[dict] = None) -> ET.Element:
@@ -645,7 +677,7 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
             cmd_text = (query.tsql or "").strip()
             used_fallback = True
         if not cmd_text:
-            cmd_text = f"-- empty query for {query.name}"
+            cmd_text = _empty_query_placeholder(query)
         # Replace any &LEXICAL_REF in the SQL with a SQL comment so Oracle
         # accepts the statement. Lexical refs are Oracle Reports
         # text-substitution templates (e.g. "&P_CRITERIA_PERMIT" expands to
@@ -713,14 +745,14 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
                 qp.set("Name", f":{pname}")
                 canon = canonical.get(pname.upper())
                 if canon:
-                    _sub(qp, "Value", f"=Parameters!{canon}.Value")
+                    _sub(qp, "Value", f"=Parameters!{_safe(canon)}.Value")
                 else:
                     _sub(qp, "Value", "=Nothing")
     else:
         # T-SQL path: existing behavior. Prefer .tsql, fall back to .sql.
         cmd_text = (query.tsql or query.sql or "").strip()
         if not cmd_text:
-            cmd_text = f"-- empty query for {query.name}"
+            cmd_text = _empty_query_placeholder(query)
         # Same trailing-semicolon strip as Oracle path (Oracle Reports XMLs
         # can carry a ";" in the SQL whether we target Oracle or SQL Server).
         cmd_text = re.sub(r"[;\s]+$", "", cmd_text)
@@ -739,7 +771,7 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
                 # "Define Query Parameters" prompt trigger (never allowed).
                 canon = canonical.get(pname.upper())
                 if canon:
-                    _sub(qp, "Value", f"=Parameters!{canon}.Value")
+                    _sub(qp, "Value", f"=Parameters!{_safe(canon)}.Value")
                 else:
                     _sub(qp, "Value", "=Nothing")
 
@@ -1069,7 +1101,11 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
     root = ET.Element(_q("ReportParameters"))
     for p in report.parameters:
         rp = _sub(root, "ReportParameter")
-        rp.set("Name", p.name)
+        # SSRS parameter Name must be a valid identifier. An Oracle param name
+        # can legally contain $ or # (e.g. P_BAL$) -- _safe maps it to a valid
+        # SSRS Name. References below use _safe(name) too, so they MATCH (a raw
+        # decl + _safe'd refs would dangle). No-op for the usual P_X names.
+        rp.set("Name", _safe(p.name))
         ptype = _ssrs_param_type(p)
         # SSRS 2008/01 schema element order:
         #   DataType -> Nullable -> DefaultValue -> AllowBlank
@@ -1451,6 +1487,38 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             drillthrough=dt,
         )
 
+    # Report-level <summary> grand totals -> a static FOOTER total row, so a
+    # flat report's "Total: N" line actually renders (the summary tokens
+    # already compile to real SSRS aggregates via the resolver). Only on the
+    # flat path; master-detail keeps its own structure. Each total lands in
+    # the column it summarizes; a "Total" label sits in column 0.
+    _SS_AGG = {"count": "Count", "sum": "Sum", "avg": "Avg", "average": "Avg",
+               "min": "Min", "max": "Max", "stddev": "StDev",
+               "variance": "Var", "% of total": "Sum"}
+    _col_up = {c.upper(): c for c in columns}
+    summ_aggs: dict = {}
+    for f in (getattr(report, "formulas", None) or []):
+        _fn = (getattr(f, "agg_function", "") or "").lower()
+        _src = (getattr(f, "agg_source", "") or "").strip()
+        if _fn and _src and _src.upper() in _col_up:
+            _real = _col_up[_src.upper()]
+            summ_aggs[_real.upper()] = (
+                f'={_SS_AGG.get(_fn, "Sum")}(Fields!{_safe(_real)}.Value, '
+                f'"{_safe(main.name)}")')
+    _emit_footer = bool(summ_aggs) and detail_query is None
+    if _emit_footer:
+        foot_row = _sub(rows_el, "TablixRow")
+        _sub(foot_row, "Height", "0.28in")
+        foot_cells = _sub(foot_row, "TablixCells")
+        for i, col in enumerate(columns):
+            cell = _sub(foot_cells, "TablixCell")
+            contents = _sub(cell, "CellContents")
+            expr = summ_aggs.get(col.upper())
+            val = expr if expr else ('="Total"' if i == 0 else '=""')
+            _build_textbox(contents, f"Foot_{_safe(col)}", val, bold=True,
+                           bg="#eef2f6", vertical_align="Middle",
+                           border_color="#d0d0d0", padding="4pt")
+
     # TablixColumnHierarchy
     col_hier = _sub(tablix, "TablixColumnHierarchy")
     col_members = _sub(col_hier, "TablixMembers")
@@ -1520,6 +1588,9 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             )
             visibility = _sub(detail_mem, "Visibility")
             _sub(visibility, "Hidden", "false")
+        # Static footer member (the grand-total row), AFTER the detail group.
+        if _emit_footer:
+            _sub(row_members, "TablixMember")
 
     # DataSet binding
     _sub(tablix, "DataSetName", _safe(main.name))
@@ -1676,6 +1747,13 @@ def _build_token_resolver(report: ParsedReport):
         if not fname:
             continue
         formula_by_name.setdefault(fname.upper(), f)
+    # field-name (UPPER) -> owning dataset, so a summary aggregate gets a
+    # correct dataset scope.
+    _agg_owner: dict = {}
+    for _q in (getattr(report, "queries", None) or []):
+        for _it in (getattr(_q, "items", None) or []):
+            if getattr(_it, "name", ""):
+                _agg_owner.setdefault(_it.name.upper(), _q.name)
     # Formula/placeholder columns carried by the synthetic
     # formula-resolution dataset (see _build_formula_dataset). A token
     # in this set binds to that dataset's field instead of =Nothing.
@@ -1740,6 +1818,25 @@ def _build_token_resolver(report: ParsedReport):
         # can still see which textboxes need rewiring.
         if u in formula_by_name:
             f = formula_by_name[u]
+            # Oracle <summary> (count/sum/avg/...) -> a REAL SSRS aggregate
+            # over its source column, scoped to that column's dataset. This
+            # makes report grand totals actually COMPUTE instead of shipping
+            # a NULL placeholder (wild-corpus verified: a count footer total).
+            _aggfn = (getattr(f, "agg_function", "") or "").lower()
+            _aggsrc = (getattr(f, "agg_source", "") or "").strip()
+            if _aggfn and _aggsrc:
+                _SS = {"count": "Count", "sum": "Sum", "avg": "Avg",
+                       "average": "Avg", "min": "Min", "max": "Max",
+                       "stddev": "StDev", "variance": "Var",
+                       "% of total": "Sum", "first": "First", "last": "Last"}
+                _fn = _SS.get(_aggfn, "Sum")
+                _k, _s, _n = resolve(_aggsrc, dataset_name, _depth + 1)
+                if _k == "field":
+                    _own = _agg_owner.get(_aggsrc.upper()) or dataset_name
+                    expr = (f'={_fn}(Fields!{_safe(_s)}.Value, "{_safe(_own)}")'
+                            if _own else f'={_fn}(Fields!{_safe(_s)}.Value)')
+                    return ("formula", expr,
+                            f"Oracle summary {_aggfn}({_aggsrc}) -> {_fn}()")
             canonical = getattr(f, "name", token) or token
             body_preview = (getattr(f, "plsql_body", "") or "").strip()
             body_preview = " ".join(body_preview.split())
@@ -5727,6 +5824,184 @@ def _build_multi_section_body(report: ParsedReport, sections) -> ET.Element:
     return body
 
 
+def _build_chart_region(chart: dict, dataset_name: str,
+                        top_in: float = 0.0) -> ET.Element:
+    """Build a REAL minimal SSRS column/bar/pie Chart bound to the dataset --
+    plots Sum(<dataValues>) grouped by <series/src> -- so a detected Oracle
+    <graph>/<rw:graph> actually RENDERS instead of only being noted. Structure
+    + element order are engine-verified (ReportViewer needs Labels the XSD
+    doesn't). Caller must ensure both columns exist in the dataset."""
+    cat = (chart.get("category") or "").strip()
+    measure = (chart.get("plot_value") or "").strip()
+    ctype = {"bar": "Bar", "pie": "Pie", "line": "Line", "area": "Area",
+             "column": "Column", "graph": "Column", "chart": "Column"}.get(
+        (chart.get("type") or "").lower(), "Column")
+    ch = ET.Element(_q("Chart"))
+    ch.set("Name", "Chart_" + _safe(measure or "M"))
+    _sub(ch, "Style")
+    _sub(ch, "Top", f"{top_in:.2f}in")
+    _sub(ch, "Left", "0.25in")
+    _sub(ch, "Height", "2.5in")
+    _sub(ch, "Width", "6in")
+    _sub(ch, "DataSetName", _safe(dataset_name))
+    sm = _sub(_sub(_sub(ch, "ChartSeriesHierarchy"), "ChartMembers"),
+              "ChartMember")
+    _sub(sm, "Label", measure or "Value")
+    cm = _sub(_sub(_sub(ch, "ChartCategoryHierarchy"), "ChartMembers"),
+              "ChartMember")
+    g = _sub(cm, "Group"); g.set("Name", "ChartCat")
+    _sub(_sub(g, "GroupExpressions"), "GroupExpression",
+         f"=Fields!{_safe(cat)}.Value")
+    _sub(cm, "Label", f"=Fields!{_safe(cat)}.Value")
+    cs = _sub(_sub(_sub(ch, "ChartData"), "ChartSeriesCollection"),
+              "ChartSeries")
+    cs.set("Name", "Series1")
+    dpv = _sub(_sub(_sub(cs, "ChartDataPoints"), "ChartDataPoint"),
+               "ChartDataPointValues")
+    _sub(dpv, "Y", f"=Sum(Fields!{_safe(measure)}.Value)")
+    _sub(cs, "Type", ctype)
+    ca = _sub(_sub(ch, "ChartAreas"), "ChartArea"); ca.set("Name", "Area1")
+    _sub(_sub(ca, "ChartCategoryAxes"), "ChartAxis").set("Name", "CatAxis")
+    _sub(_sub(ca, "ChartValueAxes"), "ChartAxis").set("Name", "ValAxis")
+    return ch
+
+
+def _chart_for_report(report, main):
+    """Return (chart_dict, dataset_name) for a renderable detected chart, or
+    None. Renderable = its category + measure are BOTH columns of the main
+    dataset (else the chart would bind to nothing)."""
+    charts = list(getattr(report, "charts", None) or [])
+    if not charts or main is None:
+        return None
+    cols = {(it.name or "").upper() for it in (main.items or []) if it.name}
+    for ch in charts:
+        cat = (ch.get("category") or "").strip().upper()
+        meas = (ch.get("plot_value") or "").strip().upper()
+        if cat and meas and cat in cols and meas in cols:
+            return (ch, main.name)
+    return None
+
+
+def _find_label_spec(report) -> Optional[dict]:
+    """Detect the mailing-label / multi-up archetype: a repeating frame whose
+    printDirection tiles ACROSS (across / acrossDown) and whose cell is a
+    small label box. Returns {frame, cell_w, cell_h, fields} or None.
+
+    Guards (strict -- many shapes tile "across", e.g. a matrix's horizontal
+    dimension frame): NO matrix anywhere in the report; EXACTLY ONE across
+    repeating frame; that frame is NOT a matrix dimension frame; and its
+    content is a LABEL cell -- a small box whose fields are predominantly a
+    boilerplate TEXT block (the address template), not data columns."""
+    # A report with a matrix is never a label report.
+    for lg in (report.layout or []):
+        stack = [lg]
+        while stack:
+            g = stack.pop()
+            if (getattr(g, "kind", "") or "") in (
+                    "matrix", "matrix_col", "matrix_row", "matrix_cell"):
+                return None
+            stack.extend(getattr(g, "children", None) or [])
+
+    labels = []
+
+    def walk(g):
+        pd = (getattr(g, "print_direction", "") or "").lower()
+        if getattr(g, "kind", "") == "repeating_frame" and "across" in pd:
+            labels.append(g)
+        for c in (getattr(g, "children", None) or []):
+            walk(c)
+
+    for lg in (report.layout or []):
+        walk(lg)
+    if len(labels) != 1:
+        return None
+    frame = labels[0]
+    cell_w = float(getattr(frame, "width", 0.0) or 0.0)
+    cell_h = float(getattr(frame, "height", 0.0) or 0.0)
+    # A label cell is small (several fit across a page). Reject a full-width
+    # "across" frame (a wide table) or a tall one.
+    if not (0.5 <= cell_w <= 4.5 and 0.2 <= cell_h <= 3.0):
+        return None
+
+    def collect_fields(g, out):
+        out.extend(getattr(g, "fields", None) or [])
+        for c in (getattr(g, "children", None) or []):
+            collect_fields(c, out)
+
+    fields = []
+    collect_fields(frame, fields)
+    if not fields:
+        return None
+    # The defining trait of a mailing label / form-label: its cell is built
+    # from a BOILERPLATE TEXT block (the merged address template), not a row
+    # of data-bound column fields. Require at least one substantial text
+    # field and that text dominate the cell.
+    text_fields = [f for f in fields
+                   if (getattr(f, "kind", "") == "text")
+                   and len((getattr(f, "text", "") or "").strip()) >= 12]
+    data_fields = [f for f in fields if getattr(f, "kind", "") == "field"]
+    if not text_fields or len(data_fields) > len(text_fields):
+        return None
+    return {"frame": frame, "cell_w": cell_w, "cell_h": max(0.5, cell_h),
+            "fields": fields}
+
+
+def _build_label_body(report, main, spec):
+    """A mailing-label body: a one-cell Tablix (RDL-2008 "list" = a Tablix
+    with one column + a detail row group) whose single cell holds the label
+    box. SSRS repeats it per record and, via the page's newspaper Columns,
+    tiles the records ACROSS then DOWN. Returns (body, n_cols, col_gap)."""
+    cell_w, cell_h = spec["cell_w"], spec["cell_h"]
+    usable = 8.5 - 2 * 0.25  # page width minus default L/R margins
+    col_gap = 0.12
+    ncols = max(1, int((usable + col_gap) // (cell_w + col_gap)))
+
+    body = ET.Element(_q("Body"))
+    items = _sub(body, "ReportItems")
+    t = _sub(items, "Tablix")
+    t.set("Name", "Tablix_Labels")
+
+    tbody = _sub(t, "TablixBody")
+    cols = _sub(tbody, "TablixColumns")
+    _sub(_sub(cols, "TablixColumn"), "Width", f"{cell_w:.3f}in")
+    rows = _sub(tbody, "TablixRows")
+    row = _sub(rows, "TablixRow")
+    _sub(row, "Height", f"{cell_h:.3f}in")
+    cell = _sub(_sub(_sub(row, "TablixCells"), "TablixCell"), "CellContents")
+
+    rect = _sub(cell, "Rectangle")
+    rect.set("Name", "Lbl_Cell")
+    _sub(rect, "KeepTogether", "true")
+    rect_items = _sub(rect, "ReportItems")
+    cover_titles: set = set()
+    counter = [0]
+    for f in spec["fields"]:
+        counter[0] += 1
+        _emit_field_textbox(rect_items, f"Lbl_Tb_{counter[0]}", "", f,
+                            0.0, 0.0, cell_w, cell_h, report, cover_titles)
+    if len(rect_items) == 0:
+        _build_textbox(rect_items, "Lbl_Tb_0", "=Nothing", font_size="10pt")
+    _sub(_sub(_sub(rect, "Style"), "Border"), "Style", "None")
+
+    # Column hierarchy: one static column.
+    _sub(_sub(_sub(t, "TablixColumnHierarchy"), "TablixMembers"),
+         "TablixMember")
+    # Row hierarchy: a DETAIL group (a Group with NO GroupExpressions =
+    # one instance per data row, the RDL-2008 "list" idiom).
+    rhm = _sub(_sub(t, "TablixRowHierarchy"), "TablixMembers")
+    det = _sub(rhm, "TablixMember")
+    dg = _sub(det, "Group"); dg.set("Name", "Lbl_Detail")
+
+    _sub(t, "DataSetName", _safe(main.name))
+    _sub(t, "Top", "0in"); _sub(t, "Left", "0in")
+    _sub(t, "Height", f"{cell_h:.3f}in")
+    _sub(t, "Width", f"{cell_w:.3f}in")
+
+    _sub(body, "Height", f"{cell_h:.3f}in")
+    _sub(body, "Style")
+    return body, ncols, col_gap
+
+
 def _find_matrix_spec(report) -> Optional[dict]:
     """Locate an Oracle cross-tab (matrix) and derive its SSRS wiring.
 
@@ -6034,8 +6309,11 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
 
 def _build_page(report: ParsedReport, page_height_in: float = 11.0,
                 footer_on_first_page: bool = True,
-                signature_in_footer: bool = True) -> ET.Element:
-    """Page-level dimensions + optional header/footer."""
+                signature_in_footer: bool = True,
+                columns: int = 1, column_spacing: float = 0.0,
+                column_width_in: float = 0.0) -> ET.Element:
+    """Page-level dimensions + optional header/footer. ``columns`` > 1 emits
+    newspaper-style multi-column layout (the mailing-label tiling)."""
     page = ET.Element(_q("Page"))
 
     # PageHeader: title block extracted from layout.
@@ -6135,6 +6413,11 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
     _sub(page, "RightMargin", f"{_PAGE_HMARGIN_IN}in")
     _sub(page, "TopMargin", f"{_PAGE_MARGIN_IN}in")
     _sub(page, "BottomMargin", f"{_PAGE_MARGIN_IN}in")
+    if columns and columns > 1:
+        # Newspaper multi-up: SSRS tiles the body's single data region across
+        # ``columns`` columns then down -- the mailing-label render.
+        _sub(page, "Columns", str(columns))
+        _sub(page, "ColumnSpacing", f"{column_spacing:.3f}in")
     return page
 
 
@@ -6237,6 +6520,28 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
     # A DOMINANT cross-tab outranks every other archetype: the matrix IS
     # the report (e.g. the classic videosales demo). Mixed layouts where a
     # matrix is just one frame among many keep their existing path.
+    # Mailing-label / multi-up archetype: a repeating frame with
+    # printDirection="across"/"acrossDown" tiles a small label cell across
+    # the page then down. SSRS renders this natively with a List data
+    # region + newspaper-style report Columns -- NOT a tall one-per-row
+    # table (which leaves trailing blank pages, wild-corpus verified).
+    _label = _find_label_spec(report) if main is not None else None
+    if _label:
+        body, ncols, colgap = _build_label_body(report, main, _label)
+        root.append(body)
+        _sub(root, "Width", f"{_label['cell_w']:.3f}in")
+        root.append(_build_page(report, page_height_in=11.0,
+                                footer_on_first_page=True,
+                                signature_in_footer=False,
+                                columns=ncols, column_spacing=colgap,
+                                column_width_in=_label["cell_w"]))
+        root.append(_build_code())
+        _sub(root, "Language", "en-US")
+        _rdsub(root, "DrawGrid", "true")
+        _rdsub(root, "GridSpacing", "0.083333in")
+        _strip_empty_required_containers(root)
+        return root
+
     _mspec0 = getattr(report, "_matrix_spec", None)
     if _mspec0 and _mspec0.get("dominant") and main is not None:
         body = _build_body(report, main)  # matrix-aware
@@ -6308,6 +6613,30 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
     else:
         body = _build_body(report, main)
         page_height = 11.0
+
+    # A detected Oracle chart whose category + measure are real dataset
+    # columns -> a REAL rendered SSRS Chart, placed below the body content
+    # (engine-verified). Guarded: a chart must never sink the conversion.
+    try:
+        _chart = _chart_for_report(report, main)
+        if _chart and body is not None:
+            _ri = body.find(_q("ReportItems"))
+            if _ri is None:
+                _ri = ET.SubElement(body, _q("ReportItems"))
+                body.insert(0, _ri)
+            _bh = body.find(_q("Height"))
+            _cur = 0.0
+            if _bh is not None and _bh.text:
+                try:
+                    _cur = float(_bh.text.replace("in", "").strip())
+                except ValueError:
+                    _cur = 0.0
+            _top = max(0.3, _cur + 0.3)
+            _ri.append(_build_chart_region(_chart[0], _chart[1], top_in=_top))
+            if _bh is not None:
+                _bh.text = f"{_top + 2.5 + 0.5:.2f}in"
+    except Exception:  # noqa: BLE001 -- a chart must never break the RDL
+        pass
 
     root.append(body)
     # Use the body's computed width (derived from Oracle source layout)

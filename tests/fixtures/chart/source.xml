@@ -1,0 +1,47 @@
+<html><body>
+<!-- Synthetic Oracle Reports web-source fixture: a CHART report. The graph
+     lives in the web layout as an rw:graph element, after the report block,
+     with its config inside an HTML comment - the real Oracle shape. Data is
+     generic (employees/salary), no client content. -->
+<report name="SALARY_CHART" DTDVersion="9.0.2.0.10">
+  <data>
+    <dataSource name="Q_1">
+      <select><![CDATA[SELECT department, SUM(salary) total_salary FROM employees GROUP BY department]]></select>
+      <group name="G_DEPARTMENT">
+        <dataItem name="DEPARTMENT" datatype="vchar2" width="30"/>
+        <dataItem name="TOTAL_SALARY" datatype="number" precision="12"/>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+    <section name="main">
+      <body width="7.5" height="9.0">
+        <frame name="M_HDR">
+          <geometryInfo x="0" y="0" width="6.0" height="0.25"/>
+          <text name="L_DEPARTMENT"><geometryInfo x="0" y="0" width="3.0" height="0.2"/>
+            <textSegment><string><![CDATA[Department]]></string></textSegment></text>
+          <text name="L_TOTAL"><geometryInfo x="3.0" y="0" width="3.0" height="0.2"/>
+            <textSegment><string><![CDATA[Total Salary]]></string></textSegment></text>
+        </frame>
+        <repeatingFrame name="R_G_DEPARTMENT" source="G_DEPARTMENT">
+          <geometryInfo x="0" y="0.25" width="6.0" height="0.3"/>
+          <field name="F_DEPARTMENT" source="DEPARTMENT">
+            <geometryInfo x="0" y="0.25" width="3.0" height="0.2"/></field>
+          <field name="F_TOTAL_SALARY" source="TOTAL_SALARY">
+            <geometryInfo x="3.0" y="0.25" width="3.0" height="0.2"/></field>
+        </repeatingFrame>
+      </body>
+    </section>
+  </layout>
+</report>
+<rw:objects><rw:dataArea>
+<rw:graph id="graph" src="G_DEPARTMENT" series="DEPARTMENT" dataValues="TOTAL_SALARY">
+<!--
+<?xml version="1.0" ?>
+<Graph version="2.6.0.23" seriesObjectCount="8">
+<Title text="Total Salary by Department" visible="true"/>
+</Graph>
+-->
+</rw:graph>
+</rw:dataArea></rw:objects>
+</body></html>

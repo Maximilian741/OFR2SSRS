@@ -837,6 +837,37 @@ def _report_from_rdl(rdl_text: str, child_name: str):
     return rep
 
 
+def _inject_report_parameters(rdl_text: str, param_names: Iterable[str]) -> str:
+    """Declare each ``param_names`` as a HIDDEN ReportParameter in an existing
+    RDL if it isn't already -- so a parent's <Drillthrough> that forwards the
+    value doesn't error "parameter not declared". Hidden + =Nothing default ->
+    the standalone user never sees a prompt and "Refresh Fields" never asks.
+    Inserts into <ReportParameters> (creating it just before <Body> in the
+    RDL-2008 element order: ...EmbeddedImages, ReportParameters, Body...)."""
+    todo = [p for p in (param_names or []) if p]
+    if not todo:
+        return rdl_text
+    existing = {m.upper() for m in
+                re.findall(r'<ReportParameter\s+Name="([^"]+)"', rdl_text)}
+    todo = [p for p in todo if p.upper() not in existing]
+    if not todo:
+        return rdl_text
+    blocks = "".join(
+        f'<ReportParameter Name="{p}"><DataType>String</DataType>'
+        f"<Nullable>true</Nullable><DefaultValue><Values><Value>=Nothing"
+        f"</Value></Values></DefaultValue><AllowBlank>true</AllowBlank>"
+        f"<Prompt>{p}</Prompt><Hidden>true</Hidden></ReportParameter>"
+        for p in todo)
+    if "<ReportParameters>" in rdl_text:
+        return rdl_text.replace("</ReportParameters>",
+                                blocks + "</ReportParameters>", 1)
+    # No <ReportParameters> yet: create it immediately before <Body> (its
+    # required position) -- match <Body ...> or <Body>.
+    return re.sub(r"<Body(\s|>)",
+                  "<ReportParameters>" + blocks + "</ReportParameters><Body" + r"\1",
+                  rdl_text, count=1)
+
+
 def _synth_report_from_sql(child_name: str, sql: str,
                            parent_param_names: Optional[Iterable[str]] = None,
                            drillthrough_params: Optional[Iterable[str]] = None):
@@ -967,14 +998,25 @@ def build_subreport(child_name: str,
         if _looks_like_oracle_xml(nm, blob):
             try:
                 from . import convert as _convert
-                data = _convert(blob)
+                # Forward the parent's drill-through params so the child RDL
+                # DECLARES them (else the link errors when clicked). Previously
+                # the Oracle-XML path -- the highest-fidelity, most common one
+                # -- silently dropped them.
+                data = _convert(blob, extra_param_names=drillthrough_params)
+                rdl_xml = data.get("rdl_xml", "")
+                # Columns we surfaced = the RDL dataset field names.
+                fields = re.findall(r'<Field Name="([^"]+)"', rdl_xml)
+                params = [p["name"] for p in
+                          (data.get("report") or {}).get("parameters", [])]
+                dt_upper = {p.upper() for p in drillthrough_params}
+                forwarded = [p for p in params if p.upper() in dt_upper]
                 return {
-                    "rdl_xml": data.get("rdl_xml", ""),
+                    "rdl_xml": rdl_xml,
                     "mockup_html": data.get("mockup_html", ""),
                     "mockup_backend_html": data.get("mockup_backend_html", ""),
-                    "fields": [],
-                    "binds": [p["name"] for p in (data.get("report") or {}).get("parameters", [])],
-                    "forwarded_params": [],
+                    "fields": fields,
+                    "binds": params,
+                    "forwarded_params": forwarded,
                     "sql": "",
                     "issues": issues,
                     "source": "oracle_xml",
@@ -989,15 +1031,21 @@ def build_subreport(child_name: str,
         if _looks_like_rdl(nm, blob):
             rdl_text = blob.decode("utf-8", "replace")
             if "<Report" in rdl_text:
+                # Declare the parent's forwarded drill-through params in the
+                # supplied RDL if it doesn't already -- else the link errors
+                # when clicked (same gap the Oracle-XML path had).
+                rdl_text = _inject_report_parameters(rdl_text, drillthrough_params)
                 rep = _report_from_rdl(rdl_text, child_name)
                 main = rep.queries[0] if rep.queries else None
+                forwarded = [p for p in drillthrough_params
+                             if f'Name="{p}"' in rdl_text]
                 return {
                     "rdl_xml": rdl_text,
                     "mockup_html": _render(rep, "frontend"),
                     "mockup_backend_html": _render(rep, "backend"),
                     "fields": [i.name for i in (main.items if main else [])],
                     "binds": [],
-                    "forwarded_params": [],
+                    "forwarded_params": forwarded,
                     "sql": (main.sql if main else ""),
                     "issues": issues + [
                         "Used the supplied .rdl as-is; preview derived from its "

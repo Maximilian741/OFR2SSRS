@@ -555,6 +555,8 @@ def _parse_formulas(data_el, program_units_index: dict, warnings: List[str]) -> 
                     name=name,
                     return_type=return_type,
                     plsql_body=note_body,
+                    agg_function=(func or "").strip().lower(),
+                    agg_source=(source_col or "").strip(),
                 )
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -808,6 +810,7 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                         source_query=rf_source,
                         format_trigger=_format_trigger_of(child),
                         page_break_before=_page_break_before(child),
+                        print_direction=_attr(child, "printDirection"),
                     )
                     _apply_geometry(grp, child)
                     _apply_visual_settings(grp, child)
@@ -1023,6 +1026,10 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
     """Parse an Oracle Reports XML byte string into a ParsedReport."""
     warnings: List[str] = []
     raw_xml = _decode(xml_bytes)
+    # Keep the FULL source: a .jsp web source carries the chart as a
+    # <rw:graph> OUTSIDE the <report> block we unwrap below, so the chart
+    # scan needs the original text, not just the extracted report.
+    _full_source = raw_xml
 
     # Unwrap a .jsp "Reports Web Source" (or any wrapper) down to the real
     # <report> block before parsing. No-op for clean report documents.
@@ -1135,6 +1142,33 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
             "type": _attr(el, "graphType") or _attr(el, "chartType")
                     or _attr(el, "type") or "chart",
         })
+    # Web-source charts: a .jsp keeps the graph as <rw:graph src=.. series=..
+    # dataValues=..> in the WEB layout, OUTSIDE the <report> block we parsed
+    # above -- so the tree walk never sees it. Scan the full original source
+    # (real-artifact verified: Oracle's emprevb.jsp "Employees by Salary").
+    _seen_cat = {(c.get("category") or "", c.get("plot_value") or "")
+                 for c in charts}
+    for m in re.finditer(r"<rw:graph\b([^>]*)>", _full_source or "", re.I):
+        attrs = m.group(1)
+
+        def _ga(nm, _a=attrs):
+            mm = re.search(nm + r'\s*=\s*"([^"]*)"', _a, re.I)
+            return mm.group(1) if mm else ""
+        cat = _ga("series") or _ga("src")
+        pv = _ga("dataValues") or _ga("groups")
+        if (cat, pv) in _seen_cat:
+            continue
+        _seen_cat.add((cat, pv))
+        # Title: the <Graph> config is in an HTML comment right after the tag.
+        tail = _full_source[m.end():m.end() + 4000]
+        tm = re.search(r'<Title[^>]*\btext\s*=\s*"([^"]*)"', tail, re.I)
+        charts.append({
+            "title": tm.group(1) if tm else "",
+            "category": cat,
+            "plot_value": pv,
+            "type": (_ga("graphType") or "graph"),
+        })
+
     if charts:
         warnings.append(
             f"{len(charts)} chart/graph object(s) detected -- not auto-built "

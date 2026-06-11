@@ -95,7 +95,9 @@ def test_dropped_subtotal_is_surfaced_but_formula_summaries_are_not():
 
     class _R:
         parameters: list = []
-        layout: list = []
+        # A non-empty layout: a dropped total is only flagged when there is
+        # somewhere to render it (a data-model-only artifact renders nothing).
+        layout: list = [object()]
         def __init__(self, q):
             self.queries = [q]
 
@@ -111,3 +113,42 @@ def test_dropped_subtotal_is_surfaced_but_formula_summaries_are_not():
     assert "SALARY" in dt
     assert "CF_Thing" not in dt
     assert any("subtotal/grand-total" in n for n in fr["needs_attention"])
+
+
+def test_non_sql_pluggable_data_source_is_surfaced():
+    """A query with COLUMNS but no SQL (a text/CSV/XML pluggable data source)
+    must be flagged -- the dataset ships empty and renders no data until the
+    user wires up the source. A normal SQL query must NOT be flagged."""
+    class _I:
+        def __init__(self, n): self.name = n
+
+    class _PdsQ:           # pluggable source: items, but no SQL
+        name = "QP_1"
+        sql = ""
+        tsql = ""
+        items = [_I("CITY"), _I("CAPITAL")]
+        groups: list = []
+
+    class _SqlQ:           # normal relational query
+        name = "Q_1"
+        sql = "SELECT city, capital FROM t"
+        tsql = ""
+        items = [_I("CITY"), _I("CAPITAL")]
+        groups: list = []
+
+    class _R:
+        parameters: list = []
+        layout: list = [object()]
+        def __init__(self, q): self.queries = [q]
+
+    rdl = (f'<Report xmlns="{RD[1:-1]}"><DataSets><DataSet Name="Q"><Fields>'
+           f'<Field Name="CITY"><DataField>CITY</DataField></Field>'
+           f'<Field Name="CAPITAL"><DataField>CAPITAL</DataField></Field>'
+           f'</Fields></DataSet></DataSets></Report>')
+    fr_pds = build_fidelity_report(_R(_PdsQ()), rdl)
+    assert fr_pds["categories"]["data_source"]["non_sql_datasets"] == ["QP_1"]
+    assert any("NON-SQL" in n for n in fr_pds["needs_attention"])
+
+    fr_sql = build_fidelity_report(_R(_SqlQ()), rdl)
+    assert fr_sql["categories"]["data_source"]["non_sql_datasets"] == []
+    assert not any("NON-SQL" in n for n in fr_sql["needs_attention"])

@@ -73,7 +73,22 @@ TH_FG       = "#ffffff"   # table header text
 # ---------------------------------------------------------------------------
 
 _TOKEN_RE = re.compile(r"&([A-Z][A-Z0-9_]*)", re.IGNORECASE)
+# Oracle inline FIELD REFERENCE inside boilerplate text: &<FIELD_NAME>. These
+# interpolate a record's value into a sentence (form letters, mailing labels:
+# "Dear &<FIRST_NAME>"). They must resolve to a sample value -- NOT be stripped
+# to empty (which left letters reading "Dear Mr./Miss ,").
+_ANGLE_TOKEN_RE = re.compile(r"&<\s*([^>]+?)\s*>")
+# Page-number / pane builtins that Oracle/SSRS expose via &<...>; these are NOT
+# data fields and should drop out of a static preview (no live page context).
+_PAGE_BUILTINS = {
+    "PHYSICALPAGENUMBER", "PAGENUMBER", "TOTALPAGES", "TOTALPHYSICALPAGES",
+    "TOTALLOGICALPAGES", "TOTALPANES", "PANENUMBER", "PAGE", "PAGES",
+}
 _WS_COLLAPSE = re.compile(r"\s*\n\s*\n\s*", re.MULTILINE)
+
+
+def _is_page_builtin(name: str) -> bool:
+    return name.upper().replace(" ", "").replace("_", "") in _PAGE_BUILTINS
 
 # Canned values used to fill in &TOKEN substitutions and bound fields when no
 # real data source is available. These are FALLBACK placeholders only — when
@@ -144,23 +159,35 @@ def _placeholder_for_source(src):
     return f"«F_{name}»"
 
 
-def _resolve_tokens(text: str) -> str:
+def _resolve_tokens(text: str, idx: int = 0) -> str:
     if _ACTIVE_MODE == "backend":
+        def _ang_back(m):
+            name = m.group(1).strip()
+            return "" if _is_page_builtin(name) else f"«&{name.upper()}»"
+        text = _ANGLE_TOKEN_RE.sub(_ang_back, text or "")
         return _TOKEN_RE.sub(
             lambda m: f"«&{m.group(1).upper()}»",
-            text or "",
+            text,
         )
-    def sub(m):
-        key = m.group(1)
+
+    def _one(key):
         u = key.upper()
         if u in _TOKEN_PREVIEW:
             return _TOKEN_PREVIEW[u]
         if "YEAR" in u:
             return "2026" if ("PREVIOUS" not in u and "PREV" not in u) else "2025"
         # CF_/CP_ formulas and any other unmatched token -> a neutral sample,
-        # NEVER the raw &TOKEN (which reads as broken in the preview).
-        return _sample_for_source(key, 0)
-    return _TOKEN_RE.sub(sub, text or "")
+        # NEVER the raw &TOKEN (which reads as broken in the preview). ``idx``
+        # lets a tiled preview (mailing labels) vary values per cell.
+        return _sample_for_source(key, idx)
+
+    # &<FIELD> inline references first: page builtins drop out, data fields
+    # resolve to a sample value so the sentence reads naturally.
+    def _angle(m):
+        name = m.group(1).strip()
+        return "" if _is_page_builtin(name) else _one(name)
+    text = _ANGLE_TOKEN_RE.sub(_angle, text or "")
+    return _TOKEN_RE.sub(lambda m: _one(m.group(1)), text)
 
 
 def _clean_text(text: str) -> str:
@@ -524,6 +551,7 @@ def _sample_for_source(src, idx):
     CITY_POOL    = ["Springfield", "Riverside"]
     DATE_POOL    = ["03/12/2026", "04/02/2026"]
     NUM_POOL     = ["1001", "1002"]
+    MONEY_POOL   = ["$1,250.00", "$3,480.00"]
     SHORT_ID     = ["ID-0001", "ID-0002"]
     TYPE_POOL    = ["Type Alpha", "Type Bravo"]
     STATUS_POOL  = ["Active", "Pending"]
@@ -533,35 +561,74 @@ def _sample_for_source(src, idx):
     PHONE_POOL   = ["(555) 010-1001", "(555) 010-1002"]
 
     # Keyword → pool dispatch (order matters: more-specific keywords first).
+    # Non-English stems (RO/ES/FR/PT/IT) are listed alongside English so the
+    # many non-English wild-corpus reports read naturally -- AND so a word
+    # like "nume" (RO: name) wins the NAME pool before its "num" substring
+    # could fall into the NUMBER pool further down.
     KEYWORD_MAP = [
-        (("email",),                       EMAIL_POOL),
-        (("phone", "tel",),                PHONE_POOL),
+        (("email", "mail", "correo", "courriel"), EMAIL_POOL),
+        (("phone", "tel", "telefon", "telefono", "telephone"), PHONE_POOL),
         # Generic structural keywords (envelope/chief cover the common
         # Oracle CF_/CP_ formula naming without any client tokens).
         (("envelope",),                    ["Sample Envelope Report",
                                             "Sample Envelope Report"]),
-        (("chief", "director", "officer"), ["Sample Chief, Bureau Chief",
+        (("chief", "director", "officer", "jefe", "directeur"),
+                                           ["Sample Chief, Bureau Chief",
                                             "Sample Director, Division"]),
-        (("contractor", "owner", "permittee", "company", "org", "facility"), NAME_POOL),
-        (("contact", "user", "person", "signer", "manager"), PERSON_POOL),
-        (("addr", "street", "location"),   ADDR_POOL),
-        (("city", "town"),                 CITY_POOL),
-        (("date", "dt"),                   DATE_POOL),
-        (("comment", "descr", "notes", "remark"), COMMENT_POOL),
-        (("status",),                      STATUS_POOL),
-        (("type",),                        TYPE_POOL),
-        (("count", "total", "qty", "num", "number"), NUM_POOL),
-        (("id", "code", "key"),            SHORT_ID),
-        (("nm", "name", "label", "group"), GROUP_POOL),
+        # Money / amount / balance (placed BEFORE number so "saldo"/"valor"
+        # read as currency, not a bare count).
+        (("salar", "salai", "sueldo", "saldo", "importe", "monto", "montant",
+          "valoare", "valor", "pret", "precio", "prix", "price", "amount",
+          "balance", "subtotal", "discount", "fee", "cost", "payment", "paid"),
+                                           MONEY_POOL),
+        # Person names (incl. RO/ES/FR/PT) -- BEFORE the generic name row so
+        # FIRST_NAME / LAST_NAME read as a person, not an org "Group One".
+        (("first", "last", "fname", "lname", "surname", "given", "middle",
+          "prenom", "apellido", "nombre", "prenume", "nom_",
+          "client", "cliente", "persoan", "persona", "empleado", "angajat",
+          "funcionar", "contact", "user", "usuario", "utilizator",
+          "signer", "manager", "gerente", "employee", "emp name", "staff",
+          "worker", "tenant", "applicant", "patient", "student", "author"),
+                                           PERSON_POOL),
+        (("contractor", "owner", "permittee", "company", "org", "facility",
+          "magazin", "empresa", "compania", "societe", "store"), NAME_POOL),
+        (("addr", "street", "location", "adresa", "adres", "adresse",
+          "direccion", "endereco", "domicilio"), ADDR_POOL),
+        # Geography: country / county / region / state. CRITICAL that these
+        # come BEFORE the NUMBER row -- "country" and "county" both START with
+        # "count", so a word-boundary "count" match would otherwise paint a
+        # whole geography report as "1001" (wild-corpus verified: Judet-Tara).
+        (("country", "nation", "pais", "pays", "tara"),
+                                           ["Westeria", "Eastland"]),
+        (("county", "region", "province", "provincia",
+          "judet", "departament", "district", "comarca"),
+                                           ["North District", "South District"]),
+        (("city", "town", "oras", "ciudad", "ville", "cidade", "localidad"),
+                                           CITY_POOL),
+        (("date", "dt", "data", "fecha", "vigencia", "fech"), DATE_POOL),
+        (("comment", "descr", "notes", "remark", "observ", "nota"), COMMENT_POOL),
+        (("status", "estado", "stare", "etat"), STATUS_POOL),
+        (("type", "tipo", "tip"),          TYPE_POOL),
+        # Generic NAME / denomination (RO denumire, ES nombre, etc.) -- still
+        # before NUMBER so "nume"/"nome" never falls to the "num" substring.
+        (("nume", "nombre", "nome", "denumire", "razon", "raison", "naam",
+          "titre", "titulo", "name"),      GROUP_POOL),
+        (("count", "total", "qty", "quantity", "num", "number", "cantidad",
+          "cantitate", "cant"), NUM_POOL),
+        (("id", "code", "key", "cod", "clave"), SHORT_ID),
+        (("nm", "label", "group", "grup"), GROUP_POOL),
     ]
     # Boolean indicator / flag columns (Oracle '*_Ind', '*_Indicator',
     # '*_Flag', '*_YN'): a Yes/No marker, never a generic "Sample Value A"
     # text block. Precise suffix match so 'binding'/'finding' don't trip it.
     if re.search(r"(_|\b)(ind|indicator|flag|yn)$", u, re.IGNORECASE):
         return ["Y", "N"][idx % 2]
+    # Word-boundary match (key has '_' normalized to spaces): a stem matches
+    # only at the START of a word, so "data" matches "data nasterii" but NOT
+    # "metadata", and "num" matches "perm num" but never inside "nume".
     for keywords, pool in KEYWORD_MAP:
         for kw in keywords:
-            if kw and kw in key:
+            if kw and re.search(r"\b" + re.escape(kw), key):
                 return pool[idx % len(pool)]
     return ["Sample Value A", "Sample Value B"][idx % 2]
 
@@ -1709,8 +1776,7 @@ def _doc_resolve_tokens(text, report):
                 field_names.add(it.name.upper())
     param_names = {(p.name or "").upper() for p in (report.parameters or [])}
 
-    def sub(m):
-        key = m.group(1)
+    def _resolve_key(key):
         u = key.upper()
         if u in _TOKEN_PREVIEW:
             return _TOKEN_PREVIEW[u]
@@ -1726,7 +1792,14 @@ def _doc_resolve_tokens(text, report):
         # bare word token -> neutral sample
         return _sample_for_source(key, 0)
 
-    return _TOKEN_RE.sub(sub, text)
+    # &<FIELD> inline references (form-letter / mailing-label merge fields):
+    # page builtins drop out, data fields interpolate a sample value -- so a
+    # sentence reads "Dear Mr. Rivera" not "Dear Mr. &<FIRST_NAME>".
+    def _angle(m):
+        name = m.group(1).strip()
+        return "" if _is_page_builtin(name) else _resolve_key(name)
+    text = _ANGLE_TOKEN_RE.sub(_angle, text)
+    return _TOKEN_RE.sub(lambda m: _resolve_key(m.group(1)), text)
 
 
 def _decollide(elems):
@@ -2053,6 +2126,215 @@ def _render_no_content_page(report):
         'an Oracle Reports XML export.</div></div>'
     )
     return _render_page(inner, label="Page 1 of 1")
+
+
+def _render_matrix_pages(report, spec):
+    """Render a matrix/cross-tab report as a real PIVOT GRID in the preview
+    (row dimension down the left, column dimension across the top, the measure
+    in the body cells) -- matching the RDL's Tablix_Matrix and Oracle's print,
+    instead of scattering the dimension fields as a flat list."""
+    row_dim = spec.get("row") or "Row"
+    col_dim = spec.get("col") or "Column"
+    cells = spec.get("cells") or ["Value"]
+    measure = cells[0]
+    row_cap = _humanize_report_title(row_dim)
+    col_cap = _humanize_report_title(col_dim)
+
+    def _axis_sample(dim, j):
+        # A pivot axis needs DISTINCT values per column/row. An ID/code/number
+        # dimension reads as a short numeric code (101, 102, ...) not a generic
+        # "Sample Value A"; a keyworded dim (City, Status) uses its pool;
+        # anything else gets a distinct "Dim A / B / C" label.
+        u = (dim or "").lower()
+        if re.search(r"(\b|_)(id|no|num|nbr|code|key|cod)(\b|_|$)", u):
+            return str(101 + j)
+        base = _sample_for_source(dim, j)
+        if base.startswith("Sample Value"):
+            return _humanize_report_title(dim) + " " + "ABCDE"[j % 5]
+        return base
+
+    # Sample axis values (distinct per cell so the grid reads like real data).
+    col_vals = [_axis_sample(col_dim, j) for j in range(3)]
+    row_vals = [_axis_sample(row_dim, i) for i in range(4)]
+    # Plausible numeric measure cells (matrix measures are counts/sums).
+    grid = [12, 8, 5, 9, 6, 3, 7, 4, 2, 5, 3, 1]
+
+    th = ('padding:5px 9px;border:1px solid #c4ccd6;font-size:11px;'
+          'background:#4a6a8a;color:#fff;font-weight:bold;text-align:center;')
+    rh = ('padding:5px 9px;border:1px solid #d0d0d0;font-size:11px;'
+          'font-weight:bold;background:#eef2f6;text-align:left;white-space:nowrap;')
+    td = ('padding:5px 9px;border:1px solid #d0d0d0;font-size:11px;'
+          'text-align:right;')
+    head = ('<tr><th style="' + th + 'text-align:left;">' + _esc(row_cap)
+            + ' \\ ' + _esc(col_cap) + '</th>'
+            + "".join('<th style="' + th + '">' + _esc(str(c)) + '</th>'
+                      for c in col_vals)
+            + '<th style="' + th + '">Total</th></tr>')
+    body_rows = []
+    for i, rv in enumerate(row_vals):
+        tds = []
+        rtot = 0
+        for j in range(len(col_vals)):
+            v = grid[(i * len(col_vals) + j) % len(grid)]
+            rtot += v
+            tds.append('<td style="' + td + '">' + str(v) + '</td>')
+        body_rows.append('<tr><td style="' + rh + '">' + _esc(str(rv)) + '</td>'
+                         + "".join(tds)
+                         + '<td style="' + td + 'font-weight:bold;">' + str(rtot)
+                         + '</td></tr>')
+    table = ('<table style="border-collapse:collapse;margin:6px auto;">'
+             + head + "".join(body_rows) + '</table>')
+    cap = ('<div style="text-align:center;color:#64748b;font-size:11px;'
+           'margin:4px 0 8px;">Cross-tab: ' + _esc(_humanize_report_title(measure))
+           + ' by ' + _esc(col_cap) + ' (columns) and ' + _esc(row_cap)
+           + ' (rows)</div>')
+    title_html = ('<div style="text-align:center;font-weight:bold;'
+                  'font-size:15px;margin-bottom:8px;">'
+                  + _esc(_humanize_report_title(getattr(report, "name", "") or "Report"))
+                  + '</div>')
+    return _render_pages_wrapper(
+        [_render_page(title_html + cap + table, label="Page 1 of 1")])
+
+
+def _mockup_chart_spec(report):
+    """Return a detected chart dict whose category+measure are real dataset
+    columns (renderable, mirrors the RDL's <Chart> gate), else None."""
+    charts = list(getattr(report, "charts", None) or [])
+    if not charts:
+        return None
+    cols = set()
+    for q in (report.queries or []):
+        for it in (q.items or []):
+            if it.name:
+                cols.add(it.name.upper())
+    for c in charts:
+        cat = (c.get("category") or "").strip().upper()
+        meas = (c.get("plot_value") or "").strip().upper()
+        if cat and meas and cat in cols and meas in cols:
+            return c
+    return charts[0] if charts else None  # show something even if unbound
+
+
+def _render_chart_svg(chart):
+    """A small SVG bar chart for the preview -- title + sample bars + the
+    '<measure> by <category>' caption -- so the mockup shows the chart the
+    RDL renders (sample bars; real values come at runtime)."""
+    title = (chart.get("title") or "Chart").strip() or "Chart"
+    cat = _humanize_report_title(chart.get("category") or "Category")
+    meas = _humanize_report_title(chart.get("plot_value") or "Value")
+    vals = [62, 88, 45, 73, 34, 57, 49]
+    maxv = max(vals)
+    W, H, pad = 460, 220, 24
+    bw = (W - 2 * pad) // len(vals)
+    bars = []
+    for i, v in enumerate(vals):
+        bh = int((v / maxv) * 150)
+        x = pad + i * bw
+        y = H - 40 - bh
+        bars.append(f'<rect x="{x + 4}" y="{y}" width="{bw - 10}" '
+                    f'height="{bh}" rx="2" fill="#4a6a8a"/>')
+        bars.append(f'<text x="{x + bw // 2}" y="{H - 24}" font-size="9" '
+                    f'text-anchor="middle" fill="#64748b">{chr(65 + i)}</text>')
+    svg = (f'<svg width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
+           f'role="img" style="max-width:100%;">'
+           f'<line x1="{pad}" y1="{H - 40}" x2="{W - pad}" y2="{H - 40}" '
+           f'stroke="#cbd5e1"/>'
+           f'<line x1="{pad}" y1="20" x2="{pad}" y2="{H - 40}" '
+           f'stroke="#cbd5e1"/>' + "".join(bars) + '</svg>')
+    return (
+        '<div style="text-align:center;">'
+        '<div style="font-weight:bold;font-size:15px;margin-bottom:2px;">'
+        + _esc(title) + '</div>'
+        '<div style="color:#64748b;font-size:11px;margin-bottom:8px;">'
+        + _esc(meas) + ' by ' + _esc(cat) + ' (sample bars)</div>'
+        + svg + '</div>')
+
+
+def _maybe_lead_chart(report, html):
+    """If the report has a renderable chart, splice a chart sheet in as the
+    first page of the preview (so mockup <-> RDL agree)."""
+    spec = _mockup_chart_spec(report)
+    if not spec:
+        return html
+    lead = _render_page(_render_chart_svg(spec), label="Chart", first_page=True)
+    marker = 'min-height:100%;">'
+    i = html.find(marker)
+    if i < 0:
+        return html
+    i += len(marker)
+    divider = ('<div style="border-top:1px dashed #cbd5e1; '
+               'max-width:8.25in; margin:0 auto 12px;"></div>')
+    return html[:i] + lead + divider + html[i:]
+
+
+def _mockup_label_spec(report):
+    """Detect the mailing-label / multi-up archetype for the PREVIEW: a single
+    repeating frame whose printDirection tiles ACROSS and whose cell is a small
+    boilerplate label box. Mirrors the RDL's _find_label_spec guards (no matrix;
+    one across frame; small cell; predominantly a text block). Returns
+    {cell_w, cell_h, text} or None."""
+    # No matrix anywhere.
+    for g in _iter_layout(report):
+        if (getattr(g, "kind", "") or "") in (
+                "matrix", "matrix_col", "matrix_row", "matrix_cell"):
+            return None
+    across = [g for g in _iter_layout(report)
+              if getattr(g, "kind", "") == "repeating_frame"
+              and "across" in (getattr(g, "print_direction", "") or "").lower()]
+    if len(across) != 1:
+        return None
+    frame = across[0]
+    cw = float(getattr(frame, "width", 0.0) or 0.0)
+    ch = float(getattr(frame, "height", 0.0) or 0.0)
+    if not (0.5 <= cw <= 4.5 and 0.2 <= ch <= 3.0):
+        return None
+    texts, datafields = [], 0
+
+    def collect(g):
+        nonlocal datafields
+        for f in (g.fields or []):
+            if getattr(f, "kind", "") == "text" and len((f.text or "").strip()) >= 12:
+                texts.append(f.text)
+            elif getattr(f, "kind", "") == "field":
+                datafields += 1
+        for c in (g.children or []):
+            collect(c)
+
+    collect(frame)
+    if not texts or datafields > len(texts):
+        return None
+    return {"cell_w": cw, "cell_h": max(0.6, ch), "text": "\n".join(texts)}
+
+
+def _render_label_pages(report):
+    """Mailing labels: tile the resolved label cell MULTI-UP across the sheet
+    then down (matching the RDL's newspaper Columns + Oracle's actual print),
+    instead of one label per page."""
+    spec = _mockup_label_spec(report)
+    if not spec:
+        return _render_generic_document_pages(report)
+    cell_w, cell_h = spec["cell_w"], spec["cell_h"]
+    usable = 7.0  # sheet content width (8.25in max - ~0.6in margins each side)
+    gap = 0.12
+    ncols = max(1, int((usable + gap) // (cell_w + gap)))
+    nrows = max(3, int(9.0 // (cell_h + gap)))
+    total = ncols * nrows
+    cells = []
+    for i in range(total):
+        body = _esc(_resolve_tokens(spec["text"], i)).replace("\n", "<br>")
+        cells.append(
+            '<div style="display:inline-block;vertical-align:top;'
+            'width:' + ("%.3fin" % cell_w) + ';height:' + ("%.3fin" % cell_h) + ';'
+            'margin:0 ' + ("%.3fin" % (gap / 2)) + ' ' + ("%.3fin" % gap) + ' '
+            + ("%.3fin" % (gap / 2)) + ';padding:0.06in 0.08in;box-sizing:border-box;'
+            'border:1px dashed #c7d2e0;font-size:10px;line-height:1.25;'
+            'overflow:hidden;white-space:pre-wrap;">' + body + '</div>')
+    inner = ('<div style="text-align:left;width:' + ("%.3fin" % usable)
+             + ';margin:0 auto;">' + "".join(cells) + '</div>')
+    note = ('<div style="text-align:center;color:#64748b;font-size:11px;'
+            'margin:4px 0 10px;">Mailing labels — ' + str(ncols)
+            + '-up per row (tiled across, then down)</div>')
+    return _render_pages_wrapper([_render_page(note + inner, label="Page 1 of 1")])
 
 
 def _render_generic_document_pages(report):
@@ -2470,17 +2752,32 @@ def render_mockup(report, mode="frontend"):
         if mode == "backend":
             return _render_design_view(report)
         kind = detect_report_kind(report)
-        if _is_header_summary_preview(report):
+        # Matrix / cross-tab: render a real pivot grid (the RDL pivots via
+        # Tablix_Matrix; the preview must match, not scatter the fields). The
+        # spec is stashed on the report during RDL generation (runs first).
+        _mspec = getattr(report, "_matrix_spec", None)
+        if _mspec and _mspec.get("dominant") and _mspec.get("row") and _mspec.get("col"):
+            _result = _render_matrix_pages(report, _mspec)
+        # Mailing-label / multi-up archetype: tile the label cell across the
+        # sheet (matches the RDL's newspaper Columns + Oracle's print), instead
+        # of one label per page through the document path.
+        elif _mockup_label_spec(report):
+            _result = _render_label_pages(report)
+        elif _is_header_summary_preview(report):
             # Accounting/status report whose criteria cover + summary table
             # live in section_header -- render that geometry-driven, then the
             # section_main detail page.
-            return _render_header_summary_pages(report)
-        if kind in ("letter", "certificate"):
+            _result = _render_header_summary_pages(report)
+        elif kind in ("letter", "certificate"):
             # Letters AND certificates are single positional documents -- render
             # the ACTUAL section_main layout (frames/texts/fields at their real
             # positions, real colors), never hardcoded sample content.
-            return _render_generic_document_pages(report)
-        return _render_tabular_pages(report)
+            _result = _render_generic_document_pages(report)
+        else:
+            _result = _render_tabular_pages(report)
+        # A detected chart renders as a real <Chart> in the RDL -- show it in
+        # the preview too (leading sheet) so mockup and RDL agree.
+        return _maybe_lead_chart(report, _result)
     finally:
         _ACTIVE_MODE = prev
         _ACTIVE_TITLE_FONT = prev_font

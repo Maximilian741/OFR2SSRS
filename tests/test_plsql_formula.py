@@ -51,6 +51,34 @@ def test_loops_or_garbage_fall_back():
     assert T("")["ok"] is False
 
 
+def test_degrades_on_garbage_without_crashing():
+    """The compiler must NEVER raise on bad input -- empty, comment-only,
+    whitespace, or syntactically broken bodies all return ok=False (the
+    caller keeps its placeholder), never an exception or a live broken expr."""
+    for bad in ("", "   ", "/* just a comment */", "-- a line comment\n",
+                "RETURN(:x +++ ;;; (", "BEGIN END;", "%%%not plsql%%%"):
+        r = T(bad)                      # must not raise
+        assert r["ok"] is False, bad
+        # an un-compilable body must not ship a half-translated live expr
+        assert r["expr"] is None or not r["ok"]
+
+
+def test_no_translated_expr_leaks_an_oracle_construct():
+    """Any expr the compiler marks ok=True must be pure VB.NET -- no NVL/
+    DECODE/SUBSTR/|| left that would error in SSRS."""
+    import re
+    for body in (
+        "BEGIN RETURN(NVL(:a, 0)); END;",
+        "BEGIN RETURN(DECODE(:s, 1, 'A', 'B')); END;",
+        "BEGIN RETURN(SUBSTR(:n, 1, 3)); END;",
+        "BEGIN RETURN(:a || '-' || :b); END;",
+    ):
+        r = T(body)
+        if r["ok"]:
+            assert not re.search(r"\bNVL\(|\bDECODE\(|\bSUBSTR\(|\|\|",
+                                 r["expr"], re.I), r["expr"]
+
+
 def test_placeholder_assignment_extraction_and_buildup():
     """Recover :CP_X := ... placeholder outputs a CF_ formula sets as side
     effects, including the build-up pattern (:CP_X := :CP_X || ...)."""

@@ -130,8 +130,14 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
     agg_sources = {m.upper() for m in re.findall(
         r"(?:Sum|Avg|Count|CountDistinct|Min|Max)\(Fields!([A-Za-z0-9_]+)\.Value",
         rdl_xml or "", re.I)}
+    # A data-model-only artifact (no <layout>) renders nothing at all -- its
+    # columns AND totals are all "absent", which the column score already
+    # reflects. Flagging "dropped totals" on it is a false alarm (there is
+    # nowhere to put a total). Only flag totals when there's a layout to
+    # render them into (wild-corpus verified: the OTN emprev data models).
+    _has_layout = bool(getattr(parsed, "layout", None))
     missing_tot = sorted({(s.get("source") or "").strip() for s in summ
-                          if (s.get("source") or "").strip()
+                          if _has_layout and (s.get("source") or "").strip()
                           # Skip CF_/CP_ formula sources -- those are wired
                           # as placeholders (category 4), not data-column
                           # totals, so they're not "dropped" aggregates.
@@ -160,6 +166,23 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
         needs.append(
             f"{len(charts)} chart/graph(s) detected -- not auto-built; recreate "
             f"as an SSRS Chart in Report Builder: {_desc[:6]}")
+
+    # 7) Non-SQL data source: an Oracle query with COLUMNS but NO SQL text is a
+    # pluggable data source (text/CSV file, XML, a custom PDS) -- the converter
+    # maps its columns but can't generate a relational query, so the dataset
+    # ships with an empty CommandText and would render NO data until the user
+    # points it at a source. Surface it so that's never a silent surprise
+    # (wild-corpus verified: textFilePDS CSV reports).
+    nonsql = [(getattr(q, "name", "") or "Q") for q in (parsed.queries or [])
+              if (getattr(q, "items", None))
+              and not (getattr(q, "sql", "") or "").strip()
+              and not (getattr(q, "tsql", "") or "").strip()]
+    cats["data_source"] = {"non_sql_datasets": nonsql}
+    if nonsql:
+        needs.append(
+            f"{len(nonsql)} dataset(s) use a NON-SQL data source (text/CSV/XML "
+            f"pluggable source) -- columns are mapped but the query is empty; "
+            f"point the dataset at your data in Report Builder: {nonsql[:6]}")
 
     # HARD score = the must-not-drop categories (params + columns).
     hard_total = cats["parameters"]["total"] + cats["columns"]["total"]

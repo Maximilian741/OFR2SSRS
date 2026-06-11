@@ -7,7 +7,7 @@ that the frontend can consume.
 """
 from __future__ import annotations
 
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Iterable
 
 from .models import ParsedReport
 from .parsers.oracle_xml import parse_oracle_xml
@@ -186,7 +186,8 @@ def _classify_source_artifact(parsed) -> Optional[Dict[str, str]]:
 
 
 def convert(xml_bytes: bytes, target_db: str = "oracle",
-            images: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+            images: Optional[Dict[str, Any]] = None,
+            extra_param_names: Optional[Iterable[str]] = None) -> Dict[str, Any]:
     """End-to-end conversion. Returns a dict ready to ship to the frontend.
 
     Parameters
@@ -212,6 +213,19 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
     parsed: ParsedReport = parse_oracle_xml(xml_bytes)
     if images:
         _merge_user_images(parsed, images)
+
+    # Drill-through TARGET parameters the caller (e.g. a parent report linking
+    # to this one as a sub-report) forwards. Declare each as a HIDDEN parameter
+    # if the report doesn't already -- an undeclared target parameter is a hard
+    # SSRS error the instant the parent's <Drillthrough> link is clicked.
+    if extra_param_names:
+        from .models import ReportParameter
+        _have = {(p.name or "").upper() for p in (parsed.parameters or [])}
+        for _p in extra_param_names:
+            if _p and _p.upper() not in _have:
+                parsed.parameters.append(
+                    ReportParameter(name=_p, label=_p, display=False))
+                _have.add(_p.upper())
 
     # Translation (Oracle SQL/PLSQL -> T-SQL) is an enhancement; a failure must
     # not sink the conversion -- the original Oracle SQL still passes through.

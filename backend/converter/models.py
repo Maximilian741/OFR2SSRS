@@ -149,12 +149,19 @@ class DataQuery:
 
 @dataclass
 class FormulaColumn:
-    """An Oracle CF_*_F formula. Becomes a calculated field or scalar UDF."""
+    """An Oracle CF_*_F formula. Becomes a calculated field or scalar UDF.
+
+    When this column is actually an Oracle <summary> (a count/sum/avg total),
+    ``agg_function`` + ``agg_source`` are set so a &TOKEN reference resolves
+    to a REAL SSRS aggregate (=Count(Fields!src.Value, "DS")) instead of a
+    NULL placeholder -- so report totals actually compute."""
     name: str                       # e.g. CF_File
     return_type: str = "VARCHAR2"
     plsql_body: str = ""            # original PL/SQL
     tsql_body: str = ""             # translated body (best-effort)
     notes: List[str] = field(default_factory=list)
+    agg_function: str = ""          # summary function: count|sum|avg|min|max
+    agg_source: str = ""            # the data column being aggregated
 
 
 # ---------------------------------------------------------------------------
@@ -259,6 +266,10 @@ class LayoutGroup:
     # the preview/RDL stack them on one sheet. The authoritative page-split
     # signal Oracle itself uses.
     page_break_before: bool = False
+    # repeatingFrame printDirection: "down" (one per row, normal), "across"
+    # / "acrossDown" (tile labels across then down -> the mailing-label
+    # multi-up shape). Drives the label archetype.
+    print_direction: str = ""
 
 
 # ---------------------------------------------------------------------------
