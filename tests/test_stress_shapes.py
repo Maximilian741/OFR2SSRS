@@ -220,3 +220,69 @@ def test_special_char_column_datafield_matches_result_set():
     dangling = [df for df in fields if df.upper() not in result_cols]
     assert not dangling, (
         f"DataField(s) {dangling} not in result set {sorted(result_cols)}")
+
+
+def _no_dangling_or_special_names(rdl):
+    """Helper: every Fields!/Parameters! reference resolves to a declared
+    Field/ReportParameter, and no $/# leaks into an SSRS Name."""
+    import re
+    fdecl = set(re.findall(r'<Field Name="([^"]+)"', rdl))
+    fref = set(re.findall(r"Fields!([A-Za-z0-9_]+)\.", rdl))
+    pdecl = set(re.findall(r'<ReportParameter Name="([^"]+)"', rdl))
+    pref = set(re.findall(r"Parameters!([A-Za-z0-9_]+)\.", rdl))
+    assert fref <= fdecl, f"dangling field refs: {fref - fdecl}"
+    assert pref <= pdecl, f"dangling param refs: {pref - pdecl}"
+    bad = [n for n in (fdecl | pdecl) if re.search(r"[$#]", n)]
+    assert not bad, f"$/# leaked into an SSRS Name: {bad}"
+
+
+def test_matrix_pivot_special_char_fields_stay_consistent():
+    """A cross-tab whose pivot/measure columns carry $/# (legal SQL idents):
+    the column GroupExpression, row GroupExpression and =Sum(cell) must all
+    reference the SAME sanitized field names the dataset declares -- no
+    dangling Fields! ref, no $/# in any Name. (Same identifier class as the
+    EMP# DataField bug, exercised through the matrix builder.)"""
+    xml = (b'<?xml version="1.0" encoding="UTF-8"?>'
+           b'<report name="SAMPLE_MATRIX" DTDVersion="1.0"><data>'
+           b'<dataSource name="Q_SALES">'
+           b'<select><![CDATA[SELECT region#, prod$, amt# FROM sales]]></select>'
+           b'<group name="G_SALES">'
+           b'<dataItem name="region#" datatype="vchar2"/>'
+           b'<dataItem name="prod$" datatype="vchar2"/>'
+           b'<dataItem name="amt#" datatype="number"/></group></dataSource></data>'
+           b'<layout><section name="main"><body width="7.5" height="9.0">'
+           b'<matrix name="M_sales"><geometryInfo x="0" y="0" width="6" height="1"/>'
+           b'<matrixCol name="g_region"><field name="f_region" source="region#">'
+           b'<geometryInfo x="1.5" y="0" width="1.5" height="0.25"/></field></matrixCol>'
+           b'<matrixRow name="g_product"><field name="f_product" source="prod$">'
+           b'<geometryInfo x="0" y="0.25" width="1.5" height="0.25"/></field></matrixRow>'
+           b'<matrixCell name="g_amount"><field name="f_amount" source="amt#">'
+           b'<geometryInfo x="1.5" y="0.25" width="1.5" height="0.25"/></field></matrixCell>'
+           b'</matrix></body></section></layout></report>')
+    out = convert(xml)
+    rdl = out["rdl_xml"]
+    _no_dangling_or_special_names(rdl)
+    if _XSD.exists():
+        etree = pytest.importorskip("lxml.etree")
+        schema = etree.XMLSchema(etree.parse(str(_XSD)))
+        assert schema.validate(etree.fromstring(rdl.encode())), \
+            "; ".join(e.message for e in schema.error_log[:3])
+
+
+def test_drillthrough_param_special_chars_sanitized_consistently():
+    """Subreport drill-through param names come from the parent's Oracle bind
+    params, which legally carry $/# (P_ID#, P_BAL$). The injected
+    <ReportParameter Name=..> and every Parameters! reference must route
+    through the same sanitizer -- no invalid Name, no dangling ref."""
+    plain = (b'<report name="CHILD" DTDVersion="9.0.2.0.10"><data>'
+             b'<dataSource name="Q_1"><select><![CDATA[SELECT a FROM t]]></select>'
+             b'<group name="G"><dataItem name="A" datatype="vchar2"/></group>'
+             b'</dataSource></data><layout><section name="main"><body width="8" height="9">'
+             b'<repeatingFrame name="R" source="G"><geometryInfo x="0" y="0" width="6" height="0.3"/>'
+             b'<field name="F" source="A"><geometryInfo x="0" y="0" width="2" height="0.2"/></field>'
+             b'</repeatingFrame></body></section></layout></report>')
+    rdl = convert(plain, extra_param_names=["P_ID#", "P_BAL$"])["rdl_xml"]
+    _no_dangling_or_special_names(rdl)
+    import re
+    decls = set(re.findall(r'<ReportParameter Name="([^"]+)"', rdl))
+    assert {"P_ID_", "P_BAL_"} <= decls, decls

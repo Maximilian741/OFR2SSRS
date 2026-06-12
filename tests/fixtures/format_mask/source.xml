@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic Oracle report exercising the documented format-mask range, so a
+     generated RDL can be RENDERED through Microsoft's actual engine and its
+     output compared 1:1 to Oracle's documented TO_CHAR results. No client
+     data: generic amounts/dates. Each field carries a different Oracle mask:
+       AMT     $NNN,NN0.00  -> currency, thousands, 2 decimals
+       QTY     9G999G999    -> grouped integer
+       PCT     999%         -> LITERAL percent (must NOT scale x100)
+       IDZ     000099       -> zero-padded id
+       NEG_ADJ 9999MI       -> trailing-minus negative (the NEG_ name makes the
+                               render harness feed a negative sample)
+       D1      DD-MON-YYYY  -> UPPERCASE spelled month (default Oracle date fmt)
+       D2      DD-Mon-YYYY  -> proper-case spelled month
+       D3      MM/DD/YYYY   -> all-digit date -->
+<report name="FORMAT_MASK_SAMPLE" DTDVersion="9.0.2.0.10">
+  <data>
+    <dataSource name="Q_1">
+      <select><![CDATA[SELECT amt, qty, pct, idz, neg_adj, d1, d2, d3 FROM samples]]></select>
+      <group name="G_SAMPLES">
+        <dataItem name="AMT" datatype="number" precision="12"/>
+        <dataItem name="QTY" datatype="number" precision="10"/>
+        <dataItem name="PCT" datatype="number" precision="6"/>
+        <dataItem name="IDZ" datatype="number" precision="8"/>
+        <dataItem name="NEG_ADJ" datatype="number" precision="10"/>
+        <dataItem name="D1" datatype="date"/>
+        <dataItem name="D2" datatype="date"/>
+        <dataItem name="D3" datatype="date"/>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+    <section name="main">
+      <body width="10.0" height="9.0">
+        <repeatingFrame name="R_G_SAMPLES" source="G_SAMPLES">
+          <geometryInfo x="0" y="0.3" width="9.5" height="0.3"/>
+          <field name="F_AMT" source="AMT" formatMask="$NNN,NN0.00">
+            <geometryInfo x="0" y="0.3" width="1.3" height="0.2"/></field>
+          <field name="F_QTY" source="QTY" formatMask="9G999G999">
+            <geometryInfo x="1.3" y="0.3" width="1.1" height="0.2"/></field>
+          <field name="F_PCT" source="PCT" formatMask="999%">
+            <geometryInfo x="2.5" y="0.3" width="0.9" height="0.2"/></field>
+          <field name="F_IDZ" source="IDZ" formatMask="000099">
+            <geometryInfo x="3.5" y="0.3" width="0.9" height="0.2"/></field>
+          <field name="F_NEG" source="NEG_ADJ" formatMask="9999MI">
+            <geometryInfo x="4.5" y="0.3" width="1.0" height="0.2"/></field>
+          <field name="F_D1" source="D1" formatMask="DD-MON-YYYY">
+            <geometryInfo x="5.6" y="0.3" width="1.4" height="0.2"/></field>
+          <field name="F_D2" source="D2" formatMask="DD-Mon-YYYY">
+            <geometryInfo x="7.0" y="0.3" width="1.4" height="0.2"/></field>
+          <field name="F_D3" source="D3" formatMask="MM/DD/YYYY">
+            <geometryInfo x="8.4" y="0.3" width="1.1" height="0.2"/></field>
+        </repeatingFrame>
+        <frame name="HDR">
+          <geometryInfo x="0" y="0" width="9.5" height="0.28"/>
+          <text name="B_AMT"><geometryInfo x="0" y="0" width="1.3" height="0.2"/>
+            <textSegment><string><![CDATA[Amount]]></string></textSegment></text>
+          <text name="B_DT"><geometryInfo x="5.6" y="0" width="1.4" height="0.2"/>
+            <textSegment><string><![CDATA[Date]]></string></textSegment></text>
+        </frame>
+      </body>
+    </section>
+  </layout>
+</report>

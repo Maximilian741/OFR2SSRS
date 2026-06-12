@@ -79,6 +79,12 @@ def _sample_value(col: str, typ: str, idx: int):
     if "datetime" in t:
         return f"2026-0{(idx % 8) + 1}-1{(idx % 9)}T00:00:00"
     if "decimal" in t or "int" in t or "double" in t:
+        # A column whose name signals a signed/loss value gets a NEGATIVE
+        # sample so negative-format masks (Oracle MI/PR -> .NET pos;neg
+        # sections) can be render-verified. Opt-in by name only -- default
+        # columns stay 1000+idx so Lookup() join keys still collide.
+        if any(h in u for h in ("NEG", "LOSS", "ADJ", "VARIANCE")):
+            return -(1000 + idx)
         # Join keys must collide across datasets; plain function of idx.
         return 1000 + idx
     if "byte[]" in t:

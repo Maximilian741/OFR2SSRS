@@ -343,6 +343,23 @@ def _q_safe(s: str) -> str:
     return (s or "").replace('"', '""')
 
 
+def _ssrs_text_align(align: str):
+    """Map an Oracle field alignment to an SSRS <TextAlign>, or None when the
+    field has no EXPLICIT alignment. None lets SSRS use 'General' (numbers/dates
+    right, text left -- which matches Oracle's own datatype default), so we only
+    override when the report author explicitly chose start/end/center. Dropping
+    an explicit alignment is a real 1:1 miss -- e.g. a CENTERED header would
+    otherwise render left under General."""
+    a = (align or "").strip().lower()
+    if a in ("end", "right"):
+        return "Right"
+    if a in ("center", "centre", "middle"):
+        return "Center"
+    if a in ("start", "left"):
+        return "Left"
+    return None
+
+
 def _collect_layout_columns(report: ParsedReport, query_name: str) -> List[str]:
     """Walk the layout tree, return ordered column names bound to query_name.
 
@@ -1285,6 +1302,7 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
                    padding: str = "4pt",
                    can_grow: bool = True,
                    font_family: Optional[str] = None,
+                   italic: bool = False,
                    underline: bool = False,
                    drillthrough: Optional[dict] = None) -> ET.Element:
     """Emit a styled Textbox.
@@ -1312,6 +1330,8 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
         _sub(style, "FontFamily", font_family)
     if bold:
         _sub(style, "FontWeight", "Bold")
+    if italic:
+        _sub(style, "FontStyle", "Italic")
     if underline:
         _sub(style, "TextDecoration", "Underline")
     if fg:
@@ -1417,13 +1437,50 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     # fixed 1.5in that would make a 54-column table 81in wide. Never drops
     # columns — width adapts, data is complete.
     _ncol = max(1, len(columns))
+    # Target table width: ~9in for a portrait report (unchanged), but a wide
+    # LANDSCAPE page (Oracle content spanning >portrait) lets the columns use
+    # the full page rather than compressing toward the 0.6in floor. max(9.0,..)
+    # keeps portrait byte-identical -- only a landscape page widens the target.
+    _target_w = max(9.0, _page_width_for(report) - 2 * _PAGE_HMARGIN_IN)
     if _ncol <= 6:
-        _colw = 1.5
+        _colw = max(1.5, round(_target_w / _ncol, 2)) if _target_w > 9.0 else 1.5
     else:
-        _colw = max(0.6, round(9.0 / _ncol, 2))
-    for _ in columns:
+        _colw = max(0.6, round(_target_w / _ncol, 2))
+    # Per-column widths from the Oracle layout: a wide description column stays
+    # wide and narrow code columns stay narrow, instead of one uniform width
+    # for all. Use each field's own width; scale DOWN proportionally only if the
+    # set overflows the target (never stretch -- preserve Oracle's widths when
+    # they fit); floor at 0.5in for legibility. Falls back to the uniform _colw
+    # when ANY column has no layout field width (mixed/synthetic columns).
+    _ora_w = {}
+    _ora_h = {}
+    try:
+        for _y, _x, _d, _lf in _layout_fields_in_order(report):
+            _s = (getattr(_lf, "source", "") or "").upper()
+            _w = float(getattr(_lf, "width", 0) or 0)
+            _h = float(getattr(_lf, "height", 0) or 0)
+            if _s and _s not in _ora_w and _w > 0:
+                _ora_w[_s] = _w
+            if _s and _s not in _ora_h and _h > 0:
+                _ora_h[_s] = _h
+    except Exception:  # noqa: BLE001 -- widths must never break the table
+        _ora_w, _ora_h = {}, {}
+    # Detail row height: the TALLEST Oracle detail field (so a field Oracle drew
+    # 0.6in tall keeps that height) -- floored at the default 0.28in (so the
+    # corpus, whose fields are <=0.28, is UNCHANGED) and capped at 2in to ignore
+    # a stray giant. CanGrow still grows the row for multi-line data beyond this.
+    _detail_h = min(2.0, max(0.28, max(
+        (_ora_h.get(c.upper(), 0.0) for c in columns), default=0.0)))
+    _widths = [_ora_w.get(c.upper(), 0.0) for c in columns]
+    if all(w > 0 for w in _widths) and _widths:
+        _sum = sum(_widths)
+        _scale = min(1.0, _target_w / _sum) if _sum > 0 else 1.0
+        _per_col = [max(0.5, round(w * _scale, 2)) for w in _widths]
+    else:
+        _per_col = [_colw] * len(columns)
+    for _w in _per_col:
         c = _sub(cols_el, "TablixColumn")
-        _sub(c, "Width", f"{_colw}in")
+        _sub(c, "Width", f"{_w}in")
 
     rows_el = _sub(body, "TablixRows")
 
@@ -1450,7 +1507,7 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     # Detail row -- alternating bg via row-number expression so output
     # mirrors the banded look in the in-app mockup.
     detail_row = _sub(rows_el, "TablixRow")
-    _sub(detail_row, "Height", "0.28in")
+    _sub(detail_row, "Height", f"{_detail_h:.2f}in")
     detail_cells = _sub(detail_row, "TablixCells")
     alt_expr = (
         '=IIf(RowNumber(Nothing) Mod 2 = 0, "'
@@ -1461,6 +1518,8 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     # must stay clickable in the SSRS table — the same Drillthrough the
     # per-record path emits. Map column -> its layout field once.
     col_dt = {}
+    col_align = {}
+    col_font = {}
     try:
         for _y, _x, _d, lf in _layout_fields_in_order(report):
             src = (getattr(lf, "source", "") or "").upper()
@@ -1468,12 +1527,30 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
                 dt = _drillthrough_for(report, lf)
                 if dt:
                     col_dt[src] = dt
+            if src and src not in col_align:
+                ta = _ssrs_text_align(getattr(lf, "align", ""))
+                if ta:
+                    col_align[src] = ta
+            if src and src not in col_font:
+                # Carry the field's Oracle FONT into the data cell -- face,
+                # size, bold, italic were parsed but never emitted, so every
+                # cell fell back to the default 10pt Arial regardless of the
+                # original (e.g. Courier New numerics rendered as Arial).
+                fam = (getattr(lf, "font_family", "") or "").strip()
+                sz = getattr(lf, "font_size", None)
+                col_font[src] = (
+                    fam or None,
+                    f"{int(sz)}pt" if sz else None,
+                    bool(getattr(lf, "bold", False)),
+                    bool(getattr(lf, "italic", False)),
+                )
     except Exception:  # noqa: BLE001 -- links must never break the table
         col_dt = {}
     for col in columns:
         cell = _sub(detail_cells, "TablixCell")
         contents = _sub(cell, "CellContents")
         dt = col_dt.get(col.upper())
+        fam, sz, bld, ital = col_font.get(col.upper(), (None, None, False, False))
         _build_textbox(
             contents,
             f"Cell_{_safe(col)}",
@@ -1485,6 +1562,11 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             fg="#0b5cad" if dt else None,
             underline=bool(dt),
             drillthrough=dt,
+            text_align=col_align.get(col.upper()),
+            font_family=fam,
+            font_size=sz or "10pt",
+            bold=bld,
+            italic=ital,
         )
 
     # Report-level <summary> grand totals -> a static FOOTER total row, so a
@@ -2274,21 +2356,100 @@ def _oracle_date_to_net(mu: str) -> str:
     return "".join(out)
 
 
-def _oracle_number_to_net(m: str) -> str:
+def _oracle_number_to_net(m: str, fill_mode: bool = False) -> str:
     """Translate an Oracle numeric mask to a .NET custom numeric format:
-    9/N -> # (optional digit), 0 -> 0 (required), keep , . $ %, G->',' D->'.'."""
-    out = []
-    for ch in m:
-        if ch in "9N":
-            out.append("#")
-        elif ch in "0,.$%":
-            out.append(ch)
-        elif ch == "G":
-            out.append(",")
-        elif ch == "D":
-            out.append(".")
-        # FM / MI / S / PR / parens etc. are dropped (best effort)
-    return "".join(out)
+    9/N -> # (optional digit), 0 -> 0 (required), keep , . $ %, G->',' D->'.'.
+    Oracle sign elements (MI/PR/S) become a .NET negative SECTION (pos;neg).
+    ``fill_mode`` True == the mask carried FM/FX -> suppress trailing fraction
+    zeros (the FM modifier's documented effect)."""
+    # Scientific notation: Oracle EEEE normalizes the mantissa to ONE leading
+    # digit and the digit positions after the decimal set the mantissa
+    # precision -- 9.9999EEEE -> "1.2346E+08" (verified vs the Oracle docs +
+    # real .NET). .NET expresses this as 0[.000...]E+00. Detect early: EEEE
+    # overrides the normal digit translation entirely.
+    if "EEEE" in m.upper():
+        before = re.split(r"(?i)EEEE", m, maxsplit=1)[0]
+        frac = re.split(r"[.Dd]", before)
+        decimals = sum(1 for c in frac[-1] if c in "90Nn") if len(frac) > 1 else 0
+        mant = "0" + ("." + "0" * decimals if decimals else "")
+        return mant + "E+00"
+    # Oracle negative-presentation elements appear at fixed positions: MI/PR are
+    # TRAILING, S is the first OR last char. Strip whichever is present; it is
+    # re-expressed as a .NET "positive;negative" section below. Verified 1:1
+    # against the Oracle TO_CHAR docs:
+    #   (default) -> leading minus (the .NET default)   MI -> "1234-"
+    #   PR -> "<1234>"   S(lead) -> "+/-1234"   S(trail) -> "1234+/-"
+    sign = None
+    body, mu = m, m.upper()
+    if mu.endswith("PR"):
+        sign, body = "PR", m[:-2]
+    elif mu.endswith("MI"):
+        sign, body = "MI", m[:-2]
+    elif mu.startswith("S"):
+        sign, body = "SL", m[1:]
+    elif mu.endswith("S"):
+        sign, body = "ST", m[:-1]
+
+    # Split integer / fractional around the FIRST decimal separator (Oracle 'D'
+    # or a literal '.'). The two parts have DIFFERENT '9' semantics, so they
+    # must be translated separately (below).
+    sep_idx = next((i for i, ch in enumerate(body) if ch in "Dd."), None)
+    int_src = body if sep_idx is None else body[:sep_idx]
+    frac_src = "" if sep_idx is None else body[sep_idx + 1:]
+
+    def _digits(src: str, fractional: bool) -> str:
+        o = []
+        for ch in src:
+            if ch in "9N":
+                # Oracle '9'/'N': in the FRACTION they PAD trailing zeros
+                # (TO_CHAR(1.5,'9.99')->"1.50") unless FM/FX fill-mode is on,
+                # which suppresses them -> '#'. In the INTEGER part they suppress
+                # LEADING zeros -> '#' (the units position is promoted to a
+                # required '0' afterward so a zero value still shows "0").
+                o.append("0" if (fractional and not fill_mode) else "#")
+            elif ch in "0,$":
+                o.append(ch)
+            elif ch == "%":
+                # Oracle '%' is a LITERAL percent sign (Oracle's x100 scaling
+                # element is 'V'; verified vs the Oracle number-format docs).
+                # .NET's bare '%' MULTIPLIES by 100, turning "50%" into "5000%".
+                # Escape to a literal.
+                o.append("\\%")
+            elif ch == "G":
+                o.append(",")
+            # D handled as the split point; FM/FX/V/L/parens dropped (best effort)
+        return "".join(o)
+
+    head = _digits(int_src, False)
+    tail = _digits(frac_src, True)
+
+    # Units position: Oracle '9' renders a ZERO value's integer part as "0"
+    # (documented), but .NET '#' is a non-zero placeholder that blanks 0. If the
+    # integer part has no required '0', promote its LAST '#' so zero shows "0"
+    # while leading positions stay '#' (no spurious leading zeros).
+    if head and "0" not in head:
+        idx = head.rfind("#")
+        if idx >= 0:
+            head = head[:idx] + "0" + head[idx + 1:]
+    if not head and (tail or sep_idx is not None):
+        head = "0"                       # pure-decimal mask -> leading 0
+
+    fmt = head + ("." + tail if sep_idx is not None else "")
+    if not fmt or fmt == ".":
+        return ""
+    # Re-express the stripped Oracle sign element as a .NET negative section.
+    # 2 sections (positive;negative) -- .NET reuses the positive section for
+    # zero, matching Oracle (MI/PR show a zero as the positive form, not a
+    # minus). '<' '>' '+' '-' are all literals in a .NET format string.
+    if sign == "MI":
+        return f"{fmt};{fmt}-"
+    if sign == "PR":
+        return f"{fmt};<{fmt}>"
+    if sign == "SL":
+        return f"+{fmt};-{fmt}"
+    if sign == "ST":
+        return f"{fmt}+;{fmt}-"
+    return fmt
 
 
 def _oracle_mask_to_net(mask: str) -> str:
@@ -2298,7 +2459,10 @@ def _oracle_mask_to_net(mask: str) -> str:
     if not mask:
         return ""
     m = mask.strip()
-    # Oracle fill-mode / format modifiers (FM, FX) have no .NET equivalent.
+    # Oracle fill-mode modifier FM/FX suppresses padding. It has no .NET token,
+    # but it DOES change numeric output (suppresses trailing-fraction zeros), so
+    # remember it before stripping and thread it into the numeric translator.
+    fill_mode = bool(re.search(r"(?i)F[MX]", m))
     m = re.sub(r"(?i)F[MX]", "", m).strip()
     if not m:
         return ""
@@ -2313,14 +2477,39 @@ def _oracle_mask_to_net(mask: str) -> str:
         net = _oracle_date_to_net(mu)
         return net if any(c in net for c in "yMdHhms") else ""
     if any(c in m for c in "09N$%"):
-        return _oracle_number_to_net(m)
+        return _oracle_number_to_net(m, fill_mode)
+    return ""
+
+
+def _spelled_case(mask: str, net: str) -> str:
+    """Return the case transform a date mask needs: 'U', 'L', or ''.
+
+    Oracle takes the case of a spelled month/day element from the format model
+    (MON->JAN, Mon->Jan, mon->jan -- verified vs the Oracle date-format docs),
+    but a .NET format string can render a spelled name (MMM/MMMM/dddd) only in
+    proper case. So an UPPER or lower spelled element needs a UCase()/LCase()
+    wrap on the value expression. Restricted to masks whose .NET format carries
+    a spelled NAME (MMM or ddd) and NO time token (H h m s t): for those, the
+    VB Format() used in the wrap is unambiguous AND null-safe. Masks that mix a
+    spelled month with time fall back to proper case (rare) -- correctness over
+    a fragile expression."""
+    if ("MMM" not in net) and ("ddd" not in net):
+        return ""
+    if any(c in net for c in "Hhmst"):
+        return ""
+    for tok in ("MONTH", "MON", "DAY", "DY", "RM"):
+        mt = re.search(tok, mask, re.IGNORECASE)
+        if mt:
+            t = mt.group(0)
+            return "U" if t.isupper() else ("L" if t.islower() else "")
     return ""
 
 
 def _format_index(report) -> dict:
-    """Map {field SOURCE name (upper) -> .NET format} for every layout field
-    carrying an Oracle formatMask. Used to stamp <Format> on the matching
-    Textbox values so SSRS renders currency / dates / thousands like Oracle."""
+    """Map {field SOURCE name (upper) -> (.NET format, case)} for every layout
+    field carrying an Oracle formatMask. Used to stamp <Format> on the matching
+    Textbox values so SSRS renders currency / dates / thousands like Oracle.
+    ``case`` is '', 'U', or 'L' -- a spelled-date case transform (see above)."""
     idx: dict = {}
 
     def walk(groups):
@@ -2331,7 +2520,7 @@ def _format_index(report) -> dict:
                 if mask and src:
                     net = _oracle_mask_to_net(mask)
                     if net:
-                        idx.setdefault(src.upper(), net)
+                        idx.setdefault(src.upper(), (net, _spelled_case(mask, net)))
             walk(getattr(g, "children", None) or [])
 
     walk(getattr(report, "layout", None) or [])
@@ -2363,8 +2552,18 @@ def _apply_field_formats(root, report) -> None:
         mobj = _PURE_FIELD_RE.match(val_el.text)
         if not mobj:
             continue
-        net = idx.get(mobj.group(1).upper())
-        if not net:
+        entry = idx.get(mobj.group(1).upper())
+        if not entry:
+            continue
+        net, case = entry
+        # Spelled-date case transform: a .NET <Format> can't force UPPER/lower
+        # case, so wrap the value. Only when the value is the plain field ref
+        # (no First()/scope) and the mask was case-flagged safe (_spelled_case:
+        # spelled name, no time token -> VB Format is unambiguous + null-safe).
+        fld = mobj.group(1)
+        if case and val_el.text.strip() == f"=Fields!{fld}.Value":
+            fn = "UCase" if case == "U" else "LCase"
+            val_el.text = f'={fn}(Format(Fields!{fld}.Value, "{net}"))'
             continue
         style = run.find(_q("Style"))
         if style is None:
@@ -4849,7 +5048,12 @@ def _emit_field_textbox(
         return (True, i_top + i_h)
 
     bold = bool(getattr(lf, "bold", False))
+    italic = bool(getattr(lf, "italic", False))
     fs = getattr(lf, "font_size", 0) or 10
+    # Oracle font FACE: parsed but (like the tablix path) was never passed
+    # through here, so positioned per-record/document fields fell back to the
+    # default Arial. Carry it (None -> SSRS default).
+    fam = (getattr(lf, "font_family", "") or "").strip() or None
     fcolor = getattr(lf, "color", "") or "#111111"
     align = (getattr(lf, "align", "") or "left").lower()
     text_align = {
@@ -4925,7 +5129,8 @@ def _emit_field_textbox(
 
     _build_textbox(
         parent_items, name, value_expr,
-        bold=bold, font_size=font_size, fg=fcolor,
+        bold=bold, italic=italic, font_family=fam,
+        font_size=font_size, fg=fcolor,
         text_align=text_align, vertical_align="Top",
         border_color="#ffffff", padding="2pt",
         # FIXED boxes, like Oracle. CanGrow=true lets a multi-line value
@@ -5229,8 +5434,9 @@ def _build_per_record_body(report, main):
                   for c in _frame_children_pre]
         # Cap at PageWidth - 2*margin - buffer so the width invariant
         # (body + margins < PageWidth) holds and SSRS doesn't insert
-        # blank pages. 8.5 - 0.5 - 0.02 = 7.98 fits Oracle's 7.85 span.
-        _MAX_BODY_W = 8.5 - 2 * _PAGE_HMARGIN_IN - 0.02  # 7.98
+        # blank pages. PageWidth is 8.5 (portrait) for normal reports -> 7.98,
+        # but WIDENS for landscape content so wide grids aren't compressed.
+        _MAX_BODY_W = _page_width_for(report) - 2 * _PAGE_HMARGIN_IN - 0.02
         BODY_W = min(_MAX_BODY_W, max(7.5, round(max(_all_r) + 0.15, 2)))
     else:
         BODY_W = 7.5
@@ -5397,7 +5603,9 @@ def _build_per_record_body(report, main):
 
         # Style hints from the parsed XML.
         bold = bool(getattr(f, "bold", False))
+        italic = bool(getattr(f, "italic", False))
         fs = getattr(f, "font_size", 0) or 10
+        fam = (getattr(f, "font_family", "") or "").strip() or None
         fcolor = getattr(f, "color", "") or "#111111"
         align = (getattr(f, "align", "") or "left").lower()
         text_align = {
@@ -5467,7 +5675,8 @@ def _build_per_record_body(report, main):
 
         _build_textbox(
             rect_items, f"Tb_Rec_{emitted}", value,
-            bold=bold, font_size=font_size, fg=fcolor,
+            bold=bold, italic=italic, font_family=fam,
+            font_size=font_size, fg=fcolor,
             text_align=text_align, vertical_align="Top",
             border_color="#ffffff", padding="2pt",
             can_grow=True,
@@ -6307,6 +6516,52 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
     return body
 
 
+def _content_span_in(report) -> float:
+    """Widest right-edge (x + width) across the main section's frames and their
+    fields = the Oracle CONTENT width. Drives portrait-vs-landscape page sizing:
+    a span wider than portrait's usable area needs a wide (landscape) page, or
+    the columns get compressed."""
+    sec = _section_by_kind(report, "section_main")
+    spans = [0.0]
+
+    def _r(o) -> float:
+        try:
+            return float(getattr(o, "x", 0) or 0) + float(getattr(o, "width", 0) or 0)
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def walk(g) -> None:
+        spans.append(_r(g))
+        for f in (getattr(g, "fields", None) or []):
+            spans.append(_r(f))
+        for ch in (getattr(g, "children", None) or []):
+            walk(ch)
+
+    if sec:
+        for c in (getattr(sec, "children", None) or []):
+            walk(c)
+    return max(spans)
+
+
+def _page_width_for(report) -> float:
+    """Resolve the report's PageWidth in inches (cached on the report). Portrait
+    8.5in unless the Oracle content span exceeds portrait's usable width, in
+    which case the page widens to fit (landscape). Gated so portrait reports are
+    byte-identical -- only genuinely-wide reports change."""
+    cached = getattr(report, "_page_width_in", None)
+    if cached:
+        return cached
+    portrait_usable = 8.5 - 2 * _PAGE_HMARGIN_IN - 0.02  # 7.98
+    try:
+        span = _content_span_in(report)
+    except Exception:  # noqa: BLE001 -- never let sizing break the RDL
+        span = 0.0
+    pw = (min(round(span + 2 * _PAGE_HMARGIN_IN + 0.1, 2), 17.0)
+          if span > portrait_usable else 8.5)
+    report._page_width_in = pw
+    return pw
+
+
 def _build_page(report: ParsedReport, page_height_in: float = 11.0,
                 footer_on_first_page: bool = True,
                 signature_in_footer: bool = True,
@@ -6408,7 +6663,7 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
         _sub(img, "Width", "1.5in")
 
     _sub(page, "PageHeight", f"{page_height_in:.2f}in")
-    _sub(page, "PageWidth", "8.5in")
+    _sub(page, "PageWidth", f"{_page_width_for(report):.2f}in")
     _sub(page, "LeftMargin", f"{_PAGE_HMARGIN_IN}in")
     _sub(page, "RightMargin", f"{_PAGE_HMARGIN_IN}in")
     _sub(page, "TopMargin", f"{_PAGE_MARGIN_IN}in")
