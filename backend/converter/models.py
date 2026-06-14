@@ -132,6 +132,11 @@ class DataQuery:
     # the generator can emit a Lookup() back to the master instead of =Nothing.
     parent_group: str = ""
     link_condition: str = ""
+    # Explicit <link parentColumn=.. childColumn=..> join keys to the master
+    # (one pair per <link>; composite when a child links on >1 column). These
+    # are Oracle's EXACT join keys -- used for a correct cross-dataset Lookup/
+    # LookupSet without guessing from column-name stems.
+    link_pairs: List = field(default_factory=list)  # [(parent_col, child_col)]
     # Names of the Oracle <group> elements this query owns (e.g. G_MAIN
     # owns group G_STATUS_1). A layout repeating-frame binds to a
     # GROUP name, not the query name, so this lets the generator map a frame
@@ -162,6 +167,10 @@ class FormulaColumn:
     notes: List[str] = field(default_factory=list)
     agg_function: str = ""          # summary function: count|sum|avg|min|max
     agg_source: str = ""            # the data column being aggregated
+    agg_scope: str = ""             # Oracle reset/compute scope: "report" (grand
+    #                                 total) or a group name (subtotal). Drives
+    #                                 WHERE the total renders (report footer vs a
+    #                                 group footer) and its SSRS aggregate scope.
 
 
 # ---------------------------------------------------------------------------

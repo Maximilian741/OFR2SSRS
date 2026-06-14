@@ -6971,6 +6971,290 @@ def _ensure_layout_images_emitted(root: ET.Element, report) -> None:
         body_h_el.text = f"{max_bottom + 0.1:.2f}in"
 
 
+def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
+    """Oracle report-level <summary compute="report"> GRAND TOTALS are placed in
+    the layout as fields bound to the summary name, but flat / multi-section body
+    builders render the data tablixes and skip these standalone total fields --
+    so the grand totals vanish (wild-corpus banking reports: 6 of 8 summaries).
+    Emit each not-yet-rendered report-scoped summary as a labeled textbox BELOW
+    the body content, computing the REAL SSRS aggregate scoped to its source
+    column's dataset (=Sum(Fields!src.Value,"Q")). Stacked below (not at the
+    Oracle y) so it never overlaps a dynamically-grown tablix. Gated on
+    report-scoped summaries existing -> non-summary reports are byte-identical."""
+    formulas = getattr(report, "formulas", None) or []
+    rep_summ = [f for f in formulas
+                if getattr(f, "agg_function", "")
+                and (getattr(f, "agg_scope", "") or "").lower() == "report"
+                and getattr(f, "agg_source", "")]
+    if not rep_summ:
+        return
+    body = root.find(_q("Body"))
+    if body is None:
+        return
+    # Only emit summaries actually PLACED in the layout (a field bound to the
+    # summary name) -- mirrors Oracle (an unplaced summary doesn't display).
+    placed = set()
+
+    def _collect(g):
+        for f in (getattr(g, "fields", None) or []):
+            s = (getattr(f, "source", "") or "").upper()
+            if s:
+                placed.add(s)
+        for c in (getattr(g, "children", None) or []):
+            _collect(c)
+    for lg in (getattr(report, "layout", None) or []):
+        _collect(lg)
+    rep_summ = [f for f in rep_summ if (f.name or "").upper() in placed]
+    if not rep_summ:
+        return
+
+    owner: dict = {}
+    for q in (getattr(report, "queries", None) or []):
+        for it in (getattr(q, "items", None) or []):
+            if getattr(it, "name", ""):
+                owner.setdefault(it.name.upper(), q.name)
+    _SS = {"count": "Count", "sum": "Sum", "avg": "Avg", "average": "Avg",
+           "min": "Min", "max": "Max", "stddev": "StDev", "variance": "Var",
+           "% of total": "Sum"}
+
+    # An aggregate OUTSIDE a data region needs an explicit dataset scope unless
+    # the report has exactly one dataset (SSRS rule). So a grand total whose
+    # source column has no resolvable owner dataset (e.g. it sums a FORMULA
+    # column, not a base query column) can only be emitted unscoped -- valid in
+    # a single-dataset report, INVALID (publish error) in a multi-dataset one.
+    _multi_ds = len(getattr(report, "queries", None) or []) > 1
+
+    def _expr(f):
+        fn = _SS.get((f.agg_function or "").lower(), "Sum")
+        src = (f.agg_source or "").strip()
+        own = owner.get(src.upper())
+        if not own and _multi_ds:
+            return None        # would be an unscoped aggregate -> skip (flag)
+        return (f'={fn}(Fields!{_safe(src)}.Value, "{_safe(own)}")' if own
+                else f'={fn}(Fields!{_safe(src)}.Value)')
+
+    existing = {(v.text or "") for v in root.iter(_q("Value"))}
+    # De-dup grand totals that already render (e.g. resolved via a layout &token).
+    todo = []
+    for f in rep_summ:
+        e = _expr(f)
+        if e is None or e in existing or e in [t[1] for t in todo]:
+            continue
+        label = re.sub(r"^(CS|CF|CP|CN)_", "", f.name or "", flags=re.IGNORECASE)
+        label = re.sub(r"[_]+", " ", label).strip().title() or (f.name or "Total")
+        todo.append((label, e))
+    if not todo:
+        return
+
+    ri = body.find(_q("ReportItems"))
+    if ri is None:
+        ri = _sub(body, "ReportItems")
+    body_h_el = body.find(_q("Height"))
+    try:
+        body_h = float((body_h_el.text or "0").replace("in", "")) \
+            if body_h_el is not None else 0.0
+    except ValueError:
+        body_h = 0.0
+
+    y = body_h + 0.20
+    for i, (label, e) in enumerate(todo):
+        _build_textbox(
+            ri, f"Tb_GrandTotal_{i}",
+            f'="{_q_safe(label)}:  " & {e[1:]}',
+            bold=True, font_size="9pt", fg="#111111",
+            text_align="Left", vertical_align="Middle",
+            border_color="#ffffff", padding="2pt", can_grow=False)
+        tb = ri[-1]
+        _sub(tb, "Top", f"{y:.2f}in")
+        _sub(tb, "Left", "0.10in")
+        _sub(tb, "Width", "5.0in")
+        _sub(tb, "Height", "0.22in")
+        y += 0.26
+    if body_h_el is not None:
+        body_h_el.text = f"{y + 0.1:.2f}in"
+
+
+_SUMLOOKUP_CODE = (
+    "Public Function SumLookup(ByVal items As Object()) As Decimal\n"
+    "  If items Is Nothing Then Return CDec(0)\n"
+    "  Dim t As Decimal = 0\n"
+    "  For Each o As Object In items\n"
+    "    If o IsNot Nothing AndAlso IsNumeric(o) Then t += CDec(o)\n"
+    "  Next\n"
+    "  Return t\n"
+    "End Function"
+)
+
+
+def _crossquery_subtotal_keys(report, reset_group, src_query):
+    """When a group subtotal resets at a group owned by master query M and its
+    summed column lives in a DIRECT child query D of M (Oracle <link>), return
+    (M.name, [(parent_col, child_col), ...]) from D's EXACT link_pairs (composite
+    when D links on >1 column). Else None -> caller leaves it honestly flagged
+    (indirect nesting / no explicit link keys are not safely resolvable)."""
+    qs = getattr(report, "queries", None) or []
+    owner = {}
+    for q in qs:
+        for gn in (getattr(q, "group_names", None) or []):
+            owner[(gn or "").upper()] = q
+    master = owner.get((reset_group or "").upper())
+    child = next((q for q in qs
+                  if (q.name or "").upper() == (src_query or "").upper()), None)
+    if master is None or child is None:
+        return None
+    # DIRECT child only: child's parent_group must be a group OWNED BY master.
+    if owner.get((getattr(child, "parent_group", "") or "").upper()) is not master:
+        return None
+    pairs = [(p, c) for (p, c) in (getattr(child, "link_pairs", None) or []) if p and c]
+    if not pairs:
+        return None
+    return (master.name, pairs)
+
+
+def _build_subtotal_tablix(name, dataset_name, key_expr, key_label, subtotals,
+                           top_in):
+    """Minimal flat Tablix bound to the MASTER dataset (one row per group key,
+    e.g. per company): a header row + a detail row. Col 0 shows the group key;
+    each subsequent col a cross-query subtotal expression. Returns (tablix,
+    width_in). No row GROUP needed -- the master dataset already yields one row
+    per key."""
+    cols = [(key_label, key_expr)] + list(subtotals)
+    colw = 1.7
+    tablix = ET.Element(_q("Tablix"))
+    tablix.set("Name", name)
+    tbody = _sub(tablix, "TablixBody")
+    tcols = _sub(tbody, "TablixColumns")
+    for _ in cols:
+        _sub(_sub(tcols, "TablixColumn"), "Width", f"{colw}in")
+    trows = _sub(tbody, "TablixRows")
+    hrow = _sub(trows, "TablixRow"); _sub(hrow, "Height", "0.24in")
+    hcells = _sub(hrow, "TablixCells")
+    for i, (label, _e) in enumerate(cols):
+        cc = _sub(_sub(hcells, "TablixCell"), "CellContents")
+        _build_textbox(cc, f"{name}_H{i}", '="' + _q_safe(label) + '"',
+                       bold=True, font_size="9pt", bg="#eef2f6", fg="#282828",
+                       text_align="Left", vertical_align="Middle",
+                       border_color="#d0d0d0", padding="3pt", can_grow=False)
+    drow = _sub(trows, "TablixRow"); _sub(drow, "Height", "0.22in")
+    dcells = _sub(drow, "TablixCells")
+    for i, (_l, expr) in enumerate(cols):
+        cc = _sub(_sub(dcells, "TablixCell"), "CellContents")
+        _build_textbox(cc, f"{name}_D{i}", expr,
+                       font_size="9pt", fg="#282828",
+                       text_align="Left" if i == 0 else "Right",
+                       vertical_align="Middle", border_color="#d0d0d0",
+                       padding="3pt", can_grow=True)
+    chm = _sub(_sub(tablix, "TablixColumnHierarchy"), "TablixMembers")
+    for _ in cols:
+        _sub(chm, "TablixMember")
+    rhm = _sub(_sub(tablix, "TablixRowHierarchy"), "TablixMembers")
+    hmem = _sub(rhm, "TablixMember"); _sub(hmem, "KeepWithGroup", "After")
+    dmem = _sub(rhm, "TablixMember")
+    _sub(dmem, "Group").set("Name", f"{name}_Det")
+    _sub(tablix, "DataSetName", _safe(dataset_name))
+    _sub(tablix, "Top", f"{top_in:.2f}in")
+    _sub(tablix, "Left", "0.10in")
+    _sub(tablix, "Height", "0.46in")
+    _sub(tablix, "Width", f"{colw * len(cols):.2f}in")
+    return tablix, colw * len(cols)
+
+
+def _ensure_group_subtotals_emitted(root: ET.Element, report) -> None:
+    """Oracle GROUP <summary reset="G_x"> subtotals where the summed column is in
+    a DIRECT child query of the reset group's master -> render a per-key subtotal
+    Tablix (bound to the master dataset) below the body, each cell a CROSS-DATASET
+    aggregate over Oracle's EXACT <link> keys:
+        =Code.SumLookup(LookupSet(<masterKeys>, <childKeys>, Fields!src.Value, "D"))
+    (=Sum(LookupSet(..)) is INVALID -> the VB reducer is mandatory; COUNT uses
+    .Length). Only PLACED, direct-child, link-resolvable subtotals ship; indirect
+    / unplaced ones are left honestly flagged. Gated -> non-subtotal reports stay
+    byte-identical."""
+    formulas = getattr(report, "formulas", None) or []
+    grp = [f for f in formulas
+           if getattr(f, "agg_function", "") and getattr(f, "agg_source", "")
+           and (getattr(f, "agg_scope", "") or "").lower() not in ("", "report")]
+    if not grp:
+        return
+    body = root.find(_q("Body"))
+    if body is None:
+        return
+    placed = set()
+
+    def _collect(g):
+        for f in (getattr(g, "fields", None) or []):
+            s = (getattr(f, "source", "") or "").upper()
+            if s:
+                placed.add(s)
+        for c in (getattr(g, "children", None) or []):
+            _collect(c)
+    for lg in (getattr(report, "layout", None) or []):
+        _collect(lg)
+    grp = [f for f in grp if (f.name or "").upper() in placed]
+    if not grp:
+        return
+
+    col_owner: dict = {}
+    for q in (getattr(report, "queries", None) or []):
+        for it in (getattr(q, "items", None) or []):
+            if getattr(it, "name", ""):
+                col_owner.setdefault(it.name.upper(), q.name)
+
+    existing = {(v.text or "") for v in root.iter(_q("Value"))}
+    # master_name -> (key_pair_for_display, [(label, expr)])
+    by_master: dict = {}
+    for f in grp:
+        src_q = col_owner.get((f.agg_source or "").upper())
+        if not src_q:
+            continue
+        info = _crossquery_subtotal_keys(report, f.agg_scope, src_q)
+        if info is None:
+            continue
+        master_name, pairs = info
+        fn_disp = (f.agg_function or "").lower()
+        pkey = ' & "|" & '.join(f"Fields!{_safe(p)}.Value" for p, _c in pairs)
+        ckey = ' & "|" & '.join(f"Fields!{_safe(c)}.Value" for _p, c in pairs)
+        lset = (f"LookupSet({pkey}, {ckey}, "
+                f'Fields!{_safe(f.agg_source)}.Value, "{_safe(src_q)}")')
+        expr = (f"={lset}.Length" if fn_disp == "count"
+                else f"=Code.SumLookup({lset})")
+        if expr in existing:
+            continue
+        label = re.sub(r"(?i)^(CS|CF|CP|CN)_", "", f.name or "")
+        label = re.sub(r"_+", " ", label).strip().title() or (f.name or "Sub")
+        slot = by_master.setdefault(master_name, [pairs[0][0], []])
+        slot[1].append((label, expr))
+        existing.add(expr)
+    by_master = {m: v for m, v in by_master.items() if v[1]}
+    if not by_master:
+        return
+
+    ri = body.find(_q("ReportItems"))
+    if ri is None:
+        ri = _sub(body, "ReportItems")
+    body_h_el = body.find(_q("Height"))
+    try:
+        body_h = float((body_h_el.text or "0").replace("in", "")) \
+            if body_h_el is not None else 0.0
+    except ValueError:
+        body_h = 0.0
+    top = body_h + 0.25
+    emitted_sum = False
+    for i, (master_name, (mkey, items)) in enumerate(by_master.items()):
+        if any("Code.SumLookup" in e for _l, e in items):
+            emitted_sum = True
+        tbx, w = _build_subtotal_tablix(
+            f"Subtot_{i}", master_name,
+            f"=Fields!{_safe(mkey)}.Value", "Group", items, top)
+        ri.append(tbx)
+        top += 0.46 + 0.24 + 0.25
+    if emitted_sum:
+        code = root.find(_q("Code"))
+        if code is not None and not (code.text or "").strip():
+            code.text = _SUMLOOKUP_CODE
+    if body_h_el is not None:
+        body_h_el.text = f"{top + 0.1:.2f}in"
+
+
 def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     """Return a complete RDL XML document as a string."""
     target_db = (target_db or "oracle").lower()
@@ -6985,6 +7269,15 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # only sees genuinely-in-scope refs.
     _repair_dangling_field_refs(root, report)
     _scope_body_direct_field_refs(root, report)
+    # Report-level Oracle <summary> grand totals that the body builders skipped
+    # (multi-section / flat) -> emit as labeled dataset-scoped aggregates below
+    # the content. After the scope/repair passes so their explicit dataset scope
+    # is preserved.
+    _ensure_summary_totals_emitted(root, report)
+    # Cross-query GROUP subtotals (placed, direct-child, link-resolvable) -> a
+    # per-key master-bound subtotal Tablix using LookupSet over Oracle's exact
+    # <link> keys. After the grand-total pass so the body-height baseline is set.
+    _ensure_group_subtotals_emitted(root, report)
     # Fidelity: stamp <Format> onto field values that carried an Oracle
     # formatMask, so currency / dates / thousands render like the original.
     _apply_field_formats(root, report)

@@ -130,6 +130,13 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
     agg_sources = {m.upper() for m in re.findall(
         r"(?:Sum|Avg|Count|CountDistinct|Min|Max)\(Fields!([A-Za-z0-9_]+)\.Value",
         rdl_xml or "", re.I)}
+    # Cross-query group subtotals render the source column as the 3rd (value)
+    # arg of a LookupSet -- LookupSet(<masterKey>, <childKey>, Fields!SRC.Value,
+    # "DS") -- reduced by Code.SumLookup / .Length. Count those as rendered too,
+    # else a correctly-emitted cross-query subtotal is falsely flagged dropped.
+    agg_sources |= {m.upper() for m in re.findall(
+        r"LookupSet\([^,]+,[^,]+,\s*Fields!([A-Za-z0-9_]+)\.Value",
+        rdl_xml or "", re.I)}
     # A data-model-only artifact (no <layout>) renders nothing at all -- its
     # columns AND totals are all "absent", which the column score already
     # reflects. Flagging "dropped totals" on it is a false alarm (there is

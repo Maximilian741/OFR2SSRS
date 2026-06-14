@@ -320,6 +320,13 @@ def _parse_queries(data_el, warnings: List[str]) -> List[DataQuery]:
         if q is not None and parent_group:
             q.parent_group = parent_group
             q.link_condition = _attr(ln, "condition")
+            # Capture Oracle's EXACT join columns (parentColumn=childColumn) so a
+            # cross-dataset Lookup/LookupSet uses the real keys, not a name-stem
+            # guess. A child can carry several <link>s (composite key).
+            _pcol = _attr(ln, "parentColumn")
+            _ccol = _attr(ln, "childColumn")
+            if _pcol and _ccol:
+                q.link_pairs.append((_pcol, _ccol))
             # Make the child's join key SELECTABLE so a Lookup() back to the
             # master is valid. Oracle child queries FILTER by the parent value
             # (e.g. ":SITE_ID" in the WHERE) but often don't RETURN it as a
@@ -545,6 +552,19 @@ def _parse_formulas(data_el, program_units_index: dict, warnings: List[str]) -> 
             return_type = _attr(sm, "datatype", "NUMBER")
             func = _attr(sm, "function", "")
             source_col = _attr(sm, "source", "")
+            # subtotal scope: "report" (grand total) or a group name (subtotal).
+            # In Oracle Reports the RESET-at attribute is the subtotal scope;
+            # compute-at only governs %-of-total / running aggregates. Oracle
+            # defaults compute="report" on nearly every <summary>, so a
+            # compute-first read silently demoted EVERY group subtotal to a
+            # grand total (and the grand-total pass then summed it report-wide
+            # instead of per-group -- wrong values). Reset-first fixes both.
+            _reset = _attr(sm, "reset", "").strip()
+            _compute = _attr(sm, "compute", "").strip()
+            _pct = (func or "").strip().lower() in (
+                "% of total", "% of report", "% of group", "percent",
+                "ratio_to_report")
+            scope = (_compute or _reset) if _pct else (_reset or _compute)
             note_body = (
                 f"Oracle <summary function={func!r} source={source_col!r}>; "
                 f"re-implement as SSRS aggregate expression"
@@ -557,6 +577,7 @@ def _parse_formulas(data_el, program_units_index: dict, warnings: List[str]) -> 
                     plsql_body=note_body,
                     agg_function=(func or "").strip().lower(),
                     agg_source=(source_col or "").strip(),
+                    agg_scope=scope,
                 )
             )
         except Exception as exc:  # pragma: no cover - defensive

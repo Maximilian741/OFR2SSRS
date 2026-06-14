@@ -85,3 +85,99 @@ def test_no_summary_means_no_footer_row():
     from converter import convert as _convert
     rdl = _convert(no_summ)["rdl_xml"]
     assert 'Name="Foot_' not in rdl
+
+
+def test_summary_scope_is_captured_report_vs_group():
+    """Oracle <summary compute/reset> scope must be parsed: "report" (grand
+    total) vs a group name (subtotal). This routes WHERE the total renders and
+    is the foundation for cross-query / group-footer subtotal rendering."""
+    xml = (b'<?xml version="1.0"?><report name="S" DTDVersion="9.0.2.0.10"><data>'
+           b'<dataSource name="Q_1"><select><![CDATA[SELECT g, v FROM t]]></select>'
+           b'<group name="G_DEPT"><dataItem name="g" datatype="vchar2"/>'
+           b'<dataItem name="v" datatype="number"/></group>'
+           b'<summary name="GrandTot" source="v" function="sum" reset="report" compute="report"/>'
+           b'<summary name="DeptSub" source="v" function="sum" reset="G_DEPT" compute="G_DEPT"/>'
+           b'</dataSource></data><layout><section name="main"><body width="8" height="9">'
+           b'<repeatingFrame name="R" source="G_DEPT"><geometryInfo x="0" y="0" width="6" height="0.3"/>'
+           b'<field name="F" source="v"><geometryInfo x="0" y="0" width="2" height="0.2"/></field>'
+           b'</repeatingFrame></body></section></layout></report>')
+    rep = parse_oracle_xml(xml)
+    scopes = {fc.name: fc.agg_scope for fc in (rep.formulas or [])
+              if getattr(fc, "agg_function", "")}
+    assert scopes.get("GrandTot") == "report"
+    assert scopes.get("DeptSub") == "G_DEPT"
+
+
+def test_report_grand_total_renders_as_dataset_scoped_aggregate():
+    """A report-level <summary compute="report"> PLACED in the layout must
+    render as a real dataset-scoped SSRS aggregate (=Sum(Fields!src.Value,"Q"))
+    below the body, not vanish. Cross-query banking reports place grand totals
+    as standalone fields the body builders skip -- this is the safety net."""
+    from converter import convert as _convert
+    xml = (b'<?xml version="1.0"?><report name="GT" DTDVersion="9.0.2.0.10"><data>'
+           b'<dataSource name="Q_SALES"><select><![CDATA[SELECT region, amt FROM s]]></select>'
+           b'<group name="G"><dataItem name="region" datatype="vchar2"/>'
+           b'<dataItem name="amt" datatype="number"/></group>'
+           b'<summary name="CS_grand" source="amt" function="sum" reset="report" compute="report"/>'
+           b'</dataSource></data><layout><section name="main"><body width="8" height="9">'
+           b'<repeatingFrame name="R" source="G"><geometryInfo x="0" y="0" width="6" height="0.3"/>'
+           b'<field name="F_region" source="region"><geometryInfo x="0" y="0" width="2" height="0.2"/></field>'
+           b'<field name="F_amt" source="amt"><geometryInfo x="2" y="0" width="2" height="0.2"/></field>'
+           b'</repeatingFrame>'
+           # the grand total PLACED as a standalone field at the bottom
+           b'<field name="F_tot" source="CS_grand"><geometryInfo x="2" y="3" width="2" height="0.2"/></field>'
+           b'</body></section></layout></report>')
+    rdl = _convert(xml)["rdl_xml"]
+    assert 'Sum(Fields!amt.Value, "Q_SALES")' in rdl, "grand total not a scoped Sum"
+
+
+def test_no_grand_total_block_without_report_summary():
+    """Gate: a report with no report-scoped summary emits no grand-total block
+    (byte-identical to before)."""
+    from converter import convert as _convert
+    no_summ = _XML.replace(b'reset="report"', b'reset="G"')  # demote to group scope
+    rdl = _convert(no_summ)["rdl_xml"]
+    assert "Tb_GrandTotal_" not in rdl
+
+
+def test_summary_scope_uses_reset_not_compute():
+    """Regression (design-panel found): the subtotal scope is Oracle's RESET-at,
+    NOT compute-at. Oracle defaults compute="report" on nearly every summary, so
+    a compute-first read silently demoted every GROUP subtotal to a grand total
+    (then summed report-wide -> wrong values). reset-first is correct; compute
+    only governs %-of-total."""
+    xml = (b'<?xml version="1.0"?><report name="P" DTDVersion="9.0.2.0.10"><data>'
+           b'<dataSource name="Q"><select><![CDATA[SELECT g,v FROM t]]></select>'
+           b'<group name="G_DEPT"><dataItem name="g" datatype="vchar2"/>'
+           b'<dataItem name="v" datatype="number"/></group>'
+           # reset=group but compute=report (the common Oracle default that broke it)
+           b'<summary name="DeptSub" source="v" function="sum" reset="G_DEPT" compute="report"/>'
+           b'</dataSource></data><layout><section name="main"><body width="8" height="9">'
+           b'<repeatingFrame name="R" source="G_DEPT"><geometryInfo x="0" y="0" width="6" height="0.3"/>'
+           b'<field name="F" source="v"><geometryInfo x="0" y="0" width="2" height="0.2"/></field>'
+           b'</repeatingFrame></body></section></layout></report>')
+    rep = parse_oracle_xml(xml)
+    sub = next(fc for fc in rep.formulas if fc.name == "DeptSub")
+    assert sub.agg_scope == "G_DEPT", f"scope should be reset-at, got {sub.agg_scope!r}"
+
+
+def test_link_join_columns_are_captured_exactly():
+    """Cross-query subtotals need Oracle's EXACT <link> join keys (parentColumn=
+    childColumn), not a name-stem guess (real reports name the child key with a
+    suffix, e.g. master cod_empresa -> child COD_EMPRESA_FL, which stem-matching
+    misses). Capture them, incl. composite (>1 link per child)."""
+    xml = (b'<?xml version="1.0"?><report name="MD" DTDVersion="9.0.2.0.10"><data>'
+           b'<dataSource name="Q_M"><select><![CDATA[SELECT emp FROM m]]></select>'
+           b'<group name="G_M"><dataItem name="emp" datatype="vchar2"/></group></dataSource>'
+           b'<dataSource name="Q_D"><select><![CDATA[SELECT emp_d, amt FROM d]]></select>'
+           b'<group name="G_D"><dataItem name="emp_d" datatype="vchar2"/>'
+           b'<dataItem name="amt" datatype="number"/></group></dataSource>'
+           b'<link name="L1" parentGroup="G_M" parentColumn="emp" childQuery="Q_D" '
+           b'childColumn="emp_d" condition="eq" sqlClause="where"/>'
+           b'</data><layout><section name="main"><body width="8" height="9">'
+           b'<repeatingFrame name="R" source="G_M"><geometryInfo x="0" y="0" width="6" height="0.3"/>'
+           b'<field name="F" source="emp"><geometryInfo x="0" y="0" width="2" height="0.2"/></field>'
+           b'</repeatingFrame></body></section></layout></report>')
+    rep = parse_oracle_xml(xml)
+    qd = next(q for q in rep.queries if q.name == "Q_D")
+    assert ("emp", "emp_d") in qd.link_pairs, qd.link_pairs
