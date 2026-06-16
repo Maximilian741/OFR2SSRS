@@ -723,6 +723,7 @@ def _layout_field_from_element(el) -> LayoutField:
     text_value = source
     bold = False
     italic = False
+    underline = False
     font_size = 10
     font_family = ""
     color = ""
@@ -747,6 +748,7 @@ def _layout_field_from_element(el) -> LayoutField:
             bold = _attr(first_font, "weight").lower() == "bold" or _attr(first_font, "bold").lower() == "yes"
             style = _attr(first_font, "style").lower()
             italic = style == "italic" or _attr(first_font, "italic").lower() == "yes"
+            underline = _attr(first_font, "underline").lower() == "yes"
             color = _attr(first_font, "color") or _attr(first_font, "foreground")
 
     font = _find(el, "font")
@@ -758,6 +760,8 @@ def _layout_field_from_element(el) -> LayoutField:
             bold = _attr(font, "bold").lower() == "yes" or _attr(font, "weight").lower() == "bold"
         if not italic:
             italic = _attr(font, "italic").lower() == "yes" or _attr(font, "style").lower() == "italic"
+        if not underline:
+            underline = _attr(font, "underline").lower() == "yes"
         if not color:
             color = _attr(font, "color") or _attr(font, "foreground")
 
@@ -785,6 +789,7 @@ def _layout_field_from_element(el) -> LayoutField:
         kind=kind,
         bold=bold,
         italic=italic,
+        underline=underline,
         font_size=font_size,
         font_family=font_family,
         color=color,
@@ -816,6 +821,15 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                     return True
         return False
 
+    def _page_break_after(el) -> bool:
+        # Oracle <generalLayout pageBreakAfter="yes"/> -- the packet page-split
+        # signal (a memo / table / letter as sibling frames each break after).
+        for gl in el:
+            if _localname(gl) == "generalLayout":
+                if _attr(gl, "pageBreakAfter").lower() in ("yes", "true"):
+                    return True
+        return False
+
     for child in node:
         tag = _localname(child)
         if tag == "repeatingFrame":
@@ -825,13 +839,19 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                 key = rf_source or rf_name
                 grp = groups_by_name.get(key)
                 if grp is None:
+                    try:
+                        _max_rec = int(_attr(child, "maxRecordsPerPage") or 0)
+                    except (TypeError, ValueError):
+                        _max_rec = 0
                     grp = LayoutGroup(
                         name=rf_name or rf_source or "group",
                         kind="repeating_frame",
                         source_query=rf_source,
                         format_trigger=_format_trigger_of(child),
                         page_break_before=_page_break_before(child),
+                        page_break_after=_page_break_after(child),
                         print_direction=_attr(child, "printDirection"),
+                        max_records_per_page=_max_rec,
                     )
                     _apply_geometry(grp, child)
                     _apply_visual_settings(grp, child)
@@ -852,6 +872,7 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                     kind="frame",
                     format_trigger=_format_trigger_of(child),
                     page_break_before=_page_break_before(child),
+                    page_break_after=_page_break_after(child),
                 )
                 _apply_geometry(grp, child)
                 _apply_visual_settings(grp, child)

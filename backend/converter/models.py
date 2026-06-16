@@ -209,6 +209,7 @@ class LayoutField:
     image_id: str = ""              # EmbeddedImage.id when kind="image"
     bold: bool = False
     italic: bool = False
+    underline: bool = False
     font_size: int = 10
     font_family: str = ""
     color: str = ""                 # text color (e.g. "Red")
@@ -275,10 +276,20 @@ class LayoutGroup:
     # the preview/RDL stack them on one sheet. The authoritative page-split
     # signal Oracle itself uses.
     page_break_before: bool = False
+    # Oracle <generalLayout pageBreakAfter="yes"/>: force a page break AFTER this
+    # frame. Used by positional document PACKETS (a memo cover + a data table +
+    # a closing letter as sibling frames in one section) to land each on its own
+    # sheet; without it the RDL flattens all three onto one page.
+    page_break_after: bool = False
     # repeatingFrame printDirection: "down" (one per row, normal), "across"
     # / "acrossDown" (tile labels across then down -> the mailing-label
     # multi-up shape). Drives the label archetype.
     print_direction: str = ""
+    # repeatingFrame maxRecordsPerPage: how many master records Oracle prints per
+    # physical page. ==1 means ONE record fills a whole page -- the positional
+    # FORM/invoice shape (a vendor block + line-item table per record), as
+    # opposed to a tabular list (many records stacked per page). 0 = unset.
+    max_records_per_page: int = 0
 
 
 # ---------------------------------------------------------------------------

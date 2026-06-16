@@ -1,0 +1,156 @@
+<?xml version="1.0" encoding="WINDOWS-1252" ?>
+<report name="SAMPLE_PACKET" DTDVersion="9.0.2.0.10">
+  <xmlSettings xmlTag="SAMPLE_PACKET" xmlPrologType="text">
+  <![CDATA[<?xml version="1.0"?>]]>
+  </xmlSettings>
+  <!-- Synthetic POSITIONAL DOCUMENT PACKET: a memo cover page, a data table
+       page, and a closing letter page -- three top-level frames in section
+       "main", separated by pageBreakAfter. Exercises the packet detector +
+       renderer (memo/table/letter on three sheets, the table tiled into rows).
+       Entirely synthetic; no client data. -->
+  <data>
+    <dataSource name="Q_MAIN">
+      <select canParse="no">
+      <![CDATA[SELECT R.Region_Name, COUNT(R.Item_Id) Rebate_Count,
+       COUNT(R.Item_Id) * 25 Rebate_Amt
+  FROM Sample_Rebate R
+ GROUP BY R.Region_Name]]>
+      </select>
+      <displayInfo x="0.50000" y="0.25000" width="1.80000" height="0.20000"/>
+      <group name="G_MAIN">
+        <displayInfo x="0.50000" y="1.00000" width="1.80000" height="3.00000"/>
+        <dataItem name="REGION_NAME" datatype="vchar2" columnOrder="1"
+         width="64" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Region Name" breakOrder="none">
+          <dataDescriptor expression="REGION_NAME"
+           descriptiveExpression="REGION_NAME" order="1" width="64"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="REBATE_COUNT" oracleDatatype="number" columnOrder="2"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Rebate Count">
+          <dataDescriptor expression="REBATE_COUNT"
+           descriptiveExpression="REBATE_COUNT" order="2"
+           oracleDatatype="number" width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="REBATE_AMT" oracleDatatype="number" columnOrder="3"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Rebate Amt">
+          <dataDescriptor expression="REBATE_AMT"
+           descriptiveExpression="REBATE_AMT" order="3"
+           oracleDatatype="number" width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+  <section name="main" width="8.50000" height="11.00000" orientation="portrait">
+    <body width="8.00000" height="9.50000">
+      <location x="0.25000" y="0.25000"/>
+      <frame name="M_MEMO">
+        <geometryInfo x="0.50000" y="0.10000" width="7.00000" height="9.00000"/>
+        <generalLayout pageBreakAfter="yes" verticalElasticity="variable"/>
+        <text name="B_MEMO_TITLE" minWidowLines="1">
+          <textSettings justify="end" spacing="single"/>
+          <geometryInfo x="5.00000" y="0.20000" width="2.00000" height="0.34000"/>
+          <textSegment>
+            <font face="Arial" size="18" underline="yes"/>
+            <string><![CDATA[Memo]]></string>
+          </textSegment>
+        </text>
+        <text name="B_MEMO_TO" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="0.50000" y="0.90000" width="0.70000" height="0.24000"/>
+          <textSegment>
+            <font face="Arial" size="12"/>
+            <string><![CDATA[To:]]></string>
+          </textSegment>
+        </text>
+        <text name="B_MEMO_BODY" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="0.50000" y="1.40000" width="6.00000" height="1.00000"/>
+          <textSegment>
+            <font face="Arial" size="11"/>
+            <string><![CDATA[This memo accompanies the regional rebate listing attached on the following page. Each region is returned a fixed rebate for every qualifying item collected during the reporting period.]]></string>
+          </textSegment>
+        </text>
+      </frame>
+      <frame name="M_TABLE">
+        <geometryInfo x="0.50000" y="0.10000" width="7.00000" height="1.00000"/>
+        <generalLayout pageBreakAfter="yes" verticalElasticity="variable"/>
+        <frame name="M_TABLE_HDR">
+          <geometryInfo x="0.50000" y="0.10000" width="7.00000" height="0.20000"/>
+          <text name="B_H_REGION" minWidowLines="1">
+            <textSettings spacing="single"/>
+            <geometryInfo x="0.50000" y="0.10000" width="2.00000" height="0.20000"/>
+            <textSegment>
+              <font face="Arial" size="11" bold="yes"/>
+              <string><![CDATA[Region]]></string>
+            </textSegment>
+          </text>
+          <text name="B_H_COUNT" minWidowLines="1">
+            <textSettings justify="center" spacing="single"/>
+            <geometryInfo x="3.00000" y="0.10000" width="1.50000" height="0.20000"/>
+            <textSegment>
+              <font face="Arial" size="11" bold="yes"/>
+              <string><![CDATA[No. of Items]]></string>
+            </textSegment>
+          </text>
+          <text name="B_H_AMT" minWidowLines="1">
+            <textSettings justify="end" spacing="single"/>
+            <geometryInfo x="5.00000" y="0.10000" width="1.50000" height="0.20000"/>
+            <textSegment>
+              <font face="Arial" size="11" bold="yes"/>
+              <string><![CDATA[Rebate]]></string>
+            </textSegment>
+          </text>
+        </frame>
+        <repeatingFrame name="R_TABLE" source="G_MAIN" printDirection="down"
+         minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.50000" y="0.35000" width="7.00000" height="0.25000"/>
+          <generalLayout verticalElasticity="variable"/>
+          <field name="F_REGION" source="REGION_NAME" minWidowLines="1"
+           spacing="single" alignment="start">
+            <font face="Arial" size="11"/>
+            <geometryInfo x="0.50000" y="0.35000" width="2.00000" height="0.20000"/>
+          </field>
+          <field name="F_COUNT" source="REBATE_COUNT" minWidowLines="1"
+           spacing="single" alignment="center">
+            <font face="Arial" size="11"/>
+            <geometryInfo x="3.00000" y="0.35000" width="1.50000" height="0.20000"/>
+          </field>
+          <field name="F_AMT" source="REBATE_AMT" minWidowLines="1"
+           formatMask="$NNN,NN0.00" spacing="single" alignment="end">
+            <font face="Arial" size="11"/>
+            <geometryInfo x="5.00000" y="0.35000" width="1.50000" height="0.20000"/>
+          </field>
+        </repeatingFrame>
+      </frame>
+      <frame name="M_LETTER">
+        <geometryInfo x="0.50000" y="0.10000" width="7.00000" height="9.00000"/>
+        <generalLayout verticalElasticity="variable"/>
+        <text name="B_L_DATE" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="0.50000" y="0.30000" width="2.00000" height="0.24000"/>
+          <textSegment>
+            <font face="Arial" size="12"/>
+            <string><![CDATA[Date:]]></string>
+          </textSegment>
+        </text>
+        <text name="B_L_BODY" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="0.50000" y="1.00000" width="6.00000" height="1.00000"/>
+          <textSegment>
+            <font face="Arial" size="11"/>
+            <string><![CDATA[This warrant represents the rebate due to your region for the reporting period indicated on the attached listing. Please direct any questions to the sample program office.]]></string>
+          </textSegment>
+        </text>
+      </frame>
+    </body>
+  </section>
+  </layout>
+  <reportPrivate defaultReportType="tabular" templateName="ncayel"
+   sectionTitle="Sample Rebate Packet"/>
+</report>

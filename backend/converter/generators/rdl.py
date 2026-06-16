@@ -25,6 +25,13 @@ from converter.models import (
     ReportParameter,
 )
 from converter.preview.html_mockup import detect_report_kind as _detect_report_kind
+from converter.preview.html_mockup import (
+    _is_positional_document_packet as _is_doc_packet,
+    _group_columnar_repeating as _frame_has_columnar_table,
+    _is_single_record_form as _is_single_record_form,
+    _has_cover_page as _has_cover_page,
+    _is_conditional_alert_frame as _is_conditional_alert_frame,
+)
 from converter.translators.plsql_formula import (
     translate_formula_to_vb, translate_expr as _translate_oracle_expr,
     extract_placeholder_assignments as _extract_cp_assignments)
@@ -1701,6 +1708,91 @@ _TOKEN_RE = re.compile(r"&([A-Za-z_][A-Za-z0-9_]*)")
 _BIND_VAR_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
 
+def _one_to_many_link_children(report) -> set:
+    """UPPER names of linked CHILD queries rendered as a COLUMNAR REPEATING
+    detail TABLE (1:many) -- e.g. JV's Q_VEHICLE: a vehicle list under each
+    tower. A 1:1 linked child (a single signature/contact field, no repeating
+    table) is NOT included -- its scalar Lookup() is already correct. These
+    1:many children get =Join(LookupSet(...)) instead, and their Oracle <link>
+    WHERE filter is stripped so the child dataset carries ALL rows. Structural
+    (the layout shape decides), never keyed on a report name."""
+    # repeating frames keyed by the GROUP they bind to (source_query = group name)
+    rep_cols: dict = {}
+    def _walk(g):
+        if "repeating" in (getattr(g, "kind", "") or "").lower():
+            sq = (getattr(g, "source_query", "") or "").upper()
+            if sq:
+                xs = {round(float(getattr(f, "x", 0) or 0), 1)
+                      for f in (getattr(g, "fields", None) or [])
+                      if (getattr(f, "kind", "") or "") == "field"}
+                rep_cols[sq] = max(rep_cols.get(sq, 0), len(xs))
+        for c in (getattr(g, "children", None) or []):
+            _walk(c)
+    for g in (getattr(report, "layout", None) or []):
+        _walk(g)
+    out = set()
+    for q in (getattr(report, "queries", None) or []):
+        if not (getattr(q, "parent_group", "") or "").strip():
+            continue
+        for gn in (getattr(q, "group_names", None) or []):
+            # >=2 distinct field x-positions in the bound repeating frame = a
+            # columnar detail TABLE (many rows), not a single positional field.
+            if rep_cols.get((gn or "").upper(), 0) >= 2:
+                out.add((q.name or "").upper())
+                break
+    return out
+
+
+def _strip_link_filter_predicates(report, child_names: set) -> None:
+    """For each 1:many linked CHILD query, remove the Oracle <link> correlation
+    predicate (``AND <expr> = :<param>``) from its SQL/T-SQL so the child
+    dataset returns ALL rows -- the per-master-row join is done in SSRS by
+    LookupSet on the key column the generator already SELECTs. Without this the
+    child stays filtered to ONE master value and the Lookup/LookupSet only
+    resolves for that single master row.
+
+    FAIL-SAFE: only a predicate whose bind param matches a MASTER column (the
+    link correlation) is removed, and only the ``AND ...`` form (never the
+    leading WHERE predicate, so the WHERE clause is never left empty). Anything
+    ambiguous is left intact -> worst case is today's behavior, never a broken
+    query. The dataset builder re-derives QueryParameters from the remaining
+    ``:X`` refs, so the now-unused link parameter drops automatically."""
+    qs = getattr(report, "queries", None) or []
+    owner: dict = {}
+    for q in qs:
+        for gn in (getattr(q, "group_names", None) or []):
+            owner[(gn or "").upper()] = q
+    for q in qs:
+        if (q.name or "").upper() not in child_names:
+            continue
+        master = owner.get((getattr(q, "parent_group", "") or "").upper())
+        if master is None:
+            continue
+        master_cols = {(getattr(it, "name", "") or "").upper()
+                       for it in (getattr(master, "items", None) or [])}
+        if not master_cols:
+            continue
+
+        def _maybe_drop(m):
+            return " " if m.group(1).upper() in master_cols else m.group(0)
+
+        for attr in ("sql", "tsql"):
+            s = getattr(q, attr, "") or ""
+            if not s:
+                continue
+            # Form B (the converter's optional-param NULL guard, which is how the
+            # Oracle link predicate is emitted): AND (:p IS NULL OR <expr> = :p)
+            new = re.sub(
+                r"(?i)\bAND\s*\(\s*[:@]([A-Za-z_]\w*)\s+IS\s+NULL\s+OR\s+"
+                r"[\w.]+\s*=\s*[:@]\1\s*\)",
+                _maybe_drop, s)
+            # Form A (bare equality): AND <expr> = :p
+            new = re.sub(r"(?i)\bAND\s+[\w.]+\s*=\s*[:@]([A-Za-z_]\w*)\b(?!\s*\))",
+                         _maybe_drop, new)
+            if new != s:
+                setattr(q, attr, new)
+
+
 def _build_token_resolver(report: ParsedReport):
     """Return a callable ``resolver(token, dataset_name) -> (kind, ssrs_name, note)``.
 
@@ -1815,6 +1907,17 @@ def _build_token_resolver(report: ParsedReport):
                 f"Fields!{_safe(m)}.Value" for m, _c in pairs)
             dst = ' & "|" & '.join(
                 f"Fields!{_safe(c)}.Value" for _m, c in pairs)
+        if (child_ds or "").upper() in getattr(report, "_one_to_many_children", set()):
+            # 1:many detail TABLE (e.g. a vehicle list per tower): list ALL the
+            # child values correlated to THIS master row, newline-joined.
+            # LookupSet returns the matching array; Join renders it down a cell
+            # (a scalar Lookup would show only the FIRST child row). The child
+            # dataset's link WHERE filter was stripped (see _build_report_root)
+            # so it holds every row for the match to work across master rows.
+            return (
+                f'=Join(LookupSet({src}, {dst}, '
+                f'Fields!{_safe(result_col)}.Value, "{_safe(child_ds)}"), vbCrLf)'
+            )
         return (
             f'=Lookup({src}, {dst}, '
             f'Fields!{_safe(result_col)}.Value, "{_safe(child_ds)}")'
@@ -3079,16 +3182,36 @@ def _resolve_palette(report: "ParsedReport") -> Dict[str, str]:
     # band_bg: prefer the first repeating_frame's background, else
     # walk parent chain (we approximate by scanning ancestors via the
     # 'flat' order, falling back to most-common bg).
+    #
+    # Oracle Reports frames carry NON-PRINTING design-time fill hints that are
+    # specifically light PINKS / LAVENDERS / MAGENTAS (r100g88b100 = #FFE0FF,
+    # #FFBFFF): RED and BLUE both near-max with green lower. Using one as the
+    # master band paints a pink bar the report never shows (JV_LOGSHEETS's
+    # county band is plain text on white). Exclude ONLY that pink/lavender
+    # family -- a genuine band (METHACT darkgreen, ASBACCRD navy, a chosen cream
+    # #FFEEAA) never has BOTH red and blue maxed, so it is kept.
+    def _is_oracle_design_fill(c):
+        c = _norm(c)
+        if len(c) != 7:
+            return False
+        try:
+            r = int(c[1:3], 16); g = int(c[3:5], 16); b = int(c[5:7], 16)
+        except ValueError:
+            return False
+        return r >= 235 and b >= 235 and g <= 235
     band_bg = ""
     for g, bg in group_bgs:
-        if getattr(g, "kind", "") == "repeating_frame":
+        if (getattr(g, "kind", "") == "repeating_frame"
+                and not _is_oracle_design_fill(bg)):
             band_bg = bg
             break
-    if not band_bg and group_bgs:
-        # most-common non-white bg across all groups
-        from collections import Counter
-        ctr = Counter(bg for _, bg in group_bgs)
-        band_bg = ctr.most_common(1)[0][0]
+    if not band_bg:
+        # most-common non-white, non-design-hint bg across all groups
+        meaningful = [bg for _, bg in group_bgs if not _is_oracle_design_fill(bg)]
+        if meaningful:
+            from collections import Counter
+            ctr = Counter(meaningful)
+            band_bg = ctr.most_common(1)[0][0]
     if not band_bg:
         band_bg = DEFAULTS["band_bg"]
 
@@ -3225,7 +3348,13 @@ def _detail_band_fields(report):
     fields = []
     def walk(g):
         for f in (g.fields or []):
-            if f.kind == "field" and f.source:
+            # A BLOB/image-bound field (a logo/seal/photo) is NOT a data column:
+            # leaving it in the detail band paints an empty cell where a picture
+            # belongs AND, when it sits just right of a real column (MCP_ACTIVE_
+            # SITES DEQ_Logo at x0.5 vs Address at x0.26), squeezes that column to
+            # a sliver. Mirrors the mockup _detail_image_srcs skip. Generic.
+            if (f.kind == "field" and f.source
+                    and not _image_field_binding(f, report)):
                 fields.append((f.source, float(getattr(f, "x", 0.0) or 0.0),
                                float(getattr(f, "y", 0.0) or 0.0),
                                float(getattr(f, "width", 0.0) or 0.0)))
@@ -3584,11 +3713,30 @@ def _build_nested_group_tablix(report, main):
             # --- navy column-header row from the layout caption texts ---
             hdr_bg = "#00008B"; hdr_fg = "#ffffff"
             headers = []  # (text, x)
-            # Column captions sit just ABOVE the detail row (smaller y). Accept
-            # labels whose y is 0.02-0.6in above row_y.
-            for text, lx, ly, _bg in label_geo:
-                if -0.02 <= (row_y - ly) <= 0.6 and text and "&<" not in text:
-                    headers.append((text, lx))
+            # Column captions sit just ABOVE the detail row (smaller y). But
+            # several labels can fall in that 0.6in window that are NOT column
+            # headers: the report TITLE (a wide centered line just above the
+            # header strip) and stray markers like "(continued)" / "Status:".
+            # The REAL header strip is the single y-band whose labels line up
+            # with the detail COLUMNS. Group the candidates by y-band and keep
+            # only the band that best aligns with the detail-column x positions
+            # -- so the title never renders as a navy column header overlapping
+            # the real ones. Generic, geometry-only.
+            _cand = [(text, lx, ly) for text, lx, ly, _bg in label_geo
+                     if -0.02 <= (row_y - ly) <= 0.6 and text and "&<" not in text]
+            if _cand:
+                _det_xs = [x for _s, x, _y, _w in row_layout]
+                _bands = {}
+                for text, lx, ly in _cand:
+                    _bands.setdefault(round(ly, 1), []).append((text, lx))
+
+                def _aligned(band):
+                    return sum(1 for _t, lx in band
+                               if any(abs(lx - dx) <= 0.4 for dx in _det_xs))
+
+                # best-aligned band; tie -> the one closest to the detail row.
+                _best_y = max(_bands, key=lambda y: (_aligned(_bands[y]), y))
+                headers = list(_bands[_best_y])
             if headers:
                 detail_has_header = True
                 hh = 0.24
@@ -3601,6 +3749,10 @@ def _build_nested_group_tablix(report, main):
                 hsorted = sorted(headers, key=lambda z: z[1])
                 for hi, (text, hx) in enumerate(hsorted):
                     nxt = hsorted[hi + 1][1] if hi + 1 < len(hsorted) else 7.5
+                    # Resolve any Oracle &TOKEN in the caption (a &PARAM ->
+                    # Parameters!..Value, a &FORMULA -> its placeholder) so the
+                    # column-header band never prints a raw "&REPORT_VEHICLE_TYPE".
+                    text, _ = _resolve_text_expression(text, report, main_ds)
                     _build_textbox(hri, f"Tb_NDHdr_{hi}", text, bold=True,
                                    font_size="9pt", bg=hdr_bg, fg=hdr_fg,
                                    text_align="Left", vertical_align="Middle",
@@ -4569,6 +4721,28 @@ def _build_cover_page(report) -> Optional[ET.Element]:
     return rect
 
 
+def _cover_text_value(text: str, report: ParsedReport) -> str:
+    """Scope-SAFE SSRS <Value> for a letter-cover TEXT element that may carry
+    Oracle &TOKENs (e.g. "&SITE_NAME (&PERM_NAME)").
+
+    The cover Rectangle sits at report-body scope (no row context) and the
+    report usually has several datasets, so a BARE Fields! reference would throw
+    an ambiguous-scope error at render time. _resolve_text_expression maps
+    &PARAM -> Parameters!..Value (scope-free) and &FORMULA ->
+    First(Fields!.., "ds") (scope-safe); only a plain DATA-field token yields a
+    bare Fields!. In that (corpus-absent) case keep the raw literal rather than
+    emit an expression that fails to render. Generic -- never a report name."""
+    raw = text or ""
+    val, is_expr = _resolve_text_expression(raw, report, "")
+    if not is_expr:
+        return '="' + raw.replace('"', '""') + '"'
+    # Reject any Fields! NOT wrapped in First( -- unsafe at body scope.
+    for m in re.finditer(r"Fields!", val):
+        if val[max(0, m.start() - 6):m.start()] != "First(":
+            return '="' + raw.replace('"', '""') + '"'
+    return val
+
+
 def _build_letter_cover_page(report) -> Optional[ET.Element]:
     """Layout-driven cover for letter / certificate reports.
 
@@ -4648,20 +4822,23 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
         # of envelopes..." note sits below *Generate Envelopes at x=2.25.
         if label_field is None and value_field is None and right_texts:
             cont_text = sorted(right_texts, key=lambda t: t[0])[0][1]
-            ct = (cont_text.text or "").strip().replace('"', '""')
-            if pairs and ct:
+            raw_ct = (cont_text.text or "").strip()
+            # Resolve any &TOKEN scope-safely (-> a quoted literal, or a
+            # Parameters!/First(Fields!) expression) so a hyperlink note like
+            # "... is a hyperlink to &CP_JV_ENVELOPE" never prints raw.
+            ct_val = _cover_text_value(raw_ct, report)
+            if pairs and raw_ct:
                 prev_lbl, prev_val, prev_vf = pairs[-1]
-                # Append as a continuation line in the value expression
-                if prev_val.startswith('="'):
-                    # Static text — chain with &
-                    pairs[-1] = (prev_lbl, prev_val[:-1] + ' ' + ct + '"',
+                # Chain into the previous value only when BOTH are plain static
+                # literals; a resolved-token EXPRESSION can't be string-spliced
+                # into a literal, so emit it as its own note row.
+                if prev_val.startswith('="') and ct_val.startswith('="'):
+                    pairs[-1] = (prev_lbl, prev_val[:-1] + ' ' + ct_val[2:],
                                  prev_vf)
                 else:
-                    # Field expression — can't easily append; emit as
-                    # separate note row with empty label
-                    pairs.append(("", f'="{ct}"', None))
-            elif ct:
-                pairs.append(("", f'="{ct}"', None))
+                    pairs.append(("", ct_val, None))
+            elif raw_ct:
+                pairs.append(("", ct_val, None))
             continue
 
         # Standalone field with no label (e.g. the URL line below
@@ -4690,8 +4867,9 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
             # as the "value" so a "Label: Static-text" pair renders.
             right = sorted(texts, key=lambda t: t[0])[-1][1]
             if right is not label_field:
-                _t = (right.text or "").replace('"', '""')
-                value_expr = f'="{_t}"'
+                # Resolve any &TOKEN scope-safely (a &PARAM/&FORMULA cover value)
+                # so a raw "&SITE_NAME (&PERM_NAME)" never prints on the cover.
+                value_expr = _cover_text_value(right.text or "", report)
             else:
                 continue
         else:
@@ -4744,36 +4922,13 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
         _sub(tb, "Width", "6.50in"); _sub(tb, "Height", f"{title_h:.2f}in")
         y += title_h + 0.40
 
-    # Meta row: Run Date / Total of ALL Records. Total scoped to
-    # the first dataset to satisfy SSRS aggregate-scope rules.
-    first_ds = next((q.name for q in (report.queries or [])), None)
-    total_expr = (f'=CountRows("{_safe(first_ds)}")'
-                  if first_ds else "=CountRows()")
-    meta_lines = [
-        ("Run Date:", '=Format(Globals!ExecutionTime, "MM/dd/yyyy HH:mm:ss")'),
-        ("Total of ALL Records:", total_expr),
-    ]
-    for idx, (lbl, val) in enumerate(meta_lines):
-        _build_textbox(
-            ri, f"LcCov_MetaLbl_{idx}", lbl,
-            bold=True, font_size="10pt", fg=INK,
-            text_align="Right", vertical_align="Middle",
-            border_color="#ffffff", padding="2pt",
-        )
-        ltb = ri[-1]
-        _sub(ltb, "Top", f"{y:.2f}in"); _sub(ltb, "Left", "1.8in")
-        _sub(ltb, "Width", "2.0in"); _sub(ltb, "Height", "0.24in")
-        _build_textbox(
-            ri, f"LcCov_MetaVal_{idx}", val,
-            bold=True, font_size="10pt", fg=INK,
-            text_align="Left", vertical_align="Middle",
-            border_color="#ffffff", padding="2pt",
-        )
-        vtb = ri[-1]
-        _sub(vtb, "Top", f"{y:.2f}in"); _sub(vtb, "Left", "3.9in")
-        _sub(vtb, "Width", "2.7in"); _sub(vtb, "Height", "0.24in")
-        y += 0.28
-
+    # NO fabricated "Run Date / Total of ALL Records" meta band here.
+    # This is a LAYOUT-DRIVEN cover: the report's own header section already
+    # carries its genuine "Run Date:" / "Selection Criteria:" / etc. labels,
+    # which render as the `pairs` below. Injecting a CountRows() "Total of ALL
+    # Records" line (and a second Run Date) duplicates and fabricates content
+    # the real Oracle cover never prints -- verified against the real
+    # letter/permit artifacts. Spacing only.
     y += 0.30
 
     # Layout-driven label:value rows.
@@ -5163,6 +5318,13 @@ def _emit_frame_rect(
     border_width > 0. Recurses into nested frames so child cards /
     sub-frames each get their own bordered Rectangle.
     """
+    # A conditional ERROR/alert frame (format-trigger box whose content is a
+    # not-equal / ERROR message, e.g. a totals-mismatch warning) is hidden on
+    # the happy path -- never emit it into the RDL, where it would paint over
+    # the normal form. Mirrors the mockup's _doc_collect_positioned skip so
+    # preview and RDL agree.
+    if _is_conditional_alert_frame(group):
+        return parent_y
     gx = float(getattr(group, "x", 0.0) or 0.0)
     gy = float(getattr(group, "y", 0.0) or 0.0)
     gw = float(getattr(group, "width", 0.0) or 0.0)
@@ -5340,8 +5502,108 @@ def _center_sibling_frame_rows(frames, parent_w):
     return deltas
 
 
-def _build_per_record_body(report, main):
+def _build_packet_body(report, main):
+    """Body for a positional document PACKET -- a memo cover, a data table, and
+    a closing letter as sibling top-level frames in section_main, each its own
+    page via Oracle pageBreakAfter. Each frame renders in its own KeepTogether
+    Rectangle (prose frames via _emit_frame_rect; the data-table frame wraps a
+    real _build_tablix), stacked vertically; a frame whose page_break_after is
+    set gets PageBreak=End.
+
+    Fixes the data loss where the generic tabular path emitted only a param
+    cover + the table, DROPPING the memo and the closing letter. Mirrors the
+    html_mockup packet preview.
+
+    NOT render-verifiable in this environment (ReportViewer is WDAC-blocked).
+    The structure is XSD-valid and the field/table emission reuses the proven
+    letter + tablix paths; SSRS's absolute-Top page-break behaviour means the
+    user should upload to confirm the exact pagination. The guaranteed win is
+    content fidelity -- all three sections present + faithfully positioned.
+    """
+    body = ET.Element(_q("Body"))
+    items = _sub(body, "ReportItems")
+    main_sec = _section_by_kind(report, "section_main")
+    frames = [c for c in (getattr(main_sec, "children", None) or [])
+              if "frame" in (getattr(c, "kind", "") or "").lower()
+              and "footer" not in (getattr(c, "name", "") or "").lower()]
+    if not frames:
+        _sub(body, "Height", "9in")
+        _sub(body, "Style")
+        return body
+
+    _all_r = [float(getattr(c, "x", 0) or 0) + float(getattr(c, "width", 0) or 0)
+              for c in frames]
+    _MAX_BODY_W = _page_width_for(report) - 2 * _PAGE_HMARGIN_IN - 0.02
+    BODY_W = min(_MAX_BODY_W, max(7.5, round(max(_all_r) + 0.15, 2)))
+
+    counter = [0]
+    cover_title_lines: set = set()
+    top = 0.0
+    GAP = 0.20
+    last = len(frames) - 1
+    for i, fr in enumerate(frames):
+        is_table = main is not None and _frame_has_columnar_table(fr)
+        if is_table:
+            # The data-table frame: wrap the real data-bound grid in a Rectangle
+            # so it stacks + can carry a PageBreak uniformly with the prose
+            # sections (a plain _emit_frame_rect would print ONE static row).
+            tbx = _build_tablix(report, main)
+            for _t in tbx.findall(_q("Top")):
+                tbx.remove(_t)
+            for _l in tbx.findall(_q("Left")):
+                tbx.remove(_l)
+            rect = ET.Element(_q("Rectangle"))
+            rect.set("Name", f"Pkt_Sect_{i}")
+            _sub(rect, "KeepTogether", "true")
+            inner = _sub(rect, "ReportItems")
+            _sub(tbx, "Top", "0.02in")
+            _sub(tbx, "Left", "0.02in")
+            inner.append(tbx)
+            _sub(_sub(_sub(rect, "Style"), "Border"), "Style", "None")
+            sect_h = 2.5
+            _sub(rect, "Top", f"{top:.2f}in")
+            _sub(rect, "Left", "0.02in")
+            _sub(rect, "Width", f"{BODY_W:.2f}in")
+            _sub(rect, "Height", f"{sect_h:.2f}in")
+            items.append(rect)
+            sect_item = rect
+        else:
+            # Prose frame (memo / letter): positioned textboxes + images,
+            # re-based to the frame origin (parent_x=parent_y=0 keeps each
+            # field's absolute x; the rect's Top is overridden below to stack).
+            _emit_frame_rect(items, fr, 0.0, 0.0, BODY_W,
+                             report, cover_title_lines, "Pkt", counter)
+            sect_item = list(items)[-1]
+            _h_el = sect_item.find(_q("Height"))
+            try:
+                sect_h = float((_h_el.text or "1").replace("in", "")) if _h_el is not None else 1.0
+            except Exception:
+                sect_h = 1.0
+            _top_el = sect_item.find(_q("Top"))
+            if _top_el is not None:
+                _top_el.text = f"{top:.2f}in"  # in place -> preserve XSD child order
+            else:
+                _sub(sect_item, "Top", f"{top:.2f}in")
+        # Honour Oracle pageBreakAfter (never on the last section).
+        if i != last and getattr(fr, "page_break_after", False):
+            _sub(_sub(sect_item, "PageBreak"), "BreakLocation", "End")
+        top += sect_h + GAP
+
+    _sub(body, "Height", f"{max(9.0, top + 1.0):.2f}in")
+    _sub(body, "Style")
+    return body
+
+
+def _build_per_record_body(report, main, suppress_empty_cover=False):
     """Build a Body that renders ONE PAGE PER RECORD of the main dataset.
+
+    ``suppress_empty_cover``: when True (the positional single-record FORM path),
+    do NOT prepend the generic "Report Parameters" cover unless the report
+    actually carries cover content (a real section_header criteria cover). A
+    requisition/invoice form has no cover page -- page 1 is the form -- so the
+    fabricated Run Date/Run By/Total cover would invent a page. Letters and
+    certificates (default False) keep their cover, which IS faithful to their
+    real Parameter-Form first page.
 
     Generic for letter / certificate / single-document reports. Layout
     comes straight from the source XML's positional fields: title
@@ -5395,7 +5657,14 @@ def _build_per_record_body(report, main):
     # form-shaped.
     cover_h = 0.0
     cover = _build_letter_cover_page(report)
-    if cover is None:
+    if cover is None and not (suppress_empty_cover and not _has_cover_page(report)):
+        # Fall back to the generic "Report Parameters" cover -- EXCEPT on the
+        # form path (suppress_empty_cover) when the report has no real cover
+        # content. A positional FORM (requisition with no header section) has NO
+        # cover page -- page 1 is the form itself -- so fabricating a Run Date /
+        # Run By / Total cover there invents a page the real report never prints.
+        # Letters/certificates (suppress_empty_cover=False) are unaffected: they
+        # keep the cover, which IS their faithful Parameter-Form first page.
         cover = _build_cover_page(report)
     next_top = 0.10
     if cover is not None:
@@ -6471,7 +6740,15 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
     cover_top = 0.0
     next_top = 0.10  # default if no cover
 
-    cover = _build_cover_page(report)
+    # A "Run Date / Run By / Total of ALL Records + Report Parameters" cover is
+    # prepended ONLY when the report actually carries cover content (a real
+    # Parameter-Form criteria cover in section_header). A plain tabular list or a
+    # master-detail grid has NO such page in the real Oracle output -- page 1 is
+    # the data. _build_cover_page would otherwise fabricate one from the
+    # parameter list (e.g. ASBACCRD's 19 params), inventing a page the report
+    # never prints. Gate it structurally, mirroring the mockup's _has_cover_page
+    # gate so preview and RDL agree.
+    cover = _build_cover_page(report) if _has_cover_page(report) else None
     if cover is not None:
         items.append(cover)
         try:
@@ -6580,10 +6857,18 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
         _sub(ph, "PrintOnFirstPage", "true")
         _sub(ph, "PrintOnLastPage", "true")
         ph_items = _sub(ph, "ReportItems")
-        title_expr = (
-            '="' + '" & vbCrLf & "'.join(
-                ln.replace('"', '""') for ln in title_lines
-            ) + '"'
+        # Resolve any Oracle lexical/&TOKEN in each title line to SSRS
+        # expression atoms (a &PARAM -> Parameters!..Value, a &FORMULA -> its
+        # placeholder) so a raw "&REPORT_VEHICLE_TYPE" never prints in the page
+        # title. A line with no token stays a plain quoted literal (unchanged).
+        def _title_atom(ln):
+            val, is_expr = _resolve_text_expression(ln, report)
+            if is_expr:
+                return val[1:]  # strip the leading '=' -> the &-joined atoms
+            return '"' + val.replace('"', '""') + '"'
+
+        title_expr = "=" + " & vbCrLf & ".join(
+            _title_atom(ln) for ln in title_lines
         )
         _build_textbox(
             ph_items, "Tb_PageTitle", title_expr,
@@ -6729,6 +7014,18 @@ def _build_embedded_images(report) -> Optional[ET.Element]:
 
 def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.Element:
     """Root <Report> element with all children in SSRS schema order."""
+    # 1:many linked detail tables (Oracle <link> child rendered as a columnar
+    # repeating frame, e.g. JV's vehicle list per tower): strip the child's
+    # link WHERE filter so its dataset carries ALL rows (the per-master-row
+    # join is done in SSRS by LookupSet on the key column the generator already
+    # SELECTs), and stash the set so the field resolver emits Join(LookupSet(..))
+    # -- a multi-row list -- instead of a scalar Lookup() for those columns.
+    # Done FIRST so parameter augmentation + dataset build see the stripped SQL.
+    try:
+        report._one_to_many_children = _one_to_many_link_children(report)
+        _strip_link_filter_predicates(report, report._one_to_many_children)
+    except Exception:  # noqa: BLE001 -- never let detail-linking sink the RDL
+        report._one_to_many_children = set()
     _augment_parameters_from_binds(report)
     # Matrix pre-pass MUST run before datasets are built (it may add the
     # cross-product dimension/measure columns to the bound query).
@@ -6826,6 +7123,66 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         root.append(_build_page(report, page_height_in=11.0,
                                 footer_on_first_page=True,
                                 signature_in_footer=False))
+        root.append(_build_code())
+        _sub(root, "Language", "en-US")
+        _rdsub(root, "DrawGrid", "true")
+        _rdsub(root, "GridSpacing", "0.083333in")
+        _strip_empty_required_containers(root)
+        return root
+
+    # Positional document PACKET (memo cover + data table + closing letter as
+    # sibling frames, each its own page via pageBreakAfter). Checked before the
+    # tabular/letter branches because such packets carry a columnar table (so
+    # detect_report_kind calls them tabular) yet must NOT lose their prose
+    # frames to the cover+tablix path. Gated tightly (_is_doc_packet fires for
+    # 0/66 corpus reports) so only genuine packets enter here.
+    try:
+        _is_packet = main is not None and _is_doc_packet(report)
+    except Exception:
+        _is_packet = False
+    if _is_packet:
+        body = _build_packet_body(report, main)
+        root.append(body)
+        _sub(root, "Width", f"{_page_width_for(report):.2f}in")
+        root.append(_build_page(report, page_height_in=11.0,
+                                footer_on_first_page=True,
+                                signature_in_footer=False))
+        root.append(_build_code())
+        _sub(root, "Language", "en-US")
+        _rdsub(root, "DrawGrid", "true")
+        _rdsub(root, "GridSpacing", "0.083333in")
+        _strip_empty_required_containers(root)
+        return root
+
+    # Positional single-record FORM (invoice / requisition / order form): one
+    # master record per page with a scattered vendor/bill-to/office block AND an
+    # embedded line-item table. The generic tabular path fabricates a Run Date /
+    # Run By / Total cover and drops the form entirely, so route it -- like a
+    # letter -- through the per-record positional body (which now skips the cover
+    # when there's none). Gated by _is_single_record_form (maxRec=1 + exactly one
+    # columnar detail table + not nested-MD): catches only genuine forms, so a
+    # tabular list or a deep master-detail never enters here.
+    try:
+        _is_form = main is not None and _is_single_record_form(report)
+    except Exception:
+        _is_form = False
+    if _is_form:
+        body = _build_per_record_body(report, main, suppress_empty_cover=True)
+        try:
+            req = float(body.attrib.pop("data-required-page-height-in", "0"))
+        except Exception:
+            req = 0.0
+        _sig_in_body = body.attrib.pop("data-signature-in-body", "") == "1"
+        chrome = (2 * _PAGE_MARGIN_IN
+                  + _page_header_height(report)
+                  + _PAGE_FOOTER_HEIGHT_IN)
+        page_height = max(11.0, req + chrome + 0.2)
+        root.append(body)
+        _report_w = float(body.attrib.pop("data-body-width-in", "7.5"))
+        _sub(root, "Width", f"{_report_w}in")
+        root.append(_build_page(report, page_height_in=page_height,
+                                footer_on_first_page=True,
+                                signature_in_footer=not _sig_in_body))
         root.append(_build_code())
         _sub(root, "Language", "en-US")
         _rdsub(root, "DrawGrid", "true")

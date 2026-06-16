@@ -319,6 +319,312 @@ def _has_columnar_repeating_frame(report):
     return False
 
 
+def _iter_group(g):
+    """Yield g and every descendant group in its subtree."""
+    stack = [g]
+    while stack:
+        n = stack.pop()
+        yield n
+        stack.extend(getattr(n, "children", None) or [])
+
+
+def _is_columnar_repeating(node):
+    """True when THIS node is a repeating_frame whose field children form a
+    horizontal table ROW (>= 2 field-kind children at >= 2 distinct x within a
+    y-band). The single-node version of _has_columnar_repeating_frame, used to
+    locate the table inside one frame of a positional document packet."""
+    if (getattr(node, "kind", "") or "") != "repeating_frame":
+        return False
+    Y_BAND = 0.12
+    bands = {}
+    for f in (node.fields or []):
+        if (f.kind or "") != "field":
+            continue
+        yb = round((f.y or 0.0) / Y_BAND)
+        bands.setdefault(yb, set()).add(round(f.x or 0.0, 2))
+    return any(len(xs) >= 2 for xs in bands.values())
+
+
+def _group_columnar_repeating(g):
+    """True when g's subtree contains a columnar (table-shaped) repeating frame."""
+    return any(_is_columnar_repeating(n) for n in _iter_group(g))
+
+
+def _group_paragraph_blocks(g):
+    """Count body-paragraph text blocks in g's subtree -- the signal that a
+    frame is a PROSE page (a memo/letter), not a data grid. A paragraph is a
+    long block (>= 80 chars) that reads like a SENTENCE (>= 12 words), so a
+    single long token -- e.g. a 120-char column-name header on a wide stress
+    report -- is NOT mistaken for prose (which would false-positive the packet
+    detector)."""
+    n = 0
+    for node in _iter_group(g):
+        for f in (getattr(node, "fields", None) or []):
+            if getattr(f, "kind", "") != "text":
+                continue
+            t = (getattr(f, "text", "") or "").strip()
+            if len(t) >= 80 and len(t.split()) >= 12:
+                n += 1
+    return n
+
+
+def _is_positional_document_packet(report):
+    """section_main is a multi-frame POSITIONAL DOCUMENT PACKET -- e.g. a memo
+    cover page + a data table + a closing letter, each its own sheet via
+    Oracle pageBreakAfter -- rather than a classic tabular listing. Structural
+    signal: >= 2 page-separated top-level content frames where at least one is
+    a PROSE page (body paragraphs, no columnar table) and either another is a
+    TABLE page or there is a second prose page.
+
+    Such packets must render geometry-faithfully (each frame on its own sheet,
+    the table tiled into rows in place) -- the tabular cover+detail template
+    fabricates a run-info cover and silently discards the prose frames
+    (wild-corpus verified: STP_PAYBACK's memo + county table + warrant letter
+    rendered as a fake 'Run By / Total of ALL Records' card). Generic: keyed on
+    frame shape, never a report name."""
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return False
+    groups = [c for c in (main.children or [])
+              if not _is_footer_frame(c) and _frame_has_content(c)]
+    if len(groups) < 2:
+        return False
+    prose = sum(1 for g in groups
+                if _group_paragraph_blocks(g) >= 1 and not _group_columnar_repeating(g))
+    tables = sum(1 for g in groups if _group_columnar_repeating(g))
+    return prose >= 1 and (tables >= 1 or prose >= 2)
+
+
+def _is_single_record_form(report):
+    """section_main is a POSITIONAL SINGLE-RECORD FORM -- an invoice/requisition/
+    order form: one master record per physical page (Oracle maxRecordsPerPage=1)
+    whose master fields are scattered at absolute positions (a vendor block, a
+    bill-to block, an office-use box) WITH an embedded columnar line-item table.
+
+    This is neither a tabular list (many records stacked per page) nor a pure
+    letter (no columnar table). The generic tabular template mis-renders it --
+    collapsing the positional master into a navy band and never laying out the
+    form -- so route it through the geometry-faithful per-record document
+    renderer instead (tile_tables=True tiles the line-item grid in place).
+
+    Structural, never keyed on a report name. Checked AFTER the letter/
+    certificate route so a maxRecordsPerPage=1 LETTER (no columnar table) keeps
+    its prose-document path untouched."""
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return False
+    # An embedded columnar line-item table must be present (else it's a pure
+    # letter/certificate, handled elsewhere).
+    if not _has_columnar_repeating_frame(report):
+        return False
+    # EXACTLY ONE line-item table. A genuine form (invoice/requisition) has one
+    # master block + one detail table. A report with SEVERAL columnar tables, or
+    # a deeply nested master-detail-detail, is a multi-table layout whose frames
+    # sit at different positions -- the single-sheet positional tile would pile
+    # them on top of each other. Those keep the tabular / nested-MD path.
+    columnar = 0
+    maxrec1 = False
+    stack = [main]
+    while stack:
+        g = stack.pop()
+        if "repeating" in (getattr(g, "kind", "") or "").lower():
+            if _is_columnar_repeating(g):
+                columnar += 1
+            if int(getattr(g, "max_records_per_page", 0) or 0) == 1:
+                maxrec1 = True
+        stack.extend(getattr(g, "children", None) or [])
+    if columnar != 1 or not maxrec1:
+        return False
+    # A deeply nested master-detail TABLE is handled by the nested-MD renderer.
+    if _is_nested_master_detail_preview(report):
+        return False
+    return True
+
+
+def _render_single_record_form_pages(report):
+    """Render a positional single-record form (one master record = one page):
+    paint section_main's frames/fields at their real geometry and tile the
+    embedded line-item table in place. Geometry-faithful; no fabricated cover,
+    no run-info card, no navy band collapse."""
+    page = _render_generic_document_page(
+        report, 0, 1, 1, section="section_main", tile_tables=True, lift_title=True)
+    return _render_pages_wrapper([page])
+
+
+def _any_maxrec1(report):
+    """Any repeating frame declares Oracle maxRecordsPerPage==1 -- one master
+    record fills a physical page. The defining signal of a per-record document
+    (a form/certificate printed one-per-page), as opposed to a list that stacks
+    many records per page."""
+    for g in _iter_layout(report):
+        if "repeating" in (getattr(g, "kind", "") or "").lower():
+            if int(getattr(g, "max_records_per_page", 0) or 0) == 1:
+                return True
+    return False
+
+
+def _block_heading_count(report):
+    """Count STANDALONE block-heading labels in section_main: short static-text
+    captions that (a) sit ALONE on their y-row (no other label within ~0.12in y
+    -- so NOT a shared column-header row), (b) do NOT end in ':' (section
+    captions, not field captions), (c) are <=3 words / <=28 chars, (d) carry no
+    raw &token, and (e) have a DATA field positioned just below them. A
+    per-facility FORM has several (Plant Location / SIC-NAIC / Emissions Contact
+    ...); a nested-MD list's master band has 0 (its captions end ':'); a tabular
+    column-header row has 0 (its labels share one y-band, so none is 'alone')."""
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return 0
+    texts, fields = [], []
+    for n in _iter_group(main):
+        for f in (n.fields or []):
+            if (f.kind or "") == "text":
+                t = (f.text or "").strip()
+                if t:
+                    texts.append((f, t))
+            elif (f.kind or "") == "field":
+                fields.append(f)
+    count, seen_y = 0, set()
+    for f, t in texts:
+        if t.endswith(":") or "&" in t:
+            continue
+        if not (1 <= len(t.split()) <= 3) or len(t) > 28:
+            continue
+        y, x = (f.y or 0.0), (f.x or 0.0)
+        alone = not any(g is not f and abs((g.y or 0.0) - y) <= 0.12
+                        for g, _ in texts)
+        if not alone:
+            continue
+        below = any(0.02 <= (fl.y or 0.0) - y <= 1.3 and abs((fl.x or 0.0) - x) < 0.6
+                    for fl in fields)
+        if not below:
+            continue
+        yb = round(y / 0.12)
+        if yb in seen_y:
+            continue
+        seen_y.add(yb)
+        count += 1
+    return count
+
+
+def _outer_master_field_count(report):
+    """Number of layout DATA fields bound to the OUTERMOST data query group's
+    own columns -- how many attributes the master record itself carries. A
+    per-facility FORM's master owns many (address / contact / id blocks); a
+    MULTI-SECTION accounting report's outer group owns ~0 (it is a pure section
+    grouping whose data lives in repeating detail rows). Keeps the nested-MD
+    block-heading signal from capturing a multi-section summary as a form."""
+    main = None
+    for q in (report.queries or []):
+        if getattr(q, "groups", None):
+            if main is None or len(q.items or []) > len(main.items or []):
+                main = q
+    if main is None or not getattr(main, "groups", None):
+        return 0
+    names = {(it.name or "").upper() for it in (main.groups[0].items or [])}
+    if not names:
+        return 0
+    cnt = 0
+    for top in (report.layout or []):
+        for g in _iter_group(top):
+            for f in (g.fields or []):
+                if (f.kind or "") == "field" and (f.source or "").upper() in names:
+                    cnt += 1
+    return cnt
+
+
+def _dense_labeled_master_block(report):
+    """A single layout node in section_main owns a DENSE labeled block: >=6
+    static-text labels AND >=6 value fields spread over >=6 distinct y-rows --
+    a stacked label:value FORM block (Plant Location / Mailing Address / SIC-NAIC
+    ... all in one master container). A flat tabular list never matches: its
+    value fields live in a ONE-ROW repeating frame (1-2 y-bands), and its labels
+    are a single column-header row -- so no single node stacks >=6 values down
+    >=6 rows."""
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return False
+    for n in _iter_group(main):
+        labels = sum(1 for f in (n.fields or [])
+                     if (f.kind or "") == "text" and (f.text or "").strip())
+        vals = [f for f in (n.fields or []) if (f.kind or "") == "field"]
+        if labels >= 6 and len(vals) >= 6:
+            yrows = {round((f.y or 0.0) / 0.12) for f in vals}
+            if len(yrows) >= 6:
+                return True
+    return False
+
+
+def _is_per_record_document(report):
+    """section_main is a per-record POSITIONAL DOCUMENT -- a per-facility labeled
+    FORM or a CERTIFICATE -- that the generic tabular / nested-MD templates
+    WRONGLY collapse into a data grid (dropping the labeled blocks + any state
+    seal). Routes such reports to the geometry-faithful per-record document
+    renderer instead.
+
+    Structural, never keyed on a report name. Three independent POSITIVE signals
+    (any one marks a positional document), each gated so the reports that already
+    render correctly are never pulled out of their path:
+      * Signal A -- Oracle maxRecordsPerPage==1 (one record per page) with no
+        full data grid (caught: VOLUNTARY_PERMIT, ASB_ACRD_HISTORY).
+      * Signal B -- a nested-MD-shaped report whose master frame carries >=3
+        STANDALONE block-heading labels (caught: AIR_EMISSION_INVENTORY_DETAIL;
+        a genuine nested-MD list like METHACT scores 0).
+      * Signal C -- a CERTIFICATE: an embedded seal/logo image co-located with a
+        prose body paragraph (caught: ASB_CARD_LIC).
+      * Signal D -- a single DENSE labeled master block (caught:
+        AIR_EMISSION_INVENTORY_SUMMARY; flat lists score 0).
+    """
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return False
+    # Reports already handled well keep their own routes.
+    if _is_single_record_form(report):        # positional invoice/requisition
+        return False
+    if _is_header_summary_preview(report):     # accounting/criteria summary
+        return False
+    # A: one master record per physical page, no full data grid.
+    if _any_maxrec1(report):
+        return True
+    # B: nested-MD-shaped but really a labeled facility FORM -- its master
+    #    record owns its own dense field set (>=4 data fields: address/contact/
+    #    id blocks) AND prints >=3 standalone block headings. A MULTI-SECTION
+    #    accounting report is also nested + block-headed, but its outer group
+    #    owns ~0 data fields (pure section grouping) -- excluded here, handled
+    #    by the multi-section archetype instead.
+    if (_is_nested_master_detail_preview(report)
+            and _block_heading_count(report) >= 3
+            and _outer_master_field_count(report) >= 4):
+        return True
+    # C: certificate -- embedded seal/logo image + a prose paragraph.
+    if (report.embedded_images or []) and _group_paragraph_blocks(main) >= 1:
+        return True
+    # D: a dense stacked label:value master block.
+    if _dense_labeled_master_block(report):
+        return True
+    return False
+
+
+def _render_per_record_document_pages(report):
+    """Render a per-record positional document (labeled facility form /
+    certificate): paint section_main's frames/fields/images at their real
+    geometry and tile any embedded sub-tables in place. One sample record/page
+    (the document repeats per record in SSRS). Mirrors
+    _render_generic_document_pages but forces tile_tables + lift_title so the
+    boxed sub-panels (SPT/EMISSIONS, SIC/NAIC) lay out instead of collapsing."""
+    if _has_cover_page(report):
+        total = 2
+        return _render_pages_wrapper([
+            _render_header_summary_page(report, page_label="Page 1 of %d" % total),
+            _render_generic_document_page(report, 0, 2, total, section="section_main",
+                                          tile_tables=True, lift_title=True),
+        ])
+    return _render_pages_wrapper([
+        _render_generic_document_page(report, 0, 1, 1, section="section_main",
+                                      tile_tables=True, lift_title=True)
+    ])
+
+
 def detect_report_kind(report):
     """Return one of 'letter', 'tabular_details', 'certificate'.
 
@@ -399,7 +705,14 @@ def detect_report_kind(report):
 
 def _find_title_text(report):
     """Pick the most title-like static-text field: largest font, centered,
-    bold preferred. Returns the LayoutField or None."""
+    bold preferred. Returns the LayoutField or None.
+
+    Right-justified text (align end/right) is excluded: a report title is
+    centered or left-aligned, never right-justified. Large right-justified
+    bold text is a total, a value, a run-date, or a red comparison/error
+    message (e.g. a format-trigger alert) -- picking it would put that line
+    where the title belongs. Generic, structural; not keyed on any report
+    name or specific phrase."""
     best = None
     best_key = (-1, -1)
     for g in _iter_layout(report):
@@ -408,8 +721,11 @@ def _find_title_text(report):
                 continue
             if not (f.text or "").strip():
                 continue
+            align = (f.align or "").lower()
+            if align in ("end", "right"):
+                continue
             sz = int(f.font_size or 0)
-            centered = 1 if (f.align or "").lower() == "center" else 0
+            centered = 1 if align == "center" else 0
             bold = 1 if f.bold else 0
             key = (sz, centered + bold)
             if key > best_key:
@@ -507,7 +823,10 @@ def _detail_field_pairs(group):
     pending_label = None
     for f in fields:
         if f.kind == "text":
-            txt = (f.text or "").strip().rstrip(":")
+            # A printed caption can embed an Oracle lexical ref
+            # (e.g. "ENF REQ #&F_ENF_REQ_ID APPROVAL"); resolve it so the
+            # detail/band label never prints a raw &TOKEN.
+            txt = _resolve_tokens((f.text or "").strip().rstrip(":"), 0)
             if txt:
                 pending_label = txt
         elif f.kind == "field":
@@ -587,8 +906,8 @@ def _sample_for_source(src, idx):
           "prenom", "apellido", "nombre", "prenume", "nom_",
           "client", "cliente", "persoan", "persona", "empleado", "angajat",
           "funcionar", "contact", "user", "usuario", "utilizator",
-          "signer", "manager", "gerente", "employee", "emp name", "staff",
-          "worker", "tenant", "applicant", "patient", "student", "author"),
+          "signer", "signator", "manager", "gerente", "employee", "emp name",
+          "staff", "worker", "tenant", "applicant", "patient", "student", "author"),
                                            PERSON_POOL),
         (("contractor", "owner", "permittee", "company", "org", "facility",
           "magazin", "empresa", "compania", "societe", "store"), NAME_POOL),
@@ -605,7 +924,7 @@ def _sample_for_source(src, idx):
                                            ["North District", "South District"]),
         (("city", "town", "oras", "ciudad", "ville", "cidade", "localidad"),
                                            CITY_POOL),
-        (("date", "dt", "data", "fecha", "vigencia", "fech"), DATE_POOL),
+        (("date", "dt", "sysdate", "rundate", "data", "fecha", "vigencia", "fech"), DATE_POOL),
         (("comment", "descr", "notes", "remark", "observ", "nota"), COMMENT_POOL),
         (("status", "estado", "stare", "etat"), STATUS_POOL),
         (("type", "tipo", "tip"),          TYPE_POOL),
@@ -785,7 +1104,52 @@ def _is_conditional_error_text(text):
     evaluate the trigger, so suppress these clear error-branch messages rather
     than show an error the real report wouldn't. Generic -- keyed on the
     'ERROR:' label convention, no per-report text."""
-    return bool(re.match(r"(?i)^\s*error\b\s*:", text or ""))
+    t = text or ""
+    if re.match(r"(?i)^\s*error\b\s*:", t):
+        return True
+    # A not-equal / comparison operator in DISPLAY text is a validation/alert
+    # message ("Total <> Total Amount on ...", "Count != expected") that Oracle
+    # prints only via a format trigger when the data fails the check -- a real
+    # caption never contains <> / != / ≠. Generic, no per-report phrase.
+    if re.search(r"(<>|!=|≠)", t):
+        return True
+    return False
+
+
+def _is_conditional_alert_frame(g):
+    """A plain (non-repeating) frame gated by a format trigger whose content is a
+    conditional ERROR/alert branch (a totals-mismatch warning, an empty-state
+    notice). Oracle shows it ONLY when the data hits the exception; a static
+    sample preview can't evaluate the trigger, so the whole box -- its alert
+    text AND the value field beside it -- is suppressed rather than painted over
+    the normal content. Excludes repeating/data frames and any frame containing
+    a repeating data frame, so real data is never dropped. Tight: requires BOTH
+    a format trigger and recognizable error text inside. Generic, no names."""
+    if not getattr(g, "format_trigger", ""):
+        return False
+    if "repeating" in (getattr(g, "kind", "") or "").lower():
+        return False
+    stack = list(getattr(g, "children", None) or [])
+    while stack:
+        c = stack.pop()
+        if "repeating" in (getattr(c, "kind", "") or "").lower():
+            return False
+        stack.extend(getattr(c, "children", None) or [])
+    for f in (getattr(g, "fields", None) or []):
+        if getattr(f, "kind", "") == "text" and _is_conditional_error_text(f.text or ""):
+            return True
+    return False
+
+
+def _is_conditional_error_source(src):
+    """An Oracle *_ERROR / ERR_* formula or placeholder field is a conditional
+    error/empty-state message printed ONLY via a format trigger when the data
+    hits that condition; on the happy path Oracle hides it. A static preview
+    can't evaluate the trigger, so suppress it -- the field version of
+    _is_conditional_error_text (e.g. CP_PERMITEE_ERROR sitting over a letterhead
+    logo). Keyed on the err/error name convention at a word boundary, so
+    OPERATOR / TERMS / VENDOR are never caught. Generic, no report names."""
+    return bool(re.search(r"(?i)(^|_)err(or)?($|_)", src or ""))
 
 
 def _font_css(face, fallback="Arial, Helvetica, sans-serif"):
@@ -936,7 +1300,11 @@ def _render_rich_header_page(report, items, pairs, page_label):
             if (vsrc or "").lower() == "currentdate":
                 val = _sample_for_source("date", 0)
             else:
-                val = _sample_for_source(vsrc or vtext or "value", 0)
+                # Shared field resolver: a CF_/CP_ field named after the report
+                # resolves to the report TITLE (CF_CMVGY_LTR_PERMIT -> "CMVGY Ltr
+                # Permit"), and a constant-blank formula renders blank, instead
+                # of a generic 'Sample Value A'.
+                val = _doc_field_caption_and_value(vsrc or vtext or "value", report, {}, 0)
         else:
             # static text: resolve any &TOKEN substitutions
             val = _resolve_tokens(vtext or "")
@@ -977,7 +1345,8 @@ def _render_rich_header_page(report, items, pairs, page_label):
     for _y, t in notes[:4]:
         notes_html += (
             '<div style="margin:6px 0 0; color:' + _TAB_INK_SOFT + '; '
-            'font-size:12px; font-style:italic;">' + _esc(t) + '</div>'
+            'font-size:12px; font-style:italic;">'
+            + _esc(_resolve_tokens(t, 0)) + '</div>'
         )
 
     inner = (
@@ -1343,17 +1712,15 @@ def _detect_multi_section_preview(report):
     sm = _find_section(report.layout or [], "section_main")
     if sm is None:
         return None
-    frames = [c for c in (sm.children or [])
-              if "frame" in (c.kind or "").lower()
-              and (c.kind or "").lower() != "repeating_frame"]
-    if len(frames) < 2:
-        return None
 
     def header_text(frame):
-        # Top-left static text = the section title (see rdl._header_text).
+        # Top-left static text = the section title (see rdl._header_text). The
+        # section frame itself may be a repeating GROUP frame, so its OWN top
+        # text still counts as the section label -- only NESTED repeating frames
+        # (the detail rows) are skipped.
         cands = []
-        def walk(g, in_rep):
-            ir = in_rep or (g.kind or "").lower() == "repeating_frame"
+        def walk(g, in_rep, top):
+            ir = in_rep or (not top and (g.kind or "").lower() == "repeating_frame")
             for f in (g.fields or []):
                 if f.kind == "text" and not ir:
                     t = (f.text or "").strip()
@@ -1362,12 +1729,20 @@ def _detect_multi_section_preview(report):
                                       float(getattr(f, "x", 0.0) or 0.0),
                                       t.split("\n")[0].strip()))
             for c in (g.children or []):
-                walk(c, ir)
-        walk(frame, False)
+                walk(c, ir, False)
+        walk(frame, False, True)
         if not cands:
             return ""
-        cands.sort(key=lambda c: (c[0], c[1]))
-        return cands[0][2]
+        # A section TITLE sits at the LEFT; a text out in the data columns
+        # (e.g. "Applications"/"Fees" headers at x>=~4) is a COLUMN label, not
+        # the section name. Only accept left-region texts, so a repeating-group
+        # section whose real title is a FORMULA field (no static text) does not
+        # borrow a column header. Falls back to the grouping field (caller).
+        left = [c for c in cands if c[1] < 3.0]
+        if not left:
+            return ""
+        left.sort(key=lambda c: (c[0], c[1]))
+        return left[0][2]
 
     def tables_in(frame):
         out, seen = [], set()
@@ -1389,6 +1764,59 @@ def _detect_multi_section_preview(report):
         walk(frame)
         return out
 
+    # Section frames usually sit directly under section_main, but some reports
+    # wrap ALL of them inside ONE body container frame. Pick the container level
+    # (section_main itself, or one of its child frames) that holds the most
+    # sibling section frames -- a non-repeating frame containing a query-bound
+    # repeating table. Generalizes to the wrapped-sections layout (e.g. an
+    # accounting report whose ~9 sections nest inside a single body frame).
+    def _section_frames(container):
+        kids = list(container.children or [])
+        plain = [c for c in kids
+                 if "frame" in (c.kind or "").lower()
+                 and (c.kind or "").lower() != "repeating_frame"
+                 and tables_in(c)]
+        # An accounting report stacks one query-bound GROUP frame per section;
+        # those are REPEATING frames. Count them as sections only when there are
+        # >=2 of them on DISTINCT queries, so a genuine nested master-detail (ONE
+        # repeating master, e.g. METHACT) is never split into sections.
+        rep = [c for c in kids
+               if (c.kind or "").lower() == "repeating_frame"
+               and getattr(c, "source_query", None)]
+        rep_qs = {(getattr(c, "source_query", "") or "").upper() for c in rep}
+        if len(rep) >= 2 and len(rep_qs) >= 2:
+            return plain + rep
+        return plain
+    _containers = [sm] + [c for c in (sm.children or [])
+                          if "frame" in (c.kind or "").lower()
+                          and (c.kind or "").lower() != "repeating_frame"]
+    frames = []
+    for _cont in _containers:
+        _sf = _section_frames(_cont)
+        if len(_sf) > len(frames):
+            frames = _sf
+    if len(frames) < 2:
+        return None
+
+    # The section's GROUPING field (leftmost field NOT inside a nested repeating
+    # detail frame) -- its sample value stands in for a section title computed by
+    # a formula when there is no static title text (e.g. ASBST's CF_*_Group,
+    # whose live value is "New Applications Received").
+    def _grp_src(g, top=True):
+        best = None
+        for f in (g.fields or []):
+            if (f.kind or "") == "field" and (f.source or "").strip():
+                bx = float(getattr(f, "x", 0.0) or 0.0)
+                if best is None or bx < best[0]:
+                    best = (bx, f.source)
+        for c in (g.children or []):
+            if (c.kind or "").lower() == "repeating_frame":
+                continue  # detail rows, not the section's grouping field
+            cb = _grp_src(c, False)
+            if cb and (best is None or cb[0] < best[0]):
+                best = cb
+        return best
+
     sections, distinct = [], set()
     for fr in sorted(frames, key=lambda f: (f.y or 0.0)):
         t = tables_in(fr)
@@ -1396,10 +1824,24 @@ def _detect_multi_section_preview(report):
             continue
         for src, _ in t:
             distinct.add(src.upper())
-        sections.append({"header": header_text(fr), "tables": t})
+        _gs = _grp_src(fr)
+        sections.append({"header": header_text(fr),
+                         "header_src": (_gs[1] if _gs else None),
+                         "tables": t})
     if len(sections) < 2 or len(distinct) < 2:
         return None
     return sections
+
+
+def _clean_section_label(src):
+    """A readable, DISTINCT section title derived from the grouping field's NAME
+    when the real title is a formula (no static text), so 9 sections don't all
+    show one repeated sample value. Strips CF_/CS_/CP_ prefixes and a trailing
+    _Group/_Type, title-cases the rest. Structural -- never a data value."""
+    s = re.sub(r"^(CF_|CS_|CP_|C_)", "", (src or ""), flags=re.IGNORECASE)
+    s = re.sub(r"_(Group|Grp|Type|Tye)$", "", s, flags=re.IGNORECASE)
+    s = re.sub(r"_+", " ", s).strip()
+    return s.title()
 
 
 def _render_multi_section_page(report, sections, page_label):
@@ -1433,17 +1875,32 @@ def _render_multi_section_page(report, sections, page_label):
     blocks = []
     for sec in sections:
         hdr = sec.get("header", "")
+        if not hdr and sec.get("header_src"):
+            # No static section title (the real title is a formula) -- derive a
+            # DISTINCT readable label from the grouping field's name so each
+            # section reads with its own header instead of borrowing a column
+            # header or repeating one sample value.
+            hdr = _clean_section_label(sec["header_src"])
         if hdr:
             blocks.append(
                 '<div style="background:' + _TAB_BAND_BG + '; color:' + _TAB_BAND_FG
                 + '; font-weight:bold; font-size:12px; padding:5px 10px; '
                 'margin-top:14px;">' + _esc(hdr) + '</div>'
             )
-        # First table of the section drives the columns shown.
-        for (src, cols) in sec["tables"][:1]:
+        # The WIDEST table of the section drives the columns shown (a group
+        # frame may expose a 1-col grouping table plus the real N-col detail).
+        _wt = max(sec["tables"], key=lambda t: len(t[1]), default=None)
+        for (src, cols) in ([_wt] if _wt else []):
             shown = cols[:6] or ["Value"]
+            # Right-align numeric columns (counts/amounts) so a stacked count
+            # table reads like the Oracle output, where the Number column sits
+            # flush-right. A column is numeric when its sample value parses as a
+            # plain/currency number. Generic -- no per-report column names.
+            aligns = {c: ("right" if re.match(r"^\$?-?[\d,]+(\.\d+)?$",
+                                               _sample_for_source(c, 0) or "")
+                          else "left") for c in shown}
             th = "".join(
-                '<th style="text-align:left; font-size:11px; padding:3px 8px; '
+                '<th style="text-align:' + aligns[c] + '; font-size:11px; padding:3px 8px; '
                 'border-bottom:1px solid ' + _TAB_RULE_LIGHT + '; color:'
                 + _TAB_INK_SOFT + ';">' + _esc(c.replace("_", " ")) + '</th>'
                 for c in shown
@@ -1451,13 +1908,35 @@ def _render_multi_section_page(report, sections, page_label):
             rows = ""
             for ri in range(2):
                 tds = "".join(
-                    '<td style="font-size:11px; padding:3px 8px; border-bottom:1px '
-                    'solid ' + _TAB_RULE_LIGHT + '; color:' + _TAB_INK + ';">'
+                    '<td style="text-align:' + aligns[c] + '; font-size:11px; padding:3px 8px; '
+                    'border-bottom:1px solid ' + _TAB_RULE_LIGHT + '; color:' + _TAB_INK + ';">'
                     + _esc(_sample_for_source(c, ri)) + '</td>'
                     for c in shown
                 )
                 bg = _TAB_PAPER if ri % 2 else _TAB_DETAIL_BG
                 rows += '<tr style="background:' + bg + ';">' + tds + '</tr>'
+            # Bold SUBTOTAL row: an Oracle accounting section closes with a bold
+            # Total/Subtotal line under its numeric column(s) (e.g. "Subtotal New
+            # Applications Received", "Total Applications"). Emit one whenever the
+            # section has a numeric (count/amount) column so each section reads
+            # like the real report instead of trailing off after the data rows.
+            # Generic -- no per-report labels or values.
+            if any(aligns[c] == "right" for c in shown):
+                sub_tds = ""
+                for ci, c in enumerate(shown):
+                    if ci == 0:
+                        cell = "Subtotal"
+                    elif aligns[c] == "right":
+                        cell = _sample_for_source(c, 7)
+                    else:
+                        cell = ""
+                    sub_tds += (
+                        '<td style="text-align:' + aligns[c] + '; font-weight:bold; '
+                        'font-size:11px; padding:4px 8px; border-top:2px solid '
+                        + _TAB_RULE_LIGHT + '; color:' + _TAB_INK + ';">'
+                        + _esc(cell) + '</td>'
+                    )
+                rows += '<tr>' + sub_tds + '</tr>'
             blocks.append(
                 '<table style="width:100%; border-collapse:collapse; margin:2px 0 '
                 '4px;"><thead><tr>' + th + '</tr></thead><tbody>' + rows
@@ -1496,6 +1975,26 @@ def _nd_geometry(report):
     return field_geo, label_geo
 
 
+def _detail_image_srcs(report):
+    """UPPER-cased set of field sources that hold IMAGE data (logo/seal/blob).
+    An image-bound field is never a DATA COLUMN -- including it in a detail band
+    paints a sample-text cell where a picture belongs AND, when it sits a hair to
+    the right of a real column (e.g. MCP_ACTIVE_SITES DEQ_Logo at x0.5 just after
+    Address at x0.26), squeezes that column to a sliver so its value explodes into
+    a tall wrapped pile. Cached on the report. Structural -- no report names."""
+    cache = getattr(report, "_nd_image_srcs", None)
+    if cache is None:
+        try:
+            cache = {s.upper() for s in (_image_source_names(report) or set())}
+        except Exception:
+            cache = set()
+        try:
+            report._nd_image_srcs = cache
+        except Exception:
+            pass
+    return cache
+
+
 def _nd_detail_band(report):
     """The repeating-frame field row with the most distinct-x positions = the
     detail TABLE row; plus wrap fields just below. Returns (row, wrap, row_y)
@@ -1504,17 +2003,27 @@ def _nd_detail_band(report):
     if main is None:
         return [], [], None
     fields = []
+    _img_srcs = _detail_image_srcs(report)
 
     def walk(g):
         for f in (g.fields or []):
-            if f.kind == "field" and f.source:
+            if (f.kind == "field" and f.source
+                    and (f.source or "").upper() not in _img_srcs):
                 fields.append((f.source, float(getattr(f, "x", 0.0) or 0.0),
                                float(getattr(f, "y", 0.0) or 0.0),
                                float(getattr(f, "width", 0.0) or 0.0)))
         for c in (g.children or []):
             walk(c)
 
-    walk(main)
+    # Detail/master data lives INSIDE a repeating-frame child of section_main;
+    # the section's OWN direct fields are page furniture (title, page number, a
+    # full-width subtitle/criteria line, run date) that must never be mistaken
+    # for a detail column. Walk only the sub-frames; fall back to the whole
+    # section if a report puts its data fields straight in section_main.
+    for c in (main.children or []):
+        walk(c)
+    if not fields:
+        walk(main)
     if not fields:
         return [], [], None
     from collections import defaultdict
@@ -1537,6 +2046,56 @@ def _nd_detail_band(report):
     return row, wrap, best_y
 
 
+def _nd_detail_band2(report):
+    """A SECOND detail field-row stacked just below the primary band, sharing the
+    SAME column x-grid -- an Oracle 2-rows-per-record layout where each logical
+    record occupies two physical lines (e.g. Site Name / Contractor stacked in
+    one column). Returns [(source, x, y, w)] sorted by x, or [] when the report
+    is a normal one-line-per-record table. Structural, geometry-only."""
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return []
+    fields = []
+    _img_srcs = _detail_image_srcs(report)
+
+    def walk(g):
+        for f in (g.fields or []):
+            if (f.kind == "field" and f.source
+                    and (f.source or "").upper() not in _img_srcs):
+                fields.append((f.source, float(getattr(f, "x", 0.0) or 0.0),
+                               float(getattr(f, "y", 0.0) or 0.0),
+                               float(getattr(f, "width", 0.0) or 0.0)))
+        for c in (g.children or []):
+            walk(c)
+
+    for c in (main.children or []):
+        walk(c)
+    if not fields:
+        return []
+    row, _wrap, best_y = _nd_detail_band(report)
+    if not row or best_y is None:
+        return []
+    row_xs = sorted({round(x, 1) for _s, x, _y, _w in row})
+    from collections import defaultdict
+    by_y = defaultdict(list)
+    for s, x, y, w in fields:
+        by_y[round(y, 2)].append((s, x, y, w))
+    for y in sorted(by_y):
+        if not (0 < (y - best_y) <= 0.45):
+            continue
+        band = by_y[y]
+        xs = sorted({round(x, 1) for _s, x, _y, _w in band})
+        if len(xs) < 2:
+            continue
+        # the second band must align with the primary columns (not a stray
+        # single-cell wrap or a totals line at unrelated x positions)
+        matched = sum(1 for xx in xs
+                      if any(abs(xx - rx) <= 0.3 for rx in row_xs))
+        if matched >= 2 and matched >= len(xs) * 0.6:
+            return sorted(band, key=lambda z: z[1])
+    return []
+
+
 def _nd_nearest_label(label_geo, x, y, max_dy=0.18, max_dx=1.4):
     best, best_dx = None, 1e9
     for text, lx, ly, _bg in label_geo:
@@ -1544,7 +2103,28 @@ def _nd_nearest_label(label_geo, x, y, max_dy=0.18, max_dx=1.4):
             dx = x - lx
             if 0 <= dx <= max_dx and dx < best_dx:
                 best_dx, best = dx, text
-    return (best or "").strip().rstrip(":")
+    # A printed caption can embed Oracle lexical refs (a group-header band
+    # like "&COL_1 : &CS_COL_SITES SITE(S)", "&<PageNumber>"); resolve them
+    # so no raw &TOKEN ever leaks into a band/column-header caption.
+    return _resolve_tokens((best or "").strip().rstrip(":"), 0)
+
+
+def _nd_header_label(label_geo, x, y):
+    """The COLUMN-HEADER text sitting just ABOVE a detail field (same x band,
+    within ~0.45in above). Distinct from _nd_nearest_label, which finds a
+    same-row caption -- a detail table's column header is a label one band
+    higher (e.g. METHACT's navy 'Individual Responsible for Action' over the
+    CF_PERFORM_BY column). Returns '' when there is no header label, so the
+    caller falls back to the field's own caption."""
+    best, best_d = None, 1e9
+    for text, lx, ly, _bg in label_geo:
+        if ly <= y + 0.02 and (y - ly) <= 0.45 and abs(lx - x) <= 0.55:
+            d = abs(lx - x) + (y - ly)
+            if d < best_d:
+                best_d, best = d, text
+    # Resolve any embedded Oracle lexical refs so a column header never
+    # prints a raw &TOKEN (see _nd_nearest_label).
+    return _resolve_tokens((best or "").strip().rstrip(":"), 0)
 
 
 def _is_nested_master_detail_preview(report):
@@ -1612,7 +2192,11 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
         if x is not None and y is not None:
             geo_cap = _nd_nearest_label(label_geo, x, y)
             if geo_cap:
-                return geo_cap
+                # A printed caption can embed Oracle lexical refs in its text
+                # (a group-header band like "&COL_1 : &CS_COL_SITES SITE(S)",
+                # or "&<PageNumber>"). Resolve them to sample values / drop page
+                # builtins so a raw &TOKEN never leaks into the band caption.
+                return _resolve_tokens(geo_cap, 0)
         lab = _src_label.get((src or "").upper(), "")
         return lab.rstrip(":") if lab else (src or "").replace("_", " ").title()
 
@@ -1646,7 +2230,7 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
     if _title_cands:
         tf = max(_title_cands, key=lambda f: len((f.text or "").strip()))
         title_color = _normalize_color(_attr(tf, "color", ""), "#000080")
-        title_lines = [re.sub(r"&<[^>]+>", "", ln).strip()
+        title_lines = [_resolve_tokens(ln, 0).strip()
                        for ln in (tf.text or "").splitlines() if ln.strip()][:3] or title_lines
     head = ""
     for ln in title_lines:
@@ -1676,7 +2260,12 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
                 'font-size:' + fs + ';padding:' + pad + ';">' + inner + '</div>')
 
     # ---- master band (OUTER group only) ----
-    band_bg = "#006400"
+    # Use the master frame's GENUINE fill (METHACT darkgreen) as a colored band.
+    # When NO genuine fill exists -- the master frame is plain or carries only an
+    # Oracle design-time hint (pale pink/lavender that never prints) -- the real
+    # report shows the master as PLAIN bold text (a county/yard + status header),
+    # so render plain rather than a FABRICATED green default band (JV_LOGSHEETS).
+    band_bg = None
     if _outer is not None:
         oy = min((field_geo[it.name.upper()][1] for it in _outer.items
                   if field_geo.get((it.name or "").upper())), default=0.0)
@@ -1685,7 +2274,12 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
                     and not _is_design_fill(_normalize_color(bg, ""))):
                 band_bg = bg
                 break
-    band = _render_caption_block(_outer, band_bg, "#fff") if _outer else ""
+    if _outer is None:
+        band = ""
+    elif band_bg:
+        band = _render_caption_block(_outer, band_bg, "#fff")
+    else:
+        band = _render_caption_block(_outer, "#ffffff", "#111111", pad="2px 0")
     # ---- middle-group cards (white) ----
     for _mg in _middles:
         band += _render_caption_block(_mg, "#f3f3f3", "#111", pad="6px 14px", fs="11px")
@@ -1697,9 +2291,14 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
     hdr_html = ""
     for hi, (s, hx, hy, hw) in enumerate(row):
         nxt = row[hi + 1][1] if hi + 1 < len(row) else total_w
+        # Prefer the report's OWN column-header label sitting above the field
+        # (the navy header strip's text), else the field's caption. Keeps the
+        # detail header reading "Owner"/"Individual Responsible for Action"
+        # rather than the raw CF_RESP_PARTY/CF_PERFORM_BY field names.
+        col_cap = _nd_header_label(label_geo, hx, hy) or _cap_for(s, hx, hy)
         hdr_html += ('<div style="position:absolute;left:' + f"{pct(hx):.1f}" + '%;'
                      'width:' + f"{pct(nxt)-pct(hx):.1f}" + '%;color:#fff;font-weight:bold;'
-                     'font-size:11px;padding:3px 4px;">' + _esc(_cap_for(s, hx, hy)) + '</div>')
+                     'font-size:11px;padding:3px 4px;">' + _esc(col_cap) + '</div>')
     hdr = ('<div style="position:relative;height:22px;background:#00008B;">'
            + hdr_html + '</div>')
 
@@ -1727,14 +2326,236 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
     return _render_page(body, label="Page " + str(page_num))
 
 
+def _is_tabbrkleft(report):
+    """A master-detail report whose MASTER (break) group fields sit on the SAME
+    y-row as the detail columns -- Oracle's tabBrkLeft: the break group is the
+    LEFT column(s) of ONE flat table, NOT a colored band above the detail
+    (METHACT-style). The nested-MD band renderer fabricates a master band and
+    collides the right-edge columns into a pile (ASBACCRD); a flat table is
+    faithful. Structural, geometry-driven -- no report names."""
+    if not _is_nested_master_detail_preview(report):
+        return False
+    row, _wrap, row_y = _nd_detail_band(report)
+    if not row or row_y is None:
+        return False
+    main = None
+    for q in (report.queries or []):
+        if getattr(q, "groups", None):
+            if main is None or len(q.items or []) > len(main.items or []):
+                main = q
+    if main is None or not main.groups:
+        return False
+    field_geo, _lg = _nd_geometry(report)
+    outer_ys = [field_geo[(it.name or "").upper()][1]
+                for it in (main.groups[0].items or [])
+                if field_geo.get((it.name or "").upper())]
+    if not outer_ys:
+        return False
+    # the master's own data field sits ON the detail row -> one flat line
+    return min(abs(oy - row_y) for oy in outer_ys) <= 0.25
+
+
+def _render_tabbrkleft_page(report, page_num, total_pages):
+    """One flat table page for a tabBrkLeft report: a single navy column-header
+    strip spanning master + detail columns (left-to-right by their real x), and
+    sample rows -- no fabricated master band, no column collision."""
+    field_geo, label_geo = _nd_geometry(report)
+    row, _wrap, _row_y = _nd_detail_band(report)
+
+    title_lines = [report.name or "Report"]
+    title_color = "#000080"
+    _cands = []
+    def _ttx(g):
+        for f in (g.fields or []):
+            t = (f.text or "").strip()
+            if (f.kind == "text" and getattr(f, "bold", False) and t
+                    and "&<" not in t and len(re.sub(r"\s+", "", t)) >= 20):
+                _cands.append(f)
+        for c in (g.children or []):
+            _ttx(c)
+    for g in (report.layout or []):
+        if "section" in (g.kind or "").lower():
+            _ttx(g)
+    if _cands:
+        tf = max(_cands, key=lambda f: len((f.text or "").strip()))
+        title_color = _normalize_color(_attr(tf, "color", ""), "#000080")
+        title_lines = [_resolve_tokens(ln, 0).strip()
+                       for ln in (tf.text or "").splitlines() if ln.strip()][:3] or title_lines
+    head = ""
+    for ln in title_lines:
+        head += ('<div style="font-family:' + _ACTIVE_TITLE_FONT + ';font-size:13px;'
+                 'font-weight:bold;color:' + title_color + ';text-align:center;'
+                 'letter-spacing:0.4px;line-height:1.4;">' + _esc(ln) + '</div>')
+    head += ('<div style="display:flex;justify-content:space-between;'
+             'align-items:baseline;margin:8px 0 6px;font-size:12px;color:#111;">'
+             '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
+             + _esc(_sample_for_source("date", 0)) + ' 1:00 PM</span></div>'
+             '<div style="font-style:italic;color:#000079;">Page ' + str(page_num)
+             + ' of ' + str(total_pages) + '</div></div>')
+
+    # An Oracle 2-rows-per-record table stacks a second field band (same column
+    # x-grid) under the first -- and the column-header strip is likewise two
+    # stacked label rows. Render both lines per record (zebra-striped) so all
+    # columns show, instead of dropping the lower band.
+    row2 = _nd_detail_band2(report)
+
+    total_w = max((x + (w or 0.0) for _s, x, _y, w in (row + row2)),
+                  default=7.5) + 0.15
+    def pct(x):
+        return max(0.0, min(100.0, (x / total_w) * 100.0))
+
+    if not row2:
+        hdr = ""
+        for hi, (s, hx, hy, _hw) in enumerate(row):
+            nxt = row[hi + 1][1] if hi + 1 < len(row) else total_w
+            cap = (_nd_header_label(label_geo, hx, hy)
+                   or _nd_nearest_label(label_geo, hx, hy)
+                   or (s or "").replace("_", " ").title())
+            hdr += ('<div style="position:absolute;left:' + f"{pct(hx):.1f}" + '%;width:'
+                    + f"{pct(nxt) - pct(hx):.1f}" + '%;color:#fff;font-weight:bold;'
+                    'font-size:11px;padding:3px 4px;overflow:hidden;white-space:nowrap;'
+                    'text-overflow:ellipsis;">' + _esc(cap) + '</div>')
+        hdr = '<div style="position:relative;height:22px;background:#00008B;">' + hdr + '</div>'
+        det = ""
+        for ri in range(3):
+            cells = ""
+            for ci, (s, x, _y, _w) in enumerate(row):
+                nxt = row[ci + 1][1] if ci + 1 < len(row) else total_w
+                v = _sample_for_source(s, ri)
+                cells += ('<div style="position:absolute;left:' + f"{pct(x):.1f}" + '%;width:'
+                          + f"{pct(nxt) - pct(x):.1f}" + '%;font-size:11px;padding:3px 4px;'
+                          'color:#111;overflow:hidden;white-space:nowrap;'
+                          'text-overflow:ellipsis;">' + _esc(v) + '</div>')
+            det += ('<div style="position:relative;height:22px;border-bottom:1px solid #ccc;">'
+                    + cells + '</div>')
+        return _render_page(head + hdr + det, label="Page " + str(page_num))
+
+    # --- two-rows-per-record path ---
+    # The header strip has its OWN two label bands above the detail; pair them in
+    # vertical order with the two detail rows (band 0 -> primary, band 1 ->
+    # secondary) so a stacked column isn't mislabeled by the nearer band.
+    from collections import defaultdict as _dd
+    _hbx = _dd(set)
+    _hbt = _dd(list)
+    for t, lx, ly, _bg in label_geo:
+        if 0 < (_row_y - ly) <= 0.7:
+            _hbx[round(ly, 2)].add(round(lx, 1))
+            _hbt[round(ly, 2)].append((t, lx, ly))
+    header_bands = sorted(y for y, xs in _hbx.items() if len(xs) >= 2)
+
+    def _hdr_at(x, band_y):
+        best, bd = None, 1e9
+        if band_y is None:
+            return ""
+        for t, lx, _ly in _hbt.get(band_y, []):
+            d = abs(lx - x)
+            if d <= 0.9 and d < bd:
+                bd, best = d, t
+        return _resolve_tokens((best or "").strip().rstrip(":"), 0)
+
+    lines_spec = [(row, header_bands[0] if header_bands else None)]
+    lines_spec.append((row2, header_bands[1] if len(header_bands) > 1 else None))
+
+    def _line(cells_html):
+        return ('<div style="position:relative;height:18px;">' + cells_html
+                + '</div>')
+
+    hdr_inner = ""
+    for cols, band_y in lines_spec:
+        line = ""
+        for hi, (s, hx, _hy, _hw) in enumerate(cols):
+            nxt = cols[hi + 1][1] if hi + 1 < len(cols) else total_w
+            cap = _hdr_at(hx, band_y) or (s or "").replace("_", " ").title()
+            line += ('<div style="position:absolute;left:' + f"{pct(hx):.1f}" + '%;width:'
+                     + f"{pct(nxt) - pct(hx):.1f}" + '%;color:#fff;font-weight:bold;'
+                     'font-size:11px;padding:1px 4px;overflow:hidden;white-space:nowrap;'
+                     'text-overflow:ellipsis;">' + _esc(cap) + '</div>')
+        hdr_inner += _line(line)
+    hdr = ('<div style="background:#00008B;padding:3px 0;">' + hdr_inner + '</div>')
+
+    det = ""
+    for ri in range(4):
+        bg = "#f2f2f2" if (ri % 2 == 1) else "#ffffff"
+        rec = ""
+        for cols, _band_y in lines_spec:
+            cells = ""
+            for ci, (s, x, _y, _w) in enumerate(cols):
+                nxt = cols[ci + 1][1] if ci + 1 < len(cols) else total_w
+                v = _sample_for_source(s, ri)
+                cells += ('<div style="position:absolute;left:' + f"{pct(x):.1f}" + '%;width:'
+                          + f"{pct(nxt) - pct(x):.1f}" + '%;font-size:11px;padding:1px 4px;'
+                          'color:#111;overflow:hidden;white-space:nowrap;'
+                          'text-overflow:ellipsis;">' + _esc(v) + '</div>')
+            rec += _line(cells)
+        det += ('<div style="background:' + bg + ';border-bottom:1px solid #ccc;">'
+                + rec + '</div>')
+    return _render_page(head + hdr + det, label="Page " + str(page_num))
+
+
+def _render_tabbrkleft_pages(report):
+    return _render_pages_wrapper(
+        [_render_tabbrkleft_page(report, 1, 1)])
+
+
+def _is_flat_tabular_list(report):
+    """A plain single-group TABULAR LIST: one DOMINANT wide repeating DETAIL
+    frame (x~0, the full body width) whose fields form a >=3-column row, under a
+    column-header band of >=3 labels. The lone query group IS the detail (not a
+    master), so the generic detail-page renderer wrongly treats the wide frame
+    as a MASTER band and emits an empty navy card -- render it as a flat table
+    instead (the same column-header-strip + rows engine tabBrkLeft uses).
+
+    Structural, never keyed on a report name. Checked AFTER nested-MD and
+    multi-section, so it only ever sees plain tabular reports."""
+    main = _find_section(report.layout or [], "section_main")
+    if main is None:
+        return False
+    if _is_nested_master_detail_preview(report):
+        return False
+    # Widest frame in the section ~= the body width (the parsed section node's
+    # own width is often unset).
+    widths = [float(getattr(n, "width", 0) or 0.0) for n in _iter_group(main)]
+    max_w = max(widths) if widths else 0.0
+    if max_w < 4.0:
+        return False
+    # A DOMINANT wide repeating detail frame at the left margin.
+    dominant = any(
+        (getattr(n, "kind", "") or "") == "repeating_frame"
+        and float(getattr(n, "x", 0) or 0.0) < 0.6
+        and float(getattr(n, "width", 0) or 0.0) >= 0.85 * max_w
+        for n in _iter_group(main))
+    if not dominant:
+        return False
+    row, _wrap, row_y = _nd_detail_band(report)
+    if len(row) < 3 or len({round(x, 1) for _s, x, _y, _w in row}) < 3:
+        return False
+    # A column-header BAND: >=3 label texts in the row just ABOVE the detail row
+    # (the navy header strip). Distinguishes a real grid from a labeled form.
+    _fg, label_geo = _nd_geometry(report)
+    hdr_labels = sum(1 for _t, _lx, ly, _bg in label_geo
+                     if row_y is not None and -0.6 <= (row_y - ly) <= 0.55)
+    return hdr_labels >= 3
+
+
 def _render_nested_master_detail_pages(report):
     NUM = 2
-    # Page 1 mirrors the RDL's _build_cover_page: the Run-info / Report
-    # Parameters cover that every Oracle detail report prints ahead of the
-    # repeating detail. The detail samples then follow as pages 2..N.
-    total = NUM + 1
-    pages = [_render_header_summary_page(report, page_label="Page 1 of %d" % total)]
-    pages += [_render_nested_master_detail_page(report, i, i + 2, total)
+    # A standalone page-1 cover ONLY when the report actually carries cover
+    # content (a Parameter-Form criteria cover in section_header). A nested
+    # master-detail whose title is just a repeating page-header -- e.g. METHACT,
+    # with an empty <section name="header"> -- has NO cover; prepending the
+    # Run-info / Report-Parameters template would invent a page (a fabricated
+    # "Run By / Total of ALL Records") the real report never prints. The report
+    # parameters are an INPUT prompt, not printed output, so they alone don't
+    # justify a cover. Generic, structural -- mirrors _has_cover_page.
+    pages = []
+    if _has_cover_page(report):
+        total = NUM + 1
+        pages.append(_render_header_summary_page(report, page_label="Page 1 of %d" % total))
+        first = 2
+    else:
+        total = NUM
+        first = 1
+    pages += [_render_nested_master_detail_page(report, i, first + i, total)
               for i in range(NUM)]
     return _render_pages_wrapper(pages)
 
@@ -1744,19 +2565,43 @@ def _render_tabular_pages(report):
 
     Multi-section dashboards (several independent tables down one page) render
     as a single dashboard page so the preview matches the multi-section RDL."""
-    if _is_nested_master_detail_preview(report):
-        return _render_nested_master_detail_pages(report)
+    # Multi-section accounting dashboard wins over nested-MD: a report with >=2
+    # sections from DISTINCT queries is a multi-section report, not one nested
+    # master-detail. A genuine nested-MD (METHACT) has ONE query and is never
+    # detected as multi-section, so this never steals it.
     _sections = _detect_multi_section_preview(report)
     if _sections:
         return _render_pages_wrapper([
             _render_multi_section_page(report, _sections, "Page 1 of 1")
         ])
+    if _is_nested_master_detail_preview(report):
+        if _is_tabbrkleft(report):
+            # Oracle tabBrkLeft: master = LEFT columns of one flat table, not a
+            # band above the detail. Render flat (no fabricated band, no column
+            # collision) instead of the group-band nested-MD page.
+            return _render_tabbrkleft_pages(report)
+        return _render_nested_master_detail_pages(report)
+    if _is_flat_tabular_list(report):
+        # A plain single-group list whose wide detail frame the card renderer
+        # would mistake for a master band (empty card). Render it flat.
+        return _render_tabbrkleft_pages(report)
     NUM_DETAIL_PAGES = 3
-    total_pages = 1 + NUM_DETAIL_PAGES
-    pages = [_render_header_summary_page(report, page_label="Page 1 of " + str(total_pages))]
+    # A "Run Date / Run By / Total of ALL Records + Report Parameters" cover is
+    # prepended ONLY when the report actually carries that cover content in its
+    # section_header (a Parameter-Form criteria cover). A plain tabular list --
+    # or a positional master-detail form -- has NO such page in the real Oracle
+    # output: page 1 is immediately the data. Fabricating run-info there invents
+    # values the report never prints, so gate it structurally (mirrors the
+    # per-record-body and packet paths, which already gate on _has_cover_page).
+    has_cover = _has_cover_page(report)
+    total_pages = NUM_DETAIL_PAGES + (1 if has_cover else 0)
+    pages = []
+    if has_cover:
+        pages.append(_render_header_summary_page(
+            report, page_label="Page 1 of " + str(total_pages)))
     for i in range(NUM_DETAIL_PAGES):
         pages.append(_render_tabular_detail_page(
-            report, sample_idx=i, page_num=2 + i, total_pages=total_pages,
+            report, sample_idx=i, page_num=len(pages) + 1, total_pages=total_pages,
         ))
     return _render_pages_wrapper(pages)
 
@@ -1809,21 +2654,43 @@ def _decollide(elems):
     triggers) and elastic frames grow/reflow; a static preview would paint them
     all on top of each other. Only elements sharing nearly the same LEFT edge
     (vertically stacked, not side-by-side table columns) are reflowed, so table
-    layouts are left untouched. Panels and images keep their positions."""
-    movable = [e for e in elems if e.get("kind") in ("text", "field")]
+    layouts are left untouched. Panels keep their positions. The LETTERHEAD
+    image (the topmost image near the page top) also stays fixed -- but any
+    OTHER image (an inline SIGNATURE graphic mid-document) flows with the text,
+    so a tall body paragraph above it pushes it down instead of overlapping it
+    (wild-corpus verified: MVWF_LTR_INSPECT's signature over the closing
+    paragraph)."""
+    # Letterhead = topmost image near the top; never moves (it's the masthead).
+    _imgs = [e for e in elems if e.get("kind") == "image"]
+    _letterhead = None
+    if _imgs:
+        _top = min(_imgs, key=lambda e: float(e.get("y", 0) or 0))
+        if float(_top.get("y", 0) or 0) < 1.5:
+            _letterhead = _top
+    movable = [e for e in elems
+               if e.get("kind") in ("text", "field")
+               or (e.get("kind") == "image" and e is not _letterhead)]
     movable.sort(key=lambda e: (round(float(e.get("y", 0) or 0), 3),
                                 round(float(e.get("x", 0) or 0), 3)))
     placed = []  # (x_left, y_top, y_bottom)
+    # Seed with the fixed letterhead so text and inline images avoid its box.
+    if _letterhead is not None:
+        _lx = float(_letterhead.get("x", 0) or 0)
+        _ly = float(_letterhead.get("y", 0) or 0)
+        placed.append((_lx, _ly, _ly + (float(_letterhead.get("h", 0) or 0) or 0.2)))
     for e in movable:
         xl = float(e.get("x", 0) or 0)
         yt = float(e.get("y", 0) or 0)
         # Estimate RENDERED height: multi-line text (Oracle elastic frames /
         # concatenated formula paragraphs) is taller than its one-line design
         # slot, so trusting the small declared height would let the next field
-        # overlap its wrapped content.
-        nlines = ((e.get("text") or "").count("\n") + 1) if e.get("kind") == "text" else 1
-        line_in = max(0.16, int(e.get("size") or 9) / 72.0 * 1.35)
-        h = max(float(e.get("h") or 0) or 0.0, nlines * line_in)
+        # overlap its wrapped content. An image uses its own declared height.
+        if e.get("kind") == "image":
+            h = float(e.get("h") or 0) or 0.3
+        else:
+            nlines = ((e.get("text") or "").count("\n") + 1) if e.get("kind") == "text" else 1
+            line_in = max(0.16, int(e.get("size") or 9) / 72.0 * 1.35)
+            h = max(float(e.get("h") or 0) or 0.0, nlines * line_in)
         yb = yt + h
         guard, moved = 0, True
         while moved and guard < 300:
@@ -1879,7 +2746,23 @@ def _section_page_groups(report, section="section_header"):
     return roots if len(roots) > 1 else []
 
 
-def _doc_collect_positioned(report, section="section_main", root=None):
+_TABLE_SAMPLE_ROWS = 12  # sample rows tiled for an embedded data table in a packet
+
+
+def _doc_cell_value(source, row_idx, mask=""):
+    """A table CELL shows the BARE sample value (no 'Caption:' prefix), varied
+    per row so the grid reads like real data. A $/number mask or an amount-like
+    column name renders as currency; a count-like column renders a small int."""
+    u = (source or "").upper()
+    if "$" in (mask or "") or re.search(r"(AMT|AMOUNT|TOTAL|FEE|COST|PRICE|\bPAY|RET_)", u):
+        return "$" + format(100 * (row_idx + 1), ",d") + ".00"
+    if u.startswith("NO_") or re.search(r"(\b|_)(NO_OF|COUNT|QTY|CNT|LIC)(\b|_|$)", u):
+        return str((row_idx % 9) + 1)
+    return _sample_for_source(source, row_idx)
+
+
+def _doc_collect_positioned(report, section="section_main", root=None,
+                            tile_tables=False, lift_title=False):
     """Walk the given section and return every positioned element as a flat
     list of dicts: {kind, text|source, x, y, w, h, bold, size, color, align,
     bg}. Geometry is absolute within the section. Generic: nothing
@@ -1893,14 +2776,35 @@ def _doc_collect_positioned(report, section="section_main", root=None):
     if main is None:
         return [], 8.5, 11.0
     out = []
+    # Columns that hold image data (blob/logo/signature) -- a field bound to one
+    # is an image object, rendered as an image placeholder, not sample text.
+    img_srcs = getattr(report, "_image_src_names", None)
+    if img_srcs is None:
+        img_srcs = _image_source_names(report)
+        try:
+            report._image_src_names = img_srcs
+        except Exception:
+            pass
     # Re-base AFTER collecting (below), using the real min-y of this frame's
     # content -- a frame's DECLARED y is unreliable (nested children can sit
     # above it, which produced negative y and upward bleed when we subtracted
     # the declared y directly).
     _ybase = 0.0
     _y0, _y1 = 0.0, float("inf")
+    # Count columnar (table-shaped) repeating frames in this section. ONE = a
+    # genuine line-item TABLE (invoice) -- tile it to the full sample length and
+    # let the reflow below push any footer down after it. MORE THAN ONE = a
+    # per-facility FORM whose several small sub-lists must each be clamped to the
+    # space before the next block, else their 12-row samples stack into one
+    # colliding pile (AIR_EMISSION SIC/NAIC, ASB_ACRD_HISTORY address/phone).
+    _n_columnar = sum(1 for _n in _iter_group(main) if _is_columnar_repeating(_n))
 
-    def walk(g, frame_bg):
+    def walk(g, frame_bg, y_bound=float("inf")):
+        # A conditional ERROR/alert frame (format-trigger box with not-equal /
+        # ERROR text) is hidden on the happy path -- skip its whole subtree so a
+        # totals-mismatch warning never paints over the normal form/table.
+        if _is_conditional_alert_frame(g):
+            return
         gbg_raw = getattr(g, "background_color", "")
         # Oracle Reports frames carry pale design-time fill hints (light pinks/
         # lavenders like #FFE0FF, #FFBFFF) that are NOT meant to print -- the
@@ -1914,6 +2818,49 @@ def _doc_collect_positioned(report, section="section_main", root=None):
                         "y": max(0.0, _gy - _ybase),
                         "w": float(g.width or 0), "h": float(g.height or 0),
                         "bg": gbg})
+        # A columnar repeating frame is a DATA TABLE: Oracle prints it once per
+        # record, so tile its single field-row into N sample rows in place (the
+        # column headers live in a sibling frame just above). Without this an
+        # embedded table collapses to one scattered row. Gated by tile_tables
+        # so only the positional-document-packet path tiles -- letters and
+        # certificates have no columnar repeating frame to tile.
+        # A maxRecordsPerPage==1 frame is the per-record DOCUMENT CONTAINER (one
+        # record per page), NOT a tileable leaf data table -- even when a couple
+        # of its form fields happen to share a y-band (so _is_columnar_repeating
+        # reads True). Tiling it would repeat the master fields into a colliding
+        # pile AND the early `return` below would drop its nested sub-frames
+        # (e.g. ENFREQ's responsible-party / site sub-lists). Let it fall through
+        # to normal once-each field emission + child recursion so those real
+        # sub-tables tile in their own right.
+        if (tile_tables and _is_columnar_repeating(g)
+                and int(getattr(g, "max_records_per_page", 0) or 0) != 1):
+            flds = [f for f in (g.fields or []) if (getattr(f, "kind", "") or "") == "field"]
+            if flds:
+                rh = max((float(getattr(f, "height", 0) or 0.0) for f in flds),
+                         default=0.18) or 0.18
+                step = max(rh + 0.03, 0.2)
+                # A lone line-item table tiles the full sample; a sub-list in a
+                # multi-table FORM is clamped to the room before the next block.
+                if _n_columnar > 1 and y_bound != float("inf"):
+                    avail = max(0.0, y_bound - float(getattr(g, "y", 0) or 0.0))
+                    n_rows = max(1, min(_TABLE_SAMPLE_ROWS, int(avail / step)))
+                else:
+                    n_rows = _TABLE_SAMPLE_ROWS
+                for k in range(n_rows):
+                    for f in flds:
+                        out.append({
+                            "kind": "cell", "source": getattr(f, "source", "") or "",
+                            "row_idx": k,
+                            "x": float(getattr(f, "x", 0.0) or 0.0),
+                            "y": (float(getattr(f, "y", 0.0) or 0.0) - _ybase) + k * step,
+                            "w": float(getattr(f, "width", 0.0) or 0.0), "h": rh,
+                            "bold": bool(getattr(f, "bold", False)),
+                            "size": int(getattr(f, "font_size", 0) or 9),
+                            "color": _normalize_color(getattr(f, "color", "") or "", "#000000"),
+                            "align": (getattr(f, "align", "") or "left").lower(),
+                            "mask": getattr(f, "format_mask", "") or "",
+                            "bg": bg})
+            return  # tiled in place -- don't also emit this frame's single row
         for f in (g.fields or []):
             x = float(getattr(f, "x", 0.0) or 0.0)
             y = float(getattr(f, "y", 0.0) or 0.0) - _ybase  # re-base to sheet top
@@ -1922,6 +2869,8 @@ def _doc_collect_positioned(report, section="section_main", root=None):
             col = _normalize_color(getattr(f, "color", "") or "", "#000000")
             common = {"x": x, "y": y, "w": w, "h": h,
                       "bold": bool(getattr(f, "bold", False)),
+                      "italic": bool(getattr(f, "italic", False)),
+                      "underline": bool(getattr(f, "underline", False)),
                       "size": int(getattr(f, "font_size", 0) or 9),
                       "color": col,
                       "align": (getattr(f, "align", "") or "left").lower(),
@@ -1933,14 +2882,66 @@ def _doc_collect_positioned(report, section="section_main", root=None):
                 if t:
                     out.append({"kind": "text", "text": t, **common})
             elif f.kind == "field":
-                out.append({"kind": "field", "source": f.source or "", **common})
+                if _is_conditional_error_source(f.source or ""):
+                    continue  # Oracle conditional *_ERROR field -- hidden at runtime
+                # An Oracle boolean INDICATOR flag (source ends "_IND") is never
+                # meaningful printed output -- it drives a conditional asterisk /
+                # checkmark via a format trigger. Painting its raw 'Y'/'N' as a
+                # positioned glyph just litters orphaned letters across the page
+                # (CMVGY_GRANT_STATUS summary's floating 'Y' row). Skip it.
+                if (f.source or "").upper().endswith("_IND"):
+                    continue
+                # An image-data field (blob/logo/signature column) is an image
+                # object, not text -- render it as an image (embedded or a
+                # labelled placeholder box), never a 'Sample Value A'.
+                if (f.source or "").upper() in img_srcs:
+                    out.append({"kind": "image", "source": f.source or "", **common})
+                else:
+                    out.append({"kind": "field", "source": f.source or "", **common})
             elif f.kind == "image":
                 out.append({"kind": "image", "source": f.source or f.image_id or "",
                             **common})
-        for c in (g.children or []):
-            walk(c, bg)
+        # Bound each child sub-frame by the nearest sibling BELOW it that
+        # overlaps its x-range (so a tiled inline sub-table stops before the
+        # next column-aligned block), else by this frame's own bottom edge.
+        _kids = list(g.children or [])
+        _gh = float(getattr(g, "height", 0) or 0.0)
+        _gbot = (_gy + _gh) if _gh > 0 else y_bound
+        for c in _kids:
+            _cy = float(getattr(c, "y", 0) or 0.0)
+            _cx = float(getattr(c, "x", 0) or 0.0)
+            _cw = float(getattr(c, "width", 0) or 0.0)
+            _below = [float(getattr(s, "y", 0) or 0.0) for s in _kids
+                      if s is not c
+                      and (float(getattr(s, "y", 0) or 0.0) - _cy) > 0.05
+                      and _cw > 0 and (float(getattr(s, "width", 0) or 0.0) > 0)
+                      and (float(getattr(s, "x", 0) or 0.0) < _cx + _cw)
+                      and (float(getattr(s, "x", 0) or 0.0)
+                           + float(getattr(s, "width", 0) or 0.0) > _cx)]
+            _cb = min(_below) if _below else _gbot
+            walk(c, bg, _cb)
 
     walk(main, "")
+    # Conditional-variant dedup: an Oracle letter often places the SAME body
+    # paragraph in TWO positions -- a normal-flow copy plus a format-trigger
+    # variant copy at the very top (above the letterhead) -- and shows only one
+    # at runtime. A static preview paints both, piling the top copy over the
+    # logo. Drop the duplicate, keeping the LATER (body-flow) instance. Only
+    # long blocks (>=40 chars) so repeated short labels stay untouched.
+    _by_text = {}
+    for e in out:
+        if e.get("kind") == "text":
+            t = (e.get("text") or "").strip()
+            if len(t) >= 40:
+                _by_text.setdefault(t, []).append(e)
+    _drop_ids = set()
+    for _t, _grp in _by_text.items():
+        if len(_grp) > 1:
+            _grp.sort(key=lambda e: e["y"])
+            for e in _grp[:-1]:
+                _drop_ids.add(id(e))
+    if _drop_ids:
+        out = [e for e in out if id(e) not in _drop_ids]
     # Re-base to the real top of this frame's content when scoping to one
     # page-root (subtract the minimum y so the page starts at a small top
     # margin, never negative -- nested children can sit above the frame's
@@ -1969,6 +2970,59 @@ def _doc_collect_positioned(report, section="section_main", root=None):
                 top = cursor + 0.4
             e["y"] = top
             cursor = max(cursor, top + (e["h"] or 0.2))
+    # Tiled-table reflow: a columnar detail table tiled into N sample rows grows
+    # far past its one-row design slot, so any fixed element positioned in the
+    # rows the table now occupies (a Total footer, a separator line) would be
+    # buried under the tiled grid. Push those elements DOWN to just below the
+    # table so they read AFTER the line items -- the way Oracle's variable-length
+    # table pushes following content down. Column headers (above the table) and
+    # blocks well below it (signature / justification) are untouched. Only runs
+    # when a table was actually tiled (cells present).
+    _cells = [e for e in out if e.get("kind") == "cell"]
+    if _cells:
+        _row_h = max((e.get("h") or 0.18) for e in _cells)
+        _ctop = min(e["y"] for e in _cells)
+        _cbot = max(e["y"] + (e.get("h") or 0.18) for e in _cells)
+        _growth = max(0.0, _cbot - (_ctop + _row_h))
+        if _growth > 0.05:
+            for e in out:
+                if e.get("kind") == "cell":
+                    continue
+                if _ctop + 1e-6 < e["y"] < _cbot - 1e-6:
+                    e["y"] += _growth
+    # Page-title lift (form path only): Oracle prints the report TITLE in the
+    # page margin (a header band above the body). When margin + body collapse
+    # into one coordinate space the centered title lands ON TOP of the body's
+    # first block (the vendor / bill-to row). Lift the centered title(s) to a
+    # clean band at the very top and push the body down to clear them, so the
+    # form reads title -> vendor block -> line items like the real page.
+    if lift_title and out:
+        _title_ids = set()
+        titles = []
+        for e in out:
+            if (e.get("kind") == "text" and e.get("bold")
+                    and (e.get("align") == "center")
+                    and int(e.get("size") or 0) >= 10
+                    and e["y"] < 1.5
+                    and len((e.get("text") or "").strip()) >= 10):
+                titles.append(e)
+                _title_ids.add(id(e))
+        if titles:
+            titles.sort(key=lambda e: e["y"])
+            cy = 0.10
+            for t in titles:
+                nlines = (t.get("text") or "").count("\n") + 1
+                th = max(float(t.get("h") or 0),
+                         nlines * int(t.get("size") or 9) / 72.0 * 1.4)
+                t["y"] = cy
+                cy += th + 0.05
+            others = [e for e in out if id(e) not in _title_ids]
+            if others:
+                top_other = min(e["y"] for e in others)
+                delta = (cy + 0.15) - top_other
+                if delta > 0:
+                    for e in others:
+                        e["y"] += delta
     out = _decollide(out)
     # page size from section body, fallback to letter
     pw, ph = 8.5, 11.0
@@ -1996,11 +3050,74 @@ def _humanize_report_title(name: str) -> str:
     return " ".join(out)
 
 
+def _image_source_names(report):
+    """UPPER names of query columns that hold IMAGE data -- an Oracle blob /
+    binLob / bfile column, or one whose name reads as an image (logo /
+    signature / seal / photo / watermark). A layout field bound to one is an
+    image object (a letterhead logo, a signature graphic), so the preview
+    renders an image placeholder box, never a fabricated 'Sample Value A'
+    text. Generic: keyed on the column's datatype + name, not a report name."""
+    out = set()
+    for q in (getattr(report, "queries", None) or []):
+        for it in (getattr(q, "items", None) or []):
+            dt = (getattr(it, "datatype", "") or "").lower()
+            nm = (getattr(it, "name", "") or "")
+            if dt in ("blob", "binlob", "bfile", "longraw", "long raw", "image", "binary"):
+                out.add(nm.upper())
+            # Name fallback for loosely-typed columns -- only UNAMBIGUOUS image
+            # words, and never when the name carries a text/number/date suffix
+            # (BADGE_NAME / SEAL_DATE / PHOTO_ID are NOT image blobs).
+            elif (re.search(r"(logo|signature|watermark|emblem|letterhead|sig_img)",
+                            nm, re.IGNORECASE)
+                  and not re.search(r"(_name|_nbr|_num|_no|_id|_date|_dt|_desc|_cd|_code|_ind|_flag)$",
+                                    nm, re.IGNORECASE)):
+                out.add(nm.upper())
+    return out
+
+
+def _blank_formula_literals(report):
+    """Map UPPER formula-name -> its constant return literal, for formulas that
+    return ONLY a constant blank/whitespace string -- e.g. an Oracle CF_NULL
+    that returns spaces to draw a blank signature/fill-in rule. Lets the
+    preview render the real blank line (underlined spaces) instead of a
+    fabricated 'Sample Value A'. Generic: reads the parsed PL/SQL body, never a
+    report name."""
+    out = {}
+    for fc in (getattr(report, "formulas", None) or []):
+        body = (getattr(fc, "plsql_body", "") or "")
+        # Scan only the executable body (after BEGIN) so the function header
+        # 'function X return Char is' isn't mistaken for a RETURN statement.
+        m = re.search(r"\bbegin\b(.*)", body, re.IGNORECASE | re.DOTALL)
+        scan = m.group(1) if m else body
+        ret_stmts = re.findall(r"\breturn\s+([^;]+);", scan, re.IGNORECASE)
+
+        def _blank_ret(r):
+            r = r.strip()
+            return (r.startswith("'") and r.endswith("'") and r[1:-1].strip() == "")
+
+        if ret_stmts and all(_blank_ret(r) for r in ret_stmts):
+            lit = ret_stmts[0].strip()[1:-1]
+            out[(getattr(fc, "name", "") or "").upper()] = lit or "      "
+    return out
+
+
 def _doc_field_caption_and_value(src, report, label_map, idx):
     """For a data field, return 'Caption: value' sample text. Uses the Oracle
     defaultLabel when present, else the field name; value from _sample_for_source.
     CF_/CP_ formula fields show a bracketed formula marker (they're computed)."""
     u = (src or "").upper()
+    # A constant-blank formula (Oracle CF_NULL returning spaces) is a blank
+    # signature/fill-in rule -- render its real whitespace (underlined into a
+    # line), never a fabricated sample value. Memoized on the report.
+    blanks = getattr(report, "_blank_formula_srcs", None)
+    if blanks is None:
+        blanks = _blank_formula_literals(report)
+        try:
+            report._blank_formula_srcs = blanks
+        except Exception:
+            pass
+    if u in blanks:
+        return blanks[u] or ""
     if u in ("CURRENTDATE", "CURRENT_DATE"):
         return _sample_for_source("date", idx)
     # A formula field named after the report (CP_<REPORTNAME> / CF_<REPORTNAME>)
@@ -2020,13 +3137,15 @@ def _doc_field_caption_and_value(src, report, label_map, idx):
 
 
 def _render_generic_document_page(report, idx, page_num, total_pages,
-                                  section="section_main", root=None):
+                                  section="section_main", root=None,
+                                  tile_tables=False, lift_title=False):
     """Paint a section's actual frames/texts/fields at their real positions.
     This is the GENERAL geometry-driven renderer -- it shows whatever the
     report contains (letterhead, address block, body, signature, invoice, or a
     header-resident summary/criteria table), never hardcoded sample content.
     ``root`` restricts to one top-level frame when a section packs several."""
-    elems, pw, ph = _doc_collect_positioned(report, section, root=root)
+    elems, pw, ph = _doc_collect_positioned(report, section, root=root,
+                                            tile_tables=tile_tables, lift_title=lift_title)
     PAD = 0.0
     SCALE = 96.0  # px per inch on screen
 
@@ -2067,16 +3186,31 @@ def _render_generic_document_page(report, idx, page_num, total_pages,
         bg = e.get("bg", "")
         if bg and _is_dark(bg) and fg.lower() in ("#000000", "#111111", "#000"):
             fg = "#ffffff"
+        _deco = []
+        if e.get("underline"):
+            _deco.append("underline")
         style = ("position:absolute;left:" + left + ";top:" + top + ";width:" + width
-                 + ";font-size:" + str(max(7, min(16, e["size"]))) + "px;"
+                 + ";font-size:" + str(max(7, min(28, e["size"]))) + "px;"
                  + ("font-weight:bold;" if e["bold"] else "")
-                 + "color:" + fg + ";text-align:" + align + ";line-height:1.25;"
-                 "white-space:pre-wrap;")
+                 + ("font-style:italic;" if e.get("italic") else "")
+                 + ("text-decoration:underline;" if _deco else "")
+                 + "color:" + fg + ";text-align:" + align + ";line-height:1.25;")
+        # A bound FIELD/CELL is single-line data in a fixed-width Oracle box: it
+        # CLIPS overflow, it does not reflow into the block below. Wrapping a
+        # too-long sample (e.g. the generic "Sample Value A" in a ~0.5in SIC code
+        # column) inflated the row and collided with the next labeled block.
+        # nowrap+ellipsis mirrors the real positioned field. A TEXT label/note
+        # may genuinely span lines (addresses, comment paragraphs) -> keep wrap.
+        field_css = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
+        text_css = "white-space:pre-wrap;"
         if e["kind"] == "text":
-            parts.append('<div style="' + style + '">' + _esc(e["text"]) + '</div>')
+            parts.append('<div style="' + style + text_css + '">' + _esc(e["text"]) + '</div>')
+        elif e["kind"] == "cell":
+            val = _doc_cell_value(e.get("source", ""), e.get("row_idx", 0), e.get("mask", ""))
+            parts.append('<div style="' + style + field_css + '">' + _esc(val) + '</div>')
         elif e["kind"] == "field":
             val = _doc_field_caption_and_value(e["source"], report, label_map, idx)
-            parts.append('<div style="' + style + '">' + _esc(val) + '</div>')
+            parts.append('<div style="' + style + field_css + '">' + _esc(val) + '</div>')
         elif e["kind"] == "image":
             im = emb.get((e["source"] or "").upper())
             if im is None:
@@ -2362,6 +3496,27 @@ def _render_generic_document_pages(report):
     return _render_pages_wrapper([
         _render_generic_document_page(report, 0, 1, 1)
     ])
+
+
+def _render_document_packet_pages(report):
+    """Render a POSITIONAL DOCUMENT PACKET: section_main packs several
+    page-break-separated top-level frames (e.g. a memo cover + a data table +
+    a closing letter). Draw each frame on its OWN sheet, geometry-faithful, in
+    document order -- a columnar repeating frame inside a frame tiles into a
+    real multi-row table in place. Mirrors _render_header_summary_pages but for
+    section_main, so a memo/table/letter packet renders 1:1 instead of being
+    forced through the tabular cover+detail template."""
+    roots = _section_page_groups(report, "section_main")
+    if not roots:
+        return _render_pages_wrapper([
+            _render_generic_document_page(report, 0, 1, 1, tile_tables=True)])
+    total = len(roots)
+    pages = [
+        _render_generic_document_page(report, 0, i + 1, total,
+                                      section="section_main", root=r, tile_tables=True)
+        for i, r in enumerate(roots)
+    ]
+    return _render_pages_wrapper(pages)
 
 
 def _is_header_summary_preview(report):
@@ -2768,11 +3923,35 @@ def render_mockup(report, mode="frontend"):
             # live in section_header -- render that geometry-driven, then the
             # section_main detail page.
             _result = _render_header_summary_pages(report)
+        elif _is_positional_document_packet(report):
+            # A multi-frame positional document (memo cover + data table +
+            # closing letter, etc.) -- render each top-level frame on its own
+            # sheet, geometry-faithful, with embedded tables tiled in place.
+            # Checked before the tabular fallback because such packets DO carry
+            # a columnar repeating frame (so detect_report_kind calls them
+            # tabular) yet must NOT lose their prose frames to the cover+detail
+            # template.
+            _result = _render_document_packet_pages(report)
         elif kind in ("letter", "certificate"):
             # Letters AND certificates are single positional documents -- render
             # the ACTUAL section_main layout (frames/texts/fields at their real
             # positions, real colors), never hardcoded sample content.
             _result = _render_generic_document_pages(report)
+        elif _is_single_record_form(report):
+            # Positional single-record FORM (invoice/requisition): one master
+            # record per page (maxRecordsPerPage=1) with a scattered vendor/
+            # bill-to/office block + an embedded line-item table. The tabular
+            # template collapses the form into a navy band; render the real
+            # geometry per record with the line-item grid tiled in place.
+            _result = _render_single_record_form_pages(report)
+        elif _is_per_record_document(report):
+            # Per-record POSITIONAL DOCUMENT -- a per-facility labeled FORM
+            # (Plant Location / Mailing Address / SIC-NAIC blocks) or a
+            # CERTIFICATE (centered name + body paragraph + state seal). The
+            # tabular / nested-MD templates collapse these into a navy-banded
+            # grid and drop the labeled blocks + the seal; render the real
+            # section_main geometry per record, tiling any sub-tables in place.
+            _result = _render_per_record_document_pages(report)
         else:
             _result = _render_tabular_pages(report)
         # A detected chart renders as a real <Chart> in the RDL -- show it in
