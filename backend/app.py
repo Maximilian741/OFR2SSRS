@@ -32,7 +32,9 @@ from converter import convert, run_query  # noqa: E402
 from converter.ingest import convert_bundle  # noqa: E402
 from converter.bundle_export import build_bundle_zip  # noqa: E402
 from converter.rdl_postprocess import (inject_connection_string,  # noqa: E402
-                                       set_datasource_reference)
+                                       set_datasource_reference,
+                                       relax_generate_all_drillthroughs,
+                                       set_drillthrough_hyperlinks)
 from converter import bursting as _bursting_mod  # noqa: E402
 from converter.parsers.oracle_xml import parse_oracle_xml as _parse_oracle_xml  # noqa: E402
 
@@ -107,15 +109,26 @@ _IMAGE_STORE: dict = {}
 # the user never repoints by hand. Connection strings are NEVER stored --
 # they are applied per-request and discarded (the UI promise).
 _DS_PATH_STORE: dict = {}
+# Per-session SSRS report-server URL (e.g. "http://host/ReportServer?/Folder").
+# A folder URL, not a secret -> safe to remember per session. When set, every
+# generated RDL's sub-report <Drillthrough> links become parameterized URL
+# <Hyperlink>s pinging that server, so the links work in BOTH the SSRS viewer
+# AND an exported PDF (a Drillthrough is interactive-only).
+_REPORT_URL_STORE: dict = {}
 
 
 def _apply_deploy_datasource(rdl_xml: str, req) -> str:
-    """Apply the caller's data source settings to a generated RDL.
+    """Apply the caller's data source + report-link settings to a generated RDL.
 
-    Priority: an explicit ``connection_string`` (embedded connection,
-    per-request only) wins; otherwise ``shared_ds_path`` (remembered for
-    the session) rewrites the DataSourceReference so SSRS auto-binds at
-    upload. Empty settings leave the RDL untouched.
+    Two independent transforms:
+      1. Sub-report LINKS. The generate-all cover link (all-aggregate
+         drill-through) is always relaxed to open the child UNFILTERED; and
+         when a ``report_server_url`` is set, EVERY sub-report drill-through is
+         rewritten into a parameterized URL hyperlink (works in viewer + PDF).
+      2. DATA SOURCE. An explicit ``connection_string`` (embedded, per-request)
+         wins; otherwise ``shared_ds_path`` (remembered for the session)
+         rewrites the DataSourceReference so SSRS auto-binds at upload.
+    Empty settings leave that transform a no-op.
     """
     if not rdl_xml:
         return rdl_xml
@@ -130,11 +143,26 @@ def _apply_deploy_datasource(rdl_xml: str, req) -> str:
           or req.values.get("connection_string") or "").strip()
     ds_path = (form.get("shared_ds_path") or body.get("shared_ds_path")
                or req.values.get("shared_ds_path") or "").strip()
+    rsu = (form.get("report_server_url") or body.get("report_server_url")
+           or req.values.get("report_server_url") or "").strip()
     if ds_path:
         _DS_PATH_STORE[_sid()] = ds_path
         _evict(_DS_PATH_STORE)
     else:
         ds_path = _DS_PATH_STORE.get(_sid(), "")
+    if rsu:
+        _REPORT_URL_STORE[_sid()] = rsu
+        _evict(_REPORT_URL_STORE)
+    else:
+        rsu = _REPORT_URL_STORE.get(_sid(), "")
+
+    # 1. Sub-report links. Relax the generate-all cover link unconditionally;
+    #    switch all drill-throughs to URL hyperlinks when a server URL is known.
+    rdl_xml = relax_generate_all_drillthroughs(rdl_xml)
+    if rsu:
+        rdl_xml = set_drillthrough_hyperlinks(rdl_xml, rsu)
+
+    # 2. Data source binding.
     if cs:
         provider = "SQL" if _resolve_target_db(req) == "sqlserver" else "ORACLE"
         return inject_connection_string(rdl_xml, cs, provider=provider)

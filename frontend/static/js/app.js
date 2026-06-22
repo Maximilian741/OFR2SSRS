@@ -103,10 +103,31 @@ function initSharedDsPath() {
   } catch (e) { /* private mode */ }
 }
 
-// Append both deployment fields to a FormData (used by every convert call).
+// SSRS report-server URL (for parameterized drill-through hyperlinks). A folder
+// URL, not a secret -> persisted in localStorage so it survives reloads.
+function getReportServerUrl() {
+  const el = document.getElementById("report-server-url");
+  return el ? (el.value || "").trim() : "";
+}
+
+function initReportServerUrl() {
+  const el = document.getElementById("report-server-url");
+  if (!el) return;
+  try {
+    const saved = localStorage.getItem("o2s_report_server_url");
+    if (saved && !el.value) el.value = saved;
+    el.addEventListener("change", function () {
+      try { localStorage.setItem("o2s_report_server_url", (el.value || "").trim()); }
+      catch (e) { /* private mode */ }
+    });
+  } catch (e) { /* private mode */ }
+}
+
+// Append all deployment fields to a FormData (used by every convert call).
 function appendDeployFields(fd) {
   const cs = getConnString(); if (cs) fd.append("connection_string", cs);
   const dsp = getSharedDsPath(); if (dsp) fd.append("shared_ds_path", dsp);
+  const rsu = getReportServerUrl(); if (rsu) fd.append("report_server_url", rsu);
 }
 
 // ----- Report images (seals / logos / watermarks) -----
@@ -1814,6 +1835,7 @@ function wireEverything() {
   const subAddBtn = document.getElementById("subreport-add-manual");
   if (subAddBtn) subAddBtn.addEventListener("click", subAddManual);
   initSharedDsPath();
+  initReportServerUrl();
   wireBatch();
   console.log("[Oracle2SSRS] ready");
 }

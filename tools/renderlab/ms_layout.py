@@ -251,6 +251,13 @@ def staticize(rdl_xml: str) -> str:
             el.text = "false"
         elif t in _COLOR:
             el.text = "White" if t == "BackgroundColor" else "Black"
+        elif t in ("Hyperlink", "BookmarkLink"):
+            # A URL/bookmark action value is an =expression on the real server;
+            # the expression-host-less render can't evaluate it, and a BLANK
+            # action element is INVALID ("Action must have exactly one of
+            # Hyperlink/Drillthrough/BookmarkLink"). Swap in a static literal
+            # URL so the report still PUBLISHES + renders for layout checks.
+            el.text = "http://localhost/o2s_static_link"
         else:
             el.text = ""
     return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")

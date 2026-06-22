@@ -76,6 +76,11 @@ try {
     Write-Output "STAGE load"
     $fs = [System.IO.File]::OpenRead((Resolve-Path $RdlPath))
     try { $lr.LoadReportDefinition($fs) } finally { $fs.Close() }
+    # A report with <Hyperlink> actions throws ReportSecurityException under
+    # LocalReport unless hyperlinks are explicitly enabled (the SSRS server
+    # allows them by default). Verification-only; never affects the deployed RDL.
+    try { $lr.EnableHyperlinks = $true } catch {}
+    try { $lr.EnableExternalImages = $true } catch {}
     Write-Output "STAGE loaded"
 
     $spec = Get-Content -LiteralPath $DataJson -Raw -Encoding UTF8 | ConvertFrom-Json

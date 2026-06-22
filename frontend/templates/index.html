@@ -77,6 +77,22 @@
       </div>
     </section>
 
+    <section class="side-section">
+      <div class="side-heading">Report server URL (for drill-through links)</div>
+      <input id="report-server-url" type="text" autocomplete="off" spellcheck="false"
+             class="conn-input"
+             placeholder="http://myserver/ReportServer?/MyFolder">
+      <div class="muted-note conn-note">
+        Your SSRS report-server URL up to the FOLDER that holds the reports
+        (e.g. <code>http://host/ReportServer?/MVWF</code>). When set, every
+        sub-report drill-through becomes a parameterized <b>URL link</b> to that
+        server &mdash; so the links work in the SSRS viewer AND in an exported
+        <b>PDF</b> (a plain drill-through only works in the viewer). The child
+        report must be deployed in that folder under its exact name. Remembered
+        in this browser.
+      </div>
+    </section>
+
     <section class="side-section" id="report-images-section" hidden>
       <div class="side-heading">Report images (seals / logos)</div>
       <div id="image-slot-list"></div>
