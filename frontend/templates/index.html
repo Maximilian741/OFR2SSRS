@@ -83,13 +83,17 @@
              class="conn-input"
              placeholder="http://myserver/ReportServer?/MyFolder">
       <div class="muted-note conn-note">
-        Your SSRS report-server URL up to the FOLDER that holds the reports
-        (e.g. <code>http://host/ReportServer?/MVWF</code>). When set, every
-        sub-report drill-through becomes a parameterized <b>URL link</b> to that
-        server &mdash; so the links work in the SSRS viewer AND in an exported
-        <b>PDF</b> (a plain drill-through only works in the viewer). The child
-        report must be deployed in that folder under its exact name. Remembered
-        in this browser.
+        Sub-report drill-throughs are <b>always</b> turned into parameterized
+        <b>URL links</b>, so they fire in the SSRS viewer AND in an exported
+        <b>PDF</b> (a plain drill-through is dropped in PDF/Word/Excel).
+        <b>Optional:</b> leave this blank and the link builds itself from the
+        server at run time (<code>Globals!ReportServerUrl</code> +
+        <code>Globals!ReportFolder</code>, zero-config on SSRS&nbsp;2016+).
+        Fill it in &mdash; your report-server URL up to the FOLDER, e.g.
+        <code>http://host/ReportServer?/MVWF</code> &mdash; for older servers or
+        to point the links at a specific folder. Use the <b>ReportServer</b>
+        URL, not the <code>/Reports</code> portal URL. The child report must be
+        deployed in that folder under its exact name. Remembered in this browser.
       </div>
     </section>
 

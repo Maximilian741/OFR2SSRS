@@ -156,11 +156,13 @@ def _apply_deploy_datasource(rdl_xml: str, req) -> str:
     else:
         rsu = _REPORT_URL_STORE.get(_sid(), "")
 
-    # 1. Sub-report links. Relax the generate-all cover link unconditionally;
-    #    switch all drill-throughs to URL hyperlinks when a server URL is known.
+    # 1. Sub-report links. Relax the generate-all cover link unconditionally,
+    #    then ALWAYS switch drill-throughs to URL hyperlinks so the links also
+    #    work in an exported PDF (a Drillthrough is dropped in static export).
+    #    An explicit server URL is used verbatim; otherwise the hyperlink falls
+    #    back to SSRS server globals (zero-config on SSRS 2016+).
     rdl_xml = relax_generate_all_drillthroughs(rdl_xml)
-    if rsu:
-        rdl_xml = set_drillthrough_hyperlinks(rdl_xml, rsu)
+    rdl_xml = set_drillthrough_hyperlinks(rdl_xml, rsu)
 
     # 2. Data source binding.
     if cs:
@@ -169,6 +171,35 @@ def _apply_deploy_datasource(rdl_xml: str, req) -> str:
     if ds_path:
         return set_datasource_reference(rdl_xml, ds_path)
     return rdl_xml
+
+
+def _resync_child_ref(prdl: str, child: str, actual: str):
+    """Re-point the parent's reference to a built child report from ``child``
+    to ``actual`` (the chicken-and-egg killer). Robust to BOTH forms the link
+    can take in the cached/deployed parent:
+
+      * ``<Drillthrough><ReportName>child</ReportName>``  (pre-deploy form)
+      * a deploy-time ``<Hyperlink>`` URL ``.../child&rs:Command=Render``
+        (the & is XML-escaped to &amp; in the RDL, but tolerate raw &)
+
+    Returns ``(found, changed, new_prdl)``: ``found`` = the parent links to
+    ``child`` at all; ``changed`` = the name actually differed and was rewritten.
+    """
+    if not prdl:
+        return (False, False, prdl)
+    dt_ref = f"<ReportName>{child}</ReportName>"
+    hl_refs = (f"/{child}&amp;rs:Command=Render", f"/{child}&rs:Command=Render")
+    found = (dt_ref in prdl) or any(h in prdl for h in hl_refs)
+    if not found:
+        return (False, False, prdl)
+    if actual == child:
+        return (True, False, prdl)
+    new = prdl.replace(dt_ref, f"<ReportName>{actual}</ReportName>")
+    new = new.replace(f"/{child}&amp;rs:Command=Render",
+                      f"/{actual}&amp;rs:Command=Render")
+    new = new.replace(f"/{child}&rs:Command=Render",
+                      f"/{actual}&rs:Command=Render")
+    return (True, new != prdl, new)
 
 
 def _asset_version():
@@ -797,13 +828,12 @@ def api_subreport_build(child_name):
     parent_rdl_out = None
     last = _last()
     prdl = (last or {}).get("rdl_xml") or ""
-    ref = f"<ReportName>{child_name}</ReportName>"
-    if prdl and ref in prdl:
-        if actual != child_name:
-            prdl = prdl.replace(ref, f"<ReportName>{actual}</ReportName>")
-            last["rdl_xml"] = prdl
+    found, changed, newp = _resync_child_ref(prdl, child_name, actual)
+    if found:
+        if changed:
+            last["rdl_xml"] = newp
             _set_last(last)
-            parent_rdl_out = prdl
+            parent_rdl_out = newp
             issues.append(
                 f"PARENT RE-SYNCED: its drill-through now opens '{actual}' "
                 f"(was '{child_name}'). Re-download the parent .rdl before "

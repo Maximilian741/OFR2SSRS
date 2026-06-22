@@ -58,7 +58,11 @@ def test_parent_resyncs_when_child_builds_under_different_name():
     with app.test_client() as client:
         _convert_parent(client)
         parent = client.get("/api/download/rdl").get_data(as_text=True)
-        assert "<ReportName>CHILD_REPORT</ReportName>" in parent
+        # Deploy output converts each drill-through to a URL <Hyperlink> (so the
+        # link also fires in an exported PDF, where a Drillthrough is dropped);
+        # the child report name now lives in the URL path, not <ReportName>.
+        assert "/CHILD_REPORT&amp;rs:Command=Render" in parent
+        assert "<Drillthrough" not in parent
 
         up = client.post(
             "/api/subreport/CHILD_REPORT/upload",
@@ -72,12 +76,12 @@ def test_parent_resyncs_when_child_builds_under_different_name():
         assert j["report_name"] == "ENVELOPE_FINAL"
         assert j["parent_synced"] is True
         assert any("RE-SYNCED" in i for i in j["issues"]), j["issues"]
-        assert "<ReportName>ENVELOPE_FINAL</ReportName>" in j["parent_rdl_xml"]
+        assert "/ENVELOPE_FINAL&amp;rs:Command=Render" in j["parent_rdl_xml"]
 
         # The next parent download IS the completed RDL.
         parent2 = client.get("/api/download/rdl").get_data(as_text=True)
-        assert "<ReportName>ENVELOPE_FINAL</ReportName>" in parent2
-        assert "<ReportName>CHILD_REPORT</ReportName>" not in parent2
+        assert "/ENVELOPE_FINAL&amp;rs:Command=Render" in parent2
+        assert "/CHILD_REPORT&amp;rs:Command=Render" not in parent2
         client.post("/api/subreport/CHILD_REPORT/clear")
 
 

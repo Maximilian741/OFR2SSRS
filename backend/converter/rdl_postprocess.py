@@ -133,29 +133,40 @@ def relax_generate_all_drillthroughs(rdl_xml: str) -> str:
     return _DRILLTHROUGH_RE.sub(_repl, rdl_xml)
 
 
-def set_drillthrough_hyperlinks(rdl_xml: str, server_url: str) -> str:
+def set_drillthrough_hyperlinks(rdl_xml: str, server_url: str | None = None) -> str:
     """Rewrite every sub-report <Drillthrough> into a parameterized URL
     <Hyperlink> that pings the report server -- so the link works in BOTH the
     SSRS interactive viewer AND an exported PDF (a Drillthrough is interactive-
-    only and dies in a static PDF). Returns rdl_xml unchanged when server_url is
-    empty (the report keeps its Drillthrough actions for in-viewer use).
+    only and is silently DROPPED in a static PDF/Word/Excel export). This is the
+    fix for "the links do nothing in the downloaded PDF": a <Hyperlink> action
+    survives PDF export as a real clickable link annotation.
 
-    ``server_url`` is the SSRS URL-access base, up to the folder, e.g.
-    ``http://host/ReportServer?/MyFolder`` (or just ``http://host/ReportServer``
-    for the root). Each drill-through becomes:
+    URL source, in order of preference:
+
+      * ``server_url`` given (e.g. ``http://host/ReportServer?/MyFolder``):
+        a literal absolute base. Works on EVERY SSRS version. Recommended when
+        the report server version is unknown or pre-2016.
+      * ``server_url`` empty -> ZERO-CONFIG via SSRS built-in globals:
+        ``Globals!ReportServerUrl`` (the running server's URL, 2008 R2+) and
+        ``Globals!ReportFolder`` (this report's folder, 2016+). The child is
+        assumed to live in the SAME folder as the parent (the documented deploy
+        layout), so no manual URL is needed on a modern server.
+
+    Each drill-through becomes (explicit-URL form shown):
 
         =\"<base>/<ReportName>&rs:Command=Render\"
-            & \"&P_ORG_ID=\" & CStr(<row expr>) & ...
+            & \"&<ParamName>=\" & CStr(<row expr>) & ...
 
     Per-record params (Fields!/Lookup() expressions) are appended so the link
     opens THAT record; aggregate (First()/...) params -- the generate-all cover
     link -- are omitted so the URL renders the child unfiltered. Generic: the
     report name + value expressions come straight from the existing drill-through
-    the generator already resolved."""
-    if not (server_url or "").strip() or not rdl_xml:
+    the generator already resolved. No-op when there are no drill-throughs."""
+    if not rdl_xml or "<Drillthrough" not in rdl_xml:
         return rdl_xml
-    base = server_url.strip().rstrip("/")
-    sep = "/" if "?" in base else "?/"
+    explicit = (server_url or "").strip().rstrip("/")
+    if explicit:
+        sep = "/" if "?" in explicit else "?/"
 
     def _repl(m):
         block = m.group(0)
@@ -164,8 +175,12 @@ def set_drillthrough_hyperlinks(rdl_xml: str, server_url: str) -> str:
         if not report:
             return block
         # Raw (un-escaped) VB.NET expression; XML-escaped once at the end.
-        url_path = f"{base}{sep}{report}&rs:Command=Render"
-        raw = f'="{url_path}"'
+        if explicit:
+            raw = f'="{explicit}{sep}{report}&rs:Command=Render"'
+        else:
+            # Zero-config: build the absolute URL from server globals at runtime.
+            raw = ('=Globals!ReportServerUrl & "?" & Globals!ReportFolder '
+                   f'& "/{report}&rs:Command=Render"')
         for name, val in _PARAM_RE.findall(block):
             v = html.unescape(val).strip()
             if _is_aggregate_expr(v):
