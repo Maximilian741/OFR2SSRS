@@ -886,10 +886,15 @@ def _synth_report_from_sql(child_name: str, sql: str,
     rep.queries.append(DataQuery(name=f"DS_{safe}", sql=sql or "",
                                  tsql=sql or "", items=items))
     pset = {p.upper() for p in (parent_param_names or [])}
+    dt_set = {p.upper() for p in (drillthrough_params or [])}
     declared = set()
     for b in _bind_params_in_sql(sql):
+        # A forwarded drill-through param stays HIDDEN even though the filter we
+        # inject now binds it in the SQL -- the parent sets it; a standalone user
+        # must never get a prompt box for it.
+        visible = (b.upper() in pset) and (b.upper() not in dt_set)
         rep.parameters.append(
-            ReportParameter(name=b, label=b, display=(b.upper() in pset))
+            ReportParameter(name=b, label=b, display=visible)
         )
         declared.add(b.upper())
     # Drill-through forwarded params (e.g. P_ORG_ID, P_SITE_ID). Declare each
@@ -922,17 +927,81 @@ def _first_sql_from_paths(artifact_paths: Iterable[str]) -> str:
     return sql
 
 
+def _alias_outer_join_set(sql: str) -> set:
+    """Aliases on the OUTER (nullable) side of an Oracle ``(+)`` join. Any column
+    of such an alias is unsafe to equality-filter -- ``alias.col = :p`` silently
+    discards the NULL-padded rows, turning the outer join into an inner one. We
+    detect the alias from ANY ``alias.col(+)`` occurrence (the marker can sit on
+    a different column of the same alias than the one we'd filter)."""
+    return {m.group(1).upper()
+            for m in re.finditer(r"\b([A-Za-z_]\w*)\.[A-Za-z_]\w*\s*\(\s*\+\s*\)",
+                                 sql or "")}
+
+
+def _inject_drillthrough_filter(sql: str,
+                                drillthrough_params: Iterable[str]
+                                ) -> Tuple[str, List[Tuple[str, str]]]:
+    """Turn the child query's neutralized Oracle lexical filter (``&P_CRITERIA``)
+    into a REAL, NULL-safe WHERE filter bound to the parent's forwarded
+    drill-through params -- so a drilled link FILTERS to the clicked record while
+    a standalone run (every param empty) still returns all rows.
+
+    Generic, no report-specific names: for each forwarded ``P_<KEY>`` find a
+    qualified id column whose base name == ``<KEY>`` (``P_ORG_ID`` -> ``O.Org_Id``),
+    preferring an INNER-joined column (its alias has no ``(+)`` marker) so the
+    filter never breaks an outer join. The fragment is spliced in at the lexical
+    slot (where the report author intended the dynamic WHERE); any leftover
+    lexical is commented out. Returns ``(new_sql, applied)`` where ``applied`` is
+    the ``[(param, column), ...]`` actually wired (empty -> nothing matched, the
+    caller keeps the unfiltered behaviour + the manual-wiring note)."""
+    dt = [p for p in (drillthrough_params or []) if p]
+    if not sql or not dt:
+        return sql, []
+    lexicals = _lexical_refs_in_sql(sql)
+    if not lexicals:
+        return sql, []  # no designated filter slot -> don't guess a WHERE
+    id_cols = _id_columns_in_sql(sql)
+    outer = _alias_outer_join_set(sql)
+
+    def _col_for(param: str):
+        key = re.sub(r"(?i)^p_", "", param).upper()  # P_ORG_ID -> ORG_ID
+        for c in id_cols:  # appearance order == FROM order
+            alias, base = c.split(".")[0].upper(), c.split(".")[-1].upper()
+            if base == key and alias not in outer:
+                return c  # first inner-joined match wins
+        return None  # only outer-joined matches -> skip (would break the join)
+
+    applied: List[Tuple[str, str]] = []
+    used_cols = set()
+    for p in dt:
+        c = _col_for(p)
+        if c and c.upper() not in used_cols:
+            applied.append((p, c))
+            used_cols.add(c.upper())
+    if not applied:
+        return sql, []
+    frag = "\n\t" + "\n\t".join(
+        f"AND (:{p} IS NULL OR {c} = :{p})" for p, c in applied) + "\n"
+    first = lexicals[0]
+    new_sql = re.sub(r"&" + re.escape(first) + r"\b", frag, sql, count=1)
+    # Any remaining lexical refs -> runnable comment (no SSRS equivalent).
+    new_sql = re.sub(r"&([A-Za-z_][A-Za-z0-9_]*)",
+                     r"/* lexical ref &\1 -- neutralized (no SSRS equivalent) */",
+                     new_sql)
+    return new_sql, applied
+
+
 def _drillthrough_reconciliation_notes(sql: str,
-                                       drillthrough_params: Iterable[str]
+                                       drillthrough_params: Iterable[str],
+                                       applied_filter: Optional[
+                                           List[Tuple[str, str]]] = None
                                        ) -> List[str]:
-    """Human-readable guidance for the one wiring step a drill-through child
-    needs: the parent forwards ``drillthrough_params`` (e.g. P_ORG_ID,
-    P_SITE_ID), but the child filters through a different mechanism (an Oracle
-    lexical ``&P_CRITERIA`` whose CONTENT lives in the parent's
-    After-Parameter-Form trigger, which is NOT in the artifacts). We declare
-    the params so the link won't error and the report runs; this note tells the
-    user exactly how to make the link FILTER. Generic -- candidate columns are
-    read from the child SQL, nothing report-specific."""
+    """Human-readable guidance for the drill-through child's filtering. The
+    parent forwards ``drillthrough_params`` (e.g. P_ORG_ID, P_SITE_ID); we
+    always declare them so the link can't error. If ``applied_filter`` is set
+    the child query was rewritten to FILTER by those params (success); otherwise
+    the child runs UNFILTERED and we tell the user exactly how to wire it.
+    Generic -- candidate columns are read from the child SQL."""
     notes: List[str] = []
     dt = [p for p in (drillthrough_params or []) if p]
     if not dt:
@@ -942,6 +1011,16 @@ def _drillthrough_reconciliation_notes(sql: str,
         " (forwarded by the parent's link) so the drill-through won't error "
         "with \"parameter not declared\"."
     )
+    if applied_filter:
+        notes.append(
+            "The drill-through link now FILTERS this child to the clicked "
+            "record: " + "; ".join(f"{p} = {c}" for p, c in applied_filter) +
+            " (added a NULL-safe \"AND (:param IS NULL OR col = :param)\" to the "
+            "query at the lexical filter slot). Clicking a parent row opens ONLY "
+            "that record's page here; running this child on its own (parameters "
+            "left empty) still lists every record."
+        )
+        return notes
     lex = _lexical_refs_in_sql(sql)
     id_cols = _id_columns_in_sql(sql)
     if lex:
@@ -1057,7 +1136,12 @@ def build_subreport(child_name: str,
 
     # 3. SQL-bearing artifacts (.sql/.docx/.txt) -> synth report -> real RDL.
     sql = _first_sql_from_paths(artifact_paths)
+    applied_filter: List[Tuple[str, str]] = []
     if sql:
+        # Wire the parent's forwarded params into the child's WHERE so the link
+        # FILTERS to the drilled record (the parameterized envelope the user
+        # wants), instead of always opening the unfiltered first page.
+        sql, applied_filter = _inject_drillthrough_filter(sql, drillthrough_params)
         rep = _synth_report_from_sql(child_name, sql, parent_param_names,
                                      drillthrough_params)
         try:
@@ -1089,7 +1173,8 @@ def build_subreport(child_name: str,
         if not cols:
             issues.append("Could not infer a column list from the SQL; the "
                           "preview shows generic columns -- refine in Report Builder.")
-        issues.extend(_drillthrough_reconciliation_notes(sql, drillthrough_params))
+        issues.extend(_drillthrough_reconciliation_notes(
+            sql, drillthrough_params, applied_filter))
         if pset and binds and not forwarded:
             issues.append("Child SQL has bind variables but none match the "
                           "parent's parameters -- drill-through will not forward values.")

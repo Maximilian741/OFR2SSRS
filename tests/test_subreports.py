@@ -203,8 +203,10 @@ def test_compose_child_declares_drillthrough_params_with_defaults():
 def test_build_subreport_reconciles_lexical_filtered_child():
     """End-to-end: a child whose SQL filters through a lexical (&P_CRITERIA)
     and binds only :P_Flag, with the parent forwarding P_ORG_ID/P_SITE_ID.
-    The built child must declare ALL THREE, every one with a default, the
-    query must stay valid (lexical neutralized), and the RDL XSD-valid."""
+    The built child must declare ALL THREE, every one with a default, the RDL
+    XSD-valid, AND the lexical filter slot must be REWRITTEN into a real NULL-
+    safe WHERE that binds the forwarded param (so the drill-through link filters
+    to the clicked record instead of running unfiltered)."""
     from converter.subreports import build_subreport
     import re
     sql = (
@@ -235,13 +237,24 @@ def test_build_subreport_reconciles_lexical_filtered_child():
     assert "P_Flag" in declared
     # No refresh-prompt landmine anywhere.
     assert _report_params_with_empty_default(rdl) == []
-    # The lexical was neutralized so the query is valid SQL (no raw &P_CRITERIA
-    # outside a comment).
+    # The lexical filter slot was REWRITTEN into a real NULL-safe filter that
+    # binds the forwarded param to the matching INNER-joined key column
+    # (O.Org_Id; the outer-joined S.* columns are correctly avoided). No raw
+    # &P_CRITERIA survives.
     cmd = re.search(r"<CommandText>(.*?)</CommandText>", rdl, re.S).group(1)
-    assert "lexical ref" in cmd  # replaced with a comment
+    assert "&P_CRITERIA" not in cmd and "P_CRITERIA" not in cmd
+    assert re.search(r":P_ORG_ID\s+IS\s+NULL\s+OR\s+O\.Org_Id\s*=\s*:P_ORG_ID",
+                     cmd, re.I), cmd
+    # The forwarded param is now a bound dataset query parameter.
+    assert '<QueryParameter Name=":P_ORG_ID">' in rdl
+    # ...and stays HIDDEN (the parent sets it; a standalone user never sees it).
+    porg = re.search(r'<ReportParameter Name="P_ORG_ID">.*?</ReportParameter>',
+                     rdl, re.S).group(0)
+    assert "<Hidden>true</Hidden>" in porg
     # forwarded_params surfaces the drill-through targets.
     assert {"P_ORG_ID", "P_SITE_ID"} <= set(res["forwarded_params"])
-    # A reconciliation note tells the user how to wire the filter.
+    # The reconciliation note reports the link now FILTERS (success), not the
+    # old "runs UNFILTERED" guidance.
     joined = " ".join(res["issues"]).lower()
-    assert "drill-through" in joined and "lexical" in joined
+    assert "drill-through" in joined and "filters this child" in joined
     _assert_xsd_valid(rdl)
