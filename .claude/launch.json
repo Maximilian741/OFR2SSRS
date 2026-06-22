@@ -2,6 +2,13 @@
   "version": "0.0.1",
   "configurations": [
     {
+      "name": "o2s-app",
+      "runtimeExecutable": "python",
+      "runtimeArgs": ["backend/app.py"],
+      "port": 5057,
+      "autoPort": true
+    },
+    {
       "name": "scratch-server",
       "runtimeExecutable": "python",
       "runtimeArgs": ["-m", "http.server", "8919", "--directory", "C:\\Users\\maxca\\Downloads\\_o2s_scratch11"],

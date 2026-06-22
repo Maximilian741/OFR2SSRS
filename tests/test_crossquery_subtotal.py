@@ -55,14 +55,18 @@ def test_no_subtotal_tablix_without_group_summary():
 
 
 try:
-    from render import render_rdl, lib_ready  # noqa: E402
-    _LIB_OK = lib_ready()
+    from render import render_rdl, lib_ready, expression_host_available  # noqa: E402
+    # This test asserts a COMPUTED subtotal value appears in the PDF, which
+    # needs RenderLab.exe's live expression host — the staticized layout path
+    # can't evaluate Code.SumLookup. Skip when that host is unavailable.
+    _EXPR_OK = lib_ready() and expression_host_available()
 except Exception:  # noqa: BLE001
-    _LIB_OK = False
+    _EXPR_OK = False
 
 
-@pytest.mark.skipif(not _LIB_OK or sys.platform != "win32",
-                    reason="ReportViewer DLLs not fetched or non-Windows")
+@pytest.mark.skipif(not _EXPR_OK or sys.platform != "win32",
+                    reason="RenderLab.exe expression host unavailable "
+                           "(DLLs unfetched / non-Windows / Application Control block)")
 def test_crossquery_subtotal_value_is_correct_through_ms_engine():
     """The one check a publish-test can't give: the cross-dataset lookup finds
     rows and sums them (a WRONG join key -> empty -> 0). RenderLab feeds emp=

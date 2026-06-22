@@ -715,8 +715,9 @@ function renderDeployStatus(data) {
     note.innerHTML = "⤷ <b>Drills through to:</b> " +
       uniq.map(escapeHtml).join(", ") +
       " — build " + (uniq.length > 1 ? "these child reports" : "this child report") +
-      " in the <b>Sub-Reports</b> tab and deploy " + (uniq.length > 1 ? "them" : "it") +
-      " to SSRS too, or the link won't work.";
+      " in the <b>Sub-Reports</b> tab, then deploy " + (uniq.length > 1 ? "them" : "it") +
+      " to SSRS <b>before the parent</b> (child-first — the link is resolved by name at " +
+      "click time). The Sub-Reports tab has the full step-by-step.";
     host.appendChild(note);
   }
   host.hidden = false;
@@ -1326,19 +1327,77 @@ function _subBuildSidebarSlot(c) {
   return wrap;
 }
 
+// ---- The "chicken-and-egg", answered in the tool ----------------------------
+// A drill-through parent references its child BY NAME. SSRS resolves that name
+// only when the link is CLICKED (runtime), never at upload -- so the child must
+// already be on the server, i.e. deploy CHILD FIRST. And because the parent's
+// link may reference a guessed child name, building the child here re-syncs the
+// parent, so you re-download the parent after (main -> children -> main again).
+// This guide spells out both orders. Reuses the bursting tab's guide styles.
+function _subDeployGuideHTML(children) {
+  const names = (children || []).filter(c => c.detected).map(c => c.name);
+  const params = [];
+  (children || []).forEach(c => {
+    const bp = (c.link && c.link.bind_params) || [];
+    bp.forEach(p => { if (p && params.indexOf(p) < 0) params.push(p); });
+  });
+  const childList = names.length
+    ? names.map(n => '<code>' + escHtml(n) + '</code>').join(", ")
+    : "the child report";
+  const paramNote = params.length
+    ? '<div class="burst-callout"><b>The parent passes these to the child:</b> ' +
+        params.map(p => '<code>' + escHtml(p) + '</code>').join(" ") +
+        '. The tool already declared them <b>hidden</b> in the child, so running the ' +
+        'child on its own never prompts for them.</div>'
+    : '';
+  return (
+    '<section class="burst-section burst-guide">' +
+      '<h3>Sub-reports (drill-through) — do them in this order</h3>' +
+      '<div class="burst-meta">A drill-through link in the parent opens a <b>child</b> report (here: ' +
+        childList + ') and passes it the clicked row’s values. Build the child here, then deploy ' +
+        '<b>child first</b> — SSRS only looks up the child’s name <b>when the link is clicked</b> (run ' +
+        'time), not when you upload. A parent uploaded before its child uploads fine, but clicking the ' +
+        'link then dies with “report cannot be found.”</div>' +
+      '<div class="burst-files-sub" style="margin-top:12px">1 · BUILD HERE (in this tool)</div>' +
+      '<ol class="burst-steps">' +
+        '<li><b>Main report first</b> — you already converted it. The tool read its drill-through link(s) ' +
+          'and listed each child below.</li>' +
+        '<li><b>Build each child</b> — drop the child’s artifact (its Oracle <code>.xml</code>, an existing ' +
+          '<code>.rdl</code>, or its <code>.sql</code>/<code>.docx</code>) in its slot. The tool builds the ' +
+          'child’s RDL and declares the exact parameters the parent forwards.</li>' +
+        '<li><b>Re-download the main</b> — if a child’s real name differs from the link’s guess, the tool ' +
+          '<b>auto-re-syncs the parent</b> (you’ll see “Parent re-synced”). Re-download the main ' +
+          '<code>.rdl</code> from the <b>RDL</b> tab, plus each child <code>.rdl</code> from its card. ' +
+          '<i>This is the “main → children → main again” step.</i></li>' +
+      '</ol>' +
+      '<div class="burst-files-sub" style="margin-top:14px">2 · DEPLOY TO SSRS (child first)</div>' +
+      '<ol class="burst-steps">' +
+        '<li><b>Upload the child(ren) first</b> — into the <b>same SSRS folder</b> as the parent, under the ' +
+          '<b>exact name</b> shown on each card (the parent references that bare name).</li>' +
+        '<li><b>Upload the main report second.</b> SSRS accepts it either way; child-first just makes the ' +
+          'first click work.</li>' +
+        '<li><b>Test the link</b> — open the main report in SSRS and click the drill-through; it opens the ' +
+          'child with the row’s values.</li>' +
+      '</ol>' +
+      paramNote +
+    '</section>'
+  );
+}
+
 // ---- Tab: full cards with artifacts, actions, and a live preview ----
 function renderSubreportsTab() {
   const host = document.getElementById("subreports-host");
   if (!host) return;
   const children = state.subreportChildren || [];
+  const guide = _subDeployGuideHTML(children);
   if (!children.length) {
-    host.innerHTML =
+    host.innerHTML = guide +
       '<div class="subreport-empty-state">No sub-reports yet. Drop a child ' +
       "report’s artifacts in the <b>Sub-reports</b> box in the sidebar, " +
       "or click <b>+ Add</b> there to build one from any artifact.</div>";
     return;
   }
-  host.innerHTML = children.map((c, i) => _subCardHTML(c, i)).join("");
+  host.innerHTML = guide + children.map((c, i) => _subCardHTML(c, i)).join("");
   _subWireCards(host);
 }
 

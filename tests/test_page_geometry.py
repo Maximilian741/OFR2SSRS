@@ -59,14 +59,15 @@ def test_no_body_item_exceeds_body_width():
     assert worst <= bw + 0.01, f"an item reaches {worst}in > body width {bw}in"
 
 
-def test_cover_record_report_uses_detail_start_break():
-    """A per-record report WITH a cover must use PageBreak=Start on the detail
-    group (fires before EACH row, including the first → separates cover from
-    cert 1 without a cover-side End break). The cover Rectangle must NOT carry
-    its own PageBreak=End — when cover_h + TablixRow > printable area, SSRS
-    positions the Tablix at its absolute Top on page 2, overflowing and
-    creating a blank page. Verified: this pattern gives cover on page 1, one
-    cert per page starting page 2, zero blank pages."""
+def test_record_report_without_cover_uses_between_break():
+    """A per-record letter/cert whose source has NO criteria cover section must
+    NOT emit a fabricated 'Report Parameters / Run Date / Run By' cover page, and
+    its detail group must use PageBreak=Between → record 1 on page 1, one record
+    per page thereafter, ZERO leading blank page. (A report that DOES display a
+    criteria cover instead uses Start: cover on page 1, records from page 2 — that
+    path is exercised by the real letter corpus, which carries a header criteria
+    section.) This synthetic fixture has no header criteria section, so 'Between'
+    is the correct blank-page-free geometry and no cover may be fabricated."""
     fix = (Path(__file__).resolve().parent / "fixtures" / "source_of_truth"
            / "letter" / "source.xml")
     if not fix.exists():
@@ -74,8 +75,9 @@ def test_cover_record_report_uses_detail_start_break():
     rdl = convert(fix.read_bytes())["rdl_xml"]
     if "OuterPageWrapper" not in rdl:
         pytest.skip("fixture is not a per-record tablix report")
+    # No fabricated cover for a report with no criteria section.
+    assert "Rect_CoverPage" not in rdl and "Cov_ParamsHdr" not in rdl, (
+        "a no-criteria per-record report must not fabricate a cover page")
     breaks = re.findall(r"<BreakLocation>(\w+)</BreakLocation>", rdl)
-    # Cover reports: detail Start is the ONLY break. No End (cover-side), no
-    # Between (would miss the cover→cert1 separation).
-    assert breaks == ["Start"], (
-        f"cover report breaks must be exactly ['Start']; got {breaks}")
+    assert breaks == ["Between"], (
+        f"no-cover per-record breaks must be exactly ['Between']; got {breaks}")

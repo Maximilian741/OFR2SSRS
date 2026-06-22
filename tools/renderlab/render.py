@@ -115,40 +115,104 @@ def synthesize_data(rdl_xml: str, rows: int = 3) -> dict:
     return {"datasets": datasets}
 
 
+_EXPR_HOST = None  # cache: can RenderLab.exe (the expression host) launch here?
+
+
+def expression_host_available() -> bool:
+    """True when RenderLab.exe — the LocalReport host that JIT-compiles a
+    report's =expressions — can actually launch. Some machines' Application
+    Control policy (Smart App Control / WDAC) blocks the unsigned local exe
+    with OSError WinError 4551; there only the layout (staticized) render works,
+    so value-correctness checks that need LIVE expressions must skip cleanly."""
+    global _EXPR_HOST
+    if _EXPR_HOST is not None:
+        return _EXPR_HOST
+    if not ensure_exe():
+        _EXPR_HOST = False
+        return _EXPR_HOST
+    try:
+        # No-arg launch: RenderLab prints usage + exits 2 (so it LAUNCHED). A
+        # blocked exe raises OSError at CreateProcess, before main() ever runs.
+        subprocess.run([str(EXE)], capture_output=True, text=True, timeout=30)
+        _EXPR_HOST = True
+    except OSError:
+        _EXPR_HOST = False
+    except subprocess.TimeoutExpired:
+        _EXPR_HOST = True
+    return _EXPR_HOST
+
+
+def _render_via_ps1(rdl_path: Path, out_pdf: Path, rows: int,
+                    timeout: int) -> dict:
+    """Render through the SIGNED ReportViewer DLLs via render_rdl.ps1, which has
+    no expression host: staticize the RDL (=expr -> placeholder) first so the
+    engine never JIT-compiles an expression. Used when RenderLab.exe is missing
+    or Application-Control-blocked. Faithful for LAYOUT / page-flow; it cannot
+    prove computed VALUES (those need expression_host_available())."""
+    from ms_layout import staticize  # local: ms_layout imports from this module
+    static = staticize(rdl_path.read_text(encoding="utf-8"))
+    with tempfile.TemporaryDirectory() as d:
+        srdl = Path(d) / "static.rdl"
+        srdl.write_text(static, encoding="utf-8")
+        djs = Path(d) / "data.json"
+        djs.write_text(json.dumps(synthesize_data(static, rows=rows)),
+                       encoding="utf-8")
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
+             "-File", str(PS1), "-RdlPath", str(srdl), "-DataJson", str(djs),
+             "-OutPdf", str(out_pdf), "-LibDir", str(LIB)],
+            capture_output=True, text=True, timeout=timeout,
+        )
+    log = (proc.stdout or "") + (proc.stderr or "")
+    ok = proc.returncode == 0 and out_pdf.exists()
+    return {"ok": ok, "pdf": str(out_pdf) if ok else None, "log": log,
+            "mode": "layout"}
+
+
 def render_rdl(rdl_path: str | Path, out_pdf: str | Path,
                rows: int = 3, timeout: int = 240) -> dict:
+    """Render an RDL to PDF. Prefers RenderLab.exe (the LocalReport host that
+    evaluates LIVE =expressions — highest fidelity); if that exe is missing or
+    blocked by an Application Control policy, falls back to the signed-DLL
+    render_rdl.ps1 LAYOUT path (staticized). The returned dict carries a "mode":
+    "expression" (values are real) or "layout" (values are placeholders)."""
     rdl_path = Path(rdl_path)
     out_pdf = Path(out_pdf)
     if not lib_ready():
-        return {"ok": False, "pdf": None,
+        return {"ok": False, "pdf": None, "mode": None,
                 "log": "ReportViewer DLLs missing — run fetch_reportviewer.py"}
     rdl_xml = rdl_path.read_text(encoding="utf-8")
-    spec = synthesize_data(rdl_xml, rows=rows)
-    with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
-                                     encoding="utf-8") as tf:
-        json.dump(spec, tf)
-        data_json = tf.name
-    try:
-        if ensure_exe():
-            cmd = [str(EXE), str(rdl_path), data_json, str(out_pdf)]
-        else:  # PowerShell fallback (no expression-host support in sandbox)
-            cmd = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass",
-                   "-File", str(PS1),
-                   "-RdlPath", str(rdl_path),
-                   "-DataJson", data_json,
-                   "-OutPdf", str(out_pdf),
-                   "-LibDir", str(LIB)]
-        proc = subprocess.run(
-            cmd, capture_output=True, text=True, timeout=timeout,
-        )
-        log = (proc.stdout or "") + (proc.stderr or "")
-        ok = proc.returncode == 0 and out_pdf.exists()
-        return {"ok": ok, "pdf": str(out_pdf) if ok else None, "log": log}
-    finally:
+    if ensure_exe():
+        spec = synthesize_data(rdl_xml, rows=rows)
+        with tempfile.NamedTemporaryFile("w", suffix=".json", delete=False,
+                                         encoding="utf-8") as tf:
+            json.dump(spec, tf)
+            data_json = tf.name
+        blocked = False
+        log = ""
         try:
-            Path(data_json).unlink()
-        except OSError:
-            pass
+            proc = subprocess.run(
+                [str(EXE), str(rdl_path), data_json, str(out_pdf)],
+                capture_output=True, text=True, timeout=timeout,
+            )
+            log = (proc.stdout or "") + (proc.stderr or "")
+            if proc.returncode == 0 and out_pdf.exists():
+                return {"ok": True, "pdf": str(out_pdf), "log": log,
+                        "mode": "expression"}
+            blocked = "Application Control" in log
+        except OSError as e:  # CreateProcess refused (e.g. WinError 4551 block)
+            blocked = True
+            log = f"RenderLab.exe could not launch ({e}); using render_rdl.ps1."
+        finally:
+            try:
+                Path(data_json).unlink()
+            except OSError:
+                pass
+        if not blocked:
+            # The exe ran and the ENGINE rejected the RDL — a real failure, not
+            # a policy block. Surface it (don't mask behind the layout path).
+            return {"ok": False, "pdf": None, "log": log, "mode": "expression"}
+    return _render_via_ps1(rdl_path, out_pdf, rows, timeout)
 
 
 def main() -> int:

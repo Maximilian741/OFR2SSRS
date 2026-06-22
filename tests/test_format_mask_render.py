@@ -26,14 +26,18 @@ sys.path.insert(0, str(ROOT / "tools" / "renderlab"))
 from converter import convert  # noqa: E402
 
 try:
-    from render import render_rdl, lib_ready  # noqa: E402
-    _LIB_OK = lib_ready()
+    from render import render_rdl, lib_ready, expression_host_available  # noqa: E402
+    # Asserts Oracle format masks ($1,000.00 / 1000% / 10-JAN-2026) appear in
+    # the PDF — that needs RenderLab.exe's live expression+format evaluation;
+    # the staticized layout path renders placeholders, not formatted values.
+    _EXPR_OK = lib_ready() and expression_host_available()
 except Exception:  # noqa: BLE001
-    _LIB_OK = False
+    _EXPR_OK = False
 
 pytestmark = pytest.mark.skipif(
-    not _LIB_OK or sys.platform != "win32",
-    reason="ReportViewer DLLs not fetched (tools/renderlab) or non-Windows",
+    not _EXPR_OK or sys.platform != "win32",
+    reason="RenderLab.exe expression host unavailable "
+           "(DLLs unfetched / non-Windows / Application Control block)",
 )
 
 _FIXTURE = ROOT / "tests" / "fixtures" / "format_mask" / "source.xml"

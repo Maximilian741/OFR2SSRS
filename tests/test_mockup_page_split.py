@@ -1,7 +1,7 @@
 """Header-resident summary reports pack several logical pages into one
 <section> (a criteria cover + a stat table, split by Oracle's
 pageBreakBefore). The HTML mockup must render each as its OWN page, not
-overlap them on one sheet. Real-artifact verified (CMVGY_GRANT_STATUS).
+overlap them on one sheet. Verified against the header-summary archetype.
 """
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from converter import convert  # noqa: E402
 from converter.parsers.oracle_xml import parse_oracle_xml  # noqa: E402
 
 # A header section with TWO content frames: a criteria cover at y=0 and a
-# stat table at y=5 carrying pageBreakBefore="yes". Mirrors the CMVGY shape.
+# stat table at y=5 carrying pageBreakBefore="yes". Mirrors the header-summary shape.
 _XML = b"""<?xml version="1.0" encoding="UTF-8"?>
 <report name="HDR_SUMMARY" DTDVersion="9.0.2.0.10">
   <data>
@@ -147,7 +147,7 @@ def test_title_formula_resolves_to_report_name_not_keyword_sample():
     val = _doc_field_caption_and_value("CP_HDR_SUMMARY", rep, {}, 0)
     assert "Hdr" in val or "HDR" in val, val
     assert val not in ("Active", "Pending")
-    assert _humanize_report_title("CMVGY_GRANT_STATUS") == "CMVGY Grant Status"
+    assert _humanize_report_title("MTR_GRANT_STATUS") == "MTR Grant Status"
 
 
 def test_root_scoping_isolates_one_frame_and_rebases_y():

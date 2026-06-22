@@ -782,6 +782,21 @@ def _layout_field_from_element(el) -> LayoutField:
         if al is not None:
             format_mask = _attr(al, "formatMask")
 
+    # Oracle visible="no" -> a computation-only field (e.g. a hidden CF_/CS_
+    # statistic that feeds a body-paragraph &token); it is NEVER drawn on the
+    # page. Default visible when the attribute is absent.
+    visible = _attr(el, "visible").strip().lower() not in ("no", "false")
+
+    # Oracle rotationAngle (centidegrees) -> degrees. A sideways window-envelope
+    # address block carries rotationAngle="27000" (270deg). Normalize to [0,360).
+    rotation = 0.0
+    _ra = _attr(el, "rotationAngle").strip()
+    if _ra:
+        try:
+            rotation = (float(_ra) / 100.0) % 360.0
+        except ValueError:
+            rotation = 0.0
+
     return LayoutField(
         name=name,
         source=source,
@@ -805,6 +820,8 @@ def _layout_field_from_element(el) -> LayoutField:
         border_color=vs_attrs["edge_line_color"] or vs_attrs["line_color"],
         hyperlink=hyperlink,
         format_mask=format_mask,
+        visible=visible,
+        rotation=rotation,
     )
 
 
@@ -901,6 +918,44 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                 warnings.append(f"failed to parse layout field: {exc}")
             _walk_layout_node(child, current_group, groups_by_name, root_groups,
                               warnings, embedded_images)
+        elif tag in ("rectangle", "box", "line"):
+            # A DRAWN graphic: a bordered box around a panel, or a horizontal /
+            # vertical rule. Oracle stores these as <rectangle>/<line> objects
+            # (with <visualSettings lineWidth>), separate from text/fields. They
+            # carry no data but are STRUCTURAL -- the emissions-summary SPT box, a
+            # section's heavy underline rules, etc. -- so capture them as
+            # positional layout fields with a border for the renderer to draw.
+            try:
+                name = _attr(child, "name")
+                geom = _find(child, "geometryInfo")
+                _gsrc = geom if geom is not None else child
+                _vs = _find(child, "visualSettings")
+                _bw = _float_attr(_vs, "lineWidth") if _vs is not None else 0.0
+                vs_attrs = _parse_visual_settings(child)
+                lf = LayoutField(
+                    name=name,
+                    kind="line" if tag == "line" else "rect",
+                    x=_float_attr(_gsrc, "x"),
+                    y=_float_attr(_gsrc, "y"),
+                    width=_float_attr(_gsrc, "width"),
+                    height=_float_attr(_gsrc, "height"),
+                    border_width=_bw or 1.0,
+                    border_color=(vs_attrs["edge_line_color"]
+                                  or vs_attrs["line_color"] or "#000000"),
+                    background_color=vs_attrs["background_color"],
+                    fill_pattern=vs_attrs["fill_pattern"],
+                )
+                target = current_group
+                if target is None:
+                    target = groups_by_name.get("_default")
+                    if target is None:
+                        target = LayoutGroup(name="_default", kind="_default",
+                                             source_query="")
+                        groups_by_name["_default"] = target
+                        root_groups.append(target)
+                target.fields.append(lf)
+            except Exception as exc:  # pragma: no cover - defensive
+                warnings.append(f"failed to parse graphic: {exc}")
         elif tag == "image":
             try:
                 name = _attr(child, "name")

@@ -1,11 +1,10 @@
 """Lock the positional-document-packet rendering and the generic field
 detectors added during the artifact-fidelity loop.
 
-These guard the real fixes verified against client artifacts (STP_PAYBACK's
-memo+table+letter packet, CMVGY/MVWF letter logos & signatures, conditional
-*_ERROR fields, CF_NULL blank rules, the report-title resolver) -- but using a
-fully SYNTHETIC fixture and duck-typed helper inputs, so no client data lands
-in the public repo.
+These guard the generic archetype fixes (a memo+table+letter document packet,
+letter logos & signatures, conditional *_ERROR fields, CF_NULL blank rules, the
+report-title resolver) -- using a fully SYNTHETIC fixture and duck-typed helper
+inputs, so no client data lands in the public repo.
 """
 import os
 import re

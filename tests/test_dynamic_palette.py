@@ -117,17 +117,22 @@ def test_band_bg_picks_up_repeating_frame_background():
 # 3) When the source XML has NO color signals, band_bg falls back to
 #    the historical navy default.
 # ---------------------------------------------------------------------------
-def test_no_color_signals_falls_back_to_defaults():
+def test_no_color_signals_falls_back_to_neutral_plain():
+    """A report with NO genuine band color must render NEUTRAL -- plain black
+    text on a white (invisible) band -- never the old navy/yellow house theme,
+    which made plain Oracle forms/lists look like styled SSRS tablixes. Reports
+    that DO carry a real band color keep it (see the other palette tests)."""
     rep = ParsedReport(name="X")
     rep.layout = [
         LayoutGroup(name="M_main", kind="frame"),
         LayoutGroup(name="R_rows", kind="repeating_frame"),
     ]
     pal = _resolve_palette(rep)
-    assert pal["band_bg"] == DEFAULTS["band_bg"]
-    assert pal["band_fg"] == DEFAULTS["band_fg"]
-    assert pal["subhdr_bg"] == DEFAULTS["subhdr_bg"]
-    assert pal["subhdr_fg"] == DEFAULTS["subhdr_fg"]
+    assert pal["themed"] is False
+    assert pal["band_bg"] == "#ffffff"
+    assert pal["band_fg"] == "#000000"
+    assert pal["subhdr_bg"] == "#ffffff"
+    assert pal["subhdr_fg"] == "#000000"
     assert pal["card_bg"] == DEFAULTS["card_bg"]
     assert pal["ink"] == DEFAULTS["ink"]
 

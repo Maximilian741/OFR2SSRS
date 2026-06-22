@@ -224,11 +224,18 @@ class LayoutField:
     foreground_color: str = ""       # fillForegroundColor (alternate fill / accent)
     fill_pattern: str = ""           # "solid" | "transparent" | ""
     border_color: str = ""           # from lineColor / edgeLineColor
+    border_width: float = 0.0        # from <visualSettings lineWidth> (pt); a
+                                     # drawn <rectangle>/<line>/<box> graphic
+    visible: bool = True             # Oracle visible="no" -> a computation-only
+                                     # field (feeds a formula/token); never drawn
     # Oracle <webSettings hyperlink="&CF_URL_X">: the formula/placeholder
     # token (leading & stripped) that builds the drill-through URL.
     hyperlink: str = ""
     # Oracle formatMask (e.g. "$NNN,NN0.00", "DD-MON-YYYY") -> SSRS <Format>.
     format_mask: str = ""
+    # Oracle rotationAngle (centidegrees, counter-clockwise; e.g. 27000 = 270deg)
+    # -> degrees. A sideways window-envelope address prints at 270deg. 0 = upright.
+    rotation: float = 0.0
 
 
 # LayoutGroup.kind values:
