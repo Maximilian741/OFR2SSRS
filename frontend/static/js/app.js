@@ -1364,10 +1364,36 @@ function renderBurstingTab(data) {
 // the SAME pipeline the main report uses, so the child gets a full RDL plus an
 // HTML mockup we render exactly like the first-page preview.
 
+// Turn a raw report name into readable link text: "JV_ENVELOPE_12" ->
+// "JV Envelope 12". Short all-caps tokens (JV) stay as acronyms; digits stay.
+// The exact wording (e.g. "Standard 12 x 9") isn't in the source, so this is a
+// sensible STARTING point the user edits -- never blank, never the ugly raw name.
+function _humanizeReportName(name) {
+  return String(name || "").split(/[_\s]+/).filter(Boolean).map(t => {
+    if (/^\d+$/.test(t)) return t;
+    if (/^[A-Z0-9]{1,3}$/.test(t)) return t;       // acronym (JV, US, ID)
+    return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
+  }).join(" ");
+}
+
+// Pre-fill the "Cover hyperlink text" box from the detected child on the fly,
+// so it's never blank. Only fills an EMPTY box (never clobbers the user's own
+// text or a remembered value).
+function _prefillGenerateAllLabel(children) {
+  const el = document.getElementById("generate-all-label");
+  if (!el || (el.value || "").trim()) return;
+  let saved = "";
+  try { saved = localStorage.getItem("o2s_generate_all_label") || ""; } catch (e) {}
+  if (saved) { el.value = saved; return; }
+  const first = (children || []).find(c => c.detected && c.name);
+  if (first) el.value = _humanizeReportName(first.name);
+}
+
 function renderSubreports(data) {
   // Reset per-conversion state (a new parent => fresh children + previews).
   state.subreportBuilds = {};
   state.subreportChildren = _subCollectDetected(data);
+  _prefillGenerateAllLabel(state.subreportChildren);
 
   const tabBtn = document.getElementById("tabbtn-subreports");
   // The tab is available after any conversion so a sub-report can be added

@@ -1003,17 +1003,50 @@ def _parse_envelope_dims(label: str):
 def _apply_envelope_page(rdl_xml: str, dims) -> str:
     """Resize the rendered envelope RDL to the real envelope dimensions (e.g. a
     12x9 catalog envelope) with tight margins, so the child prints as an ACTUAL
-    envelope instead of a letter-size page. No-op without dims."""
+    envelope instead of a letter-size page. No-op without dims.
+
+    CRITICAL: also CLAMP the report body/tablix geometry to the PRINTABLE area
+    (page minus margins). If the Report <Width> or the body/tablix <Height>
+    exceeds the printable size, SSRS emits a blank overflow page to the right
+    and/or below EVERY record -- the "envelope skips every few pages" defect.
+    A body wider than printable -> a blank right-half page; taller -> a blank
+    bottom-half page; both -> a 2x2 block of pages per envelope. Clamping all
+    <Width>/<Height> to fit (page builtins use <PageWidth>/<PageHeight>, never
+    touched here) makes it exactly one page per envelope."""
     if not dims:
         return rdl_xml
     pw, ph = dims
+    margin = 0.25
     repl = {
         "PageWidth": f"{pw}in", "PageHeight": f"{ph}in",
-        "LeftMargin": "0.25in", "RightMargin": "0.25in",
-        "TopMargin": "0.25in", "BottomMargin": "0.25in",
+        "LeftMargin": f"{margin}in", "RightMargin": f"{margin}in",
+        "TopMargin": f"{margin}in", "BottomMargin": f"{margin}in",
     }
     for tag, val in repl.items():
         rdl_xml = re.sub(rf"<{tag}>[^<]*</{tag}>", f"<{tag}>{val}</{tag}>", rdl_xml)
+    # The BODY's usable height is the page minus margins AND the PageHeader +
+    # PageFooter bands (SSRS reserves those on every page). A body taller than
+    # that spills onto a blank page below -- so subtract them, not just margins.
+    def _band_h(tag):
+        m = re.search(rf"<{tag}>\s*<Height>([0-9.]+)in", rdl_xml)
+        return float(m.group(1)) if m else 0.0
+    head_h, foot_h = _band_h("PageHeader"), _band_h("PageFooter")
+    # Printable box, with a safety epsilon so a value sitting on the boundary
+    # (tablix Top + Height) never tips onto a blank page.
+    pw_in = round(pw - 2 * margin - 0.06, 2)
+    ph_in = round(ph - 2 * margin - head_h - foot_h - 0.20, 2)
+
+    def _clamp(tag, limit):
+        def _r(m):
+            try:
+                v = float(m.group(1))
+            except ValueError:
+                return m.group(0)
+            return f"<{tag}>{min(round(v, 2), limit)}in</{tag}>"
+        return re.sub(rf"<{tag}>([0-9.]+)in</{tag}>", _r, rdl_xml)
+
+    rdl_xml = _clamp("Width", pw_in)
+    rdl_xml = _clamp("Height", ph_in)
     return rdl_xml
 
 
