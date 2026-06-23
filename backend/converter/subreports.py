@@ -910,6 +910,136 @@ def _synth_report_from_sql(child_name: str, sql: str,
     return rep
 
 
+_INCLUSION_PARAM_NAME_RE = re.compile(r"(?i)site[_\s]?includ")
+
+
+def _default_inclusion_params_yes(rdl_xml: str) -> str:
+    """Default a child's 'site include' toggle parameter to 'YES'.
+
+    A drill-through URL (``rs:Command=Render``) that omits a parameter renders
+    the child with that parameter's DEFAULT. When a "site include" toggle is left
+    at the neutral ``=Nothing`` default, an envelope-style child whose address +
+    sort key both read ``DECODE(:P_Site_Include,'YES',S.Site_Name,NULL)`` falls to
+    the NULL branch -- which BOTH drops the site from the address AND collapses the
+    ORDER BY (keyed on that same column) to the recipient name. A "generate all"
+    bulk envelope then prints in a DIFFERENT order than a parent run sorted by
+    site, so the two stacks don't line up 1:1.
+
+    Defaulting the toggle to ``YES`` makes the bulk/auto-rendered child sort by the
+    site column, matching a site-sorted parent. Generic: keyed on the parameter
+    NAME pattern (``site``+``includ``), never a report name; no-op when absent."""
+    if not rdl_xml or "<ReportParameter" not in rdl_xml:
+        return rdl_xml
+
+    def _repl(m):
+        block = m.group(0)
+        if _INCLUSION_PARAM_NAME_RE.search(m.group(1)):
+            return block.replace("<Value>=Nothing</Value>", "<Value>YES</Value>", 1)
+        return block
+
+    return re.sub(r'<ReportParameter Name="([^"]+)">.*?</ReportParameter>',
+                  _repl, rdl_xml, flags=re.DOTALL)
+
+
+_ENVELOPE_NAME_RE = re.compile(r"(?i)envelope|mailing|mail[_\s]?label|\blabel\b")
+_ADDRESS_COL_RE = re.compile(r"(?i)addr")
+_HARDCODED_TOP_RE = re.compile(
+    r"\b([A-Za-z0-9][A-Za-z0-9.\-]{1,30})\s+is\s+hard\s?coded\s+at\s+the\s+top",
+    re.IGNORECASE)
+
+
+def _artifact_full_text(arts) -> str:
+    """All readable text across the dropped artifacts (docx body + plain text).
+    Used to mine layout notes the SQL alone doesn't carry -- e.g. a backend
+    screenshot doc that says '<X> is hard coded at the top of the envelope'."""
+    out = []
+    for nm, blob in arts or []:
+        try:
+            low = (nm or "").lower()
+            if low.endswith((".docx", ".dotx")):
+                import io, zipfile
+                z = zipfile.ZipFile(io.BytesIO(blob))
+                for part in ("word/document.xml",):
+                    if part in z.namelist():
+                        out.append(re.sub(r"<[^>]+>", " ",
+                                          z.read(part).decode("utf-8", "replace")))
+            else:
+                out.append(blob.decode("utf-8", "replace"))
+        except Exception:
+            continue
+    return re.sub(r"\s+", " ", " ".join(out))
+
+
+def _envelope_top_text(full_text: str) -> str:
+    """Extract a hard-coded top-of-envelope label from an artifact note like
+    'JV53063 is hard coded at the top of the envelope' -> 'JV 53063'. Generic:
+    reads the value from the artifact, never a baked-in literal. '' if absent."""
+    m = _HARDCODED_TOP_RE.search(full_text or "")
+    if not m:
+        return ""
+    val = m.group(1).strip()
+    # 'JV53063' -> 'JV 53063' (letters+digits run reads better spaced).
+    sp = re.match(r"^([A-Za-z]+)(\d.*)$", val)
+    return f"{sp.group(1)} {sp.group(2)}" if sp else val
+
+
+def _address_column(cols) -> str:
+    """The recipient-address column among the SELECT columns (name ~ 'addr'),
+    else the longest-named candidate, else ''."""
+    addr = [c for c in cols if _ADDRESS_COL_RE.search(c)]
+    return addr[0] if addr else (cols[-1] if cols else "")
+
+
+def _looks_like_envelope(child_name: str, cols) -> bool:
+    """An envelope / mailing-label child: named like one AND carrying a
+    recipient-address column. Conservative so ordinary list children are not
+    re-routed to the positioned single-record envelope body."""
+    named = bool(_ENVELOPE_NAME_RE.search(child_name or ""))
+    has_addr = any(_ADDRESS_COL_RE.search(c) for c in (cols or []))
+    return named and has_addr
+
+
+def _attach_envelope_layout(rep, cols, top_text):
+    """Give a (already param/query-wired) SQL child a POSITIONED mailing-envelope
+    layout -- one envelope per recipient: the hard-coded top label centered near
+    the top, the recipient address block in the window position. Replaces the
+    labeled field-list with the envelope's real shape. Positions are
+    envelope-archetype constants (where an address sits on an envelope); the LABEL
+    + ADDRESS column come from the artifacts. Built ON TOP of the report
+    _synth_report_from_sql already produced, so the drill-through param
+    declarations + the :P_ORG_ID filter binding are preserved."""
+    from .models import LayoutGroup, LayoutField
+    qname = rep.queries[0].name if rep.queries else "Q_ADDRESS"
+    addr = _address_column(cols)
+    sec = LayoutGroup(name="section_main", kind="section_main",
+                      repeat_on=qname, source_query=qname)
+    frame = LayoutGroup(name="M_ENVELOPE", kind="frame",
+                        x=0.0, y=0.0, width=7.9, height=6.0)
+    fields = []
+    if top_text:
+        fields.append(LayoutField(name="B_TOP", kind="text", text=top_text,
+                                  x=3.0, y=0.6, width=1.9, height=0.25,
+                                  align="center", bold=True, font_size=11))
+    if addr:
+        fields.append(LayoutField(name="F_ADDRESS", kind="field", source=addr,
+                                  x=3.6, y=4.2, width=4.0, height=1.3,
+                                  align="start", font_size=11))
+    frame.fields = fields
+    sec.children.append(frame)
+    rep.layout = [sec]
+    return rep
+
+
+def _strip_chrome_textboxes(rdl_xml: str) -> str:
+    """Remove the fabricated 'Report run on:' + 'Page N of M' chrome textboxes
+    the generator adds to a page header/footer -- a mailing envelope has neither.
+    Keeps the page-title textbox (which carries the envelope's top label)."""
+    for nm in ("Tb_RunOn", "Tb_PageNum"):
+        rdl_xml = re.sub(r'<Textbox Name="' + nm + r'">.*?</Textbox>', "",
+                         rdl_xml, flags=re.DOTALL)
+    return rdl_xml
+
+
 def _first_sql_from_paths(artifact_paths: Iterable[str]) -> str:
     """Pull the first runnable SELECT out of any artifact, trimmed to one
     statement (reuses the same extraction the stub builder uses)."""
@@ -1142,8 +1272,23 @@ def build_subreport(child_name: str,
         # FILTERS to the drilled record (the parameterized envelope the user
         # wants), instead of always opening the unfiltered first page.
         sql, applied_filter = _inject_drillthrough_filter(sql, drillthrough_params)
+        _cols = _select_columns(sql)
         rep = _synth_report_from_sql(child_name, sql, parent_param_names,
                                      drillthrough_params)
+        _envelope = _looks_like_envelope(child_name, _cols)
+        if _envelope:
+            # Mailing-envelope child: give the (param/query-wired) report a
+            # POSITIONED envelope layout (top label + address in the window)
+            # instead of the labeled field-list. The top label is mined from the
+            # artifacts (e.g. a screenshot note).
+            top_text = _envelope_top_text(_artifact_full_text(arts))
+            _attach_envelope_layout(rep, _cols, top_text)
+            if top_text:
+                issues.append(f"Envelope archetype: positioned the address block "
+                              f"+ top label '{top_text}' (from your artifacts).")
+            else:
+                issues.append("Envelope archetype: positioned the address block "
+                              "(no hard-coded top label found in the artifacts).")
         try:
             from .translators.plsql_to_tsql import translate_report
             translate_report(rep)
@@ -1159,6 +1304,13 @@ def build_subreport(child_name: str,
             rdl_xml = compose_subreport_rdl(
                 safe_name, artifact_paths, parent_param_names,
                 drillthrough_params)["rdl_xml"]
+        if _envelope:
+            # An envelope has no 'Report run on' / 'Page of' chrome.
+            rdl_xml = _strip_chrome_textboxes(rdl_xml)
+        # A bulk "generate all" link auto-renders the child with its parameter
+        # DEFAULTS; default a site-include toggle to YES so the bulk envelopes
+        # sort by site, matching a site-sorted parent (the 1:1 mailing order).
+        rdl_xml = _default_inclusion_params_yes(rdl_xml)
         main = rep.queries[0] if rep.queries else None
         cols = [i.name for i in (main.items if main else [])]
         binds = _bind_params_in_sql(sql)

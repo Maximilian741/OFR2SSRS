@@ -34,7 +34,8 @@ from converter.bundle_export import build_bundle_zip  # noqa: E402
 from converter.rdl_postprocess import (inject_connection_string,  # noqa: E402
                                        set_datasource_reference,
                                        relax_generate_all_drillthroughs,
-                                       set_drillthrough_hyperlinks)
+                                       set_drillthrough_hyperlinks,
+                                       align_drillthrough_sort_default)
 from converter import bursting as _bursting_mod  # noqa: E402
 from converter.parsers.oracle_xml import parse_oracle_xml as _parse_oracle_xml  # noqa: E402
 
@@ -163,6 +164,9 @@ def _apply_deploy_datasource(rdl_xml: str, req) -> str:
     #    back to SSRS server globals (zero-config on SSRS 2016+).
     rdl_xml = relax_generate_all_drillthroughs(rdl_xml)
     rdl_xml = set_drillthrough_hyperlinks(rdl_xml, rsu)
+    # Default the master's sort selector to SITE so its records line up 1:1 with
+    # the sub-report's site-ordered bulk list -- no manual parameter setting.
+    rdl_xml = align_drillthrough_sort_default(rdl_xml)
 
     # 2. Data source binding.
     if cs:

@@ -123,6 +123,79 @@ function initReportServerUrl() {
   } catch (e) { /* private mode */ }
 }
 
+// ----- App-level "How it works" modal -----
+function _appHowtoHTML() {
+  return (
+    '<h2>How Oracle2SSRS works</h2>' +
+    '<p class="howto-lead">Turn an Oracle Reports export into a deployable SSRS report in four steps. ' +
+      'Two optional add-ons &mdash; <b>sub-reports</b> (drill-through links) and <b>bursting</b> (one report &rarr; ' +
+      'many emails) &mdash; are explained below.</p>' +
+
+    '<div class="howto-section">' +
+      '<div class="howto-h">The basic flow</div>' +
+      '<div class="howto-pipe">' +
+        '<div class="howto-pipe-step"><span class="o2s-num">1</span>Drop artifacts<small>the Oracle <code>.xml</code>/<code>.rdf</code>, plus any <code>.sql</code>/<code>.docx</code>/images</small></div>' +
+        '<div class="howto-pipe-arr">&rarr;</div>' +
+        '<div class="howto-pipe-step"><span class="o2s-num">2</span>Convert<small>see the preview + the generated RDL, side by side</small></div>' +
+        '<div class="howto-pipe-arr">&rarr;</div>' +
+        '<div class="howto-pipe-step"><span class="o2s-num">3</span>Bind data source<small>point the report at your SSRS shared data source (sidebar)</small></div>' +
+        '<div class="howto-pipe-arr">&rarr;</div>' +
+        '<div class="howto-pipe-step"><span class="o2s-num">4</span>Download + deploy<small>upload the <code>.rdl</code> to your report server</small></div>' +
+      '</div>' +
+    '</div>' +
+
+    '<div class="howto-section">' +
+      '<div class="howto-h">Sub-reports (drill-through links)</div>' +
+      '<p>One report can open <b>another</b> report for a clicked row. Each row carries its own values into the ' +
+        'child, and a separate &ldquo;generate all&rdquo; link produces the whole set <b>in the same order</b>.</p>' +
+      '<div class="o2s-flow">' +
+        '<div class="o2s-node o2s-main"><div class="o2s-node-title">main report</div><div class="o2s-node-sub">lists every record</div></div>' +
+        '<div class="o2s-links">' +
+          '<div class="o2s-link"><span class="o2s-num">1</span><div>click <b>one record</b> <span class="o2s-arrow">&rarr;</span> just that one&rsquo;s child <em>(filtered)</em></div></div>' +
+          '<div class="o2s-link"><span class="o2s-num">2</span><div><b>&ldquo;generate all&rdquo;</b> <span class="o2s-arrow">&rarr;</span> every child <em>(same order as the rows)</em></div></div>' +
+        '</div>' +
+        '<div class="o2s-node o2s-child"><div class="o2s-node-title">child report</div><div class="o2s-node-sub">e.g. one envelope</div></div>' +
+      '</div>' +
+      '<p>Build the child in the <b>Sub-reports</b> tab (drop its artifact), deploy the <b>child first</b>, then the ' +
+        'main report &mdash; the links work in the SSRS viewer <b>and</b> in an exported PDF.</p>' +
+    '</div>' +
+
+    '<div class="howto-section">' +
+      '<div class="howto-h">Bursting (one report &rarr; many emails)</div>' +
+      '<p>Bursting splits <b>one</b> report run into <b>many PDFs &mdash; one per recipient</b> &mdash; and emails each ' +
+        'automatically. Each recipient gets only their own page.</p>' +
+      '<div class="o2s-flow">' +
+        '<div class="o2s-node o2s-main"><div class="o2s-node-title">one run</div><div class="o2s-node-sub">many rows</div></div>' +
+        '<div class="o2s-links">' +
+          '<div class="o2s-link"><span class="o2s-num">1</span><div>split by recipient <span class="o2s-arrow">&rarr;</span> <b>one PDF each</b></div></div>' +
+          '<div class="o2s-link"><span class="o2s-num">2</span><div>each PDF <span class="o2s-arrow">&rarr;</span> <b>emailed to that person</b> <em>(automatic)</em></div></div>' +
+        '</div>' +
+        '<div class="o2s-node o2s-child"><div class="o2s-node-title">per-recipient</div><div class="o2s-node-sub">PDF + email</div></div>' +
+      '</div>' +
+      '<p>Configure the recipient list + download the ready-to-run <b>Burst Pack</b> in the <b>Bursting</b> tab.</p>' +
+    '</div>' +
+
+    '<div class="burst-callout"><b>A worked example &mdash; MVWF_PERMIT:</b> the permit report lists every permittee. ' +
+      'Each permit has a link to <b>that permittee&rsquo;s envelope</b> (JV_ENVELOPE_12), and a &ldquo;generate all&rdquo; ' +
+      'link produces <b>every envelope in the same order as the permits</b> &mdash; so the two stacks match for mailing.</div>'
+  );
+}
+
+function initHowto() {
+  const modal = document.getElementById("howto-modal");
+  const body = document.getElementById("howto-body");
+  const openBtn = document.getElementById("howto-open");
+  const closeBtn = document.getElementById("howto-close");
+  const backdrop = document.getElementById("howto-backdrop");
+  if (!modal || !body || !openBtn) return;
+  const open = () => { body.innerHTML = _appHowtoHTML(); modal.hidden = false; };
+  const close = () => { modal.hidden = true; };
+  openBtn.addEventListener("click", open);
+  if (closeBtn) closeBtn.addEventListener("click", close);
+  if (backdrop) backdrop.addEventListener("click", close);
+  document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !modal.hidden) close(); });
+}
+
 // Append all deployment fields to a FormData (used by every convert call).
 function appendDeployFields(fd) {
   const cs = getConnString(); if (cs) fd.append("connection_string", cs);
@@ -1169,10 +1242,27 @@ function renderBurstingTab(data) {
   const keyc = escHtml(burst.burst_key_field || "recipient");
 
   // ---- Turnkey "do exactly this" guide ----
+  const brname = (data && data.report && data.report.name) || "your report";
   const guide = document.createElement("section");
-  guide.className = "burst-section burst-guide";
+  guide.className = "burst-section burst-guide o2s-howto";
   guide.innerHTML =
-    '<h3>Make it run — 4 steps</h3>' +
+    '<h3>What bursting does</h3>' +
+    '<div class="burst-meta">Bursting takes <b>one</b> report run and splits it into <b>many PDFs &mdash; one per ' +
+      'recipient</b> &mdash; then emails each to the right person automatically. Each <code>' + keyc +
+      '</code> gets only their own page.</div>' +
+    '<div class="o2s-flow">' +
+      '<div class="o2s-node o2s-main"><div class="o2s-node-title">' + escHtml(brname) + '</div>' +
+        '<div class="o2s-node-sub">one run &middot; many rows</div></div>' +
+      '<div class="o2s-links">' +
+        '<div class="o2s-link"><span class="o2s-num">1</span><div>split by <code>' + keyc + '</code> ' +
+          '<span class="o2s-arrow">&rarr;</span> <b>one PDF each</b></div></div>' +
+        '<div class="o2s-link"><span class="o2s-num">2</span><div>each PDF <span class="o2s-arrow">&rarr;</span> ' +
+          '<b>emailed to that recipient</b> <em>(automatic)</em></div></div>' +
+      '</div>' +
+      '<div class="o2s-node o2s-child"><div class="o2s-node-title">per-recipient PDF</div>' +
+        '<div class="o2s-node-sub">+ its own email</div></div>' +
+    '</div>' +
+    '<div class="burst-files-sub" style="margin-top:14px">Make it run &mdash; 4 steps</div>' +
     '<ol class="burst-steps">' +
       '<li>In <b>Distribution Settings</b> above: set your <b>email server &amp; sender</b>, and edit ' +
         '<b>Email-Source SQL</b> so it returns <b>one row per recipient</b> (their email + their ' +
@@ -1371,36 +1461,58 @@ function _subDeployGuideHTML(children) {
         '. The tool already declared them <b>hidden</b> in the child, so running the ' +
         'child on its own never prompts for them.</div>'
     : '';
+  const parentName = (state.data && state.data.report && state.data.report.name) || "your main report";
+  const childName = names[0] || "the child report";
+  const paramChips = params.length
+    ? params.map(p => '<code>' + escHtml(p) + '</code>').join(" ")
+    : "";
   return (
-    '<section class="burst-section burst-guide">' +
-      '<h3>Sub-reports (drill-through) — do them in this order</h3>' +
-      '<div class="burst-meta">A drill-through link in the parent opens a <b>child</b> report (here: ' +
-        childList + ') and passes it the clicked row’s values. Build the child here, then deploy ' +
-        '<b>child first</b> — SSRS only looks up the child’s name <b>when the link is clicked</b> (run ' +
-        'time), not when you upload. A parent uploaded before its child uploads fine, but clicking the ' +
-        'link then dies with “report cannot be found.”</div>' +
-      '<div class="burst-files-sub" style="margin-top:12px">1 · BUILD HERE (in this tool)</div>' +
-      '<ol class="burst-steps">' +
-        '<li><b>Main report first</b> — you already converted it. The tool read its drill-through link(s) ' +
-          'and listed each child below.</li>' +
-        '<li><b>Build each child</b> — drop the child’s artifact (its Oracle <code>.xml</code>, an existing ' +
-          '<code>.rdl</code>, or its <code>.sql</code>/<code>.docx</code>) in its slot. The tool builds the ' +
-          'child’s RDL and declares the exact parameters the parent forwards.</li>' +
-        '<li><b>Re-download the main</b> — if a child’s real name differs from the link’s guess, the tool ' +
-          '<b>auto-re-syncs the parent</b> (you’ll see “Parent re-synced”). Re-download the main ' +
-          '<code>.rdl</code> from the <b>RDL</b> tab, plus each child <code>.rdl</code> from its card. ' +
-          '<i>This is the “main → children → main again” step.</i></li>' +
-      '</ol>' +
-      '<div class="burst-files-sub" style="margin-top:14px">2 · DEPLOY TO SSRS (child first)</div>' +
-      '<ol class="burst-steps">' +
-        '<li><b>Upload the child(ren) first</b> — into the <b>same SSRS folder</b> as the parent, under the ' +
-          '<b>exact name</b> shown on each card (the parent references that bare name).</li>' +
-        '<li><b>Upload the main report second.</b> SSRS accepts it either way; child-first just makes the ' +
-          'first click work.</li>' +
-        '<li><b>Test the link</b> — open the main report in SSRS and click the drill-through; it opens the ' +
-          'child with the row’s values.</li>' +
-      '</ol>' +
-      paramNote +
+    '<section class="burst-section burst-guide o2s-howto">' +
+      '<h3>How sub-report (drill-through) links work</h3>' +
+      '<div class="burst-meta">Your <b>main report</b> (<code>' + escHtml(parentName) + '</code>) lists many ' +
+        'records. A <b>drill-through link</b> lets each row open a <b>second report</b> (' + childList + ') for ' +
+        '<i>that</i> record. A separate <b>“generate all”</b> link produces the whole set <b>in the same order</b> ' +
+        'as the rows you just ran.</div>' +
+      // ---- visual flow diagram ----
+      '<div class="o2s-flow">' +
+        '<div class="o2s-node o2s-main"><div class="o2s-node-title">' + escHtml(parentName) + '</div>' +
+          '<div class="o2s-node-sub">main report · every record</div></div>' +
+        '<div class="o2s-links">' +
+          '<div class="o2s-link"><span class="o2s-num">1</span><div>Click <b>one record’s</b> link ' +
+            '<span class="o2s-arrow">&rarr;</span> opens <b>just that one’s</b> child <em>(filtered to it)</em></div></div>' +
+          '<div class="o2s-link"><span class="o2s-num">2</span><div>Click <b>“generate all”</b> ' +
+            '<span class="o2s-arrow">&rarr;</span> <b>every</b> child <em>(same order as the rows)</em></div></div>' +
+        '</div>' +
+        '<div class="o2s-node o2s-child"><div class="o2s-node-title">' + escHtml(childName) + '</div>' +
+          '<div class="o2s-node-sub">the child report(s)</div></div>' +
+      '</div>' +
+      (paramChips
+        ? '<div class="burst-callout"><b>What gets passed:</b> the parent hands the child ' + paramChips +
+            ' for the clicked row, so the child shows exactly that record. The links fire in the SSRS viewer ' +
+            '<b>and</b> in an exported PDF.</div>'
+        : '<div class="burst-callout">The links fire in the SSRS viewer <b>and</b> in an exported PDF.</div>') +
+      // ---- collapsible step-by-step ----
+      '<details class="o2s-details"><summary>Show me the exact steps (build &rarr; deploy &rarr; test)</summary>' +
+        '<div class="burst-files-sub" style="margin-top:10px">1 · BUILD HERE (in this tool)</div>' +
+        '<ol class="burst-steps">' +
+          '<li><b>Main report first</b> — already converted. The tool read its link(s) and listed each child below.</li>' +
+          '<li><b>Build each child</b> — drop the child’s artifact (Oracle <code>.xml</code>, a <code>.rdl</code>, ' +
+            'or <code>.sql</code>/<code>.docx</code>) in its slot. The tool builds the child and declares the exact ' +
+            'parameters the parent forwards.</li>' +
+          '<li><b>Re-download the main</b> — if a child’s real name differs from the link’s guess the tool ' +
+            '<b>auto-re-syncs the parent</b> (“Parent re-synced”). Re-download the main <code>.rdl</code> from the ' +
+            '<b>RDL</b> tab + each child from its card. <i>(“main &rarr; children &rarr; main again.”)</i></li>' +
+        '</ol>' +
+        '<div class="burst-files-sub" style="margin-top:12px">2 · DEPLOY TO SSRS (child first)</div>' +
+        '<ol class="burst-steps">' +
+          '<li><b>Upload the child(ren) first</b> — into the <b>same SSRS folder</b> as the parent, under the ' +
+            '<b>exact name</b> on each card (SSRS resolves the link by that bare name, at click time).</li>' +
+          '<li><b>Upload the main report second.</b></li>' +
+          '<li><b>Test</b> — open the main in SSRS, click <b>one record’s</b> link (its child) and the ' +
+            '<b>“generate all”</b> link (the ordered set).</li>' +
+        '</ol>' +
+        paramNote +
+      '</details>' +
     '</section>'
   );
 }
@@ -1836,6 +1948,7 @@ function wireEverything() {
   if (subAddBtn) subAddBtn.addEventListener("click", subAddManual);
   initSharedDsPath();
   initReportServerUrl();
+  initHowto();
   wireBatch();
   console.log("[Oracle2SSRS] ready");
 }

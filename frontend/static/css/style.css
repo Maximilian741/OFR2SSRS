@@ -1381,6 +1381,65 @@ body.show-advanced .advanced-toggle { background: var(--panel-2); color: var(--t
   font-size: 12.5px; color: var(--text); line-height: 1.55;
 }
 .burst-callout code { background: rgba(255,255,255,0.06); color: var(--accent-2); padding: 1px 5px; border-radius: 4px; }
+/* ---- Interactive "how it works" flow diagram (sub-reports + bursting) ---- */
+.o2s-flow { display: flex; align-items: stretch; gap: 10px; margin: 14px 0 2px; flex-wrap: wrap; }
+.o2s-node {
+  flex: 1 1 150px; min-width: 130px; background: var(--panel);
+  border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px;
+  text-align: center; display: flex; flex-direction: column; justify-content: center;
+}
+.o2s-node.o2s-main { border-color: rgba(94,234,212,0.5); }
+.o2s-node.o2s-child { border-color: rgba(125,211,252,0.5); }
+.o2s-node-title { font-family: var(--font-mono); font-size: 13px; font-weight: 700; color: var(--text); word-break: break-all; }
+.o2s-node-sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+.o2s-links { flex: 1.4 1 200px; min-width: 180px; display: flex; flex-direction: column; gap: 8px; justify-content: center; }
+.o2s-link { display: flex; align-items: flex-start; gap: 8px; font-size: 12px; color: var(--text); line-height: 1.45; }
+.o2s-link em { color: var(--text-muted); font-style: italic; }
+.o2s-num {
+  flex: 0 0 auto; width: 18px; height: 18px; border-radius: 50%;
+  background: var(--accent); color: #07241f; font-size: 11px; font-weight: 800;
+  display: inline-flex; align-items: center; justify-content: center; margin-top: 1px;
+}
+.o2s-arrow { color: var(--accent); font-weight: 700; padding: 0 2px; }
+.o2s-details { margin-top: 14px; }
+.o2s-details > summary { cursor: pointer; font-size: 12.5px; font-weight: 600; color: var(--accent-2); padding: 4px 0; user-select: none; }
+.o2s-details[open] > summary { margin-bottom: 6px; }
+/* ---- App-level "How it works" button + modal ---- */
+.topbar-howto {
+  background: rgba(94,234,212,0.10); border: 1px solid rgba(94,234,212,0.30);
+  color: var(--accent); font-size: 12.5px; font-weight: 600; cursor: pointer;
+  padding: 5px 11px; border-radius: 7px; margin-right: 10px; transition: background .15s, border-color .15s;
+}
+.topbar-howto:hover { background: rgba(94,234,212,0.18); border-color: rgba(94,234,212,0.55); }
+.howto-modal { position: fixed; inset: 0; z-index: 1000; display: flex; align-items: flex-start; justify-content: center; }
+.howto-modal[hidden] { display: none; }
+.howto-backdrop { position: absolute; inset: 0; background: rgba(2,6,12,0.72); backdrop-filter: blur(3px); }
+.howto-panel {
+  position: relative; margin: 5vh auto; width: min(760px, 92vw); max-height: 90vh; overflow-y: auto;
+  background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+  padding: 26px 30px 30px; box-shadow: 0 24px 60px rgba(0,0,0,0.5);
+}
+.howto-close {
+  position: absolute; top: 12px; right: 14px; width: 32px; height: 32px; border-radius: 8px;
+  background: transparent; border: 1px solid var(--border); color: var(--text-muted);
+  font-size: 20px; line-height: 1; cursor: pointer;
+}
+.howto-close:hover { color: var(--text); border-color: var(--accent); }
+.howto-panel h2 { margin: 0 0 6px; font-size: 20px; color: var(--text); }
+.howto-lead { font-size: 13px; color: var(--text-muted); line-height: 1.6; margin: 0 0 20px; }
+.howto-section { margin: 22px 0 0; }
+.howto-h { font-size: 14px; font-weight: 700; color: var(--accent-2); margin: 0 0 8px; }
+.howto-section p { font-size: 12.5px; color: var(--text); line-height: 1.6; margin: 6px 0; }
+.howto-pipe { display: flex; align-items: stretch; flex-wrap: wrap; gap: 6px; margin: 10px 0 4px; }
+.howto-pipe-step {
+  flex: 1 1 120px; min-width: 110px; background: var(--bg, rgba(255,255,255,0.02));
+  border: 1px solid var(--border); border-radius: 9px; padding: 10px 12px;
+  font-size: 12.5px; font-weight: 600; color: var(--text); display: flex; flex-direction: column; gap: 4px;
+}
+.howto-pipe-step small { font-weight: 400; color: var(--text-muted); font-size: 11px; line-height: 1.4; }
+.howto-pipe-step .o2s-num { width: 20px; height: 20px; }
+.howto-pipe-arr { align-self: center; color: var(--accent); font-weight: 800; font-size: 16px; }
+@media (max-width: 560px) { .howto-pipe-arr { display: none; } }
 .burst-files > summary {
   cursor: pointer; font-size: 12.5px; color: var(--text-muted);
   font-weight: 600; padding: 2px 0;

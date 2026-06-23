@@ -193,9 +193,62 @@ def set_drillthrough_hyperlinks(rdl_xml: str, server_url: str | None = None) -> 
     return _DRILLTHROUGH_RE.sub(_repl, rdl_xml)
 
 
+_SORT_PARAM_NAME_RE = re.compile(r"(?i)(^|_)sort$")
+_REPORTPARAM_RE = re.compile(r'<ReportParameter Name="([^"]+)">.*?</ReportParameter>',
+                             flags=re.DOTALL)
+_COMMANDTEXT_RE = re.compile(r"<CommandText>(.*?)</CommandText>",
+                            flags=re.DOTALL | re.IGNORECASE)
+
+
+def align_drillthrough_sort_default(rdl_xml: str) -> str:
+    """Make a master report's records come out in the SAME order as its
+    sub-report's bulk "generate all" list -- with ZERO manual parameter setting.
+
+    The envelope/sub-report child sorts by site (its site-include toggle now
+    defaults YES). For the master's records to line up 1:1, the master must also
+    sort by site. The master already has a SORT-selector parameter wired to a
+    ``DECODE(:P_SORT, ... 'SITE', S.Site_Name ...)`` ORDER BY -- but it defaults to
+    the neutral ``=Nothing`` (which falls to the DECODE's default branch, a
+    DIFFERENT order). This defaults that selector to ``SITE`` so the master prints
+    in site order out of the box.
+
+    Generic + safe: only acts when (a) the report links to a sub-report
+    (Drillthrough or an ``rs:Command=Render`` hyperlink), AND (b) it has a
+    parameter whose prompt/name is a sort selector, AND (c) that parameter is
+    DECODEd with a literal ``'SITE'`` branch in a dataset query. No-op otherwise;
+    the parameter stays user-overridable (not hidden)."""
+    if not rdl_xml:
+        return rdl_xml
+    if "<Drillthrough" not in rdl_xml and "rs:Command=Render" not in rdl_xml:
+        return rdl_xml
+    cmd_texts = _COMMANDTEXT_RE.findall(rdl_xml)
+
+    def _site_decoded(param: str) -> bool:
+        bind = re.compile(r":\s*" + re.escape(param) + r"\b", re.IGNORECASE)
+        for ct in cmd_texts:
+            if bind.search(ct) and re.search(r"DECODE\s*\(.*?'SITE'", ct,
+                                             re.IGNORECASE | re.DOTALL):
+                return True
+        return False
+
+    def _repl(m):
+        block, name = m.group(0), m.group(1)
+        pm = re.search(r"<Prompt>([^<]*)</Prompt>", block)
+        prompt = (pm.group(1) if pm else "").strip().lower()
+        is_sort = prompt in ("sort", "sort order") or _SORT_PARAM_NAME_RE.search(name)
+        if (is_sort and "<Value>=Nothing</Value>" in block
+                and _site_decoded(name)):
+            return block.replace("<Value>=Nothing</Value>",
+                                 "<Value>SITE</Value>", 1)
+        return block
+
+    return _REPORTPARAM_RE.sub(_repl, rdl_xml)
+
+
 __all__ = [
     "inject_connection_string",
     "set_datasource_reference",
     "relax_generate_all_drillthroughs",
     "set_drillthrough_hyperlinks",
+    "align_drillthrough_sort_default",
 ]

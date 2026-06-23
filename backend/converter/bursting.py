@@ -852,7 +852,7 @@ _EMAIL_CONFIG_TEMPLATE = """{
   "SmtpFrom":              "[email protected]",
   "SmtpCredentialTarget":  "O2S_SMTP",
 
-  "BindParameter":         "P___KEY__",
+  "BindParameter":         "__BIND_PARAM__",
   "BodyIsHtml":            false,
   "BodyTemplate":          "Dear __NAME__,\\n\\nYour report is attached. Reference: __KEY__.\\n\\n— App Reporting",
 
@@ -874,10 +874,52 @@ def build_email_powershell_script(report, info, rdl_path):
     return out
 
 
+def _bind_param_for_key(report, burst_key_field):
+    """Best report PARAMETER to filter the report to one burst-key value -- the
+    SSRS parameter the driver sets per row. Matches the burst-key column to a
+    ReportParameter: an exact de-prefixed name match (burst key 'Perm_Name' ->
+    'P_PERM_NAME') wins; else a clear report-specific placeholder 'P_<KEY>' the
+    user edits (better than the old opaque 'P___KEY__'). Generic, name-based."""
+    if not burst_key_field:
+        return "P___KEY__"
+
+    def _n(s):
+        return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+    key_n = _n(burst_key_field)
+    params = [getattr(p, "name", "") for p in getattr(report, "parameters", [])]
+    # 1. exact de-prefixed match (P_PERM_NAME == key Perm_Name)
+    for p in params:
+        if _n(re.sub(r"(?i)^p_?", "", p)) == key_n and key_n:
+            return p
+    # 2. clear, report-specific fill-in placeholder (NOT the opaque P___KEY__).
+    return "P_" + re.sub(r"[^A-Za-z0-9]", "_", burst_key_field).upper()
+
+
+def _pick_bind_candidates(report, burst_key_field):
+    """Report parameters that plausibly filter to one burst key -- a parameter
+    whose name shares the burst key's leading token (e.g. key 'Permit' ->
+    P_PERM_NUM / P_PERM_NAME / P_PERMITTEE). For the README's guidance list."""
+    ktoks = [t for t in re.split(r"[^a-z0-9]+", str(burst_key_field or "").lower()) if t]
+    if not ktoks:
+        return []
+    pref = ktoks[0][:4]
+    out = []
+    for p in (getattr(report, "parameters", []) or []):
+        pn = getattr(p, "name", "")
+        ptoks = [t for t in re.split(r"[^a-z0-9]+", pn.lower()) if t and t != "p"]
+        if any(t.startswith(pref) or pref.startswith(t) for t in ptoks):
+            out.append(pn)
+    return out[:6]
+
+
 def build_email_config_template(report, info):
     """Sample burst.config.json for this specific report."""
     rname = _safe_name((report.name if hasattr(report, "name") else "") or "report")
-    return _EMAIL_CONFIG_TEMPLATE.replace("__REPORT_NAME__", rname)
+    bind = _bind_param_for_key(report, (info or {}).get("burst_key_field"))
+    return (_EMAIL_CONFIG_TEMPLATE
+            .replace("__REPORT_NAME__", rname)
+            .replace("__BIND_PARAM__", bind))
 
 
 def build_service_account_checklist(report, info):
@@ -984,6 +1026,12 @@ def build_burst_readme(report, info, config):
         "   ```\n"
         "5. **Edit `burst.config.json`** -- specifically the `SmtpServer` (currently `"
         + smtp_host + "`), `ReportServer`, `DbServer`, `DbName`, and the burst SQL if needed.\n"
+        "   - **`BindParameter`** (currently `" + str((config or {}).get("BindParameter")
+            or _bind_param_for_key(report, bk)) + "`) must be the report parameter "
+        "that filters the report to ONE `" + bk + "`. Set it to the matching parameter "
+        "from this report: " + (", ".join("`" + p + "`" for p in
+            _pick_bind_candidates(report, bk)) or "`(none auto-detected)`") + ". "
+        "The driver passes each row's `" + bk + "` as this parameter's value.\n"
         "6. **Dry-run first** -- no email actually leaves:\n"
         "   ```powershell\n"
         "   powershell -ExecutionPolicy Bypass -File .\\Send-Reports.ps1 -DryRun\n"

@@ -23,9 +23,20 @@
     </div>
   </div>
   <div class="topbar-meta">
+    <button id="howto-open" class="topbar-howto" type="button" title="How this tool works">
+      <span aria-hidden="true">&#9432;</span> How it works
+    </button>
     <span class="topbar-pill" id="status-pill">Ready</span>
   </div>
 </header>
+
+<div id="howto-modal" class="howto-modal" hidden>
+  <div class="howto-backdrop" id="howto-backdrop"></div>
+  <div class="howto-panel" role="dialog" aria-modal="true" aria-label="How Oracle2SSRS works">
+    <button class="howto-close" id="howto-close" type="button" aria-label="Close">&times;</button>
+    <div id="howto-body"></div>
+  </div>
+</div>
 
 <div class="layout">
 
