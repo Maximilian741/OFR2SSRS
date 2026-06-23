@@ -123,6 +123,26 @@ function initReportServerUrl() {
   } catch (e) { /* private mode */ }
 }
 
+// Friendly DISPLAY label for the cover "generate all" sub-report link (e.g.
+// "JV Standard 12 x 9 Envelope"). Not a secret -> persisted in localStorage.
+function getGenerateAllLabel() {
+  const el = document.getElementById("generate-all-label");
+  return el ? (el.value || "").trim() : "";
+}
+
+function initGenerateAllLabel() {
+  const el = document.getElementById("generate-all-label");
+  if (!el) return;
+  try {
+    const saved = localStorage.getItem("o2s_generate_all_label");
+    if (saved && !el.value) el.value = saved;
+    el.addEventListener("change", function () {
+      try { localStorage.setItem("o2s_generate_all_label", (el.value || "").trim()); }
+      catch (e) { /* private mode */ }
+    });
+  } catch (e) { /* private mode */ }
+}
+
 // ----- App-level "How it works" modal -----
 function _appHowtoHTML() {
   return (
@@ -201,6 +221,7 @@ function appendDeployFields(fd) {
   const cs = getConnString(); if (cs) fd.append("connection_string", cs);
   const dsp = getSharedDsPath(); if (dsp) fd.append("shared_ds_path", dsp);
   const rsu = getReportServerUrl(); if (rsu) fd.append("report_server_url", rsu);
+  const gal = getGenerateAllLabel(); if (gal) fd.append("generate_all_label", gal);
 }
 
 // ----- Report images (seals / logos / watermarks) -----
@@ -1948,6 +1969,7 @@ function wireEverything() {
   if (subAddBtn) subAddBtn.addEventListener("click", subAddManual);
   initSharedDsPath();
   initReportServerUrl();
+  initGenerateAllLabel();
   initHowto();
   wireBatch();
   console.log("[Oracle2SSRS] ready");

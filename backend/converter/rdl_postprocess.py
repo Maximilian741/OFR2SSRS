@@ -245,10 +245,56 @@ def align_drillthrough_sort_default(rdl_xml: str) -> str:
     return _REPORTPARAM_RE.sub(_repl, rdl_xml)
 
 
+_TEXTBOX_RE = re.compile(r"<Textbox\b.*?</Textbox>", re.DOTALL)
+
+
+def set_generate_all_link_text(rdl_xml: str, label: str = "") -> str:
+    """Give the cover "generate all" sub-report link a friendly DISPLAY label.
+
+    After the drill-through becomes a URL <Hyperlink>, the textbox hosting the
+    bulk "generate all" link still shows whatever placeholder text the Oracle
+    formula left (e.g. "CP URL ALL ENVELOPE"). This rewrites the display text of
+    every textbox whose hyperlink is a GENERATE-ALL link (a Render URL with NO
+    per-record key) to ``label`` -- e.g. "JV Standard 12 x 9 Envelope" -- so the
+    end user knows exactly what they're generating. When ``label`` is empty the
+    text falls back to the child report's name parsed from the URL (still far
+    clearer than the raw placeholder). Per-record links (URL carries P_ORG_ID
+    etc.) are left untouched. No-op when there are no hyperlinks."""
+    if not rdl_xml or "<Hyperlink>" not in rdl_xml:
+        return rdl_xml
+
+    def _repl(m):
+        block = m.group(0)
+        hl = re.search(r"<Hyperlink>([^<]*)</Hyperlink>", block)
+        if not hl:
+            return block
+        url = hl.group(1)
+        if "Command=Render" not in url:
+            return block
+        if "P_ORG_ID" in url or "&amp;P_" in url or re.search(r"&P_[A-Za-z]", url):
+            return block  # per-record link -> leave its row value alone
+        lbl = (label or "").strip()
+        if not lbl:
+            mrep = re.search(r"/([A-Za-z0-9_]+)&(?:amp;)?rs:Command=Render", url)
+            lbl = mrep.group(1) if mrep else "Open report"
+        safe = html.escape(lbl, quote=False)
+        # Replace the display text of the first text run (the visible label).
+        new, n = re.subn(r"(<TextRun>\s*<Value>).*?(</Value>)",
+                         lambda _m: _m.group(1) + safe + _m.group(2),
+                         block, count=1, flags=re.DOTALL)
+        if n == 0:  # textbox without an explicit TextRun Value -> try a bare Value
+            new = re.sub(r"<Value>.*?</Value>",
+                         f"<Value>{safe}</Value>", block, count=1, flags=re.DOTALL)
+        return new
+
+    return _TEXTBOX_RE.sub(_repl, rdl_xml)
+
+
 __all__ = [
     "inject_connection_string",
     "set_datasource_reference",
     "relax_generate_all_drillthroughs",
     "set_drillthrough_hyperlinks",
     "align_drillthrough_sort_default",
+    "set_generate_all_link_text",
 ]

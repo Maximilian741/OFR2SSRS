@@ -1088,6 +1088,26 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
 # ---------------------------------------------------------------------------
 
 
+def _should_hide_parameter(param_name: str, was_declared_in_xml: bool) -> bool:
+    """Hide a parameter from the end-user prompt when it is internal wiring, not
+    a real filter. Generic across reports: a parameter is hidden when it is a
+    query-bind-only param (synthesized from a SQL :bind, never declared as an
+    Oracle <userParameter>), OR its name matches a system/internal pattern
+    (report-server URL, file path, lexical criteria, subtitle, distribution,
+    envelope/url builder, or a drill-through *_NUM id). The caller already
+    handles Oracle display="no"."""
+    name_upper = (param_name or "").upper()
+    if not was_declared_in_xml:
+        return True
+    internal_patterns = ("REPORT_SERVER", "_PATH", "_URL", "CRITERIA",
+                         "SUBTITLE", "DISTR", "ENVELOPE")
+    if any(p in name_upper for p in internal_patterns):
+        return True
+    if name_upper.endswith("_NUM"):
+        return True
+    return False
+
+
 def _augment_parameters_from_binds(report: ParsedReport) -> None:
     """Add a ReportParameter for any bind variable that is referenced in a
     query's SQL but NOT declared in the source XML's <userParameter> list.
@@ -1126,7 +1146,7 @@ def _augment_parameters_from_binds(report: ParsedReport) -> None:
                     name=bind,
                     datatype="character",
                     label=bind,
-                    display=True,
+                    display=not _should_hide_parameter(bind, was_declared_in_xml=False),
                 )
                 report.parameters.append(rp)
 
@@ -1245,7 +1265,11 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
         # Use the parameter's declared name verbatim as the prompt; SSRS
         # auto-renders underscores as spaces in the parameter form.
         _sub(rp, "Prompt", p.label or p.name)
-        if not p.display:
+        # Hide when explicitly display="no" OR when the name matches an
+        # internal/system pattern (report-server / path / url / criteria /
+        # subtitle / distr / envelope / *_NUM) -- keeps the end-user prompt to
+        # the real filters only.
+        if not p.display or _should_hide_parameter(p.name, was_declared_in_xml=True):
             _sub(rp, "Hidden", "true")
     return root
 
@@ -2248,6 +2272,42 @@ def _build_token_resolver(report: ParsedReport):
                     return ("formula", _tr["expr"],
                             f"formula {canonical!r} translated deterministically -> "
                             f"{_tr['expr'][:120]}")
+                # Last resort before a blank placeholder: an uncomputable formula
+                # whose NAME (minus the CF_/CP_/CS_/CG_ prefix) UNIQUELY matches a
+                # real data column almost always just FORMATS or SELECTS that
+                # column (e.g. CF_PERMITTEES wraps the PERMITTEE column;
+                # F_Get_Permittees() is uncompilable so the body translation
+                # fails). Resolve to that column through the normal field path so
+                # the value actually RENDERS -- in-scope -> Fields!, cross-dataset
+                # -> a scope-safe Lookup -- instead of shipping a blank card.
+                # Strict: exact name or a singular/plural pair, the match must be
+                # UNIQUE, and we only adopt it when it resolves to something
+                # renderable (never downgrade to =Nothing). Otherwise fall through
+                # to the placeholder below unchanged.
+                _stem = re.sub(r"^(CF|CP|CS|CG|CT)_", "", u)
+                if _stem and _stem != u:
+                    def _np(s):  # plural-insensitive normalize
+                        return s[:-1] if s.endswith("S") else s
+                    _cands = [fu for fu in all_field_owner
+                              if fu == _stem or _np(fu) == _np(_stem)]
+                    if len(_cands) == 1:
+                        _cu = _cands[0]
+                        _mc, _owner = all_field_owner[_cu]
+                        _dskey = (dataset_name or "").upper()
+                        # In the bound dataset -> a direct field reference.
+                        if _dskey and _dskey in dataset_fields and _cu in dataset_fields[_dskey]:
+                            return ("field", dataset_fields[_dskey][_cu],
+                                    f"formula {canonical!r} uncomputable; bound to "
+                                    f"in-scope data column {_mc!r}.")
+                        # In a LINKED detail dataset -> a scope-safe Lookup back
+                        # to it (resolve() can't be reused here: a same-named
+                        # parameter alias would shadow the data column).
+                        _lk = _lookup_for_child(_mc, _owner, dataset_name)
+                        if _lk:
+                            return ("field_other_ds", _lk,
+                                    f"formula {canonical!r} uncomputable; bound to "
+                                    f"same-stem column {_mc!r} via Lookup from "
+                                    f"{_owner!r}.")
             if u in formula_ds_cols:
                 # Carried as a column of the formula-resolution dataset.
                 # Bind to it with a scoped First() so the value resolves
@@ -6672,6 +6732,35 @@ def _emit_field_textbox(
     return (True, rel_top + place_h)
 
 
+def _record_has_watermark(report) -> bool:
+    """True if the per-record layout sits on top of a large background image (a
+    seal/watermark). When present, content sub-frames must be drawn with a
+    TRANSPARENT fill instead of the usual white card, so the watermark shows
+    through continuously instead of being sliced into white bands by each frame
+    box. Cached on the report. Generic: keyed on a large (>=3in) image field, not
+    any report name."""
+    cached = getattr(report, "_has_watermark_cache", None)
+    if cached is not None:
+        return cached
+    found = [False]
+
+    def _walk(groups):
+        for g in groups or []:
+            if found[0]:
+                return
+            for f in getattr(g, "fields", []) or []:
+                if (getattr(f, "kind", "") == "image"
+                        and float(getattr(f, "width", 0) or 0) >= 3.0
+                        and float(getattr(f, "height", 0) or 0) >= 3.0):
+                    found[0] = True
+                    return
+            _walk(getattr(g, "children", []) or [])
+
+    _walk(getattr(report, "layout", []) or [])
+    report._has_watermark_cache = found[0]
+    return found[0]
+
+
 def _emit_frame_rect(
     parent_items, group, parent_x, parent_y, parent_w,
     report, cover_title_lines, name_prefix, counter,
@@ -6728,8 +6817,11 @@ def _emit_frame_rect(
     style = _sub(rect, "Style")
     border_w = float(getattr(group, "border_width", 0) or 0)
     if border_w > 0:
-        # Visible frame: white card + black border (Oracle look).
-        _sub(style, "BackgroundColor", "#ffffff")
+        # Visible frame: black border. White card fill UNLESS a watermark/seal
+        # sits behind the record -- then keep the fill transparent so the seal
+        # shows through continuously instead of being sliced into white bands.
+        if not _record_has_watermark(report):
+            _sub(style, "BackgroundColor", "#ffffff")
         border = _sub(style, "Border")
         _sub(border, "Style", "Solid")
         _sub(border, "Color", "#000000")
@@ -7243,7 +7335,11 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
     _sub(rect, "KeepTogether", "true")
     rstyle = _sub(rect, "Style")
     palette = _resolve_palette(report)
-    _sub(rstyle, "BackgroundColor", palette["card_bg"])
+    # White card behind the record -- UNLESS a watermark/seal sits behind it,
+    # then keep it transparent so the seal shows through (white paper still backs
+    # the page; only the opaque fill that sliced the seal is dropped).
+    if not _record_has_watermark(report):
+        _sub(rstyle, "BackgroundColor", palette["card_bg"])
     # Outer border around the per-record content -- gives the
     # certificate / letter its own visible frame on the page. The
     # individual sub-frames (named M_* children in the Oracle

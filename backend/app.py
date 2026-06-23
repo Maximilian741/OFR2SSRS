@@ -35,7 +35,8 @@ from converter.rdl_postprocess import (inject_connection_string,  # noqa: E402
                                        set_datasource_reference,
                                        relax_generate_all_drillthroughs,
                                        set_drillthrough_hyperlinks,
-                                       align_drillthrough_sort_default)
+                                       align_drillthrough_sort_default,
+                                       set_generate_all_link_text)
 from converter import bursting as _bursting_mod  # noqa: E402
 from converter.parsers.oracle_xml import parse_oracle_xml as _parse_oracle_xml  # noqa: E402
 
@@ -116,6 +117,7 @@ _DS_PATH_STORE: dict = {}
 # <Hyperlink>s pinging that server, so the links work in BOTH the SSRS viewer
 # AND an exported PDF (a Drillthrough is interactive-only).
 _REPORT_URL_STORE: dict = {}
+_GEN_ALL_LABEL_STORE: dict = {}
 
 
 def _apply_deploy_datasource(rdl_xml: str, req) -> str:
@@ -146,6 +148,13 @@ def _apply_deploy_datasource(rdl_xml: str, req) -> str:
                or req.values.get("shared_ds_path") or "").strip()
     rsu = (form.get("report_server_url") or body.get("report_server_url")
            or req.values.get("report_server_url") or "").strip()
+    gen_all_label = (form.get("generate_all_label") or body.get("generate_all_label")
+                     or req.values.get("generate_all_label") or "").strip()
+    if gen_all_label:
+        _GEN_ALL_LABEL_STORE[_sid()] = gen_all_label
+        _evict(_GEN_ALL_LABEL_STORE)
+    else:
+        gen_all_label = _GEN_ALL_LABEL_STORE.get(_sid(), "")
     if ds_path:
         _DS_PATH_STORE[_sid()] = ds_path
         _evict(_DS_PATH_STORE)
@@ -164,6 +173,9 @@ def _apply_deploy_datasource(rdl_xml: str, req) -> str:
     #    back to SSRS server globals (zero-config on SSRS 2016+).
     rdl_xml = relax_generate_all_drillthroughs(rdl_xml)
     rdl_xml = set_drillthrough_hyperlinks(rdl_xml, rsu)
+    # Give the cover "generate all" link a friendly display label (e.g. "JV
+    # Standard 12 x 9 Envelope") so the end user knows what they're generating.
+    rdl_xml = set_generate_all_link_text(rdl_xml, gen_all_label)
     # Default the master's sort selector to SITE so its records line up 1:1 with
     # the sub-report's site-ordered bulk list -- no manual parameter setting.
     rdl_xml = align_drillthrough_sort_default(rdl_xml)
