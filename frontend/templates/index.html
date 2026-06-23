@@ -108,17 +108,19 @@
       </div>
     </section>
 
-    <section class="side-section">
-      <div class="side-heading">Sub-report link label (optional)</div>
+    <section class="side-section" style="border:2px solid #2563eb;border-radius:8px;padding:10px;background:#eff6ff">
+      <div class="side-heading" style="color:#1d4ed8">&#128279; Cover hyperlink text &mdash; type it here</div>
       <input id="generate-all-label" type="text" autocomplete="off" spellcheck="false"
              class="conn-input"
              placeholder="e.g. JV Standard 12 x 9 Envelope">
       <div class="muted-note conn-note">
-        The text shown on the cover&rsquo;s <b>&ldquo;generate all&rdquo;</b>
-        sub-report link. Type what the end user should read &mdash; e.g.
-        <code>JV Standard 12 x 9 Envelope</code> &mdash; instead of the raw
-        column name. Leave blank to fall back to the child report&rsquo;s name.
-        Updates the RDL on the next convert/download. Remembered in this browser.
+        This is the <b>exact words the envelope hyperlink shows</b> on the cover
+        page (both the &ldquo;Generate Envelopes&rdquo; link and the
+        &ldquo;[Permittee] is a hyperlink to&hellip;&rdquo; line). Type
+        <code>JV Standard 12 x 9 Envelope</code> here, then Convert/Download &mdash;
+        the link reads exactly that instead of <code>JV_ENVELOPE_12</code>.
+        <b>If you leave this blank it falls back to the report name</b> (the tool
+        can&rsquo;t invent the envelope&rsquo;s description). Remembered in this browser.
       </div>
     </section>
 

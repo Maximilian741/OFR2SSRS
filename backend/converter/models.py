@@ -236,6 +236,13 @@ class LayoutField:
     # Oracle rotationAngle (centidegrees, counter-clockwise; e.g. 27000 = 270deg)
     # -> degrees. A sideways window-envelope address prints at 270deg. 0 = upright.
     rotation: float = 0.0
+    # Per-segment rich text for a kind="text" boilerplate that mixes fonts within
+    # one object (Oracle <textSegment>s, each with its own <font>). Each entry:
+    # {"text": str, "bold": bool, "italic": bool, "underline": bool,
+    #  "size": int, "color": str}. Empty when the text is uniform. The generator
+    # emits one TextRun per segment so e.g. an UNbold caption + a BOLD value on
+    # the next line render with their real weights (the license body).
+    segments: list = field(default_factory=list)
 
 
 # LayoutGroup.kind values:

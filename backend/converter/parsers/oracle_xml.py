@@ -732,15 +732,32 @@ def _layout_field_from_element(el) -> LayoutField:
     if text_settings is not None and not align:
         align = _attr(text_settings, "justify")
 
+    segments: List[dict] = []
     if tag == "text":
         segs: List[str] = []
         first_font = None
         for ts in _iter_descendants(el, "textSegment"):
+            seg_font = _find(ts, "font")
             if first_font is None:
-                first_font = _find(ts, "font")
-            for s in _findall(ts, "string"):
-                if s.text:
-                    segs.append(s.text)
+                first_font = seg_font
+            seg_text = "".join(s.text for s in _findall(ts, "string") if s.text)
+            segs.append(seg_text)
+            # Per-segment style so a mixed-font <text> (e.g. an unbold caption +
+            # a BOLD value beneath it) keeps each segment's real weight/size.
+            sb = (_attr(seg_font, "weight").lower() == "bold"
+                  or _attr(seg_font, "bold").lower() == "yes") if seg_font is not None else bold
+            ss = _attr(seg_font, "style").lower() if seg_font is not None else ""
+            segments.append({
+                "text": seg_text,
+                "bold": sb,
+                "italic": (ss == "italic"
+                           or (_attr(seg_font, "italic").lower() == "yes" if seg_font is not None else False)),
+                "underline": (_attr(seg_font, "underline").lower() == "yes"
+                              if seg_font is not None else False),
+                "size": (_int_attr(seg_font, "size", 0) if seg_font is not None else 0) or 0,
+                "color": ((_attr(seg_font, "color") or _attr(seg_font, "foreground"))
+                          if seg_font is not None else ""),
+            })
         text_value = "".join(segs).strip()
         if first_font is not None:
             font_size = _int_attr(first_font, "size", 10) or 10
@@ -750,6 +767,13 @@ def _layout_field_from_element(el) -> LayoutField:
             italic = style == "italic" or _attr(first_font, "italic").lower() == "yes"
             underline = _attr(first_font, "underline").lower() == "yes"
             color = _attr(first_font, "color") or _attr(first_font, "foreground")
+        # Only keep segments when they actually MIX styles (else uniform path is
+        # simpler + unchanged). "Mix" = any segment differs in bold/size/italic.
+        _b0 = segments[0]["bold"] if segments else False
+        _s0 = segments[0]["size"] if segments else 0
+        if not any((s["bold"] != _b0) or (s["size"] and _s0 and s["size"] != _s0)
+                   for s in segments):
+            segments = []
 
     font = _find(el, "font")
     if font is not None:
@@ -822,6 +846,7 @@ def _layout_field_from_element(el) -> LayoutField:
         format_mask=format_mask,
         visible=visible,
         rotation=rotation,
+        segments=segments,
     )
 
 

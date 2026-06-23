@@ -1421,38 +1421,65 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
                    italic: bool = False,
                    underline: bool = False,
                    writing_mode: Optional[str] = None,
-                   drillthrough: Optional[dict] = None) -> ET.Element:
+                   drillthrough: Optional[dict] = None,
+                   segments_spec: Optional[list] = None) -> ET.Element:
     """Emit a styled Textbox.
 
     The optional kwargs let _build_tablix dial in mockup-matching styling
     (header band color, white-on-band foreground, alternating row
     background expression, centered headers, etc.) without forking the
     function. All new kwargs default to backwards-compatible values.
+
+    ``segments_spec`` (optional): a list of per-LINE runs for a MIXED-font
+    Oracle <text> (e.g. an unbold caption then a BOLD value beneath). Each entry
+    is {"value": rdl_value, "bold": bool, "italic": bool, "underline": bool,
+    "font_size": "18pt", "color": str}. Emitted as one Paragraph per entry so
+    each line carries its own weight/size; ``value``/``bold``/``font_size`` are
+    ignored when this is given.
     """
     tb = _sub(parent, "Textbox")
     tb.set("Name", name)
     paragraphs = _sub(tb, "Paragraphs")
-    para = _sub(paragraphs, "Paragraph")
-    if text_align:
-        para_style = _sub(para, "Style")
-        _sub(para_style, "TextAlign", text_align)
-    runs = _sub(para, "TextRuns")
-    run = _sub(runs, "TextRun")
-    _sub(run, "Value", value)
-    if drillthrough:
-        _emit_drillthrough(run, drillthrough)
-    style = _sub(run, "Style")
-    _sub(style, "FontSize", font_size)
-    if font_family:
-        _sub(style, "FontFamily", font_family)
-    if bold:
-        _sub(style, "FontWeight", "Bold")
-    if italic:
-        _sub(style, "FontStyle", "Italic")
-    if underline:
-        _sub(style, "TextDecoration", "Underline")
-    if fg:
-        _sub(style, "Color", fg)
+    if segments_spec:
+        for seg in segments_spec:
+            para = _sub(paragraphs, "Paragraph")
+            if text_align:
+                _sub(_sub(para, "Style"), "TextAlign", text_align)
+            run = _sub(_sub(para, "TextRuns"), "TextRun")
+            _sub(run, "Value", seg.get("value", ""))
+            sstyle = _sub(run, "Style")
+            _sub(sstyle, "FontSize", seg.get("font_size") or font_size)
+            if font_family:
+                _sub(sstyle, "FontFamily", font_family)
+            if seg.get("bold"):
+                _sub(sstyle, "FontWeight", "Bold")
+            if seg.get("italic"):
+                _sub(sstyle, "FontStyle", "Italic")
+            if seg.get("underline"):
+                _sub(sstyle, "TextDecoration", "Underline")
+            _sub(sstyle, "Color", seg.get("color") or fg or "#111111")
+    else:
+        para = _sub(paragraphs, "Paragraph")
+        if text_align:
+            para_style = _sub(para, "Style")
+            _sub(para_style, "TextAlign", text_align)
+        runs = _sub(para, "TextRuns")
+        run = _sub(runs, "TextRun")
+        _sub(run, "Value", value)
+        if drillthrough:
+            _emit_drillthrough(run, drillthrough)
+        style = _sub(run, "Style")
+        _sub(style, "FontSize", font_size)
+        if font_family:
+            _sub(style, "FontFamily", font_family)
+        if bold:
+            _sub(style, "FontWeight", "Bold")
+        if italic:
+            _sub(style, "FontStyle", "Italic")
+        if underline:
+            _sub(style, "TextDecoration", "Underline")
+        if fg:
+            _sub(style, "Color", fg)
     tb_style = _sub(tb, "Style")
     border = _sub(tb_style, "Border")
     # A WHITE border on a transparent/white textbox is invisible on the page but
@@ -6714,8 +6741,39 @@ def _emit_field_textbox(
         text_align = "Center"
 
     value_expr = ""
+    seg_spec = None
     if img_bind is None:
-        if kind == "text":
+        # MIXED-FONT Oracle <text> (per-segment <font>): emit each segment as its
+        # own line/run with its real weight + size, so e.g. the UNbold "IS
+        # LICENSED TO OPERATE" caption and the BOLD business-name line beneath it
+        # render correctly (the license body). Resolve each segment's &tokens
+        # independently. Falls through to the uniform path when not segmented.
+        _segs = getattr(lf, "segments", None) or []
+        if kind == "text" and _segs:
+            _main_ds = (_pick_main_query(report).name
+                        if _pick_main_query(report) else "")
+            seg_spec = []
+            for _sg in _segs:
+                _st = re.sub(r"\s*\n\s*", " ", (_sg.get("text") or "")).strip()
+                if not _st:
+                    continue
+                _rv, _isx = _resolve_text_expression(_st, report, dataset_name=_main_ds)
+                _sval = _rv if _isx else ('="' + _st.replace('"', '""') + '"')
+                seg_spec.append({
+                    "value": _sval,
+                    "bold": bool(_sg.get("bold")),
+                    "italic": bool(_sg.get("italic")),
+                    "underline": bool(_sg.get("underline")),
+                    "font_size": (f"{_sg.get('size')}pt" if _sg.get("size") else font_size),
+                    "color": _sg.get("color") or fcolor,
+                })
+            if not seg_spec:
+                seg_spec = None
+            else:
+                value_expr = '=""'
+        if seg_spec is not None:
+            pass
+        elif kind == "text":
             # Oracle's XML export pretty-prints CDATA text: REAL line
             # breaks and wrap-indentation both arrive as "\n + spaces".
             # The deterministic discriminator is Oracle's own geometry:
@@ -6805,6 +6863,7 @@ def _emit_field_textbox(
         # content, so fixed boxes are both safe AND faithful.
         can_grow=False,
         drillthrough=_drillthrough_for(report, lf),
+        segments_spec=seg_spec,
     )
     tb = parent_items[-1]
     _sub(tb, "Top", f"{rel_top:.2f}in")
