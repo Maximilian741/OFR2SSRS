@@ -1455,9 +1455,19 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
         _sub(style, "Color", fg)
     tb_style = _sub(tb, "Style")
     border = _sub(tb_style, "Border")
-    _sub(border, "Style", "Solid")
-    _sub(border, "Color", border_color)
-    _sub(border, "Width", "0.5pt")
+    # A WHITE border on a transparent/white textbox is invisible on the page but
+    # paints white outline lines OVER a watermark (the seal) -- the "white lines
+    # slashing through the image". Emit no border in that case (purely render-
+    # neutral on a white page). Keep a white border only where it's a real
+    # gridline, i.e. over a COLORED background (e.g. a navy column header).
+    _b_white = str(border_color or "").strip().lower() in ("#ffffff", "#fff", "white", "")
+    _bg_white = str(bg or "").strip().lower() in ("", "#ffffff", "#fff", "white")
+    if _b_white and _bg_white:
+        _sub(border, "Style", "None")
+    else:
+        _sub(border, "Style", "Solid")
+        _sub(border, "Color", border_color)
+        _sub(border, "Width", "0.5pt")
     if bg:
         _sub(tb_style, "BackgroundColor", bg)
     if vertical_align:
@@ -2132,6 +2142,47 @@ def _build_token_resolver(report: ParsedReport):
             f'Fields!{_safe(result_col)}.Value, "{_safe(child_ds)}")'
         )
 
+    def _corr_count_for_child(result_col, child_ds, bound_ds):
+        """Correlated COUNT of a linked child's rows for the CURRENT master row:
+        ``=LookupSet(key, key, Fields!result.Value, "child").Length``. Uses the
+        same structural Oracle <link> correlation key as ``_lookup_for_child``
+        (so e.g. an Oracle count(ORG_ID) summary referenced per-permit becomes
+        the count of THIS permit's orgs, not a global Count over the whole child
+        dataset). Returns None when child_ds is not a linked detail of bound_ds."""
+        q = query_by_name.get((child_ds or "").upper())
+        if q is None or not getattr(q, "parent_group", ""):
+            return None
+        bound_cols = dataset_fields.get((bound_ds or "").upper(), {})
+        child_cols = dataset_fields.get((child_ds or "").upper(), {})
+        if not bound_cols or not child_cols:
+            return None
+        pairs = []
+        seen_keys = set()
+        for b in re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", q.sql or ""):
+            bu = b.upper()
+            if bu in seen_keys or bu not in bound_cols:
+                continue
+            dest = child_cols.get(bu)
+            if not dest:
+                for cu, cn in child_cols.items():
+                    if cu == bu or cu.endswith("_" + bu) or cu.endswith(bu):
+                        dest = cn
+                        break
+            if dest:
+                seen_keys.add(bu)
+                pairs.append((bound_cols[bu], dest))
+        if not pairs:
+            return None
+        if len(pairs) == 1:
+            src = f"Fields!{_safe(pairs[0][0])}.Value"
+            dst = f"Fields!{_safe(pairs[0][1])}.Value"
+        else:
+            src = ' & "|" & '.join(f"Fields!{_safe(m)}.Value" for m, _c in pairs)
+            dst = ' & "|" & '.join(f"Fields!{_safe(c)}.Value" for _m, c in pairs)
+        rc = child_cols.get((result_col or "").upper()) or pairs[0][1]
+        return (f'=LookupSet({src}, {dst}, '
+                f'Fields!{_safe(rc)}.Value, "{_safe(child_ds)}").Length')
+
     # Build formula lookup: name_upper -> FormulaColumn-like object with
     # ``.name`` and ``.plsql_body`` attributes. Tolerate a missing
     # ``formulas`` attribute (older ParsedReport instances).
@@ -2225,6 +2276,19 @@ def _build_token_resolver(report: ParsedReport):
                        "% of total": "Sum", "first": "First", "last": "Last"}
                 _fn = _SS.get(_aggfn, "Sum")
                 _k, _s, _n = resolve(_aggsrc, dataset_name, _depth + 1)
+                # Oracle count(child_col) referenced from the MASTER scope -> a
+                # correlated LookupSet().Length over the linked child (a plain
+                # Count(.., "child") would count the WHOLE child dataset, never
+                # the current master row's children). Drives e.g. the IS/ARE
+                # "licensed to operate" wording (CS_Org_Count = 1).
+                if _aggfn == "count":
+                    _own = _agg_owner.get(_aggsrc.upper())
+                    if _own and _own.upper() != (dataset_name or "").upper():
+                        _cc = _corr_count_for_child(_aggsrc, _own, dataset_name)
+                        if _cc:
+                            return ("formula", _cc,
+                                    f"Oracle count({_aggsrc}) -> correlated "
+                                    f"LookupSet().Length over {_own}")
                 if _k == "field":
                     _own = _agg_owner.get(_aggsrc.upper()) or dataset_name
                     expr = (f'={_fn}(Fields!{_safe(_s)}.Value, "{_safe(_own)}")'
@@ -2251,12 +2315,30 @@ def _build_token_resolver(report: ParsedReport):
                     if k2 == "field":
                         return f"Fields!{s2}.Value"
                     raise ValueError(f"unsafe ref {nm!r} ({k2})")
+                # Looser variant for CP_ placeholder expressions ONLY: also embed
+                # a clean COMPUTED sub-expression (a correlated count / a
+                # cross-dataset Lookup) so a condition like ``:CS_Org_Count = 1``
+                # resolves. Never embeds a blank (=Nothing) or an unfilled
+                # formula-dataset placeholder. Kept separate from _formula_ref so
+                # the full-formula translate path stays strict (no drift).
+                def _formula_ref_embed(nm):
+                    k2, s2, _n2 = resolve(nm, dataset_name, _depth + 1)
+                    if k2 == "param":
+                        return f"Parameters!{s2}.Value"
+                    if k2 == "field":
+                        return f"Fields!{s2}.Value"
+                    if (k2 in ("formula", "field_other_ds")
+                            and isinstance(s2, str) and s2.startswith("=")):
+                        _b = s2[1:].strip()
+                        if _b and _b != "Nothing" and "DS_REPORT_FORMULAS" not in _b:
+                            return _b
+                    raise ValueError(f"unsafe ref {nm!r} ({k2})")
                 # CP_ placeholder OUTPUT computed by another CF_ formula's
                 # side-effect (:CP_X := expr). Use its extracted+translated
                 # expression so the value shows instead of a blank.
                 if u in cp_exprs:
                     try:
-                        _cp = _translate_oracle_expr(cp_exprs[u], _formula_ref)
+                        _cp = _translate_oracle_expr(cp_exprs[u], _formula_ref_embed)
                     except Exception:  # noqa: BLE001
                         _cp = {"ok": False}
                     if _cp.get("ok") and _cp.get("vb"):

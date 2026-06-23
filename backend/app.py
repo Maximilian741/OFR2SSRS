@@ -818,10 +818,20 @@ def api_subreport_build(child_name):
     # declared <userParameter> list (they're built inside the URL formula), so
     # they must be passed explicitly alongside parent_params.
     dt_params = forwarded_drillthrough_params(parsed, child_name) if parsed else []
+    # Human display label for this child (e.g. "JV Standard 12 x 9 Envelope").
+    # Sizes an envelope child (parses "12 x 9") AND is stored as the parent's
+    # generate-all link text so the cover reads the label, not the report name.
+    _body = request.get_json(silent=True) or {}
+    label = (request.form.get("display_label") or _body.get("display_label")
+             or request.values.get("display_label") or "").strip()
+    if label:
+        _GEN_ALL_LABEL_STORE[_sid()] = label
+        _evict(_GEN_ALL_LABEL_STORE)
     try:
         result = build_subreport(child_name, paths,
                                  parent_param_names=parent_params,
-                                 drillthrough_params=dt_params)
+                                 drillthrough_params=dt_params,
+                                 display_label=label)
     except Exception as e:
         traceback.print_exc()
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500

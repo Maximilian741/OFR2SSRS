@@ -1606,6 +1606,15 @@ function _subCardHTML(c, idx) {
       "</div>" +
       '<div class="subreport-meta">' + meta.join(" &middot; ") + "</div>" +
       '<div class="subreport-artifacts">Artifacts: ' + arts + "</div>" +
+      '<div class="subreport-label-row">' +
+        '<label class="subreport-label-lbl">Display name / size' +
+          '<input type="text" class="conn-input subreport-label" data-child="' + child +
+          '" placeholder="e.g. JV Standard 12 x 9 Envelope" autocomplete="off" spellcheck="false">' +
+        "</label>" +
+        '<div class="muted-note">Shown as the cover link text on the parent report. ' +
+          'An envelope with a size (e.g. <code>12 x 9</code>) is built at that page size. ' +
+          'Remembered in this browser.</div>' +
+      "</div>" +
       '<div class="subreport-actions">' +
         '<label class="btn btn-ghost subreport-add">Add artifact(s)' +
           '<input type="file" multiple class="subreport-upload" data-child="' + child +
@@ -1642,6 +1651,17 @@ function _subWireCards(host) {
         renderSubreportsTab();
         renderSubreportSidebar();
       } catch (err) { if (msg) msg.textContent = "Clear failed: " + err; }
+    });
+  });
+  host.querySelectorAll(".subreport-label").forEach(input => {
+    const child = input.dataset.child;
+    try {
+      const saved = localStorage.getItem("o2s_sublabel_" + child);
+      if (saved && !input.value) input.value = saved;
+    } catch (e) { /* private mode */ }
+    input.addEventListener("change", () => {
+      try { localStorage.setItem("o2s_sublabel_" + child, (input.value || "").trim()); }
+      catch (e) { /* private mode */ }
     });
   });
   host.querySelectorAll(".subreport-build").forEach(btn => {
@@ -1681,15 +1701,36 @@ async function subUploadArtifacts(child, files, msgEl) {
   }
 }
 
+// The per-child display label (cover link text + envelope size). Read from the
+// card input if present, else the remembered value. Persisted both per-child
+// AND as the global generate-all label so the PARENT cover link uses it.
+function _subLabel(child) {
+  const el = document.querySelector('.subreport-label[data-child="' + cssAttr(child) + '"]');
+  let v = el ? (el.value || "").trim() : "";
+  if (!v) { try { v = localStorage.getItem("o2s_sublabel_" + child) || ""; } catch (e) {} }
+  return v;
+}
+function cssAttr(s) { return String(s).replace(/"/g, '\\"'); }
+
 async function subBuildAndPreview(child, opts) {
   opts = opts || {};
   const setMsg = (t) => { if (opts.msgEl) opts.msgEl.textContent = t; };
   setMsg("Building…");
+  const label = _subLabel(child);
+  if (label) {
+    try {
+      localStorage.setItem("o2s_sublabel_" + child, label);
+      localStorage.setItem("o2s_generate_all_label", label);
+    } catch (e) { /* private mode */ }
+    const sidebar = document.getElementById("generate-all-label");
+    if (sidebar && !sidebar.value) sidebar.value = label;
+  }
   try {
     const r = await fetch("/api/subreport/" + encodeURIComponent(child) + "/build",
                           { method: "POST",
                             headers: { "Content-Type": "application/json" },
-                            body: JSON.stringify({ shared_ds_path: getSharedDsPath() }) });
+                            body: JSON.stringify({ shared_ds_path: getSharedDsPath(),
+                                                   display_label: label }) });
     const j = await r.json();
     if (!r.ok || j.error) throw new Error(j.error || "build failed");
     state.subreportBuilds = state.subreportBuilds || {};

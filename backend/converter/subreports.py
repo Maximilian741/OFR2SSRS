@@ -983,6 +983,40 @@ def _envelope_top_text(full_text: str) -> str:
     return f"{sp.group(1)} {sp.group(2)}" if sp else val
 
 
+_ENV_DIM_RE = re.compile(r"(\d+(?:\.\d+)?)\s*[xX×]\s*(\d+(?:\.\d+)?)")
+
+
+def _parse_envelope_dims(label: str):
+    """Read an envelope size out of a human label like 'JV Standard 12 x 9
+    Envelope' -> (12.0, 9.0) inches. Returns None when the label has no
+    '<W> x <H>' pair or the numbers aren't plausible envelope inches. Generic:
+    the size comes from the user's label, never a baked-in constant."""
+    m = _ENV_DIM_RE.search(label or "")
+    if not m:
+        return None
+    w, h = float(m.group(1)), float(m.group(2))
+    if 3.0 <= w <= 17.0 and 3.0 <= h <= 17.0:
+        return (w, h)
+    return None
+
+
+def _apply_envelope_page(rdl_xml: str, dims) -> str:
+    """Resize the rendered envelope RDL to the real envelope dimensions (e.g. a
+    12x9 catalog envelope) with tight margins, so the child prints as an ACTUAL
+    envelope instead of a letter-size page. No-op without dims."""
+    if not dims:
+        return rdl_xml
+    pw, ph = dims
+    repl = {
+        "PageWidth": f"{pw}in", "PageHeight": f"{ph}in",
+        "LeftMargin": "0.25in", "RightMargin": "0.25in",
+        "TopMargin": "0.25in", "BottomMargin": "0.25in",
+    }
+    for tag, val in repl.items():
+        rdl_xml = re.sub(rf"<{tag}>[^<]*</{tag}>", f"<{tag}>{val}</{tag}>", rdl_xml)
+    return rdl_xml
+
+
 def _address_column(cols) -> str:
     """The recipient-address column among the SELECT columns (name ~ 'addr'),
     else the longest-named candidate, else ''."""
@@ -999,30 +1033,44 @@ def _looks_like_envelope(child_name: str, cols) -> bool:
     return named and has_addr
 
 
-def _attach_envelope_layout(rep, cols, top_text):
+def _attach_envelope_layout(rep, cols, top_text, dims=None):
     """Give a (already param/query-wired) SQL child a POSITIONED mailing-envelope
-    layout -- one envelope per recipient: the hard-coded top label centered near
-    the top, the recipient address block in the window position. Replaces the
-    labeled field-list with the envelope's real shape. Positions are
-    envelope-archetype constants (where an address sits on an envelope); the LABEL
-    + ADDRESS column come from the artifacts. Built ON TOP of the report
-    _synth_report_from_sql already produced, so the drill-through param
-    declarations + the :P_ORG_ID filter binding are preserved."""
+    layout -- one envelope per recipient: the hard-coded top label near the top,
+    the recipient address block in the window position. Replaces the labeled
+    field-list with the envelope's real shape. When ``dims`` (W,H inches, from
+    the user's envelope label) is given, the frame + the recipient block are
+    laid out for THAT envelope and the page is resized to match (see
+    ``_apply_envelope_page``); otherwise a sensible default block. Positions are
+    envelope-archetype proportions; the LABEL + ADDRESS column come from the
+    artifacts. Built ON TOP of the report _synth_report_from_sql already
+    produced, so the drill-through param declarations + the :P_ORG_ID filter
+    binding are preserved."""
     from .models import LayoutGroup, LayoutField
     qname = rep.queries[0].name if rep.queries else "Q_ADDRESS"
     addr = _address_column(cols)
+    if dims:
+        pw, ph = dims
+        fw, fh = round(pw - 0.5, 2), round(ph - 0.5, 2)
+        # Recipient block in the lower-center "window" zone of the envelope.
+        ax, ay = round(pw * 0.42, 2), round(ph * 0.46, 2)
+        aw = round(min(4.5, pw * 0.5), 2)
+        tx, ty, tw = round(pw * 0.06, 2), 0.3, round(max(2.2, pw * 0.30), 2)
+    else:
+        fw, fh = 7.9, 6.0
+        ax, ay, aw = 3.6, 4.2, 4.0
+        tx, ty, tw = 3.0, 0.6, 1.9
     sec = LayoutGroup(name="section_main", kind="section_main",
                       repeat_on=qname, source_query=qname)
     frame = LayoutGroup(name="M_ENVELOPE", kind="frame",
-                        x=0.0, y=0.0, width=7.9, height=6.0)
+                        x=0.0, y=0.0, width=fw, height=fh)
     fields = []
     if top_text:
         fields.append(LayoutField(name="B_TOP", kind="text", text=top_text,
-                                  x=3.0, y=0.6, width=1.9, height=0.25,
+                                  x=tx, y=ty, width=tw, height=0.25,
                                   align="center", bold=True, font_size=11))
     if addr:
         fields.append(LayoutField(name="F_ADDRESS", kind="field", source=addr,
-                                  x=3.6, y=4.2, width=4.0, height=1.3,
+                                  x=ax, y=ay, width=aw, height=1.3,
                                   align="start", font_size=11))
     frame.fields = fields
     sec.children.append(frame)
@@ -1172,7 +1220,8 @@ def _drillthrough_reconciliation_notes(sql: str,
 def build_subreport(child_name: str,
                     artifact_paths: Iterable[str],
                     parent_param_names: Optional[Iterable[str]] = None,
-                    drillthrough_params: Optional[Iterable[str]] = None
+                    drillthrough_params: Optional[Iterable[str]] = None,
+                    display_label: str = ""
                     ) -> Dict[str, Any]:
     """Build a child report from artifacts and return a rich preview payload.
 
@@ -1276,13 +1325,15 @@ def build_subreport(child_name: str,
         rep = _synth_report_from_sql(child_name, sql, parent_param_names,
                                      drillthrough_params)
         _envelope = _looks_like_envelope(child_name, _cols)
+        _env_dims = _parse_envelope_dims(display_label) if _envelope else None
         if _envelope:
             # Mailing-envelope child: give the (param/query-wired) report a
             # POSITIONED envelope layout (top label + address in the window)
             # instead of the labeled field-list. The top label is mined from the
-            # artifacts (e.g. a screenshot note).
+            # artifacts (e.g. a screenshot note); the envelope SIZE is read from
+            # the user's display label ("... 12 x 9 Envelope" -> a 12x9 page).
             top_text = _envelope_top_text(_artifact_full_text(arts))
-            _attach_envelope_layout(rep, _cols, top_text)
+            _attach_envelope_layout(rep, _cols, top_text, _env_dims)
             if top_text:
                 issues.append(f"Envelope archetype: positioned the address block "
                               f"+ top label '{top_text}' (from your artifacts).")
@@ -1307,6 +1358,11 @@ def build_subreport(child_name: str,
         if _envelope:
             # An envelope has no 'Report run on' / 'Page of' chrome.
             rdl_xml = _strip_chrome_textboxes(rdl_xml)
+            # Resize the page to the real envelope dimensions from the label.
+            rdl_xml = _apply_envelope_page(rdl_xml, _env_dims)
+            if _env_dims:
+                issues.append(f"Envelope sized to {_env_dims[0]} x {_env_dims[1]} in "
+                              f"(from the label '{display_label}').")
         # A bulk "generate all" link auto-renders the child with its parameter
         # DEFAULTS; default a site-include toggle to YES so the bulk envelopes
         # sort by site, matching a site-sorted parent (the 1:1 mailing order).

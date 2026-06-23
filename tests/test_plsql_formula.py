@@ -94,9 +94,21 @@ def test_placeholder_assignment_extraction_and_buildup():
     assert vb["ok"] and "Parameters!P_Year.Value" in vb["vb"] and "end" in vb["vb"]
 
 
-def test_placeholder_skips_conditional_assignment():
-    """A CP_ assigned ONLY inside an IF is skipped (a wrong value is worse than
-    a blank) -- conservative extraction."""
+def test_placeholder_recovers_conditional_as_case():
+    """A CP_ assigned inside an IF is recovered as a CASE -- with an explicit
+    ELSE NULL when there's no ELSE branch, so a non-matching row shows BLANK
+    (Oracle's behaviour), never a wrong value."""
     from converter.translators.plsql_formula import extract_placeholder_assignments as ex
+    # THEN-only -> CASE WHEN x=0 THEN 'a' ELSE NULL END (blank when x != 0).
     body = "BEGIN IF :x = 0 THEN :CP_Y := 'a' ; END IF ; RETURN(1); END;"
-    assert "CP_Y" not in ex(body)
+    cp = ex(body)
+    assert "CP_Y" in cp
+    up = cp["CP_Y"].upper()
+    assert "CASE" in up and "'A'" in up and ("ELSE (NULL)" in up or "ELSE NULL" in up)
+    # IF/ELSE with different literals -> a two-armed CASE (the IS/ARE pattern).
+    body2 = ("BEGIN IF :n = 1 THEN :CP_U := 'IS' ; ELSE :CP_U := 'ARE' ; END IF ;"
+             " RETURN(1); END;")
+    cp2 = ex(body2)
+    assert "CP_U" in cp2
+    up2 = cp2["CP_U"].upper()
+    assert "'IS'" in up2 and "'ARE'" in up2 and "CASE" in up2

@@ -287,7 +287,23 @@ def set_generate_all_link_text(rdl_xml: str, label: str = "") -> str:
                          f"<Value>{safe}</Value>", block, count=1, flags=re.DOTALL)
         return new
 
-    return _TEXTBOX_RE.sub(_repl, rdl_xml)
+    out = _TEXTBOX_RE.sub(_repl, rdl_xml)
+
+    # The cover's descriptive text ("[Permittee] is a hyperlink to X.", and the
+    # "...generate "X" in the same order..." note) reference the envelope's
+    # DESCRIPTION via an Oracle formula the tool can't compute (an external DB
+    # lookup), so it renders blank. When the user supplied that description as
+    # the label, substitute it for the envelope-description placeholder wherever
+    # it appears -- the placeholder is a First(Fields!CP_*ENVELOPE*.Value,
+    # "DS_REPORT_FORMULAS") over the synthetic formula dataset. Only runs when a
+    # real label was given (never invents text).
+    lbl = (label or "").strip()
+    if lbl:
+        out = re.sub(
+            r'First\(Fields!([A-Za-z0-9_]*ENVELOPE[A-Za-z0-9_]*)\.Value,\s*'
+            r'"DS_REPORT_FORMULAS"\)',
+            '"' + lbl.replace('"', '""') + '"', out, flags=re.IGNORECASE)
+    return out
 
 
 __all__ = [

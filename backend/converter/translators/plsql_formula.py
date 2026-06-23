@@ -687,17 +687,61 @@ def extract_placeholder_assignments(plsql_body: str) -> Dict[str, str]:
     columns; those are referenced elsewhere in the layout but would otherwise
     stay blank. Returns ``{CP_NAME_UPPER: oracle_expr}``.
 
-    CONSERVATIVE on purpose: only UNCONDITIONAL top-level assignments (NOT inside
-    an IF) -- a conditional CP_ value could be wrong, and a wrong value is worse
-    than a blank. Handles the build-up pattern ``:CP_X := :CP_X || '...'`` by
-    folding the prior value in. The caller still translates + scope-checks each
-    expression, so an unsafe one falls back to the placeholder."""
+    Handles the build-up pattern ``:CP_X := :CP_X || '...'`` by folding the prior
+    value in, and CONDITIONAL assignments inside an ``IF/ELSIF/ELSE`` by folding
+    the branch values into a CASE (so e.g. ``IF :n=1 THEN :CP_U:='IS ...' ELSE
+    :CP_U:='ARE ...'`` recovers as ``CASE WHEN :n=1 THEN 'IS ...' ELSE 'ARE ...'
+    END``). Cross-references between placeholders (``:CP_L := LOWER(:CP_U)``) are
+    folded transitively. The caller still translates + scope-checks every
+    expression, so any value whose condition/refs don't fully resolve falls back
+    to the placeholder -- a broken or out-of-scope expression never ships."""
     src = _strip_comments(plsql_body or "")
     body = _body_between_begin_end(src)
     out: Dict[str, str] = {}
+
+    def _ph_assign_in(stmts_str, cpname):
+        if stmts_str is None:
+            return None
+        for ss in _split_statements(stmts_str):
+            m = re.match(r"(?is)^\s*:([A-Za-z_]\w*)\s*:=\s*(.*)$", ss)
+            if m and m.group(1).upper() == cpname.upper():
+                return m.group(2).strip().rstrip(";").strip()
+        return None
+
     for s in _split_top_level(body):
-        if _IFBLOCK_RE.match(s):
-            continue  # skip conditional assignments (too risky to guess)
+        ifm = _IFBLOCK_RE.match(s)
+        if ifm:
+            branches = _parse_if(ifm.group(1))
+            if not branches:
+                continue
+            parts = [st for _c, st in branches["cond"]]
+            if branches["else"] is not None:
+                parts.append(branches["else"])
+            cpnames = set()
+            for st in parts:
+                for ss in _split_statements(st or ""):
+                    m = re.match(r"(?is)^\s*:(CP_[A-Za-z0-9_]*)\s*:=", ss)
+                    if m:
+                        cpnames.add(m.group(1).upper())
+            for cp in cpnames:
+                cond_vals = [(c, _ph_assign_in(st, cp)) for c, st in branches["cond"]]
+                else_val = _ph_assign_in(branches["else"], cp) if branches["else"] is not None else None
+                # every conditional branch must set it, else the value is ambiguous
+                if not all(v is not None for _, v in cond_vals):
+                    continue
+                vals = [v for _, v in cond_vals] + [else_val]
+                if else_val is not None and len(set(vals)) == 1:
+                    # set to the SAME value in every branch incl. ELSE -> the
+                    # condition is irrelevant; emit it unconditionally.
+                    out[cp] = else_val
+                else:
+                    # Genuinely conditional (different per branch, or no ELSE so
+                    # it's blank when the condition is false). Build a CASE with
+                    # an explicit ELSE NULL so a non-matching row shows blank --
+                    # exactly Oracle's behaviour, never a wrong value.
+                    out[cp] = _build_case(cond_vals,
+                                          else_val if else_val is not None else "NULL")
+            continue
         am = re.match(r"(?is)^\s*:([A-Za-z_]\w*)\s*:=\s*(.*)$", s)
         if not am:
             continue
@@ -710,6 +754,23 @@ def extract_placeholder_assignments(plsql_body: str) -> Dict[str, str]:
             expr = re.sub(rf":{re.escape(name)}\b", "(" + prior + ")",
                           expr, flags=re.IGNORECASE)
         out[name.upper()] = expr
+
+    # Fold cross-placeholder references (:CP_L := LOWER(:CP_U)) transitively so
+    # every value stands on its own (references only real binds/fields/summaries).
+    for _ in range(6):
+        changed = False
+        for k in list(out.keys()):
+            def _sub(m, _k=k):
+                ref = m.group(1).upper()
+                if ref in out and ref != _k:
+                    return "(" + out[ref] + ")"
+                return m.group(0)
+            new = re.sub(r":([A-Za-z_]\w*)", _sub, out[k])
+            if new != out[k]:
+                out[k] = new
+                changed = True
+        if not changed:
+            break
     return out
 
 
