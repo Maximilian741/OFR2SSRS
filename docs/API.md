@@ -419,16 +419,22 @@ This is the `report` key in the conversion payload. Top-level shape:
 
 ```json
 {
-  "name":        "SAMPLE_INSPECTION",
-  "dtd_version": "9.0.4.0.33",
-  "parameters":  [ ReportParameter, ... ],
-  "queries":     [ DataQuery,       ... ],
-  "formulas":    [ FormulaColumn,   ... ],
-  "layout":      [ LayoutGroup,     ... ],
-  "triggers":    [ TriggerCode,     ... ],
-  "warnings":    [ "string", ...    ]
+  "name":            "SAMPLE_INSPECTION",
+  "dtd_version":     "9.0.4.0.33",
+  "parameters":      [ ReportParameter, ... ],
+  "queries":         [ DataQuery,       ... ],
+  "formulas":        [ FormulaColumn,   ... ],
+  "layout":          [ LayoutGroup,     ... ],
+  "triggers":        [ TriggerCode,     ... ],
+  "embedded_images": [ { "id": "image_1", "mime_type": "image/gif", "size": 2048 }, ... ],
+  "warnings":        [ "string", ...    ]
 }
 ```
+
+`embedded_images` lists any seal / logo / watermark blobs extracted from the
+Oracle layout's `<binaryData>` (the raw hex is omitted from the JSON; `size`
+is the decoded byte length). These are emitted into the RDL's
+`<EmbeddedImages>` block.
 
 ### `ReportParameter`
 
@@ -484,13 +490,25 @@ This is the `report` key in the conversion payload. Top-level shape:
 
 ```json
 {
-  "name":        "CF_File",
-  "return_type": "VARCHAR2",
-  "plsql_body":  "RETURN :item_no || '-' || :year;",
-  "tsql_body":   "RETURN @item_no + '-' + CAST(@year AS VARCHAR);",
-  "notes":       [ "Concatenation rewritten || -> +" ]
+  "name":         "CF_File",
+  "return_type":  "VARCHAR2",
+  "plsql_body":   "RETURN :item_no || '-' || :year;",
+  "tsql_body":    "RETURN @item_no + '-' + CAST(@year AS VARCHAR);",
+  "notes":        [ "Concatenation rewritten || -> +" ],
+  "agg_function": "",
+  "agg_source":   "",
+  "agg_scope":    ""
 }
 ```
+
+* `plsql_body` is the original Oracle PL/SQL.
+* `tsql_body` is the translator's best-effort SQL rendering of the body.
+  Separately, the RDL generator compiles `CF_*` / `CP_*` formula columns
+  into inline SSRS VB.NET expressions (see `translators/plsql_formula.py`).
+* `agg_function` / `agg_source` / `agg_scope` are populated when the
+  "formula" is actually an Oracle `<summary>` (a count / sum / avg total),
+  carrying the aggregate function, the column being aggregated, and the
+  reset/compute scope. They are empty strings for ordinary formulas.
 
 ### `LayoutGroup`
 

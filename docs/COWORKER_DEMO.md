@@ -209,6 +209,16 @@ Mention these in passing:
   Adding a new generator (CSV, Power BI, Crystal) means writing one
   function. Adding a new translator (LLM-assisted, DB2-target) means
   writing one function.
+* **PL/SQL formula columns are actually compiled**, not hand-waved. A real
+  tokenizer + parser turns a `CF_*` / `CP_*` formula into an SSRS VB.NET
+  expression that computes inline. If a formula calls an external package
+  function we can't resolve, we leave a safe placeholder instead of
+  shipping a broken expression.
+* **Verified, not asserted.** The generated RDL is validated against
+  Microsoft's own RDL 2008 XSD, and render-verified through Microsoft's
+  ReportViewer engine (`tools/renderlab`) — it renders to a real PDF that
+  we measure for page count and blank pages. The test suite is **620
+  passed, 19 skipped**.
 * It is **offline by default**. No SaaS, no telemetry, no API keys
   required. Optional Claude assist is opt-in via `.env`.
 * The frontend is **vanilla JS** with no build step. You can clone and

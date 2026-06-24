@@ -25,33 +25,44 @@ your development environment, run the test suite, and submit a pull request.
    source .venv/bin/activate
    ```
 
-3. Install dependencies:
+3. Launch the application to verify your setup:
+
+   - Windows: `run.bat`
+   - macOS / Linux: `./run.sh`
+
+   The launcher installs the dependencies from `requirements.txt` itself and
+   then starts the Flask app on `http://127.0.0.1:5057`. If you would rather
+   install manually (for example, to run the tests without starting the app):
 
    ```bash
    pip install -r requirements.txt
    ```
 
-4. Launch the application to verify your setup:
-
-   - Windows: `run.bat`
-   - macOS / Linux: `./run.sh`
+   The dependency surface is intentionally small: Flask, lxml, python-docx,
+   the Anthropic SDK (for the optional Claude assist), and pytest + pypdf for
+   the test/render-verification path. Python 3.9 or newer is required.
 
 ## Running tests
 
 The project uses [pytest](https://docs.pytest.org/). From the project root:
 
 ```bash
-pytest
+python -m pytest -q
 ```
 
-For quieter output and short tracebacks:
+The suite currently reports **620 passed, 19 skipped** (639 collected). The
+skipped tests are render-verification cases that only run when the
+RenderLab MS-engine host is available on the machine; they are skipped
+cleanly elsewhere rather than failing.
 
-```bash
-pytest --tb=short -q
-```
+Generated RDL is validated against Microsoft's own RDL 2008 XSD
+(`tests/fixtures/schema/ReportDefinition_2008.xsd`, loaded with
+`lxml.etree.XMLSchema`), so a change that produces schema-invalid RDL will
+fail the suite.
 
 Please make sure all tests pass before opening a pull request, and add tests
-for any new behavior you introduce.
+for any new behavior you introduce. Fixtures must be name-agnostic — see the
+note on customer data below.
 
 ## Code style
 
@@ -63,18 +74,27 @@ for any new behavior you introduce.
 - Match the existing project conventions for naming, imports, and module
   layout. When in doubt, look at neighboring files.
 
+## No customer data, ever
+
+This is a public repository; the Oracle reports it is used against in the
+field are private. Real report names, table names, column names, and bind
+variables must **not** appear anywhere in the code, tests, fixtures, docs, or
+commit messages. Test fixtures are name-agnostic and parametrized — when you
+add a test case, use a synthetic report shape, not a real one. A PR that
+introduces identifiable customer data will not be merged.
+
 ## Pull request process
 
-1. Create a feature branch off of `main`:
+1. Create a feature branch off of `master`:
 
    ```bash
    git checkout -b feature/short-description
    ```
 
 2. Make your changes in small, logically grouped commits with clear messages.
-3. Run `pytest` locally and confirm all tests pass.
+3. Run `python -m pytest -q` locally and confirm all tests pass.
 4. Update documentation (README, docstrings, examples) when behavior changes.
-5. Push your branch and open a pull request against `main`.
+5. Push your branch and open a pull request against `master`.
 6. Fill out the pull request template completely. Link any related issues.
 7. A maintainer will review your PR. Please respond to feedback promptly and
    push follow-up commits to the same branch (do not force-push during review
@@ -89,5 +109,11 @@ Please use the GitHub issue templates:
   behavior.
 - Feature request: describe the problem you are trying to solve and the
   proposed solution.
+
+## License
+
+This project is licensed under the Elastic License 2.0 (see `LICENSE`). By
+submitting a contribution you agree that it will be licensed under the same
+terms.
 
 Thanks again for contributing!

@@ -43,7 +43,7 @@ def _collapse_iif(expr: str) -> str:
     value-or-fallback cover expression --
         IIf(Len(Trim(CStr(First(Fields!X)..)))=0, "fallback", CStr(First(Fields!X)..))
     -- references the same field in BOTH the condition AND the else branch, so
-    the loop emitted the field's text TWICE ("CP JV ENVELOPECP JV ENVELOPE").
+    the loop emitted the field's text TWICE ("CP ENVELOPECP ENVELOPE").
     Collapse each IIf to the branch that carries the field/param token (the value
     actually displayed on the happy path); tie / neither -> the else (3rd) arg.
     Repeats to handle nesting. Verification-only: never touches the deployed RDL,
@@ -123,7 +123,7 @@ def staticize(rdl_xml: str) -> str:
     _TYPE_LIT = {"String": "x", "Boolean": "false",
                  "DateTime": "2020-01-01T00:00:00", "Integer": "0", "Float": "0"}
     # A parameter whose DefaultValue is a CONCRETE LITERAL (no leading '=', e.g.
-    # a title's "DEQ Air Resources Management Bureau") is a display constant: a
+    # a title's bureau/division display constant) is a display constant: a
     # =Parameters!X.Value reference to it should render that literal, not the
     # humanised token. Capture these BEFORE the =expr defaults get type-rewritten.
     param_defaults = {}
@@ -196,7 +196,7 @@ def staticize(rdl_xml: str) -> str:
             # Lookup(src_key, dest_key, RESULT, "dataset") displays only RESULT;
             # the two key args + the dataset name are plumbing, not output. Left
             # as-is, every Fields! token (incl. the keys) would humanise and
-            # concatenate into a garbled band ("SITE IDSITE IDCMVGY"). Collapse to
+            # concatenate into a garbled band ("SITE IDSITE IDORG"). Collapse to
             # the result field so the verification render shows the real column.
             expr = re.sub(
                 r'\bLookup(?:Set)?\s*\(\s*[^,()]+,\s*[^,()]+,\s*'

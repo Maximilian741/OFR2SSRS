@@ -647,13 +647,13 @@ def _render_per_record_document_pages(report):
     # frames AND a genuine nested-MD group chain) is positioned correctly by its
     # absolute Oracle geometry -- tiling only scrambles the field/cell order
     # (Employer label drifts below its address; Course block floats above it).
-    # Tile ONLY flat per-facility forms (leaf sub-tables, e.g. the AIR inventory
-    # SIC/NAIC table), which are NOT nested-MD (_is_nested_master_detail_preview
+    # Tile ONLY flat per-facility forms (leaf sub-tables, e.g. an emissions
+    # inventory SIC/NAIC table), which are NOT nested-MD (_is_nested_master_detail_preview
     # False) so they keep their correct tiling.
     _tile = not (_has_nested_repeating_frames(report)
                  and _is_nested_master_detail_preview(report))
     # Report-wide summary TRAILER frame(s) (totals, no repeating descendant --
-    # MVWFR's Application/MVWFR-Status count tables) print ONCE at the report end
+    # a report-end status count-table frame) print ONCE at the report end
     # on their own page, NOT on every per-record page. The per-record page skips
     # them (skip_trailer default True); each is rendered as a trailing page below.
     _main = _find_section(report.layout or [], "section_main")
@@ -2076,8 +2076,8 @@ def _detect_multi_section_preview(report):
                          "summary_line": bool(_hdr) and not _ch and _agg})
 
     # Post-pass: surface an orphan footer-only summary frame (label + CS_/Sum/CF_
-    # aggregate, no group-frame wrapper) the main loop missed -- ASBESTOS's
-    # "Enforcement Cases Ongoing". Mirrors rdl._detect_multi_section's post-pass.
+    # aggregate, no group-frame wrapper) the main loop missed -- e.g. a loose
+    # "<metric> total" summary line. Mirrors rdl._detect_multi_section's post-pass.
     _existing = {(s["header"] or "").strip().lower() for s in sections}
 
     def _partner_src(parent, fy):
@@ -2531,7 +2531,7 @@ def _nd_header_label(label_geo, x, y):
         # marker sit in the y-band BETWEEN the real column-header strip and the
         # detail row -- they are NOT column headers (the band is painted
         # separately). Left in, they're the CLOSEST label above the column and
-        # get mis-picked (MCP_ACTIVE_SITES lost "Location"/"Incident Dates" to
+        # get mis-picked (a multi-section site listing lost "Location"/"Incident Dates" to
         # the site-count band + "(continued)"). Skip them, mirroring the RDL
         # col-header exclusion. The window is 0.55in (not 0.45) so the genuine
         # header one band higher than the count caption is still reachable.
@@ -2717,12 +2717,12 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
     else:
         band = _render_caption_block(_outer, "#ffffff", "#111111", pad="2px 0")
     # A group whose master band is a COUNT CAPTION ("<grp> : N SITE(S)") instead
-    # of data-field rows (MCP_ACTIVE_SITES) yields an EMPTY caption block (the
+    # of data-field rows (a count-banded site listing) yields an EMPTY caption block (the
     # group key has no printed F_ field). Surface the Oracle group-band caption
     # -- the "(S)" count band in label_geo -- as the bold band line so the group
     # header isn't lost (it used to leak in via _nd_header_label as a bogus
     # column header; now excluded there). Gated to the no-data-field case, so a
-    # genuine master card (METHACT's Complaint band) is untouched.
+    # genuine master card (a master-detail card's master band) is untouched.
     if _outer is not None and not _group_field_rows(_outer):
         _gcap = ""
         for _t, _lx, _ly, _bg in sorted(label_geo, key=lambda z: (z[2], z[1])):
@@ -2736,7 +2736,7 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
     # ---- middle-group cards (white) ----
     # A middle group whose fields are ALL internal keys (*_ID) or bare dates
     # (*_DATE/*_DT) is not a sub-master header -- the real report runs straight
-    # from the master band into the detail header (verified: METHACT's spurious
+    # from the master band into the detail header (verified on a master-detail card's spurious
     # "Status Date / Action History ID" line). Skip such cards (mirrors the RDL
     # builder); a genuine middle group with descriptive fields still renders.
     for _mg in _middles:
@@ -3519,9 +3519,9 @@ def _doc_cell_value(source, row_idx, mask=""):
 def _is_summary_trailer_frame(fr):
     """A section_main top-level frame that is a REPORT-WIDE summary TRAILER: no
     repeating-frame descendant AND a field whose source is a report TOTAL
-    (`..._TOTAL`). Such a frame (MVWFR's M_REPORT_SUMMARY_FTR count tables) prints
+    (`..._TOTAL`). Such a frame (a report-summary footer count-table frame) prints
     ONCE at the report end, not on every per-record page. Mirrors rdl.py's
-    identically-named gate (corpus scan: only MVWFR matches)."""
+    identically-named gate (keyed on structure)."""
     if "repeating" in (getattr(fr, "kind", "") or "").lower():
         return False
     stack = list(getattr(fr, "children", None) or [])
@@ -3582,13 +3582,13 @@ def _doc_collect_positioned(report, section="section_main", root=None,
         if _is_conditional_alert_frame(g):
             return
         # A REPORT-WIDE summary TRAILER frame (totals, no repeating descendant --
-        # MVWFR's Application/MVWFR-Status count tables) prints ONCE at the report
+        # a report-end status count-table frame) prints ONCE at the report
         # end, on its OWN page, not on every per-record page. Skip it here; the
         # trailer page is rendered separately via root=<trailer>, skip_trailer=False.
         if skip_trailer and g is not main and _is_summary_trailer_frame(g):
             return
         # A CONDITIONAL grantee/site LIST repeating frame nested in a
-        # header-summary stat table (CMVGY_GRANT_STATUS page 2: R_Budget_C /
+        # header-summary stat table (a header-summary report's page 2: R_Budget_C /
         # R_Itemized_MI / R_Quarter_MQ3) prints ONLY when "Include Grantee and
         # Site Lists = YES"; the default summary suppresses it. The static
         # preview can't evaluate that flag, so tiling these frames piles an
@@ -3743,7 +3743,7 @@ def _doc_collect_positioned(report, section="section_main", root=None,
             walk(c, bg, _cb)
 
     walk(main, "")
-    # Header-summary per-grantee GRID (CMVGY_GRANT_STATUS page 3): mirror the
+    # Header-summary per-grantee GRID (a header-summary report's page 3): mirror the
     # RDL's _build_grantee_grid_tablix. The *_IND asterisk fields belong UNDER
     # the FY column headers (their x matches B_FY_* exactly, y on the grantee /
     # site rows), but the parser stores them in section_HEADER's reused

@@ -65,15 +65,27 @@
 
 ## What to call out if asked
 
-- **Architecture.** Five independent modules: parser, translator,
-  generator, preview, and live-DB. Plus bursting, sub-reports, pre-flight
-  audit, and cross-validation against supporting artifacts (SQL files,
-  DOCX walkthroughs, screenshots). Hot-swappable behind one
-  `ParsedReport` dataclass — the same UI works for any Oracle Reports XML.
-- **Translation coverage.** DECODE to CASE, NVL to ISNULL, TO_CHAR to
+- **Architecture.** Independent modules behind one `ParsedReport`
+  dataclass: parser, two translators (SQL→T-SQL and a PL/SQL *formula*
+  compiler), RDL generator + post-process, the HTML-mockup and live-DB
+  preview, three validators, plus bursting, sub-reports, pre-flight audit,
+  a fidelity self-check, and cross-validation against supporting artifacts
+  (SQL files, DOCX walkthroughs, screenshots). The same UI works for any
+  Oracle Reports XML.
+- **SQL translation coverage.** DECODE to CASE, NVL to ISNULL, TO_CHAR to
   CONVERT, TO_DATE to TRY_CONVERT, `(+)` outer join to LEFT JOIN, `||` to
   `+`, lexical refs flagged, every `Pkg_*.F_*` package call gets a
   corresponding `dbo.fn_*` UDF stub auto-generated alongside the RDL.
+- **Formula compiler.** PL/SQL formula columns (`CF_*` / `CP_*`) are
+  compiled — by a real tokenizer + parser, not pattern substitution — into
+  SSRS VB.NET expressions that compute inline (`||`→`&`, `NVL`/`DECODE`→
+  `IIf`, `SUBSTR`→`Mid`, `TO_CHAR`→`Format`, and so on). Anything that
+  references an external package function is left as a safe placeholder
+  rather than emitting a broken expression.
+- **Verified, not asserted.** Generated RDL is validated against
+  Microsoft's RDL 2008 XSD and render-verified through Microsoft's
+  ReportViewer engine (`tools/renderlab`), which renders the RDL to a real
+  PDF and measures page count and blank pages.
 - **SharedDataSourceReference design.** The RDL ships pointing at a named
   shared data source rather than an embedded connection string. This is
   what prevents the "Define Query Parameters" dialog at refresh time.
@@ -87,8 +99,9 @@
 
 ## Backup plan if something breaks
 
-- `samples/expected_rdl/` — pre-generated RDL output for the bundled
-  sample, in case the live conversion misbehaves.
-- `samples/oracle/` — bundled Oracle source artifacts.
-- `pytest -q` — runs the full test suite (parametrized name-agnostic
-  fixtures) in seconds.
+- `samples/expected_rdl/SAMPLE_INSPECTION.rdl` — pre-generated RDL output
+  for the bundled sample, in case the live conversion misbehaves.
+- `samples/oracle/SAMPLE_INSPECTION.xml` — the bundled (synthetic) Oracle
+  source artifact.
+- `python -m pytest -q` — runs the full test suite (parametrized,
+  name-agnostic fixtures): **620 passed, 19 skipped**.

@@ -124,7 +124,7 @@ function initReportServerUrl() {
 }
 
 // Friendly DISPLAY label for the cover "generate all" sub-report link (e.g.
-// "JV Standard 12 x 9 Envelope"). Not a secret -> persisted in localStorage.
+// "Standard 12 x 9 Envelope"). Not a secret -> persisted in localStorage.
 function getGenerateAllLabel() {
   const el = document.getElementById("generate-all-label");
   return el ? (el.value || "").trim() : "";
@@ -195,8 +195,8 @@ function _appHowtoHTML() {
       '<p>Configure the recipient list + download the ready-to-run <b>Burst Pack</b> in the <b>Bursting</b> tab.</p>' +
     '</div>' +
 
-    '<div class="burst-callout"><b>A worked example &mdash; MVWF_PERMIT:</b> the permit report lists every permittee. ' +
-      'Each permit has a link to <b>that permittee&rsquo;s envelope</b> (JV_ENVELOPE_12), and a &ldquo;generate all&rdquo; ' +
+    '<div class="burst-callout"><b>A worked example &mdash; a Permit report:</b> the permit report lists every permittee. ' +
+      'Each permit has a link to <b>that permittee&rsquo;s envelope</b> (an Envelope sub-report), and a &ldquo;generate all&rdquo; ' +
       'link produces <b>every envelope in the same order as the permits</b> &mdash; so the two stacks match for mailing.</div>'
   );
 }
@@ -1364,14 +1364,14 @@ function renderBurstingTab(data) {
 // the SAME pipeline the main report uses, so the child gets a full RDL plus an
 // HTML mockup we render exactly like the first-page preview.
 
-// Turn a raw report name into readable link text: "JV_ENVELOPE_12" ->
-// "JV Envelope 12". Short all-caps tokens (JV) stay as acronyms; digits stay.
+// Turn a raw report name into readable link text: "ENVELOPE_REPORT_12" ->
+// "Envelope Report 12". Short all-caps tokens (US, ID) stay as acronyms; digits stay.
 // The exact wording (e.g. "Standard 12 x 9") isn't in the source, so this is a
 // sensible STARTING point the user edits -- never blank, never the ugly raw name.
 function _humanizeReportName(name) {
   return String(name || "").split(/[_\s]+/).filter(Boolean).map(t => {
     if (/^\d+$/.test(t)) return t;
-    if (/^[A-Z0-9]{1,3}$/.test(t)) return t;       // acronym (JV, US, ID)
+    if (/^[A-Z0-9]{1,3}$/.test(t)) return t;       // acronym (US, ID)
     return t.charAt(0).toUpperCase() + t.slice(1).toLowerCase();
   }).join(" ");
 }
@@ -1635,7 +1635,7 @@ function _subCardHTML(c, idx) {
       '<div class="subreport-label-row">' +
         '<label class="subreport-label-lbl">Display name / size' +
           '<input type="text" class="conn-input subreport-label" data-child="' + child +
-          '" placeholder="e.g. JV Standard 12 x 9 Envelope" autocomplete="off" spellcheck="false">' +
+          '" placeholder="e.g. Standard 12 x 9 Envelope" autocomplete="off" spellcheck="false">' +
         "</label>" +
         '<div class="muted-note">Shown as the cover link text on the parent report. ' +
           'An envelope with a size (e.g. <code>12 x 9</code>) is built at that page size. ' +

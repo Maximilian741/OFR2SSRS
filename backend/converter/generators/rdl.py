@@ -208,7 +208,7 @@ def _alias_select_items(sql: str, item_names) -> str:
         # Already aliased? Oracle SQL allows BOTH explicit "expr AS name"
         # AND implicit "expr name" (a bare trailing identifier). We must
         # detect both -- the implicit form previously slipped through and
-        # got double-aliased ("Pkg_JV_Util.F(...) Violations AS DERIVED").
+        # got double-aliased ("Pkg_Util.F(...) Violations AS DERIVED").
         # The implicit form is recognized as: ")" or a word char, then
         # whitespace, then an identifier at end of item.
         if re.search(r"\bAS\b\s+[A-Za-z_][A-Za-z0-9_]*\s*$", stripped, re.IGNORECASE):
@@ -693,9 +693,81 @@ def _empty_query_placeholder(query) -> str:
     )
 
 
+def _reconstruct_lexical_criteria(report) -> dict:
+    """Reconstruct Oracle ``&P_CRITERIA_X`` lexical filters into REAL, NULL-safe,
+    parameter-bound SQL predicates so a declared filter parameter (e.g. a Renewal
+    Year) actually FILTERS the dataset instead of being inert.
+
+    Oracle Reports has no SSRS equivalent for a lexical (SQL-text) parameter, so
+    a ``&P_CRITERIA_X`` that a BEFORE-REPORT trigger builds at run time used to be
+    neutralised to a comment -> the query ran UNFILTERED and the year/date/name
+    prompts did nothing. This recovers the very common "criteria builder" idiom:
+    a trigger concatenates ``:P_Criteria_X := :P_Criteria_X || F_Criteria_*_Bind(
+    pvColumn_1 => cvCOL, pvBind_Variable => 'P_Y')`` (and inline date ranges),
+    where ``cvCOL`` is a ``CONSTANT VARCHAR2`` holding the column expression.
+
+    Returns ``{LEXICAL_NAME_UPPER: where_fragment}``; only predicates whose column
+    resolves to a known cv-constant are emitted (NULL-safe, so an empty prompt =
+    no filter, matching Oracle). Anything not confidently parseable is left out
+    (the caller keeps the honest placeholder for it). Purely structural -- no
+    report-specific names hardcoded."""
+    import html as _html
+    blobs = []
+    for t in (getattr(report, "triggers", None) or []):
+        blobs.append(getattr(t, "body", "") or "")
+    for f in (getattr(report, "formulas", None) or []):
+        blobs.append(getattr(f, "plsql_body", "") or "")
+    raw = getattr(report, "raw_xml", "") or ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    blobs.append(raw)
+    plsql = _html.unescape("\n".join(b for b in blobs if b))
+    if "F_Criteria" not in plsql and "P_Criteria" not in plsql:
+        return {}
+    # cv* CONSTANT column expressions (single-quoted literal; '' -> ')
+    consts = {}
+    for m in re.finditer(
+            r"(cv[A-Za-z_0-9]+)\s+CONSTANT\s+VARCHAR2\([0-9]+\)\s*:=\s*'((?:''|[^'])*)'\s*;",
+            plsql, re.I):
+        consts[m.group(1)] = m.group(2).replace("''", "'").strip()
+    out: dict = {}
+    lexnames = {n.upper() for n in re.findall(r":(P_Criteria_[A-Za-z0-9_]+)\s*:=", plsql, re.I)}
+    for lex in lexnames:
+        preds, seen = [], set()
+        def _add(p, key):
+            if key not in seen:
+                seen.add(key); preds.append(p)
+        for am in re.finditer(r":" + lex + r"\s*:=\s*:" + lex + r"\s*\|\|\s*(.*?);",
+                              plsql, re.S | re.I):
+            rhs = am.group(1)
+            mb = re.search(r"F_Criteria_Varchar2_Bind\s*\(\s*pvColumn_1\s*=>\s*(\w+)"
+                           r"\s*,\s*pvBind_Variable\s*=>\s*'(\w+)'", rhs, re.I)
+            if mb and consts.get(mb.group(1)):
+                _add(f"(:{mb.group(2)} IS NULL OR {consts[mb.group(1)]} = "
+                     f"UPPER(TRIM(:{mb.group(2)})))", mb.group(2).upper())
+                continue
+            mn = re.search(r"F_Criteria_Number_Bind\s*\(\s*pvColumn_1\s*=>\s*(\w+)"
+                           r"\s*,\s*pvBind_Variable\s*=>\s*'(\w+)'", rhs, re.I)
+            if mn and consts.get(mn.group(1)):
+                _add(f"(:{mn.group(2)} IS NULL OR {consts[mn.group(1)]} = :{mn.group(2)})",
+                     mn.group(2).upper())
+                continue
+            # inline date range: cvDT || ' >= :P_a' ... cvDT || ' <= :P_b'
+            mc = re.search(r"(\w+)\s*\|\|\s*'\s*>=\s*:(\w+)'.*?(\w+)\s*\|\|\s*'\s*<=\s*:(\w+)'",
+                           rhs, re.S | re.I)
+            if mc and (consts.get(mc.group(1)) or consts.get(mc.group(3))):
+                col = consts.get(mc.group(1)) or consts.get(mc.group(3))
+                _add(f"(:{mc.group(2)} IS NULL OR {col} >= :{mc.group(2)})", mc.group(2).upper())
+                _add(f"(:{mc.group(4)} IS NULL OR {col} <= :{mc.group(4)})", mc.group(4).upper())
+        if preds:
+            out[lex] = "\n\tAND " + "\n\tAND ".join(preds)
+    return out
+
+
 def _build_dataset(query: DataQuery, declared_params: Iterable[str],
                    target_db: str = "oracle",
-                   param_types: Optional[dict] = None) -> ET.Element:
+                   param_types: Optional[dict] = None,
+                   criteria_map: Optional[dict] = None) -> ET.Element:
     """Build one <DataSet> element from a DataQuery.
 
     ``target_db`` selects which CommandText flavor and parameter prefix to
@@ -742,12 +814,18 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         # "Refresh Fields" / schema inspection right now. Only applied for
         # the Oracle target; the T-SQL path uses query.tsql which has
         # already had refs translated to =Parameters!X.Value.
-        cmd_text = re.sub(
-            r"&([A-Z_][A-Z0-9_]*)",
-            r"/* lexical ref &\1 -- reimplement as dynamic WHERE/SELECT at deploy time */",
-            cmd_text,
-            flags=re.IGNORECASE,
-        )
+        # A recognised &P_CRITERIA_X criteria-builder is RECONSTRUCTED into real
+        # NULL-safe, parameter-bound predicates (so the Renewal-Year / date / name
+        # prompts actually FILTER). Anything else stays a harmless comment.
+        _cmap = criteria_map or {}
+        def _lex_sub(m):
+            nm = m.group(1)
+            frag = _cmap.get(nm.upper())
+            if frag is not None:
+                return frag
+            return (f"/* lexical ref &{nm} -- reimplement as dynamic "
+                    f"WHERE/SELECT at deploy time */")
+        cmd_text = re.sub(r"&([A-Z_][A-Z0-9_]*)", _lex_sub, cmd_text, flags=re.IGNORECASE)
         # Strip trailing semicolons + whitespace. Oracle Reports XMLs preserve
         # the SQL the developer typed in SQL*Plus / PL/SQL, often ending with
         # ";". The SSRS Oracle data extension sends each CommandText as a
@@ -1065,10 +1143,14 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
                                    param_types=param_types))
         return root
 
+    # Recover &P_CRITERIA_X lexical filters (the F_Criteria builder idiom) into
+    # real parameter-bound WHERE predicates so the filter prompts actually filter.
+    criteria_map = _reconstruct_lexical_criteria(report)
+
     seen_ds_names: set = set()
     for q in report.queries:
         ds = _build_dataset(q, declared, target_db=target_db,
-                            param_types=param_types)
+                            param_types=param_types, criteria_map=criteria_map)
         # SSRS rejects duplicate <DataSet Name>. Keep the first occurrence's
         # name; disambiguate later collisions (a scoped reference to an
         # ambiguous duplicate name resolves to the first anyway).
@@ -1176,8 +1258,8 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
     # Oracle parameters with a declared initialValue that are NOT query binds
     # (never referenced in any dataset's SQL) are DISPLAY CONSTANTS -- a report
     # title's division/agency sub-line, an address-type code, etc. Honor their
-    # Oracle default so the value actually PRINTS (e.g. the centered subtitle
-    # "DEQ Air Resources Management Bureau"), instead of the typed-NULL =Nothing
+    # Oracle default so the value actually PRINTS (e.g. a centered bureau/division
+    # subtitle constant), instead of the typed-NULL =Nothing
     # a query-filter param needs. Query-filter params are LEFT on =Nothing so the
     # (:P IS NULL OR col=:P) guard still widens to all rows and the load-bearing
     # param-prompt bypass is untouched. Generic: the value comes straight from
@@ -1956,8 +2038,8 @@ _BIND_VAR_RE = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
 def _one_to_many_link_children(report) -> set:
     """UPPER names of linked CHILD queries rendered as a COLUMNAR REPEATING
-    detail TABLE (1:many) -- e.g. JV's Q_VEHICLE: a vehicle list under each
-    tower. A 1:1 linked child (a single signature/contact field, no repeating
+    detail TABLE (1:many) -- e.g. a Q_VEHICLE child: a line-item list under each
+    master record. A 1:1 linked child (a single signature/contact field, no repeating
     table) is NOT included -- its scalar Lookup() is already correct. These
     1:many children get =Join(LookupSet(...)) instead, and their Oracle <link>
     WHERE filter is stripped so the child dataset carries ALL rows. Structural
@@ -3974,8 +4056,9 @@ def _grouped_tabular_spec(report):
     or None when the layout is NOT this archetype.
 
     Purely STRUCTURAL / geometry-driven (no report names). The discriminators
-    that keep it from stealing the existing nested-MD CARD reports (METHACT,
-    ASBINSPC) are: the outer frame must DIRECTLY own the group-header data field
+    that keep it from stealing the existing nested-MD CARD reports (a nested
+    master-detail card report, and an inspection card report) are: the outer
+    frame must DIRECTLY own the group-header data field
     (a card report nests its master fields one level deeper, so its outer frame
     owns none), AND there must be both a >=3-label column header AND a summary
     footer. Single-record FORMS (one record/page) are excluded outright."""
@@ -4261,7 +4344,7 @@ def _build_stacked_list_tablix(report, main):
 
 def _nearest_label(label_geo, x, y, max_dy=0.18, max_dx=1.4):
     """Find the static label that sits on (roughly) the same row to the LEFT of
-    a field at (x, y) -- that's the field's printed caption (e.g. 'FITS Site:'
+    a field at (x, y) -- that's the field's printed caption (e.g. 'Site:'
     left of the SITE_NAME value). Returns the label text (colon-stripped) or ''."""
     best = None
     best_dx = 1e9
@@ -4377,7 +4460,7 @@ def _is_flat_tabular_list_rdl(report, main):
         return False
     # NOT a genuine nested master-detail: the OUTER group must not carry a
     # stacked master BAND well ABOVE the detail row (its fields span >=2 y-rows
-    # or sit >0.9in above the detail, e.g. METHACT's Complaint-ID band over an
+    # or sit >0.9in above the detail, e.g. a complaint-ID master band over an
     # Action table). A grouped-but-FLAT list (e.g. a permittee roster with 2 sort
     # groups) has its outer field(s) IN the detail row -> route flat.
     try:
@@ -4564,7 +4647,7 @@ def _build_nested_group_tablix(report, main):
                            border_color=band_bg, padding="2pt", can_grow=True)
             _tb = bri[-1]
             # Place the caption at the LABEL's x (left of the value) so the
-            # "FITS Site:  GREAT FALLS..." reads as one positioned line.
+            # "Site:  <value>..." reads as one positioned line.
             lab_x = fx
             for text, lx, ly, _bg in label_geo:
                 if abs(ly - fy) <= 0.18 and lx <= fx + 0.05 and (fx - lx) <= 1.4:
@@ -4680,7 +4763,7 @@ def _build_nested_group_tablix(report, main):
     # A middle-group card field that is an internal key (*_ID) or that DUPLICATES
     # a detail column adds a spurious sub-band between the master band and the
     # detail header -- the real report runs straight from the band into the
-    # detail (verified: METHACT's "Status Date / Action History ID" line). Drop
+    # detail (verified on a nested master-detail card report's header line). Drop
     # those and skip the card entirely when nothing descriptive remains; a
     # genuine middle sub-master with real header fields still renders.
     _det_names = ({(_it.name or "").upper()
@@ -4739,8 +4822,8 @@ def _build_nested_group_tablix(report, main):
             # "(continued)" continuation marker both sit in the same y-window as
             # the real column-header strip, and the group caption is the CLOSER
             # band -- so the y tie-break would pick it and re-print the group
-            # header as a column header (MCP_ACTIVE_SITES rendered
-            # "Col_1 : N SITE(S)" where Oracle prints "Location"). The caption is
+            # header as a column header (observed on a multi-section site listing
+            # report: "Col_1 : N SITE(S)" where Oracle prints "Location"). The caption is
             # already painted as the group band (Tb_ND_Band*), so exclude it +
             # the "(continued)" marker; the genuine detail-column labels then win.
             _bctok = ("&" + bcol).lower() if bcol else None
@@ -4872,13 +4955,13 @@ def _build_nested_group_tablix(report, main):
     _sub(oge, "GroupExpression",
          f"=Fields!{_safe(bcol)}.Value" if (bcol and bcol.upper() in declared) else "=1")
     # A per-MASTER CARD band (geo_band: a colored master frame carrying >=2
-    # labeled fields -- e.g. METHACT's green Complaint-ID card with FITS Site /
-    # Incident Site / Location) is a full-page document per outer group, so it
+    # labeled fields -- e.g. a master card with a colored ID band over labeled
+    # detail / Incident Site / Location) is a full-page document per outer group, so it
     # page-breaks before each instance like Oracle. A thin group-CAPTION band
     # (the "<County-City> : N SITE(S)" list case, rendered as the single
     # Tb_ND_BandL caption) packs many groups per page; breaking per group there
-    # emits a blank leading page + one sparse group per sheet (MCP_ACTIVE_SITES).
-    # Gate the break on the band shape so the dense-list case reflows.
+    # emits a blank leading page + one sparse group per sheet (seen on a
+    # site-listing report). Gate the break on the band shape so the dense-list case reflows.
     if geo_band:
         opb = _sub(outer_grp, "PageBreak"); _sub(opb, "BreakLocation", "Start")
     cursor = _sub(outer_mem, "TablixMembers")
@@ -5699,8 +5782,8 @@ def _extract_title_lines(report, limit: int = 3):
 
     # Display-constant parameter fields (a fixed Oracle initialValue, NOT a query
     # bind) positioned in the title band are SUBTITLE lines -- e.g. F_DIVISION
-    # bound to &P_DIVISION = "DEQ Air Resources Management Bureau", or F_bureau ->
-    # &P_BUREAU = "<...> Asbestos Control Program". A <text> title block can't hold
+    # bound to &P_DIVISION = a bureau/division display constant, or F_bureau ->
+    # &P_BUREAU = a program-name display constant. A <text> title block can't hold
     # them (they're data fields), so without this the title loses its agency /
     # division sub-line. Resolve each to its literal default and let it sort into
     # the title block by its own y. Query-filter params (no initialValue, or used
@@ -5956,7 +6039,7 @@ def _build_cover_page(report) -> Optional[ET.Element]:
     _sub(rect, "KeepTogether", "true")
     style = _sub(rect, "Style")
     # The real Oracle criteria cover is a plain label:value list on white paper --
-    # NO border box (verified against the MVWF/CMVGY letter-cover truth). A drawn
+    # NO border box (verified against the letter-cover ground truth). A drawn
     # box was an invented frame, so the cover border is None.
     border = _sub(style, "Border")
     _sub(border, "Style", "None")
@@ -6278,7 +6361,7 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
     _sub(rect, "KeepTogether", "true")
     style = _sub(rect, "Style")
     # Oracle's criteria cover is a borderless label:value list on white paper
-    # (verified against the MVWF + CMVGY letter-cover truth — page 1 of each is
+    # (verified against the letter-cover ground truth — page 1 of each is
     # a plain list, no drawn box). A Solid border was an invented frame.
     border = _sub(style, "Border")
     _sub(border, "Style", "None")
@@ -6583,7 +6666,7 @@ def _emit_field_textbox(
     source = (getattr(lf, "source", "") or "").strip()
 
     # Oracle visible="no" -> a computation-only field (a hidden CF_/CS_ statistic
-    # that feeds a body-paragraph &token, e.g. CMVGY's CF_Avg_Haul); never draw
+    # that feeds a body-paragraph &token, e.g. a CF_ average formula); never draw
     # it. Mirrors the mockup's hidden-field skip so preview and RDL agree.
     if not getattr(lf, "visible", True):
         return (False, 0.0)
@@ -6614,7 +6697,7 @@ def _emit_field_textbox(
         if not _resid:
             return (False, 0.0)
     # Oracle module-filename trailer (a text field whose entire content is the
-    # source report's own file name, e.g. "CMVGY_GRANT_STATUS.rdf"). Oracle prints
+    # source report's own file name, e.g. "GRANT_STATUS.rdf"). Oracle prints
     # this in a developer/margin trailer next to the page number; it is the source
     # artifact name, never report content, and would otherwise leak into the body.
     # Same skip the title path already applies (".rdf"-suffixed text is ignored
@@ -6992,7 +7075,7 @@ def _emit_frame_rect(
     # Recurse into child frames (each gets its own bordered Rectangle).
     for child in (group.children or []):
         ckind = (child.kind or "").lower()
-        # In a header-resident summary cover (CMVGY_GRANT_STATUS), the stat table
+        # In a header-resident summary cover (a header-summary report), the stat table
         # carries CONDITIONAL grantee/site LIST repeating frames (R_Budget_C,
         # R_Itemized_MI, R_Quarter_MQ3 -- "Permittee"/"&Permittee : &Site" values)
         # that Oracle hides when "Include Grantee/Site Lists on Summary Page" = NO.
@@ -7050,8 +7133,8 @@ _PAGE_FOOTER_HEIGHT_IN = 0.6
 def _name_derived_title(report):
     """A clean report title derived from the report NAME, acronym-preserving:
     underscores -> spaces; a token with NO vowels stays UPPER (an acronym, e.g.
-    CMVGY), every other token is Capitalized (GRANT -> Grant). "CMVGY_GRANT_
-    STATUS" -> "CMVGY Grant Status". Used when the real title is a formula value
+    a no-vowel acronym), every other token is Capitalized (GRANT -> Grant). "ACME_GRANT_
+    STATUS" -> "ACME Grant Status". Used when the real title is a formula value
     the text-field title picker can't see."""
     nm = (getattr(report, "name", "") or "").strip()
     if not nm:
@@ -7067,12 +7150,12 @@ def _name_derived_title(report):
 def _resolved_title_lines(report):
     """Title lines for the PageHeader, minus the generic 'Report
     Parameters' caption (which is never a real report title)."""
-    # A HEADER-RESIDENT summary report's real title is a FORMULA value (CMVGY's
-    # CP_CMVGY_GRANT_STATUS -> "CMVGY Grant Accounting Status"), a data field the
+    # A HEADER-RESIDENT summary report's real title is a FORMULA value (a
+    # CP_ title formula -> "Grant Accounting Status"), a data field the
     # text-only title picker can't read; it instead grabs the section_main
     # asterisk-grid COLUMN-HEADER fragments ("Grant"/"Registered"/"Vehicles") and
     # leaks them into every page header. Derive a clean name-based title instead.
-    # Gated on _is_header_summary_report -> True for ONLY CMVGY_GRANT_STATUS, so
+    # Gated on _is_header_summary_report (a structural detector), so
     # no other report's title changes.
     if _is_header_summary_report(report):
         _nt = _name_derived_title(report)
@@ -7262,9 +7345,9 @@ def _is_summary_trailer_frame(fr) -> bool:
     """A section_main top-level frame that is a REPORT-WIDE summary TRAILER: it
     has NO repeating-frame descendant (so it is not per-record data) AND contains
     a field whose source is a report TOTAL (`..._TOTAL`, e.g. CF_APP_TOTAL). Such
-    a frame -- MVWFR's M_REPORT_SUMMARY_FTR (Application-Status + MVWFR-Status
-    count tables) -- prints ONCE at the report end, not on every per-record page.
-    Tightly keyed (corpus scan: only MVWFR matches), so a per-record document with
+    a frame -- a report-summary footer frame (status count tables) -- prints
+    ONCE at the report end, not on every per-record page.
+    Tightly keyed on structure, so a per-record document with
     a plain page-footer frame (page#/date, no totals) is never pulled out."""
     if "repeating" in (getattr(fr, "kind", "") or "").lower():
         return False
@@ -7350,7 +7433,7 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
         # source has NO criteria section (VOLUNTARY registration, wallet card) must
         # NOT get a fabricated "Run Date / Run By / Total of ALL Records" page --
         # the real document never prints one. Letters that DO display criteria
-        # (CMVGY letters, MVWF letter) build their faithful cover via
+        # (letter reports) build their faithful cover via
         # _build_letter_cover_page above, so they are unaffected. (suppress_empty_
         # cover is retained for API compatibility; the _has_cover_page gate now
         # governs the cover uniformly for the form and letter/cert paths.)
@@ -7505,7 +7588,7 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
         or "frame" in (c.kind or "").lower()
     ]
     # Split off any REPORT-WIDE summary TRAILER frame (a totals frame with no
-    # repeating descendant, e.g. MVWFR's Application/MVWFR-Status count tables).
+    # repeating descendant, e.g. a report-end status count-table frame).
     # It must print ONCE at the report end via a static Tablix trailer row, NOT on
     # every per-record page. Only split when a non-trailer (record) frame remains.
     _trailer_frames = [c for c in frame_children if _is_summary_trailer_frame(c)]
@@ -7752,7 +7835,7 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
 
     # ---- Report-wide SUMMARY TRAILER row -------------------------------------
     # A static 2nd Tablix row that renders ONCE after the last record (the totals
-    # frame split out above, e.g. MVWFR's Application/MVWFR-Status count tables).
+    # frame split out above, e.g. a report-end status count-table frame).
     # Its own Group(=1) renders it exactly once; PageBreak=Start puts it on its
     # own final page -- matching the Oracle report trailer, instead of repeating
     # the summary on every per-record page.
@@ -8089,10 +8172,10 @@ def _detect_multi_section(report: ParsedReport):
         })
 
     # Post-pass: surface a footer-only summary frame that the main detector missed
-    # because it has NO group-frame wrapper of its own. ASBESTOS's "Enforcement
-    # Cases Ongoing" (label + CS_9) sits LOOSE under section_main next to a single
-    # loose repeating frame, so neither the plain nor the >=2-repeating path picks
-    # it up, while its siblings (each wrapped in their own M_G_*_GRPFR) were caught.
+    # because it has NO group-frame wrapper of its own. A loose "<metric> total"
+    # line (label + a CS_ summary) can sit LOOSE under section_main next to a
+    # single loose repeating frame, so neither the plain nor the >=2-repeating path
+    # picks it up, while its siblings (each wrapped in their own M_G_*_GRPFR) were caught.
     # Emit it as a single-summary-line section. Gated tight (label present, NOT a
     # "Total"/"Number" caption, carries a CS_/Sum/CF_ aggregate, NOT already a
     # section) so it fires ONLY on genuine orphan summary lines -- corpus-verified
@@ -8218,7 +8301,7 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
     # No separate column-header row: the real stat/accounting section goes
     # straight from the gray band (which carries the "Number" value caption on
     # its right edge) into data rows. A humanized field-name header row
-    # ("Stat Meth Count ...") would be spurious noise, so it is omitted.
+    # ("Stat Count ...") would be spurious noise, so it is omitted.
     drow = _sub(rows_el, "TablixRow")
     _sub(drow, "Height", "0.24in")
     dcells = _sub(drow, "TablixCells")
@@ -8854,12 +8937,12 @@ def _build_matrix_tablix(report, spec) -> ET.Element:
 
 def _build_grantee_grid_tablix(report, main):
     """A per-grantee ASTERISK GRID for the header-summary report
-    (CMVGY_GRANT_STATUS): one bordered box per grantee, repeated down the page.
+    (a header-summary report): one bordered box per grantee, repeated down the page.
     Each box = the section_main R_Org repeating frame painted at its real
     geometry (FY column-header texts + grantee name + the font-28 *_Ind asterisk
     fields under each FY column + quarter headers + site + contact). Replaces the
     generic nested-card the summary stat query would otherwise mangle. Gated to
-    _is_header_summary_report (CMVGY_GS only), so baseline-safe."""
+    _is_header_summary_report (a structural detector), so baseline-safe."""
     ms = _section_by_kind(report, "section_main")
 
     def _find_rep(node):
@@ -8921,11 +9004,11 @@ def _build_grantee_grid_tablix(report, main):
 
     # The _Ind sources live in the SUB-queries (Cars_Ind/Grant_Ind/... in
     # Q_Grant; Itemized_Ind in Q_ACCOUNTING; Q1-4_Ind in Q_Logsheet), not in
-    # the grid's own dataset (Q_CMVGY). _field_value_for, scoped to the grid
+    # the grid's own dataset (the main summary query). _field_value_for, scoped to the grid
     # dataset, can only resolve same-dataset columns + report formulas (so just
     # CP_Complete_Ind, the DS_REPORT_FORMULAS field, resolved; the other nine
     # came back =Nothing). Bind each cross-query indicator with a SSRS Lookup on
-    # the per-grantee join key shared between Q_CMVGY and the indicator's owning
+    # the per-grantee join key shared between the main summary query and the indicator's owning
     # query (Org_Id for grant/accounting, Site_Id for the quarterly logsheet) --
     # the same LookupSet/Join pattern already used for 1:many linked detail
     # elsewhere. Generic: the host query + join key are discovered from the
@@ -9498,7 +9581,7 @@ def _build_embedded_images(report) -> Optional[ET.Element]:
 def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.Element:
     """Root <Report> element with all children in SSRS schema order."""
     # 1:many linked detail tables (Oracle <link> child rendered as a columnar
-    # repeating frame, e.g. JV's vehicle list per tower): strip the child's
+    # repeating frame, e.g. a line-item list per master record): strip the child's
     # link WHERE filter so its dataset carries ALL rows (the per-master-row
     # join is done in SSRS by LookupSet on the key column the generator already
     # SELECTs), and stash the set so the field resolver emits Join(LookupSet(..))
@@ -9605,7 +9688,7 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
     # ("Name Order: Name Order", "Appl Address | Appl Phones") instead of the
     # geometry-faithful document the truth shows. Route it through the per-record
     # positional body (the _is_form arm) so the RDL matches the mockup. Reuses the
-    # mockup's exact predicate; METHACT/ASBINSPC (genuine nested-MD cards) score
+    # mockup's exact predicate; genuine nested-MD card reports score
     # False so they keep the Tablix path and the 13 baselines stay byte-identical.
     _prd = False
     if main is not None and kind not in ("certificate", "letter"):
@@ -9875,11 +9958,11 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
     column's dataset (=Sum(Fields!src.Value,"Q")). Stacked below (not at the
     Oracle y) so it never overlaps a dynamically-grown tablix. Gated on
     report-scoped summaries existing -> non-summary reports are byte-identical."""
-    # A HEADER-RESIDENT summary report (CMVGY_GRANT_STATUS) carries ALL its totals
+    # A HEADER-RESIDENT summary report carries ALL its totals
     # inside the section_header stat table (the cover Rectangle); a separate
     # grand-total stack stacked below the per-grantee grid is a redundant
     # duplicate (it mis-renders the _Ind formulas as a "Miss Grant: Miss Grant"
-    # label list). Skip. Gated -> only CMVGY_GRANT_STATUS, baseline-safe.
+    # label list). Skip. Gated on the structural detector, baseline-safe.
     if _is_header_summary_report(report):
         return
     formulas = getattr(report, "formulas", None) or []

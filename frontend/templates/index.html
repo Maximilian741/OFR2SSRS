@@ -101,7 +101,7 @@
         server at run time (<code>Globals!ReportServerUrl</code> +
         <code>Globals!ReportFolder</code>, zero-config on SSRS&nbsp;2016+).
         Fill it in &mdash; your report-server URL up to the FOLDER, e.g.
-        <code>http://host/ReportServer?/MVWF</code> &mdash; for older servers or
+        <code>http://host/ReportServer?/MyReports</code> &mdash; for older servers or
         to point the links at a specific folder. Use the <b>ReportServer</b>
         URL, not the <code>/Reports</code> portal URL. The child report must be
         deployed in that folder under its exact name. Remembered in this browser.
@@ -112,15 +112,16 @@
       <div class="side-heading" style="color:#1d4ed8">&#128279; Cover hyperlink text &mdash; type it here</div>
       <input id="generate-all-label" type="text" autocomplete="off" spellcheck="false"
              class="conn-input"
-             placeholder="e.g. JV Standard 12 x 9 Envelope">
+             placeholder="e.g. Standard #10 Envelope">
       <div class="muted-note conn-note">
-        This is the <b>exact words the envelope hyperlink shows</b> on the cover
-        page (both the &ldquo;Generate Envelopes&rdquo; link and the
-        &ldquo;[Permittee] is a hyperlink to&hellip;&rdquo; line). Type
-        <code>JV Standard 12 x 9 Envelope</code> here, then Convert/Download &mdash;
-        the link reads exactly that instead of <code>JV_ENVELOPE_12</code>.
-        <b>If you leave this blank it falls back to the report name</b> (the tool
-        can&rsquo;t invent the envelope&rsquo;s description). Remembered in this browser.
+        This is the <b>exact words the sub-report hyperlink shows</b> on the cover
+        page (both the &ldquo;generate all&rdquo; link and any
+        &ldquo;[field] is a hyperlink to&hellip;&rdquo; line). Type the
+        human-friendly name here (e.g. <code>Standard #10 Envelope</code>), then
+        Convert/Download &mdash; the link reads exactly that instead of the raw
+        report name. <b>If you leave this blank it falls back to the report
+        name</b> (the tool can&rsquo;t invent the sub-report&rsquo;s description).
+        Remembered in this browser.
       </div>
     </section>
 

@@ -14,9 +14,13 @@ original. A typical state agency or utility carries hundreds of these reports.
 
 Our pipeline turns the bulk of that work into a 30-second drag-and-drop:
 
-* parse the Oracle XML
-* translate the embedded Oracle SQL / PL/SQL into T-SQL
-* emit a structurally valid `.rdl`
+* parse the Oracle XML (or a mixed folder of XML / SQL / DOCX / RDF / image
+  artifacts) into a single in-memory `ParsedReport`
+* translate the embedded Oracle SQL into T-SQL, and compile each PL/SQL
+  formula column (`CF_*` / `CP_*`) into an SSRS VB.NET expression that
+  computes inline
+* emit an RDL that is validated against Microsoft's own RDL 2008 XSD and
+  render-verified through the ReportViewer engine
 * detect per-recipient (bursting) distribution and drill-through sub-reports
 * render an HTML mock-up of the RDL so a reviewer can eyeball the result
   before opening Report Builder
@@ -31,39 +35,45 @@ package UDF stubs, pixel-precise positioning) rather than silently fudged.
 ## 2. High-level pipeline
 
 ```
-                +-------------------------+
-  .xml / .rdf  |  parsers/oracle_xml.py  |
-  (bytes)  --> |  parse_oracle_xml()     |  --> ParsedReport
-                +-------------------------+
-                              |
-                              v
-                +---------------------------------+
-                | translators/plsql_to_tsql.py    |
-                | translate_report(report)        |
-                |   (mutates each q.tsql,         |
-                |    each formula.tsql_body,      |
-                |    appends translation notes)   |
-                +---------------------------------+
-                              |
-                              v
-                +-------------------------+        +-----------------------+
-                | generators/rdl.py       | -----> | rdl_xml: str          |
-                | generate_rdl(report)    |        | (downloadable .rdl)   |
-                +-------------------------+        +-----------------------+
-                              |
-                              v
+  .xml / .rdf / .sql      +-------------------------+
+  .docx / .png / folder -> |  parsers/oracle_xml.py  |
+  (bytes; ingest.py        |  parse_oracle_xml()     | --> ParsedReport
+   classifies bundles)     +-------------------------+     (models.py)
+                                        |
+                                        v
+        +-------------------------------------------------------+
+        | translators/                                          |
+        |  plsql_to_tsql.py  translate_report()                 |
+        |     SQL  -> T-SQL (mutates q.tsql, appends notes)      |
+        |  plsql_formula.py  translate_formula_to_vb()           |
+        |     CF_/CP_ PL/SQL -> SSRS VB.NET expression           |
+        |  udf_stubs.py       package-fn -> dbo.fn_* signatures  |
+        +-------------------------------------------------------+
+                                        |
+                                        v
+        +-------------------------+        +-----------------------+
+        | generators/rdl.py       | -----> | rdl_xml: str          |
+        | generate_rdl(report)    |        | (RDL 2008 document)   |
+        | rdl_postprocess.py      |        +-----------------------+
+        +-------------------------+
+                                        |
+                                        v
    +--------------------+   +-------------------+   +----------------------+
    | preview/           |   | validators/       |   | deployment.py        |
    |  html_mockup       |   |  tsql_check       |   |  build_checklist()   |
-   |  mockup_variants   |   |  rdl_check        |   |                      |
-   |  live_data         |   |  preflight        |   | bursting.py          |
-   +--------------------+   +-------------------+   | subreports.py        |
-                              |                     +----------------------+
-                              v
+   |  mockup_variants   |   |  rdl_check        |   | bursting.py          |
+   |  live_data         |   |  preflight        |   | subreports.py        |
+   +--------------------+   +-------------------+   | fidelity.py          |
+                                        |           +----------------------+
+                                        v
                 +-------------------------+
                 |  Flask app.py           |
                 |  JSON payload to UI     |
                 +-------------------------+
+
+  Offline verification (not in the request path):
+    tools/renderlab/  renders the emitted RDL through Microsoft's
+    ReportViewer engine to a real PDF and measures it.
 ```
 
 The shared in-memory contract between every module is `ParsedReport`
@@ -97,8 +107,9 @@ another module's internals.
   * `POST /api/download/burst-pack` — download the Burst Pack zip
   * `GET /api/subreports` — list detected drill-through children
   * `POST /api/subreport/<child>/upload|clear|build` — manage a child report
-  * `GET /api/ai/status`, `POST /api/auto-fix`, `POST /api/apply-fix` —
-    optional Claude assist
+  * `GET /api/ai/status`, `GET /api/ai/test`, `POST /api/auto-fix`,
+    `POST /api/apply-fix` — optional Claude assist
+  * `GET /api/recent/clear` — reset the in-memory recent-conversion cache
   * `GET /api/health` — health/sample-list probe
 
 ### 3.2 `backend/converter/__init__.py` — Pipeline glue
@@ -140,19 +151,38 @@ Defines the dataclasses every module reads/writes:
 palette from the layout's `<bgColor>` / `<fgColor>` attributes for the
 dynamic-palette feature in the mockup renderer.
 
-### 3.5 `backend/converter/translators/plsql_to_tsql.py`
+### 3.5 `backend/converter/translators/` — two translators
 
-* Public API:
-  * `translate_report(report: ParsedReport) -> None` (mutates in place)
-  * `translate_sql(oracle_sql: str) -> tuple[str, list[str]]`
-* Rule-based, regex-driven. Translation rule table is in section 5.
+There are two independent translators with distinct jobs.
+
+**`plsql_to_tsql.py` — SQL dialect translator** (rule-based, regex-driven).
+
+* Public API: `translate_report(report: ParsedReport) -> None` (mutates in
+  place; called from `converter/__init__.py`).
+* Rewrites each `DataQuery.sql` (Oracle SQL) into `DataQuery.tsql` (T-SQL).
+  Translation rule highlights are in section 5.
 * Every non-trivial rewrite emits a warning into `q.notes`, surfaced to the
   UI so reviewers can audit risky rewrites.
-* Companion file `translators/udf_stubs.py` ships the `dbo.fn_*` SQL Server
-  scalar-function stubs that mirror the Oracle PL/SQL package functions
-  most reports rely on.
-* `translators/registry.py` exposes a `register(rule)` hook for vendors to
-  drop in custom Oracle to T-SQL rewrites without forking the core.
+
+**`plsql_formula.py` — PL/SQL formula compiler** (the core feature; a real
+tokenizer + precedence-climbing parser, not pattern substitution).
+
+* Public API: `translate_formula_to_vb(plsql_body, ...)` and
+  `translate_expr(...)` (consumed by `generators/rdl.py`).
+* Compiles an Oracle `CF_*` / `CP_*` formula body to an SSRS VB.NET
+  expression that **computes inline** — `||` becomes `&`,
+  `NVL`/`NVL2`/`COALESCE` become `IIf(IsNothing(...))`, `DECODE` and searched
+  `CASE`/`IF` become nested `IIf`, and the common string/number/date built-ins
+  (`SUBSTR`→`Mid`, `INSTR`→`InStr`, `TO_CHAR`→`Format`, `SYSDATE`→`Now()`,
+  etc.) map to their VB.NET equivalents.
+* **Honest fallback.** A formula is reported as fully translated only when the
+  *whole* expression compiled with no unknown calls; an external package
+  function leaves the formula `unresolved` so the generator keeps a safe
+  placeholder rather than emitting a broken expression.
+
+**`udf_stubs.py`** ships the `dbo.fn_*` SQL Server scalar-function stub
+signatures that mirror the Oracle PL/SQL package functions reports rely on;
+the SQL translator rewrites each call site to the matching `dbo.fn_*`.
 
 ### 3.6 `backend/converter/generators/rdl.py`
 
@@ -161,27 +191,32 @@ dynamic-palette feature in the mockup renderer.
   `http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition`
   namespace + `rd:` designer namespace.
 * **Body shape detection.** The generator inspects the parsed layout and
-  picks one of two body shapes:
-  * **Per-record (letter / certificate)** — one full page per source row,
-    free-form arrangement of fields. Implemented by
-    `_build_per_record_body`. Emits a single-row `<Tablix>` wrapping a
-    `<Rectangle>` of absolutely-positioned `<Textbox>` elements, with
-    `<PageBreak>` between records.
-  * **Tabular** — grid-style list/register, often with grouping. Detected
-    by `_looks_tabular` (any descendant repeating frame). Implemented by
-    `_build_grouped_card_tablix` and the surrounding tabular path. Emits
-    a multi-row `<Tablix>` with `<TablixRowHierarchy>` groups per
+  picks a body shape:
+  * **Per-record (letter / certificate / single-record form)** — a
+    free-form arrangement of absolutely-positioned fields, typically one
+    page per source row. Implemented by `_build_per_record_body`.
+  * **Tabular** — grid-style list/register, often with grouping and
+    subtotals. The tabular paths are selected by `_grouped_tabular_spec`
+    and `_is_flat_tabular_list_rdl` and built by
+    `_build_grouped_tabular_subtotal_tablix` and `_build_grouped_card_tablix`.
+    Emits a multi-row `<Tablix>` with `<TablixRowHierarchy>` groups per
     Oracle repeating frame.
+* **Formula columns.** `CF_*` / `CP_*` formulas are compiled to inline
+  SSRS VB.NET expressions via `translators/plsql_formula.py`; an
+  unresolvable formula is left as a safe placeholder.
 * **DataSource shape.** Emitted as `<DataSourceReference>SharedDataSource</...>`
   rather than an embedded `<ConnectionProperties>` block. See
   `CONVERSION_NOTES.md` for why — it is load-bearing for SSRS refresh
   behavior.
-* **Compatibility post-pass.** `_make_ssrs_oracle_compatible` runs after
-  initial generation to add date-bind wrapping, alias unaliased SELECT
-  items, auto-declare undeclared binds, set AllowBlank/Nullable, and
-  strip empty required-children containers.
-* **Post-process.** `rdl_postprocess.py` runs a final sweep to normalize
-  whitespace and verify schema constraints SSRS enforces at upload.
+* **Compatibility post-pass.** `_make_ssrs_oracle_compatible` runs over the
+  CommandText to add date-bind wrapping, alias unaliased SELECT items, and
+  auto-declare undeclared binds; the generator also sets
+  `AllowBlank`/`Nullable` and strips empty required-children containers so
+  SSRS does not reject the upload.
+* **Post-process.** `rdl_postprocess.py` exposes helpers
+  (`set_datasource_reference`, `inject_connection_string`) the deployment
+  step uses to point the shared-data-source reference at the user's real
+  server path or, optionally, embed a connection string.
 
 ### 3.7 `backend/converter/preview/html_mockup.py`
 
@@ -211,13 +246,20 @@ Three independent validators, all returning issues in the shape
 * `tsql_check.py` — pure-Python lexical/structural T-SQL checks. Catches
   untranslated Oracle constructs, unbalanced parens, missing/unbound
   report parameters.
-* `rdl_check.py` — XSD-style structural validation of the emitted RDL.
+* `rdl_check.py` — structural validation of the emitted RDL.
   Verifies required elements present, field references resolve to
   declared `<Field>`s, parameter references resolve to declared
   `<ReportParameter>`s, Tablix groupings reference a real dataset.
 * `preflight.py` — `preflight_audit(rdl_xml)` runs a final RDL audit
   immediately before download, catching anything the per-stage validators
   missed (orphan field refs, empty required containers, stray bind syntax).
+
+Beyond these runtime validators, the test suite validates generated RDL
+against **Microsoft's own RDL 2008 XSD** (`ReportDefinition_2008.xsd`,
+loaded with `lxml.etree.XMLSchema` in `tests/test_rdl_schema_xsd.py` and
+several other test modules). This is true schema validation, not a
+hand-rolled approximation — a generated RDL that fails the Microsoft schema
+fails the test suite.
 
 ### 3.10 `backend/converter/bursting.py`
 
@@ -294,12 +336,63 @@ file to running on a real SSRS server.
   for every prompt, validates each result (no `DROP`/`EXEC`/etc.), and
   patches the RDL in place.
 
-### 3.17 `backend/db/seed_sample_db.py` and `backend/db/sample.sqlite`
+### 3.17 `backend/converter/rdl_postprocess.py`
+
+Post-processing helpers that run on the generated RDL string:
+
+* `set_datasource_reference(rdl_xml, path)` — rewrites the
+  `<DataSourceReference>` target to the caller's real shared-data-source
+  path (e.g. `/Data Sources/Oracle_Prod`). When the path matches an
+  existing shared data source, SSRS binds it at upload, so the user never
+  has to repoint the data source by hand.
+* `inject_connection_string(rdl_xml, conn_str)` — alternative path that
+  switches the data source to an embedded connection string.
+
+The shared-reference shape itself (and *why* it is load-bearing) is
+documented in `CONVERSION_NOTES.md`.
+
+### 3.18 `backend/converter/fidelity.py`
+
+`fidelity.py` is the converter's self-check: it parses the **generated**
+RDL back and compares it to the parsed Oracle source, scoring how faithful
+the copy is (1.0 = no silently dropped column or parameter) and listing
+exactly what was preserved and what still needs manual wiring. Where the
+XSD/preflight gates answer "will it upload?", this answers "is it a 1:1
+copy?". Generic and structural — no per-report logic. Surfaced in the UI's
+Extras card.
+
+### 3.19 `backend/converter/batch.py` and `licensing.py`
+
+* `batch.py` — converts many Oracle reports in one pass and produces a
+  **Migration Assessment**: a per-report verdict table (upload-readiness,
+  fidelity score, effort tier, concrete reasons) plus an executive summary,
+  and a zip of every generated RDL. Effort tiers (`automatic` /
+  `light-touch` / `assisted` / `manual`) are derived deterministically from
+  the converter's own preflight and fidelity signals. When RenderLab is
+  available, each RDL is also rendered through Microsoft's engine and the
+  page-count / blank-page verdict is stamped into the assessment.
+* `licensing.py` — an edition seam (`O2S_LICENSE` → Community / Pro /
+  Enterprise) that gates only volume features (batch size) and assessment
+  branding. The converter core is fully functional in every edition and
+  single-report conversion is always unlimited; there is no phone-home.
+
+### 3.20 `backend/db/seed_sample_db.py` and `backend/db/sample.sqlite`
 
 Bundled SQLite sample DB seeded with synthetic data so the Live Data tab
 returns real rows with zero database setup.
 
-### 3.18 `frontend/templates/index.html` + `frontend/static/`
+### 3.21 `tools/renderlab/` — Microsoft-engine render verification
+
+A standalone harness (not in the request path) that renders a generated
+RDL through **Microsoft's ReportViewer engine** to a real PDF and measures
+it (page count, blank pages, width overflow), so layout claims are verified
+numerically rather than asserted. It has two render paths: `RenderLab.exe`
+(a `LocalReport` host that JIT-compiles RDL expressions) and, when that host
+is blocked by an OS Application Control policy, a signed-DLL PowerShell
+fallback (`render_rdl.ps1`) that staticizes expressions and still drives the
+real engine. See `tools/renderlab/README.md`.
+
+### 3.22 `frontend/templates/index.html` + `frontend/static/`
 
 Single-page, vanilla-JS frontend. The UI surfaces **four main tabs** by
 default (HTML Mockup, RDL XML, Bursting, Sub-Reports) with the other
@@ -445,19 +538,22 @@ before the migrated report goes live.
 
 ## 11. Extension points
 
-* **Translator plugin registry.** `translators/registry.py` exposes
-  `register(rule)` so vendors can drop in custom Oracle to T-SQL rewrites
-  without forking the core. Each rule is `(name, pattern, rewrite_fn,
-  severity)`.
-* **AI-assist module.** `ai_assist.py` builds a prompt for an LLM that
-  pairs the un-translated Oracle SQL with the rules table; the response
-  is parsed and merged into the rule pipeline so the deterministic
-  translator runs first and the LLM only fills gaps. `ai_runner.py` does
-  the same automatically when `ANTHROPIC_API_KEY` is set.
-* **Custom UDF stubs.** `translators/udf_stubs.py` is a plain Python dict.
-  Adding a new `dbo.fn_*` mapping is a one-line edit.
+Because every module reads and writes the same `ParsedReport`, the pipeline
+is extended by adding a function, not by editing existing modules.
+
+* **AI-assist module.** `ai_assist.py` builds a paste-into-LLM prompt for
+  PL/SQL the deterministic translator could not handle. `ai_runner.py` does
+  the same automatically when `ANTHROPIC_API_KEY` is set: it calls Claude,
+  validates each result (rejecting `DROP`/`EXEC`/etc.), and patches the RDL
+  in place.
+* **Custom UDF stubs.** `translators/udf_stubs.py` keeps its known mappings
+  in the `_KNOWN_STUBS` dict. Adding a new `dbo.fn_*` mapping is a
+  dict-entry edit.
+* **Custom translation rules.** `translators/plsql_to_tsql.py` is a single
+  rule-driven module; new Oracle→T-SQL rewrites are added alongside the
+  existing ones (see the rule highlights in section 5).
 * **Custom generators.** Implement `generate_<format>(report) -> str`
-  against the same `ParsedReport`. Wire it into `converter/__init__.py`.
+  against the same `ParsedReport` and wire it into `converter/__init__.py`.
 * **Custom validators.** Implement `validate_<thing>(report) -> list[dict]`
   with the standard issue shape; the UI renders any number of validators
   side-by-side.

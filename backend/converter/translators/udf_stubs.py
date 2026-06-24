@@ -171,7 +171,7 @@ _KNOWN_STUBS: Dict[str, Dict] = {
         "body": (
             "    DECLARE @abbr NVARCHAR(20);\n"
             "    SELECT TOP 1 @abbr = District_Abbr FROM dbo.Districts WHERE District_Id = @distr_id;\n"
-            "    RETURN ISNULL(@abbr, N'JV')"
+            "    RETURN ISNULL(@abbr, N'NA')"
         ),
     },
     "F_Get_Perm_Name": {

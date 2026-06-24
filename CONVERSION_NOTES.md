@@ -108,11 +108,14 @@ RDL bodies:
   grid, often with grouping. The body is a multi-row `<Tablix>` with
   `<TablixRowHierarchy>` groups for each Oracle repeating frame.
 
-The generator detects which shape applies by inspecting the parsed
-`LayoutSection` tree: if any descendant of the main section has a
-repeating frame, it is tabular; otherwise it is treated as per-record.
-See `_looks_tabular` and `_build_per_record_body` in
-`backend/converter/generators/rdl.py`.
+The generator detects which shape applies by inspecting the parsed layout
+tree. A report whose main section drives a grid of detail rows routes to a
+tabular body; a free-form one-page-per-row report routes to a per-record
+body. The relevant entry points in
+`backend/converter/generators/rdl.py` are `_grouped_tabular_spec` /
+`_is_flat_tabular_list_rdl` (which select the tabular paths,
+`_build_grouped_tabular_subtotal_tablix` and `_build_grouped_card_tablix`)
+and `_build_per_record_body` (the free-form positional path).
 
 Both code paths share the same DataSource, DataSet, ReportParameter, and
 PageHeader/PageFooter emission — only the `<Body>` differs.
@@ -192,17 +195,21 @@ heights are computed from the rendered content, not declared up front.
 
 ## Adding a new report as a test case
 
-1. Drop the source Oracle XML at
-   `tests/fixtures/source_of_truth/case_NNN/source.xml`.
-2. (Optional) Drop a known-good hand-tweaked RDL at
-   `tests/fixtures/source_of_truth/case_NNN/expected.rdl`.
-3. Run `pytest -q`. The parametrized tests in
+1. Create a new subdirectory under `tests/fixtures/source_of_truth/`
+   (use a descriptive, synthetic name such as `letter` or `master_detail`).
+2. Drop the source Oracle XML at `<your-dir>/source.xml` and a known-good
+   reference RDL at `<your-dir>/expected.rdl`. Both files are required:
+   `tests/test_source_of_truth.py` walks the directory and treats every
+   subfolder that contains **both** `source.xml` and `expected.rdl` as a
+   case.
+3. Run `python -m pytest -q`. The parametrized tests in
    `tests/test_source_of_truth.py` and `tests/test_field_alignment.py`
-   automatically discover the new `case_NNN` directory and assert every
-   compatibility guarantee above.
+   automatically discover the new directory and assert every compatibility
+   guarantee above.
 
 Customer report names, table names, column names, and bind variables must
-not appear anywhere in `tests/*.py`. Fixtures are name-agnostic.
+not appear anywhere in `tests/*.py` or in any fixture. Fixtures are
+name-agnostic and synthetic.
 
 ## Known limitations
 
