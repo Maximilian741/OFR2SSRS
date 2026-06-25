@@ -71,7 +71,8 @@ Rewrites currently in place (see the module for the full table):
 | `SYSDATE`                      | `GETDATE()`                                | no     |
 | `||` (string concat)           | `+`                                        | no     |
 | `:P_FOO` bind                  | `@P_FOO`                                   | no     |
-| `&LEX_FOO` lexical             | (left in place + warning)                  | YES    |
+| `&P_CRITERIA` criteria-builder | reconstructed → NULL-safe param WHERE      | YES    |
+| `&LEX_FOO` other lexical       | (left in place + warning)                  | YES    |
 | `Pkg_X.fn_Y(...)`              | `dbo.fn_Y(...)` + UDF stub                 | yes    |
 | `ROWNUM`                       | `TOP n` / `ROW_NUMBER() OVER (...)`        | yes    |
 | `(+)` outer join               | `LEFT OUTER JOIN ... ON ...`               | yes    |
@@ -213,10 +214,12 @@ name-agnostic and synthetic.
 
 ## Known limitations
 
-- **Lexical references (`&LEX_FOO`).** No general SSRS equivalent (closest
-  is dynamic SQL via expressions). The translator leaves them in place,
-  the validator flags them as errors, the deploy checklist documents how
-  to convert them.
+- **Lexical references (`&LEX_FOO`).** SSRS has no general lexical-parameter
+  equivalent (closest is dynamic SQL via expressions). The common
+  **`&P_CRITERIA` "criteria builder" idiom is reconstructed** into real,
+  `NULL`-safe, parameter-bound `WHERE` predicates, so filter prompts actually
+  filter. Other free-form lexicals are left in place, flagged by the
+  validator, and documented in the deploy checklist for manual conversion.
 - **PL/SQL package function bodies.** Call sites are rewritten and stubs
   are shipped, but the body of each `dbo.fn_*` UDF has to be ported by
   hand. The audit trail flags every call so nothing is missed.

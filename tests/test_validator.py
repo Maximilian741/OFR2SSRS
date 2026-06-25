@@ -149,3 +149,43 @@ def test_preflight_passes_clean_cellcontents():
     result = preflight_audit(rdl)
     rules = [i["rule"] for i in result["issues"]]
     assert "rdl.invalid_cellcontents_child" not in rules
+
+
+def _bodyonly_rdl(report_items_inner: str) -> str:
+    """Minimal RDL with NO data region (Tablix/List/...), only the given
+    ReportItems in the body — for the no-bound-items / positional-document rule."""
+    NS = "http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition"
+    return f'''<?xml version="1.0" encoding="utf-8"?>
+<Report xmlns="{NS}">
+  <DataSources><DataSource Name="DS"><ConnectionProperties><DataProvider>SQL</DataProvider><ConnectString/></ConnectionProperties></DataSource></DataSources>
+  <DataSets><DataSet Name="D1"><Query><DataSourceName>DS</DataSourceName><CommandText>SELECT 1</CommandText></Query><Fields><Field Name="X"><DataField>X</DataField></Field></Fields></DataSet></DataSets>
+  <Body><ReportItems>{report_items_inner}</ReportItems><Height>1in</Height></Body>
+  <Page><PageHeight>11in</PageHeight><PageWidth>8.5in</PageWidth><LeftMargin>1in</LeftMargin><RightMargin>1in</RightMargin><TopMargin>1in</TopMargin><BottomMargin>1in</BottomMargin></Page>
+  <Width>8.5in</Width>
+</Report>'''
+
+
+def test_preflight_positional_document_not_flagged_no_bound_items():
+    """A letter/form/certificate has no data region but displays its data via
+    scoped body textbox field refs. It must NOT get the hard rdl.no_bound_items
+    RED (false positive) — instead an AMBER rdl.positional_document note.
+    Regression for a letter/invoice report (RED -> AMBER)."""
+    from converter.validators.preflight import preflight_audit
+    tb = ('<Textbox Name="T1"><Paragraphs><Paragraph><TextRuns><TextRun>'
+          '<Value>=First(Fields!X.Value, "D1")</Value></TextRun></TextRuns>'
+          '</Paragraph></Paragraphs></Textbox>')
+    rules = [i["rule"] for i in preflight_audit(_bodyonly_rdl(tb))["issues"]]
+    assert "rdl.no_bound_items" not in rules, rules
+    assert "rdl.positional_document" in rules, rules
+
+
+def test_preflight_truly_empty_report_keeps_no_bound_items_red():
+    """No data region AND no field references = nothing displays -> keep the
+    hard rdl.no_bound_items RED (the degenerate stub case)."""
+    from converter.validators.preflight import preflight_audit
+    tb = ('<Textbox Name="T1"><Paragraphs><Paragraph><TextRuns><TextRun>'
+          '<Value>Static text</Value></TextRun></TextRuns></Paragraph>'
+          '</Paragraphs></Textbox>')
+    rules = [i["rule"] for i in preflight_audit(_bodyonly_rdl(tb))["issues"]]
+    assert "rdl.no_bound_items" in rules, rules
+    assert "rdl.positional_document" not in rules, rules

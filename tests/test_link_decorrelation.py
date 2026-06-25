@@ -93,3 +93,35 @@ def test_lookup_uses_composite_key_when_multiple_correlations():
         f"Lookup joins on a single key — wrong rows with constant keys: {lk}")
     assert '"|"' in lk or "&quot;|&quot;" in lk, (
         f"expected composite key separator in: {lk}")
+
+
+def test_reconstruct_drops_shared_cv_builders_keeps_unique():
+    """A cv* column-builder CONSTANT reused to build MORE THAN ONE lexical is a
+    SHARED helper Oracle splices into DIFFERENT queries (e.g. :P_Criteria_A
+    AND :P_Criteria_B from the same cvCOL set). Reconstructing one query's
+    WHERE from it injects a column that won't resolve in the sibling query
+    (ORA-01858/ORA-00904) -- which broke a permit certificate's date + permit
+    prompts in production. Such predicates MUST be dropped (caller keeps the honest
+    placeholder); a cv-constant UNIQUE to one lexical is provably that query's own
+    filter and is kept. Regression for the permit-certificate defect 1+2 general fix."""
+    from converter.generators.rdl import _reconstruct_lexical_criteria
+    plsql = (
+        "cvSHARED CONSTANT VARCHAR2(50) := 'P.Shared_Col';\n"
+        "cvONLYA  CONSTANT VARCHAR2(50) := 'A.Only_Col';\n"
+        ":P_Criteria_A := :P_Criteria_A || F_Criteria_Varchar2_Bind(pvColumn_1 => cvSHARED, pvBind_Variable => 'P_S');\n"
+        ":P_Criteria_A := :P_Criteria_A || F_Criteria_Varchar2_Bind(pvColumn_1 => cvONLYA, pvBind_Variable => 'P_A');\n"
+        ":P_Criteria_B := :P_Criteria_B || F_Criteria_Varchar2_Bind(pvColumn_1 => cvSHARED, pvBind_Variable => 'P_S');\n"
+    )
+
+    class _R:
+        raw_xml = plsql
+        triggers = []
+        formulas = []
+
+    cm = _reconstruct_lexical_criteria(_R())
+    a = cm.get("P_CRITERIA_A", "")
+    assert "A.Only_Col" in a, "unique-cv predicate must be kept (provably this query's filter)"
+    assert "P.Shared_Col" not in a, "shared-cv predicate must be dropped (cross-query ORA-00904 risk)"
+    assert "P_CRITERIA_B" not in cm, (
+        "a wholly-shared builder must reconstruct to nothing -> caller keeps the honest comment"
+    )

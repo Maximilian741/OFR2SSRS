@@ -48,6 +48,14 @@ two independent standards that catch different classes of defect:
   blank pages, and geometry. This catches publish-time semantic rules that
   XSD validation cannot (for example aggregate-in-`Lookup`, and
   `TablixMember` `RepeatOnNewPage` consistency).
+- **Compile-verified expressions.** A schema-valid RDL that renders can still
+  carry a *VB.NET expression* that throws `#Error` the moment the report
+  server evaluates it. So every generated `=...` expression — and the report's
+  own `<Code>` block — is compiled through the real `System.CodeDom`
+  `VBCodeProvider`, the same compilation SSRS performs at publish time. A bad
+  `IIf` arity, a trailing comma, an undefined function, or a leaked Oracle `||`
+  is caught here, before download, instead of in your live report. (Runs on
+  Windows with the .NET Framework; degrades to a clean skip elsewhere.)
 
 Run `python tools/renderlab/fetch_reportviewer.py` once to fetch the
 official Microsoft runtime from nuget.org; the rendering checks then run as
@@ -135,6 +143,30 @@ The companion SQL translation has a rule-based core (`DECODE`, `NVL`,
 `TO_CHAR`, `TO_DATE`, `TRUNC`, `SYSDATE`, `INSTR`, `SUBSTR`, `CHR`, `||`,
 `(+)`, `LISTAGG`, `ROWNUM`, bind variables, lexical references) and supports
 two SQL targets (see below).
+
+### Parameter filters that actually filter
+
+Oracle reports often build their `WHERE` clause from a **lexical parameter** —
+a chunk of SQL *text* (`&P_CRITERIA`) that a `BEFORE REPORT` trigger assembles
+at run time from the user's prompts (year, date range, name). SSRS has no
+lexical parameter, so a naive conversion drops that text and the report runs
+**unfiltered** — the prompts render but do nothing.
+
+Oracle2SSRS recognizes the standard "criteria builder" idiom (a trigger
+concatenating `F_Criteria_*_Bind(column, 'P_param')` fragments against
+`cv*` column constants) and **reconstructs it into real, `NULL`-safe,
+parameter-bound predicates**:
+
+```sql
+AND (:P_Year      IS NULL OR TO_CHAR(O.Order_Date,'YYYY') = UPPER(TRIM(:P_Year)))
+AND (:P_Date_From IS NULL OR TRUNC(O.Status_Date) >= :P_Date_From)
+```
+
+Each declared filter parameter is bound as a real query parameter, so picking a
+value filters and leaving it blank widens to all rows — exactly the Oracle
+behavior. Only predicates whose column resolves to a known constant are
+emitted; anything the tool can't reconstruct with confidence is left with an
+honest placeholder rather than a wrong filter.
 
 ### Layout fidelity
 

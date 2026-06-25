@@ -791,6 +791,17 @@ def _layout_field_from_element(el) -> LayoutField:
 
     kind = "text" if tag == "text" else "field"
 
+    # Oracle <generalLayout verticalElasticity="variable|expand|contract|fixed">:
+    # whether the box grows to fit content (prose) or is sized to content. Read
+    # it from the <generalLayout> child (real exports) or the element itself.
+    vertical_elasticity = ""
+    _gl = _find(el, "generalLayout")
+    if _gl is not None:
+        vertical_elasticity = _attr(_gl, "verticalElasticity")
+    if not vertical_elasticity:
+        vertical_elasticity = _attr(el, "verticalElasticity")
+    vertical_elasticity = (vertical_elasticity or "").strip().lower()
+
     vs_attrs = _parse_visual_settings(el)
 
     # Drill-through hyperlink: <webSettings hyperlink="&CF_URL_X">. Strip the
@@ -847,6 +858,7 @@ def _layout_field_from_element(el) -> LayoutField:
         visible=visible,
         rotation=rotation,
         segments=segments,
+        vertical_elasticity=vertical_elasticity,
     )
 
 

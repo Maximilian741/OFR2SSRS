@@ -113,7 +113,7 @@ def test_subhdr_bg_is_readable_light_grey(case_name, src_path):
     assert lum >= LUM_FLOOR, (
         f"[{case_name}] subhdr_bg={subhdr_bg} has luminance {lum:.3f} "
         f"< floor {LUM_FLOOR}. Would render as a near-black SubHdr "
-        f"strip and bury the Complaint-ID text."
+        f"strip and bury the record-id label text."
     )
 
 

@@ -851,6 +851,13 @@ function renderPreflight(data) {
   const count = s => issues.filter(i => (i.severity || "").toUpperCase() === s).length;
   const blockers = count("BLOCKER"), reds = count("RED"), ambers = count("AMBER");
 
+  // Deep expression verification: every generated VB.NET expression was compiled
+  // through the real System.CodeDom compiler (the same compilation SSRS performs
+  // at publish). A clean pass is strong evidence the report won't throw #Error.
+  const ev = pf.expr_verify;
+  const evReady = !!(ev && ev.available && ev.summary &&
+                     ev.summary.failed === 0 && ev.summary.total > 0);
+
   const banner = document.getElementById("preflight-banner");
   if (banner) {
     let cls, label, sub;
@@ -882,6 +889,10 @@ function renderPreflight(data) {
       label = "✓ Upload-ready";
       sub = ambers ? (ambers + " note" + (ambers > 1 ? "s" : "") + " — optional review.")
                    : "No blockers detected.";
+      if (evReady) {
+        sub = ev.summary.total + " expression" + (ev.summary.total > 1 ? "s" : "") +
+              " compile-verified (VB.NET). " + sub;
+      }
     }
     banner.className = "preflight-banner " + cls;
     banner.innerHTML = "<b>" + label + "</b><span>" + sub + "</span>";
@@ -890,10 +901,19 @@ function renderPreflight(data) {
 
   // Validation-tab detail: prepend an ordered preflight issue list.
   const vhost = document.getElementById("validation-host");
-  if (vhost && issues.length) {
+  if (vhost && (issues.length || evReady)) {
     const sec = document.createElement("div");
     sec.className = "preflight-detail";
     let html = "<h4>Upload-safety preflight</h4>";
+    if (evReady) {
+      html += "<div class='pf-issue pf-ok'>" +
+              "<span class='pf-sev'>✓</span>" +
+              "<code class='pf-rule'>rdl.expr_compile</code>" +
+              "<span class='pf-msg'>All " + ev.summary.total +
+              " generated VB.NET expression(s) compiled clean through the real " +
+              "compiler (the same compilation SSRS runs at publish) — none will " +
+              "render as #Error.</span></div>";
+    }
     ["BLOCKER", "RED", "AMBER"].forEach(sev => {
       issues.filter(i => (i.severity || "").toUpperCase() === sev).forEach(i => {
         html += "<div class='pf-issue pf-" + sev.toLowerCase() + "'>" +

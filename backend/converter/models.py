@@ -243,6 +243,12 @@ class LayoutField:
     # emits one TextRun per segment so e.g. an UNbold caption + a BOLD value on
     # the next line render with their real weights (the license body).
     segments: list = field(default_factory=list)
+    # Oracle <generalLayout verticalElasticity="..."> for a <text>: "variable"/
+    # "expand" = the box GROWS to fit its content at run time (flowing prose);
+    # "contract"/"fixed"/"" = the box is sized to its content and does NOT grow.
+    # Used to decide whether stacked multi-font segments should collapse into one
+    # TextRun (fixed boxes) vs. be left to flow+grow (growable full-width prose).
+    vertical_elasticity: str = ""
 
 
 # LayoutGroup.kind values:

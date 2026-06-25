@@ -134,6 +134,118 @@ def _ssrs_param_type(p: ReportParameter) -> str:
     return p.ssrs_datatype if hasattr(p, "ssrs_datatype") else "String"
 
 
+def _sql_code_mask(sql: str):
+    """Return a list[bool] the same length as ``sql``: True where the character
+    is *code* (NOT inside a ``'...'`` string literal, a ``"..."`` quoted
+    identifier, or a ``--`` / ``/* */`` comment). Oracle escapes a single quote
+    inside a literal by doubling it (``''``).
+
+    Tokenizers that only track paren depth mis-split a SELECT list whenever a
+    comma or paren appears inside a string/identifier/comment -- e.g. an author
+    who comments out trailing columns ( ..."alias"/*, c2, c3*/ ) gets the commas
+    inside the comment treated as item separators, and aliases injected around
+    the ``/* */`` -> invalid SQL. Masking those spans first makes the split and
+    the alias detection robust."""
+    mask = [True] * len(sql)
+    i, n = 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":                               # string literal
+            mask[i] = False
+            i += 1
+            while i < n:
+                mask[i] = False
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":   # '' escaped quote
+                        mask[i + 1] = False
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+        elif c == '"':                             # quoted identifier
+            mask[i] = False
+            i += 1
+            while i < n:
+                mask[i] = False
+                if sql[i] == '"':
+                    i += 1
+                    break
+                i += 1
+        elif c == '-' and i + 1 < n and sql[i + 1] == '-':   # line comment
+            while i < n and sql[i] != '\n':
+                mask[i] = False
+                i += 1
+        elif c == '/' and i + 1 < n and sql[i + 1] == '*':   # block comment
+            mask[i] = False
+            mask[i + 1] = False
+            i += 2
+            while i < n:
+                if sql[i] == '*' and i + 1 < n and sql[i + 1] == '/':
+                    mask[i] = False
+                    mask[i + 1] = False
+                    i += 2
+                    break
+                mask[i] = False
+                i += 1
+        else:
+            i += 1
+    return mask
+
+
+def _strip_trailing_sql_comment(text: str) -> str:
+    """Strip the trailing run of ``/* */`` / ``--`` comments and whitespace from
+    a SELECT item so the alias detector inspects the real expression, not a
+    commented-out tail.
+
+    Must be span-aware: a ``--`` *inside* a ``/* ... -- ... */`` block is NOT a
+    line comment, and a trailing ``'...'`` string literal is part of the
+    expression, not a comment. A naive regex that strips a trailing ``--`` first
+    breaks the enclosing block's ``*/`` and corrupts the item. So we tokenize:
+    mark exactly the characters that live inside a comment, then drop the
+    trailing maximal run of comment-or-whitespace."""
+    n = len(text)
+    comment = [False] * n
+    i = 0
+    while i < n:
+        c = text[i]
+        if c == "'":                                   # string literal (kept)
+            i += 1
+            while i < n:
+                if text[i] == "'":
+                    if i + 1 < n and text[i + 1] == "'":
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+        elif c == '"':                                 # quoted identifier (kept)
+            i += 1
+            while i < n and text[i] != '"':
+                i += 1
+            i += 1
+        elif c == '-' and i + 1 < n and text[i + 1] == '-':   # line comment
+            while i < n and text[i] != '\n':
+                comment[i] = True
+                i += 1
+        elif c == '/' and i + 1 < n and text[i + 1] == '*':   # block comment
+            comment[i] = comment[i + 1] = True
+            i += 2
+            while i < n:
+                if text[i] == '*' and i + 1 < n and text[i + 1] == '/':
+                    comment[i] = comment[i + 1] = True
+                    i += 2
+                    break
+                comment[i] = True
+                i += 1
+        else:
+            i += 1
+    end = n
+    while end > 0 and (comment[end - 1] or text[end - 1].isspace()):
+        end -= 1
+    return text[:end]
+
+
 def _alias_select_items(sql: str, item_names) -> str:
     """Ensure every item in the top-level SELECT list has an SQL alias
     matching the dataset Field name we declared in the RDL.
@@ -164,10 +276,17 @@ def _alias_select_items(sql: str, item_names) -> str:
     if sel_idx < 0:
         return sql
 
+    # Mask string literals / quoted identifiers / comments so paren-depth, the
+    # top-level FROM, and the comma split are all computed on CODE only.
+    code = _sql_code_mask(sql)
+
     depth = 0
     from_idx = -1
     i = sel_idx + len("SELECT")
     while i < len(sql):
+        if not code[i]:
+            i += 1
+            continue
         ch = sql[i]
         if ch == "(":
             depth += 1
@@ -182,27 +301,59 @@ def _alias_select_items(sql: str, item_names) -> str:
     if from_idx < 0:
         return sql
 
-    sel_body = sql[sel_idx + len("SELECT"):from_idx]
+    sel_start = sel_idx + len("SELECT")
+    # A leading set-quantifier (DISTINCT / ALL / UNIQUE) is part of the SELECT,
+    # NOT of the first column. Hold it aside so the first item's derived alias
+    # doesn't absorb it: "SELECT ALL T.COL" otherwise derives ALL_T_COL, and the
+    # <Field> for that column then binds to nothing -> BLANK first column. It is
+    # re-emitted verbatim before the columns. (Only matches the keyword as a
+    # whole word, so a column like all_total is unaffected.)
+    _sb = sql[sel_start:from_idx]
+    _quant = re.match(r"\s*(?:DISTINCT|ALL|UNIQUE)\b", _sb, re.IGNORECASE)
+    quant_text = _sb[:_quant.end()] if _quant else ""
+    body_start = sel_start + len(quant_text)
+    sel_body = sql[body_start:from_idx]
     parts = []
     cur = []
     depth = 0
-    for ch in sel_body:
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-        if ch == "," and depth == 0:
-            parts.append("".join(cur))
-            cur = []
-        else:
-            cur.append(ch)
+    for j, ch in enumerate(sel_body):
+        if code[body_start + j]:
+            if ch == "(":
+                depth += 1
+            elif ch == ")":
+                depth -= 1
+            if ch == "," and depth == 0:
+                parts.append("".join(cur))
+                cur = []
+                continue
+        cur.append(ch)
     if cur:
         parts.append("".join(cur))
+
+    # Positional alignment: Oracle Reports binds SQL columns to <dataItem>s BY
+    # POSITION (the Nth select item -> the Nth dataItem), so the canonical name
+    # for select item i is item_names[i]. SSRS instead binds the <Field> BY NAME
+    # (DataField must equal the result-set column name). When the counts line up
+    # 1:1 we can use this to repair a multi-word quoted alias whose returned
+    # column name ( "Denumire joc" ) can't match the sanitized DataField
+    # ( Denumire_joc_ ) -> otherwise a BLANK column. Only used in the narrow
+    # quoted-special-char branch below; everything else keeps its
+    # order-independent derive-from-expression alias.
+    _names = [str(n).strip() for n in (item_names or [])]
+    _positional = len(parts) == len(_names) and all(_names)
 
     new_parts = []
     for idx, raw in enumerate(parts):
         stripped = raw.strip()
         if not stripped:
+            new_parts.append(raw)
+            continue
+        # Inspect the item with any TRAILING comment removed. Oracle authors
+        # routinely comment out trailing columns ( ..."alias"/*, c2, c3*/ ); the
+        # alias detector must read the real expression, not the comment text, or
+        # it injects an alias around the /* */ and produces invalid SQL.
+        core = _strip_trailing_sql_comment(stripped)
+        if not core:
             new_parts.append(raw)
             continue
         # Already aliased? Oracle SQL allows BOTH explicit "expr AS name"
@@ -211,10 +362,44 @@ def _alias_select_items(sql: str, item_names) -> str:
         # got double-aliased ("Pkg_Util.F(...) Violations AS DERIVED").
         # The implicit form is recognized as: ")" or a word char, then
         # whitespace, then an identifier at end of item.
-        if re.search(r"\bAS\b\s+[A-Za-z_][A-Za-z0-9_]*\s*$", stripped, re.IGNORECASE):
+        if re.search(r"\bAS\b\s+[A-Za-z_][A-Za-z0-9_]*\s*$", core, re.IGNORECASE):
             new_parts.append(raw)
             continue
-        if re.search(r"(?:\)|[A-Za-z0-9_]|')\s+[A-Za-z_][A-Za-z0-9_]*\s*$", stripped):
+        # Already aliased with an Oracle DOUBLE-QUOTED identifier alias, e.g.
+        #    NVL(x,'-----') "localdepartement"        (implicit, no AS)
+        #    TO_CHAR(d)  AS "dateCreation"            (explicit AS + quoted)
+        # A trailing "..." after the expression is a quoted column alias (Oracle
+        # string literals use SINGLE quotes -- handled separately below -- so a
+        # trailing double-quoted token is never a literal). The quoted alias
+        # already makes Oracle return exactly that column name, so the parser
+        # declared the <Field> from it. Appending a second alias would produce
+        # invalid SQL ( expr "a" AS b -> ORA-00923 "FROM keyword not found" ) AND
+        # rename the column away from the declared field -> blank binding. Leave
+        # it untouched. (This is the quoted-alias sibling of the implicit-alias
+        # rule below; without it, every report using "quoted" column aliases
+        # emitted a double-aliased, un-runnable query.)
+        _mq = re.search(r'"([^"]*)"\s*$', core)
+        if _mq:
+            _qcontent = _mq.group(1)
+            _is_ident = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _qcontent)
+            # A quoted alias that is NOT a plain identifier ( "Denumire joc" )
+            # makes Oracle return a column of that exact spaced/cased name, which
+            # the sanitized <Field DataField> can never match -> BLANK column.
+            # When the SQL columns align 1:1 with the dataItems, rewrite the alias
+            # to the positionally-bound dataItem name (quoted, exact case) so the
+            # by-name SSRS binding matches Oracle's by-position binding. A quoted
+            # alias that IS already a plain identifier ( "localdepartement" )
+            # matches its field as-is and is left untouched (zero drift).
+            if (not _is_ident and _positional and idx < len(_names)
+                    and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _names[idx])
+                    and _names[idx] != _qcontent):
+                _new_raw = re.sub(r'"[^"]*"(\s*)$', f'"{_names[idx]}"' + r"\1",
+                                  raw, count=1)
+                new_parts.append(_new_raw if _new_raw != raw else raw)
+                continue
+            new_parts.append(raw)
+            continue
+        if re.search(r"(?:\)|[A-Za-z0-9_]|')\s+[A-Za-z_][A-Za-z0-9_]*\s*$", core):
             # Trailing identifier following ")", a word char, OR a
             # closing single-quote (string-literal concatenation) =
             # implicit Oracle alias. Don't add a second one.
@@ -248,7 +433,7 @@ def _alias_select_items(sql: str, item_names) -> str:
         # leading $ or #.)
         if re.fullmatch(
             r"\s*[A-Za-z_][A-Za-z0-9_$#]*(\.[A-Za-z_][A-Za-z0-9_$#]*)?\s*",
-            stripped,
+            core,
         ):
             new_parts.append(raw)
             continue
@@ -258,7 +443,7 @@ def _alias_select_items(sql: str, item_names) -> str:
         # runs of underscores). This guarantees the alias matches the
         # <Field Name="..."> our parser declared, regardless of where
         # item_names puts this item in its own ordering.
-        derived = re.sub(r"[^A-Za-z0-9]+", "_", stripped).strip("_").upper()
+        derived = re.sub(r"[^A-Za-z0-9]+", "_", core).strip("_").upper()
         # Avoid SQL-reserved or absurd aliases. Cap at 30 chars
         # (Oracle pre-12c identifier limit) and ensure it starts with
         # a letter.
@@ -267,12 +452,17 @@ def _alias_select_items(sql: str, item_names) -> str:
             continue
         derived = derived[:30]
         alias = derived
-        # Preserve trailing whitespace so re-join doesn't shift formatting.
-        m_trail = re.match(r"(.*?)(\s*)$", raw, re.DOTALL)
-        body_part, trail = m_trail.group(1), m_trail.group(2)
-        new_parts.append(f"{body_part} AS {alias}{trail}")
+        # Insert "AS <alias>" right after the expression (the comment-stripped
+        # core), BEFORE any trailing comment we removed -- appending after a
+        # trailing -- line comment would swallow the alias, and keeping the
+        # alias adjacent to the expression is clearer for /* */ too. For an
+        # item with no trailing comment this is identical to the old behavior.
+        lead = raw[:len(raw) - len(raw.lstrip())]
+        after = raw[len(lead) + len(core):]  # trailing comment(s) + whitespace
+        new_parts.append(f"{lead}{core} AS {alias}{after}")
 
-    return sql[:sel_idx + len("SELECT")] + ",".join(new_parts) + sql[from_idx:]
+    return (sql[:sel_start] + quant_text + ",".join(new_parts)
+            + sql[from_idx:])
 
 
 def _make_ssrs_oracle_compatible(sql: str, param_types: dict) -> str:
@@ -732,6 +922,31 @@ def _reconstruct_lexical_criteria(report) -> dict:
         consts[m.group(1)] = m.group(2).replace("''", "'").strip()
     out: dict = {}
     lexnames = {n.upper() for n in re.findall(r":(P_Criteria_[A-Za-z0-9_]+)\s*:=", plsql, re.I)}
+    # A cv* column-builder CONSTANT reused to build MORE THAN ONE lexical is a
+    # SHARED helper: Oracle reports routinely build :P_Criteria_A AND
+    # :P_Criteria_B (and :P_Criteria_C, ...) from the same cvCOL set,
+    # then splice each lexical into a DIFFERENT query. Reconstructing one query's
+    # WHERE from a shared builder injects a predicate whose column belongs to a
+    # SIBLING query -> it does not resolve here (ORA-00904) and the whole filter
+    # (plus every prompt feeding it) breaks at run time. This is provable WITHOUT
+    # the schema: a column expression that builds two different queries' criteria
+    # cannot be a valid column of both. So only a cv-constant UNIQUE to a single
+    # lexical is provably THIS query's own filter; predicates built from a shared
+    # cv-constant are dropped and the caller keeps the honest "/* lexical ref &X
+    # -- reimplement at deploy */" placeholder (the conservative hand-fix users
+    # apply to exactly these reports). Single-purpose builders are unaffected.
+    def _frag_cvs(lx):
+        cvs = set()
+        for am in re.finditer(r":" + lx + r"\s*:=\s*:" + lx + r"\s*\|\|\s*(.*?);",
+                              plsql, re.S | re.I):
+            cvs.update(c for c in re.findall(r"\b(cv[A-Za-z_0-9]+)\b", am.group(1))
+                       if c in consts)
+        return cvs
+    _cv_lexcount: dict = {}
+    for _cvs in (_frag_cvs(lex) for lex in lexnames):
+        for _cv in _cvs:
+            _cv_lexcount[_cv] = _cv_lexcount.get(_cv, 0) + 1
+    shared_cvs = {cv for cv, n in _cv_lexcount.items() if n > 1}
     for lex in lexnames:
         preds, seen = [], set()
         def _add(p, key):
@@ -743,22 +958,26 @@ def _reconstruct_lexical_criteria(report) -> dict:
             mb = re.search(r"F_Criteria_Varchar2_Bind\s*\(\s*pvColumn_1\s*=>\s*(\w+)"
                            r"\s*,\s*pvBind_Variable\s*=>\s*'(\w+)'", rhs, re.I)
             if mb and consts.get(mb.group(1)):
-                _add(f"(:{mb.group(2)} IS NULL OR {consts[mb.group(1)]} = "
-                     f"UPPER(TRIM(:{mb.group(2)})))", mb.group(2).upper())
+                if mb.group(1) not in shared_cvs:
+                    _add(f"(:{mb.group(2)} IS NULL OR {consts[mb.group(1)]} = "
+                         f"UPPER(TRIM(:{mb.group(2)})))", mb.group(2).upper())
                 continue
             mn = re.search(r"F_Criteria_Number_Bind\s*\(\s*pvColumn_1\s*=>\s*(\w+)"
                            r"\s*,\s*pvBind_Variable\s*=>\s*'(\w+)'", rhs, re.I)
             if mn and consts.get(mn.group(1)):
-                _add(f"(:{mn.group(2)} IS NULL OR {consts[mn.group(1)]} = :{mn.group(2)})",
-                     mn.group(2).upper())
+                if mn.group(1) not in shared_cvs:
+                    _add(f"(:{mn.group(2)} IS NULL OR {consts[mn.group(1)]} = :{mn.group(2)})",
+                         mn.group(2).upper())
                 continue
             # inline date range: cvDT || ' >= :P_a' ... cvDT || ' <= :P_b'
             mc = re.search(r"(\w+)\s*\|\|\s*'\s*>=\s*:(\w+)'.*?(\w+)\s*\|\|\s*'\s*<=\s*:(\w+)'",
                            rhs, re.S | re.I)
             if mc and (consts.get(mc.group(1)) or consts.get(mc.group(3))):
-                col = consts.get(mc.group(1)) or consts.get(mc.group(3))
-                _add(f"(:{mc.group(2)} IS NULL OR {col} >= :{mc.group(2)})", mc.group(2).upper())
-                _add(f"(:{mc.group(4)} IS NULL OR {col} <= :{mc.group(4)})", mc.group(4).upper())
+                _cvdt = mc.group(1) if consts.get(mc.group(1)) else mc.group(3)
+                if _cvdt not in shared_cvs:
+                    col = consts.get(mc.group(1)) or consts.get(mc.group(3))
+                    _add(f"(:{mc.group(2)} IS NULL OR {col} >= :{mc.group(2)})", mc.group(2).upper())
+                    _add(f"(:{mc.group(4)} IS NULL OR {col} <= :{mc.group(4)})", mc.group(4).upper())
         if preds:
             out[lex] = "\n\tAND " + "\n\tAND ".join(preds)
     return out
@@ -818,13 +1037,39 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         # NULL-safe, parameter-bound predicates (so the Renewal-Year / date / name
         # prompts actually FILTER). Anything else stays a harmless comment.
         _cmap = criteria_map or {}
+        _lex_src = cmd_text  # neighbor lookups read the pre-substitution text
         def _lex_sub(m):
             nm = m.group(1)
             frag = _cmap.get(nm.upper())
             if frag is not None:
                 return frag
-            return (f"/* lexical ref &{nm} -- reimplement as dynamic "
-                    f"WHERE/SELECT at deploy time */")
+            comment = (f"/* lexical ref &{nm} -- reimplement as dynamic "
+                       f"WHERE/SELECT at deploy time */")
+            # Emit a NULL token before the comment ONLY when the ref fills a
+            # COMPLETE operand slot -- its non-space neighbours on BOTH sides are
+            # delimiters: prev in '(' / ',' AND next in ',' / ')'. That is exactly
+            # the function-argument case ( NVL(&X, y) -> NVL(NULL /* */, y) ),
+            # where a bare comment would leave an empty operand Oracle rejects
+            # (ORA-00936/00923); NULL keeps the statement VALID and the report
+            # RUNS (the column degrades to its NVL/COALESCE fallback).
+            # Requiring BOTH delimiters avoids the prefix/infix trap: a lexical
+            # that is a mid-expression fragment ( &COL USERINFO.NAME, or x = &V )
+            # must stay a bare comment -- injecting NULL there ( NULL USERINFO.NAME )
+            # would itself be invalid. Clause-position refs ( ') GROUP BY' ) also
+            # keep the bare comment. Conservative by construction: a working
+            # lexical is never disturbed.
+            s, e = m.start(), m.end()
+            j = s - 1
+            while j >= 0 and _lex_src[j].isspace():
+                j -= 1
+            prev = _lex_src[j] if j >= 0 else ""
+            k = e
+            while k < len(_lex_src) and _lex_src[k].isspace():
+                k += 1
+            nxt = _lex_src[k] if k < len(_lex_src) else ""
+            if (prev and prev in "(,") and (nxt and nxt in ",)"):
+                return "NULL " + comment
+            return comment
         cmd_text = re.sub(r"&([A-Z_][A-Z0-9_]*)", _lex_sub, cmd_text, flags=re.IGNORECASE)
         # Strip trailing semicolons + whitespace. Oracle Reports XMLs preserve
         # the SQL the developer typed in SQL*Plus / PL/SQL, often ending with
@@ -1126,13 +1371,18 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
         # Always emit at least one dataset so the Tablix has something to bind.
         # For Oracle target we put the placeholder in .sql so CommandText
         # comes through unchanged; for sqlserver we put it in .tsql.
-        placeholder_sql = "SELECT 1 AS Column1, 0 AS Column2, '' AS Column3"
+        # Oracle MANDATES a FROM clause: "SELECT 1, 0, ''" with no FROM throws
+        # ORA-00923 "FROM keyword not found where expected". So the Oracle (.sql)
+        # stub must select FROM DUAL. SQL Server (.tsql) has no DUAL and allows a
+        # FROM-less SELECT, so it keeps the bare form.
+        placeholder_sql = "SELECT 1 AS Column1, 0 AS Column2, '' AS Column3 FROM DUAL"
+        placeholder_tsql = "SELECT 1 AS Column1, 0 AS Column2, '' AS Column3"
         # Use a neutral placeholder name (NOT Q_PERMIT) so the converter
         # stays generic across reports. Columns are equally generic.
         placeholder = DataQuery(
             name="Q_MAIN",
             sql=placeholder_sql,
-            tsql=placeholder_sql,
+            tsql=placeholder_tsql,
             items=[
                 DataItem(name="Column1", datatype="character"),
                 DataItem(name="Column2", datatype="number"),
@@ -3219,6 +3469,235 @@ def _repair_dangling_field_refs(root, report) -> None:
             v.text = new_text
 
 
+def _repair_misscoped_field_refs(root) -> None:
+    """Publish-safety net: an aggregate scoped to a dataset that does NOT
+    declare the field renders #Error at run time ("field X does not exist in
+    dataset Y"). E.g. ``First(Fields!CF_Group_Total.Value, "Q_Main")``
+    where CF_Group_Total is actually a field of the formula dataset.
+    ``_repair_dangling_field_refs`` deliberately PROTECTS already-scoped refs, so
+    a *wrong* scope slips through. Rewrite the scope to a dataset that genuinely
+    declares the field -- preferring the formula dataset, then any dataset that
+    has it. Mirrors (and clears) preflight rule 6e ``rdl.scoped_ref_field_missing``.
+    Conservative: only acts when the current scope is a KNOWN dataset that lacks
+    the field AND a different dataset supplies it, so correctly-scoped refs and
+    data-region scopes are never touched."""
+    ds_fields: dict = {}
+    for ds in root.iter(_q("DataSet")):
+        nm = ds.get("Name") or ""
+        ds_fields[nm] = {f.get("Name") for f in ds.iter(_q("Field"))
+                         if f.get("Name")}
+    if not ds_fields:
+        return
+    agg = re.compile(
+        r"((?:Sum|Avg|Min|Max|Count|CountDistinct|First|Last|StDev|StDevP|"
+        r"Var|VarP|RunningValue|Aggregate)\s*\(\s*Fields!([A-Za-z_]\w*)\.Value"
+        r'\s*,\s*")([^"]+)("\s*\))')
+
+    def _pick_ds(field: str):
+        if field in ds_fields.get(_FORMULA_DATASET_NAME, set()):
+            return _FORMULA_DATASET_NAME
+        for d, fs in ds_fields.items():
+            if field in fs:
+                return d
+        return None
+
+    for v in root.iter(_q("Value")):
+        text = v.text or ""
+        if "Fields!" not in text:
+            continue
+
+        def _fix(m):
+            field, scope = m.group(2), m.group(3)
+            if scope in ds_fields and field not in ds_fields[scope]:
+                target = _pick_ds(field)
+                if target and target != scope:
+                    return m.group(1) + target + m.group(4)
+            return m.group(0)
+
+        new = agg.sub(_fix, text)
+        if new != text:
+            v.text = new
+
+
+# Adobe Standard-14 AFM advance widths (1/1000 em), ASCII 32..126. Times-Roman
+# and Times-Bold are metrically compatible with Times New Roman (designed as
+# drop-in substitutes -- same advance widths); verified here within ~2% of the
+# real Windows Times New Roman TrueType metrics, so they portably estimate a
+# label's rendered width with NO font files at runtime (a Linux deploy has none).
+_AFM_TIMES_ROMAN = (
+    250, 333, 408, 500, 500, 833, 778, 180, 333, 333, 500, 564, 250, 333, 250,
+    278, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 278, 278, 564, 564,
+    564, 444, 921, 722, 667, 667, 722, 611, 556, 722, 722, 333, 389, 722, 611,
+    889, 722, 722, 556, 722, 667, 556, 611, 722, 722, 944, 722, 722, 611, 333,
+    278, 333, 469, 500, 333, 444, 500, 444, 500, 444, 333, 500, 500, 278, 278,
+    500, 278, 778, 500, 500, 500, 500, 333, 389, 278, 500, 500, 722, 500, 500,
+    444, 480, 200, 480, 541)
+_AFM_TIMES_BOLD = (
+    250, 333, 555, 500, 500, 1000, 833, 278, 333, 333, 500, 570, 250, 333, 250,
+    278, 500, 500, 500, 500, 500, 500, 500, 500, 500, 500, 333, 333, 570, 570,
+    570, 500, 930, 722, 667, 722, 722, 667, 611, 778, 778, 389, 500, 778, 667,
+    944, 722, 778, 611, 778, 722, 556, 667, 722, 722, 1000, 722, 722, 667, 333,
+    278, 333, 581, 500, 333, 500, 556, 444, 556, 444, 333, 500, 556, 278, 333,
+    556, 278, 833, 556, 500, 556, 556, 444, 389, 333, 556, 500, 722, 500, 500,
+    444, 394, 220, 394, 520)
+# Helvetica / Helvetica-Bold advance widths -- metrically compatible with Arial
+# (Arial is a drop-in Helvetica clone). Verified here within ~3-5% of the real
+# Windows Arial TrueType metrics. Oracle forms mix Arial labels with Times ones,
+# and Arial renders ~5-12% WIDER than Times at the same size, so a Times-only
+# estimate UNDER-counts an Arial label and misses its clip (fire-92).
+_AFM_HELVETICA = (
+    278, 278, 355, 556, 556, 889, 667, 191, 333, 333, 389, 584, 278, 333, 278,
+    278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 278, 278, 584, 584,
+    584, 556, 1015, 667, 667, 722, 722, 667, 611, 778, 722, 278, 500, 667, 556,
+    833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 278,
+    278, 278, 469, 556, 333, 556, 556, 500, 556, 556, 278, 556, 556, 222, 222,
+    500, 222, 833, 556, 556, 556, 556, 333, 500, 278, 556, 500, 722, 500, 500,
+    500, 334, 260, 334, 584)
+_AFM_HELVETICA_BOLD = (
+    278, 333, 474, 556, 556, 889, 722, 238, 333, 333, 389, 584, 278, 333, 278,
+    278, 556, 556, 556, 556, 556, 556, 556, 556, 556, 556, 333, 333, 584, 584,
+    584, 611, 975, 722, 722, 722, 722, 667, 611, 778, 722, 278, 556, 722, 611,
+    833, 722, 778, 667, 778, 722, 667, 611, 722, 667, 944, 667, 667, 611, 333,
+    278, 333, 584, 556, 333, 556, 611, 556, 611, 556, 333, 611, 611, 278, 278,
+    556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556,
+    500, 389, 280, 389, 584)
+
+
+def _widen_clipped_constant_labels(root) -> None:
+    """Fidelity net for positional FORM/letter layouts: Oracle sizes a constant
+    text label's box to its OWN renderer, but SSRS draws the same Times New Roman
+    (esp. Bold) a few % wider, so a box that fit in Oracle clips the last
+    character(s) under SSRS -- e.g. "Geographic Detail" -> "Geographic Detai".
+    The width is copied 1:1 from the source geometry (not a shrink bug); the
+    mismatch is purely font-metric. CanGrow does NOT help here -- it WRAPS the
+    label to a 2nd line, which Oracle never does (proven non-1:1 by render).
+    The faithful fix is to WIDEN the box just enough to fit the label on one
+    line -- but ONLY where there is provably free horizontal space before the
+    next sibling box, so overlap is never introduced.
+
+    Conservative on every axis: only single-line pure string literals, only the
+    Times family (the metrics we have), only left/general aligned, only widen
+    (never shrink), and only when the one-line target fits the gap to the nearest
+    right-neighbour (capped at the container's right edge). Anything uncertain is
+    left exactly as-is -- still clipping is no worse than before, and zero risk
+    of a new overlap or page-spill (height is untouched)."""
+    def _text_w(s, size_pt, bold, sans):
+        if sans:
+            tbl = _AFM_HELVETICA_BOLD if bold else _AFM_HELVETICA
+        else:
+            tbl = _AFM_TIMES_BOLD if bold else _AFM_TIMES_ROMAN
+        u = sum((tbl[ord(c) - 32] if 32 <= ord(c) <= 126 else 500) for c in s)
+        return u / 1000.0 * size_pt / 72.0  # inches
+
+    def _fin(el, tag):
+        c = el.find(_q(tag))
+        if c is None or not (c.text or "").strip():
+            return None
+        try:
+            return float((c.text or "").replace("in", "").strip())
+        except ValueError:
+            return None
+
+    def _first(el, tag):
+        for x in el.iter(_q(tag)):
+            if (x.text or "").strip():
+                return x.text.strip()
+        return None
+
+    PAD = 2 * 2 / 72.0   # textbox padding (2pt L + 2pt R) reserved from the box
+    GAP = 0.04           # min clear gap kept before a right-neighbour
+    SAFE = 0.02          # round-up cushion so the one-line fit isn't pixel-tight
+    root_w = _fin(root, "Width") or 8.5
+    body_t, rect_t, tb_t, ri_t = (_q("Body"), _q("Rectangle"),
+                                  _q("Textbox"), _q("ReportItems"))
+
+    for cont in root.iter():
+        if cont.tag not in (body_t, rect_t):
+            continue
+        ri = cont.find(ri_t)
+        if ri is None:
+            continue
+        cont_w = root_w if cont.tag == body_t else (_fin(cont, "Width") or root_w)
+        # direct-child positioned items share one coordinate space -- the set of
+        # boxes a widen could collide with.
+        sibs = []
+        for it in list(ri):
+            L, T = _fin(it, "Left"), _fin(it, "Top")
+            W, H = _fin(it, "Width"), _fin(it, "Height")
+            if None in (L, T, W, H):
+                continue
+            sibs.append([it, L, T, W, H])
+        for rec in sibs:
+            it, L, T, W, H = rec
+            if it.tag != tb_t:
+                continue
+            if (_first(it, "CanGrow") or "").lower() == "true":
+                continue
+            align = (_first(it, "TextAlign") or "left").lower()
+            if align == "general":
+                align = "left"          # SSRS renders string General as left
+            if align not in ("left", "center", "right"):
+                continue
+            fam = (_first(it, "FontFamily") or "Times New Roman").strip()
+            _famkey = fam.split(",")[0].strip().lower()
+            if _famkey in ("times new roman", "times", "times-roman", "serif"):
+                _sans = False
+            elif _famkey in ("arial", "helvetica", "arial narrow", "sans-serif",
+                             "liberation sans", "segoe ui", "tahoma", "verdana",
+                             "calibri"):
+                _sans = True
+            else:
+                continue  # unknown font -> no portable metrics -> skip
+            vals = [v.text for v in it.iter(_q("Value")) if (v.text or "").strip()]
+            if len(vals) != 1:
+                continue
+            val = vals[0].strip()
+            if not (val.startswith('="') and val.endswith('"')
+                    and val.count('"') == 2 and "&" not in val):
+                continue
+            text = val[2:-1]
+            if (not text or "Fields!" in text or "Parameters!" in text
+                    or "Globals!" in text):
+                continue
+            try:
+                size = float((_first(it, "FontSize") or "10pt").replace("pt", ""))
+            except ValueError:
+                continue
+            bold = "bold" in (_first(it, "FontWeight") or "").lower()
+            need = _text_w(text, size, bold, _sans) + PAD
+            if W >= need:
+                continue  # already fits -> not clipping -> leave alone
+            target = need + SAFE
+            # Room to grow on each side: the nearest sibling that shares this
+            # box's vertical band bounds the box's right edge (a sibling strictly
+            # to the right) and left edge (a sibling strictly to the left).
+            band = [s for s in sibs if s is not rec
+                    and s[2] < T + H and s[2] + s[4] > T]
+            right_lim = min([s[1] for s in band if s[1] > L + 0.01]
+                            + [cont_w]) - GAP
+            left_lim = max([s[1] + s[3] for s in band if s[1] + s[3] < L - 0.01]
+                           + [0.0]) + GAP
+            # Keep the alignment ANCHOR fixed so the label stays where Oracle put
+            # it, just shows in full: left edge (Left), centre (Center) or right
+            # edge (Right). Grow only into the side(s) the anchor frees up.
+            if align == "left":
+                new_l, new_r = L, L + target
+            elif align == "right":
+                new_l, new_r = (L + W) - target, (L + W)
+            else:  # center -- keep the visual centre fixed
+                c = L + W / 2.0
+                new_l, new_r = c - target / 2.0, c + target / 2.0
+            if new_l < max(left_lim, 0.0) - 1e-6 or new_r > right_lim + 1e-6:
+                continue                # would overlap / overflow -> leave as-is
+            we = it.find(_q("Width"))
+            le = it.find(_q("Left"))
+            if we is None:
+                continue
+            we.text = f"{target:.2f}in"
+            if le is not None and align != "left":
+                le.text = f"{max(0.0, new_l):.2f}in"
+
+
 def _scope_body_direct_field_refs(root, report) -> None:
     """Upload-safety net for ANY report shape: a Textbox <Value> that
     references Fields!X.Value while NOT inside a data region (Tablix/List/
@@ -4281,9 +4760,18 @@ def _build_stacked_list_tablix(report, main):
     for bi, band in enumerate(headers):
         bx = sorted(band)
         for hi, (lx, label) in enumerate(bx):
-            nxt = bx[hi + 1][0] if hi + 1 < len(bx) else (
-                min((c["next"] for c in cols
-                     if c["next"] is not None and c["next"] > lx), default=BODY_W))
+            # The LAST header in a band must span to the SAME right edge as the
+            # DATA column it heads -- i.e. _col_right of the column at this lx --
+            # symmetric with the detail-cell width below. Using a column's "next"
+            # pointer under-sizes the final header ("next" can be < the data
+            # column's actual right edge), clamping it to the 0.4in floor and
+            # CLIPPING captions like "Visit Type"/"Compliant?" to "Visit"/"Comp"
+            # while the data renders full. Matching the heading column's right
+            # edge (not the rightmost column) avoids over-widening a band whose
+            # last label heads an interior column.
+            nxt = bx[hi + 1][0] if hi + 1 < len(bx) else next(
+                (_col_right(ci) for ci, c in enumerate(cols)
+                 if abs(c["x"] - lx) <= 0.01), BODY_W)
             text, _ = _resolve_text_expression(label, report, main_ds)
             _build_textbox(hri, f"Tb_SLHdr_{bi}_{hi}", text, bold=True,
                            font_size="8pt", bg=hdr_bg, fg=hdr_fg,
@@ -4963,7 +5451,13 @@ def _build_nested_group_tablix(report, main):
     # emits a blank leading page + one sparse group per sheet (seen on a
     # site-listing report). Gate the break on the band shape so the dense-list case reflows.
     if geo_band:
-        opb = _sub(outer_grp, "PageBreak"); _sub(opb, "BreakLocation", "Start")
+        # "Between" (not "Start"): break BETWEEN master instances, so the FIRST
+        # master starts on page 1 and each subsequent master opens a new page.
+        # "Start" breaks before EVERY instance INCLUDING the first -> a blank
+        # leading page (one corpus report rendered an empty page 1 + the data on
+        # page 2; the truth is "Page 1 of 1" with the data at the top). "Between" matches
+        # Oracle's page-break-before-group (which never breaks before the first).
+        opb = _sub(outer_grp, "PageBreak"); _sub(opb, "BreakLocation", "Between")
     cursor = _sub(outer_mem, "TablixMembers")
 
     # Band header member (static, repeats on new page).
@@ -6346,14 +6840,6 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
     if not pairs:
         return None
 
-    # Title text via _extract_title_lines (re-used from generic cover).
-    title_lines = _extract_title_lines(report, limit=3)
-    title_lines = [
-        ln for ln in title_lines
-        if not re.fullmatch(r"(report\s+)?parameters?", ln.strip(), re.IGNORECASE)
-    ]
-
-    _ct_font, TITLE_FG = _title_style(report)
     INK = "#282828"
 
     rect = ET.Element(_q("Rectangle"))
@@ -6369,25 +6855,14 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
 
     ri = _sub(rect, "ReportItems")
 
+    # NO report TITLE band on a layout-driven letter/certificate criteria cover.
+    # Oracle's Parameter Form output is JUST the label:value criteria list -- the
+    # body letterhead title belongs on the certificate/letter
+    # PAGES, never on the criteria page. _extract_title_lines was injecting the
+    # body title here, so the cover showed a centred letterhead title the real
+    # report never prints. Verified against the certificate/letter
+    # front-end ground-truth covers -- both start directly at "Report:".
     y = 0.30
-    if title_lines:
-        title_expr = (
-            '="' + '" & vbCrLf & "'.join(
-                ln.replace('"', '""') for ln in title_lines
-            ) + '"'
-        )
-        title_h = 0.34 * len(title_lines)
-        _build_textbox(
-            ri, "Cov_Title", title_expr,
-            bold=True, font_size="14pt", fg=TITLE_FG,
-            text_align="Center", vertical_align="Middle",
-            border_color="#ffffff", padding="2pt",
-            font_family=_ct_font,
-        )
-        tb = ri[-1]
-        _sub(tb, "Top", f"{y:.2f}in"); _sub(tb, "Left", "0.15in")
-        _sub(tb, "Width", "6.50in"); _sub(tb, "Height", f"{title_h:.2f}in")
-        y += title_h + 0.40
 
     # NO fabricated "Run Date / Total of ALL Records" meta band here.
     # This is a LAYOUT-DRIVEN cover: the report's own header section already
@@ -6815,12 +7290,20 @@ def _emit_field_textbox(
     font_size = f"{fs}pt" if fs else "10pt"
 
     # Heuristic centring: bold, large text near the top of its frame
-    # is almost always a title -- centre it.
+    # is almost always a title -- centre it. BUT only when the box spans most
+    # of the frame width: a real title is a frame-wide banner, whereas a stacked
+    # list of bold ROW LABELS (e.g. a header-summary report's stat-row labels,
+    # each a 3.4in box in a 7.3in frame = 47%)
+    # is left-anchored and must stay LEFT (the truth left-aligns them; centring
+    # staggered the whole stat column). Without the span gate the heuristic
+    # mis-read each row label as its own title and centred it.
     fx_abs = float(getattr(lf, "x", 0.0) or 0.0)
     fy_abs = float(getattr(lf, "y", 0.0) or 0.0)
+    _fw = float(getattr(lf, "width", 0.0) or 0.0)
     if (kind == "text" and bold and fs and fs >= 11
             and (fy_abs - oy) <= 1.5
-            and text_align == "Left"):
+            and text_align == "Left"
+            and rect_w > 0 and _fw >= 0.6 * rect_w):
         text_align = "Center"
 
     value_expr = ""
@@ -6853,7 +7336,42 @@ def _emit_field_textbox(
             if not seg_spec:
                 seg_spec = None
             else:
-                value_expr = '=""'
+                # N stacked <Paragraph>s (one per segment) in a CanGrow=false box
+                # OVERFLOW and clip every segment past the first when Oracle's box
+                # isn't tall enough for N lines: the "expires <date>" wallet card
+                # lost its date, the bureau-chief name/address line lost the
+                # address. Oracle rendered these as ONE elastic box -- inline runs
+                # on a single line (short box) or wrapped lines that fit a
+                # sized-to-content box -- not as independent stacked paragraphs.
+                # Collapse the segments into ONE TextRun occupying the same
+                # vertical budget Oracle assumed: space-joined inline when the box
+                # is one line, vbCrLf-joined when it spans >= 2 lines.
+                # EXCEPTION: a GROWABLE, ~full-width prose box (verticalElasticity
+                # variable/expand AND most of the printable width) is a flowing
+                # letter body Oracle expands at run time; collapsing it to a fixed
+                # line would clip the prose, so keep its per-segment paragraphs.
+                _elastic = (getattr(lf, "vertical_elasticity", "") or "").lower()
+                _growable = _elastic in ("variable", "expand")
+                _bh = float(getattr(lf, "height", 0.0) or 0.0)
+                try:
+                    _maxpt = max(float(str(s["font_size"]).replace("pt", "").strip())
+                                 for s in seg_spec)
+                except (ValueError, KeyError, TypeError):
+                    _maxpt = float(fs)
+                _seg_lh = max(6.0, _maxpt) * 1.15 / 72.0
+                _printable = max(1.0, _page_width_for(report) - 2 * _PAGE_HMARGIN_IN)
+                _wide = float(getattr(lf, "width", 0.0) or 0.0) >= 0.6 * _printable
+                _oneline = _bh > 0 and _bh < 2 * _seg_lh
+                _keep_stacked = _growable and ((not _oneline) or _wide)
+                if _keep_stacked:
+                    value_expr = '=""'
+                else:
+                    _vals = [s["value"][1:] if str(s["value"]).startswith("=")
+                             else '"' + str(s["value"]).replace('"', '""') + '"'
+                             for s in seg_spec]
+                    _join = ' & " " & ' if _oneline else ' & vbCrLf & '
+                    value_expr = "=" + _join.join(_vals)
+                    seg_spec = None
         if seg_spec is not None:
             pass
         elif kind == "text":
@@ -6944,6 +7462,14 @@ def _emit_field_textbox(
         # a second page (measured with the real MS engine). Oracle's
         # fixed-position layouts guarantee the declared box fits the
         # content, so fixed boxes are both safe AND faithful.
+        #
+        # NB: single-line CONSTANT labels ("Geographic Detail") whose
+        # Oracle-sized box clips under SSRS's wider Times New Roman keep
+        # CanGrow=False here (CanGrow would WRAP them to a 2nd line, which
+        # Oracle never does). The faithful 1:1 fix -- widening the box to the
+        # label's natural single-line width, into provably free space only --
+        # is applied later by _widen_clipped_constant_labels (AFM-metric
+        # post-pass over the finished tree).
         can_grow=False,
         drillthrough=_drillthrough_for(report, lf),
         segments_spec=seg_spec,
@@ -8306,13 +8832,18 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
     _sub(drow, "Height", "0.24in")
     dcells = _sub(drow, "TablixCells")
     alt = '=IIf(RowNumber(Nothing) Mod 2 = 0, "#f5f7fa", "#ffffff")'
-    for col in cols:
+    for ci, col in enumerate(cols):
         cell = _sub(dcells, "TablixCell")
         contents = _sub(cell, "CellContents")
+        # cols[0] is the description/label (Left); cols[1:] are the numeric
+        # count/fee VALUE columns -> right-align them to match the band's
+        # "Number" caption (and Oracle's numeric right-justify). Verified
+        # against an accounting/summary report truth (counts align right).
         _build_textbox(
             contents, f"{_safe(name)}_Cell_{_safe(col)}",
             f"=Fields!{_safe(col)}.Value",
             bg=alt, vertical_align="Middle",
+            text_align=("Right" if ci > 0 else "Left"),
             border_color="#d0d0d0", padding="3pt",
         )
 
@@ -8335,7 +8866,9 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
             if i == 0:
                 _fval, _falign = (total_label or "Total"), "Left"
             elif col in value_cols:
-                _fval, _falign = f"=Sum(Val(Fields!{_safe(col)}.Value))", "Center"
+                # Right-align the total to sit under its now-right-aligned value
+                # column (Center left the total visually off the column).
+                _fval, _falign = f"=Sum(Val(Fields!{_safe(col)}.Value))", "Right"
             else:
                 _fval, _falign = "", "Left"
             _build_textbox(
@@ -10239,6 +10772,61 @@ def _ensure_group_subtotals_emitted(root: ET.Element, report) -> None:
         body_h_el.text = f"{top + 0.1:.2f}in"
 
 
+def _clamp_body_height_to_page(root) -> None:
+    """Publish-safety net: a TRAILING blank page appears whenever the body height
+    plus the full vertical page chrome exceeds the page height --
+    TopMargin + PageHeader + Body + PageFooter + BottomMargin > PageHeight.
+    The 9in body-height floors the builders use ignore the PageHeader AND the
+    0.6in PageFooter, so on an 11in page a report with a ~0.9in header overflows
+    by ~0.5in and SSRS spills an empty trailing page (engine-verified: several
+    tabular/list/summary reports in the corpus all
+    rendered a body-blank last page). Shrink the body to exactly the available
+    height. SAFE: only SHRINKS (never grows); never touches a body whose own
+    positioned items would be clipped by the smaller height (a positional form
+    with bottom-of-page fields); the Tablix data regions whose tiny design
+    height grows at render time are unaffected -- their rows just paginate
+    naturally instead of spilling an empty page."""
+    page = root.find(_q("Page"))
+    body = root.find(_q("Body"))
+    if page is None or body is None:
+        return
+
+    def _fh(el, tag, dv=0.0):
+        if el is None:
+            return dv
+        e = el.find(_q(tag))
+        try:
+            return (float((e.text or "").replace("in", "").strip())
+                    if e is not None and (e.text or "").strip() else dv)
+        except ValueError:
+            return dv
+
+    # Rendering-slack allowance: SSRS draws the page header/footer a little taller
+    # than their declared <Height> (region padding + line leading), so the true
+    # chrome is up to ~0.45in more than the sum of the declared boxes. Calibrated
+    # against the MS engine (a 3-line-title 1.16in header needed body
+    # <=7.79in to fit one 11in page); shrink-only + the item-clip guard below make
+    # an over-generous allowance harmless (Tablix rows just paginate).
+    _CHROME_SLACK = 0.45
+    avail = (_fh(page, "PageHeight", 11.0)
+             - _fh(page, "TopMargin", 0.5) - _fh(page, "BottomMargin", 0.5)
+             - _fh(page.find(_q("PageHeader")), "Height")
+             - _fh(page.find(_q("PageFooter")), "Height") - _CHROME_SLACK)
+    if avail < 1.0:
+        return
+    bh_el = body.find(_q("Height"))
+    if bh_el is None or _fh(body, "Height") <= avail:
+        return  # already fits -> no trailing slack to trim
+    ri = body.find(_q("ReportItems"))
+    if ri is not None:
+        for it in list(ri):
+            # A positioned body item whose bottom would fall past the reduced
+            # height must not be clipped -> leave the body tall for this report.
+            if _fh(it, "Top") + _fh(it, "Height") > avail + 0.01:
+                return
+    bh_el.text = f"{avail:.2f}in"
+
+
 def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     """Return a complete RDL XML document as a string."""
     target_db = (target_db or "oracle").lower()
@@ -10252,7 +10840,13 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # body-direct Fields! refs. Order matters: repairs first so the scoper
     # only sees genuinely-in-scope refs.
     _repair_dangling_field_refs(root, report)
+    _repair_misscoped_field_refs(root)
     _scope_body_direct_field_refs(root, report)
+    # Fidelity: widen positional CONSTANT-string labels whose Oracle-sized box
+    # clips under SSRS's wider Times metrics -- but ONLY into provably free space
+    # (capped at the nearest right-neighbour / container edge), so no overlap or
+    # page-spill is ever introduced (height untouched). See the function doc.
+    _widen_clipped_constant_labels(root)
     # Report-level Oracle <summary> grand totals that the body builders skipped
     # (multi-section / flat) -> emit as labeled dataset-scoped aggregates below
     # the content. After the scope/repair passes so their explicit dataset scope
@@ -10265,6 +10859,10 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # Fidelity: stamp <Format> onto field values that carried an Oracle
     # formatMask, so currency / dates / thousands render like the original.
     _apply_field_formats(root, report)
+    # Trim trailing-blank-page slack: body + header + footer + margins must fit
+    # the page height (see _clamp_body_height_to_page). Last, after every builder
+    # has set its body height.
+    _clamp_body_height_to_page(root)
     try:
         ET.indent(root, space="  ")
     except AttributeError:

@@ -147,6 +147,29 @@ def test_param_and_query_extremes_convert_to_valid_rdl(name, xml):
             f"{name}: " + "; ".join(e.message for e in schema.error_log[:3])
 
 
+def test_lexical_in_operand_slot_emits_null_not_empty_operand():
+    """A lexical ref filling a COMPLETE operand slot -- NVL(&P_X, fallback) --
+    must become NVL(NULL /*..*/, fallback): valid Oracle SQL that RUNS (the
+    column degrades to the NVL fallback). A bare comment there leaves
+    NVL(/*..*/, fallback) = ORA-00936 'missing expression'."""
+    import re
+    out = convert(_prep(sql="SELECT NVL(&P_SITE, A) v FROM t"))
+    cmd = re.search(r"<CommandText>(.*?)</CommandText>", out["rdl_xml"], re.S).group(1)
+    assert re.search(r"NVL\(\s*NULL\b", cmd), f"expected NVL(NULL ...): {cmd[:200]}"
+    assert not re.search(r"NVL\(\s*/\*", cmd), f"empty operand left: {cmd[:200]}"
+
+
+def test_lexical_in_clause_position_stays_a_bare_comment():
+    """A lexical NOT in a complete operand slot (clause tail) must stay a bare
+    comment -- injecting NULL there ( 'WHERE 1=1 NULL' ) would itself be invalid.
+    Conservative placeholder selection, the safe default."""
+    import re
+    out = convert(_prep(sql="SELECT A FROM t WHERE 1=1 &P_W"))
+    cmd = re.search(r"<CommandText>(.*?)</CommandText>", out["rdl_xml"], re.S).group(1)
+    assert "/* lexical ref" in cmd
+    assert not re.search(r"1\s*=\s*1\s+NULL\b", cmd), f"NULL wrongly injected: {cmd[:200]}"
+
+
 def test_param_name_with_dollar_sign_is_sanitized_consistently():
     """Oracle legally allows $ / # in identifiers (e.g. P_BAL$). SSRS does
     NOT, so the param Name must be sanitized -- and its references must use the

@@ -273,7 +273,8 @@ def api_convert():
     try:
         target_db = _resolve_target_db(request)
         data = convert(f.read(), target_db=target_db,
-                       images=_IMAGE_STORE.get(_sid()) or None)
+                       images=_IMAGE_STORE.get(_sid()) or None,
+                       deep_verify=True)
         # Apply deployment data source settings (embedded connection string
         # per-request, or the session's shared data source path) so the RDL
         # binds to the right data source AT UPLOAD -- no manual repointing.

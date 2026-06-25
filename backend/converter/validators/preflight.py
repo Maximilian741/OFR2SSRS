@@ -578,8 +578,24 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
     stats["bound_items_total"] = bound_items
 
     if bound_items == 0:
-        issues.append(("RED", "rdl.no_bound_items",
-                       "No <Tablix>, <List>, <Subreport>, or <Chart> — datasets will load but never display"))
+        # A positional-document archetype (letter / form / certificate) displays
+        # its data through body TEXTBOXES bound to scoped aggregate field refs
+        # (=First(Fields!X.Value, "DS")), NOT a data region — render-verified on
+        # the letter corpus (MS-engine). That IS a valid display path, so the
+        # hard "nothing displays" RED is a false positive there. Only keep the
+        # RED when NOTHING references a field at all (a truly empty/degenerate
+        # report); when fields ARE shown positionally, downgrade to an AMBER
+        # verify-note (single-record / burst-per-recipient layout).
+        if re.search(r"Fields!\w+\.Value", rdl_xml):
+            issues.append(("AMBER", "rdl.positional_document",
+                           "No <Tablix>/<List>/<Subreport>/<Chart>; data is shown via "
+                           "positional body textboxes (letter / form / certificate "
+                           "archetype). Verify each field shows the intended record "
+                           "(single-record or burst-per-recipient layout)."))
+        else:
+            issues.append(("RED", "rdl.no_bound_items",
+                           "No <Tablix>, <List>, <Subreport>, or <Chart>, and no field "
+                           "references — datasets will load but never display."))
 
     # 8) Every data-bound item should reference an existing dataset
     for tag in ("Tablix", "List", "Chart"):

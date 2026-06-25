@@ -187,7 +187,8 @@ def _classify_source_artifact(parsed) -> Optional[Dict[str, str]]:
 
 def convert(xml_bytes: bytes, target_db: str = "oracle",
             images: Optional[Dict[str, Any]] = None,
-            extra_param_names: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+            extra_param_names: Optional[Iterable[str]] = None,
+            deep_verify: bool = False) -> Dict[str, Any]:
     """End-to-end conversion. Returns a dict ready to ship to the frontend.
 
     Parameters
@@ -342,6 +343,52 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
         preflight = dict(preflight)
         preflight["source_kind"] = source_kind["kind"]
         preflight["source_kind_message"] = source_kind["message"]
+
+    # Deep expression verification (opt-in via deep_verify). Compiles every
+    # generated VB.NET expression -- and the report's own <Code> block --
+    # through the real System.CodeDom VB compiler, the same compilation SSRS
+    # performs at publish time. This catches the class of bug the static
+    # preflight and the layout renderer are both blind to: an expression that
+    # is syntactically invalid VB (bad IIf arity, trailing comma, unbalanced
+    # parens, an undefined function, a leaked Oracle ||) renders as #Error in
+    # real SSRS but passes a Fields!-reference check. Availability-gated and
+    # wrapped so it can NEVER break a conversion: on a host without the
+    # compiler (e.g. Linux CI) it is simply reported as not-run.
+    if deep_verify:
+        try:
+            from .validators.vb_expr_check import check_rdl_expressions
+            ev = check_rdl_expressions(rdl_xml, timeout=120)
+            preflight = dict(preflight)
+            preflight["expr_verify"] = {
+                "available": bool(ev.get("available")),
+                "summary": ev.get("summary", {}),
+                "bad": [
+                    {"location": b.get("location"), "expr": b.get("expr", "")[:160],
+                     "error": (b.get("errors") or [""])[0][:200]}
+                    for b in ev.get("bad", [])[:25]
+                ],
+            }
+            # A non-compiling expression IS an upload-time blocker; merge each
+            # into the issue list and re-derive the worst verdict. (No-op when
+            # everything compiles, so existing clean reports are unaffected.)
+            if ev.get("available") and ev.get("bad"):
+                issues = list(preflight.get("issues", []))
+                for b in ev["bad"][:25]:
+                    err = (b.get("errors") or [""])[0]
+                    issues.append({
+                        "severity": "BLOCKER", "rule": "rdl.expr_compile",
+                        "message": (
+                            f"<{b.get('location')}> expression does not compile in "
+                            f"VB.NET (SSRS renders #Error at run time): "
+                            f"{b.get('expr', '')[:80]} -> {err[:140]}"),
+                    })
+                preflight["issues"] = issues
+                _sev = {"BLOCKER": 3, "RED": 2, "AMBER": 1}
+                _worst = max((_sev.get(i.get("severity"), 0) for i in issues), default=0)
+                preflight["verdict"] = {3: "BLOCKER", 2: "RED", 1: "AMBER",
+                                        0: "READY"}[_worst]
+        except Exception:  # noqa: BLE001 -- deep verify must never sink a convert
+            pass
 
     return {
         "report": parsed.to_dict(),
