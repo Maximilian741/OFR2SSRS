@@ -18,6 +18,7 @@ from .preview.live_data import run_query
 from .validators.tsql_check import validate_report
 from .validators.rdl_check import validate_rdl
 from .validators.preflight import preflight_audit
+from .validators.layout_audit import audit_layout
 from .deployment import build_checklist
 from .audit import build_audit_trail
 from .fidelity import build_fidelity_report
@@ -343,6 +344,32 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
         preflight = dict(preflight)
         preflight["source_kind"] = source_kind["kind"]
         preflight["source_kind_message"] = source_kind["message"]
+
+    # Static layout audit: flag CanGrow=false textboxes whose declared content
+    # can't fit (clip risk) -- the class the placeholder-data render is blind to.
+    # Purely structural + data-independent. Surfaced as NON-BLOCKING AMBER notes
+    # in the same pre-download verdict, never a BLOCKER (a clip is a fidelity nit,
+    # not an upload/runtime failure). Wrapped so it can never sink a convert().
+    try:
+        _layout_flags = audit_layout(rdl_xml)
+        if _layout_flags:
+            preflight = dict(preflight)
+            _issues = list(preflight.get("issues", []))
+            for _lf in _layout_flags:
+                _issues.append({
+                    "severity": "AMBER",  # frontend only buckets BLOCKER/RED/AMBER
+                    "rule": _lf.get("rule", "layout.height_overflow"),
+                    "message": _lf.get("message", ""),
+                })
+            preflight["issues"] = _issues
+            # Re-derive the worst verdict; AMBER lifts READY->AMBER but never
+            # lowers an existing BLOCKER/RED.
+            _sev = {"BLOCKER": 3, "RED": 2, "AMBER": 1}
+            _worst = max((_sev.get(i.get("severity"), 0) for i in _issues), default=0)
+            preflight["verdict"] = {3: "BLOCKER", 2: "RED", 1: "AMBER",
+                                    0: "READY"}[_worst]
+    except Exception:  # layout audit must never break a convert
+        pass
 
     # Deep expression verification (opt-in via deep_verify). Compiles every
     # generated VB.NET expression -- and the report's own <Code> block --
