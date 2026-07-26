@@ -800,6 +800,18 @@ def detect_report_kind(report):
             if len(getattr(_q, "items", None) or []) >= 3:
                 return "tabular_details"
 
+    # 7. A GEOMETRY-LESS layout (the minimal DTD-1.0 grammar:
+    # <groupLeft><field source=.../> with no x/y on anything) is a group-
+    # left TABULAR listing by definition — the card path would stack every
+    # field at one identical spot (wild-corpus verified: 100% overprint).
+    _data_fields = [f for g in _iter_layout(report)
+                    for f in (g.fields or []) if f.kind == "field"]
+    _has_rep = any(g.kind == "repeating_frame" for g in _iter_layout(report))
+    if (len(_data_fields) >= 3 and not _has_rep
+            and all((f.x or 0) == 0 and (f.y or 0) == 0
+                    and (f.width or 0) == 0 for f in _data_fields)):
+        return "tabular_details"
+
     return "certificate"
 
 

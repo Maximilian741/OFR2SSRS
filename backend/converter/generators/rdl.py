@@ -1004,6 +1004,142 @@ def _reconstruct_lexical_criteria(report) -> dict:
     return out
 
 
+def _format_trigger_hidden_map(report) -> dict:
+    """Trigger-function name (lower) -> SSRS <Hidden> VB expression, for
+    every format trigger whose PL/SQL body reduces to a boolean expression
+    (wild-corpus: 54 triggers on one report, ALL previously dropped —
+    conditionally-printed objects became unconditionally printed). Cached
+    per report; untranslatable bodies simply stay absent (today's
+    behavior + the object prints unconditionally)."""
+    m = getattr(report, "_ft_hidden_map", None)
+    if m is not None:
+        return m
+    m = {}
+    try:
+        from ..translators.plsql_formula import translate_format_trigger
+        for t in (getattr(report, "triggers", None) or []):
+            nm = (getattr(t, "name", "") or "").strip().lower()
+            if not nm or not (getattr(t, "body", "") or "").strip():
+                continue
+            try:
+                h = translate_format_trigger(t.body)
+            except Exception:  # noqa: BLE001
+                h = None
+            if h:
+                m[nm] = h
+    except Exception:  # noqa: BLE001
+        m = {}
+    report._ft_hidden_map = m
+    return m
+
+
+def _format_trigger_style_map(report) -> dict:
+    """Trigger name (lower) -> (cond_vb, {ssrs_prop: value}) for every
+    conditional-STYLING trigger (wild-corpus dominant pattern: bold/font
+    the Sub Total rows). Cached per report."""
+    m = getattr(report, "_ft_style_map", None)
+    if m is not None:
+        return m
+    m = {}
+    try:
+        from ..translators.plsql_formula import translate_format_trigger_style
+        for t in (getattr(report, "triggers", None) or []):
+            nm = (getattr(t, "name", "") or "").strip().lower()
+            if not nm or not (getattr(t, "body", "") or "").strip():
+                continue
+            try:
+                r = translate_format_trigger_style(t.body)
+            except Exception:  # noqa: BLE001
+                r = None
+            if r:
+                m[nm] = r
+    except Exception:  # noqa: BLE001
+        m = {}
+    report._ft_style_map = m
+    return m
+
+
+_FT_STYLE_DEFAULTS = {"FontWeight": "Normal", "FontStyle": "Normal",
+                      "FontFamily": "Arial", "FontSize": "10pt",
+                      "Color": "#111111", "BackgroundColor": "Transparent"}
+
+
+def _apply_format_trigger_style(tb, report, trigger_name) -> bool:
+    """Patch a Textbox's TextRun styles (and box style for background)
+    with =IIf(cond, styled, default) expressions per the trigger. Returns
+    True when applied."""
+    nm = (trigger_name or "").strip().lower()
+    if not nm:
+        return False
+    r = _format_trigger_style_map(report).get(nm)
+    if not r:
+        return False
+    cond, styles = r
+    applied = False
+    for prop, val in styles.items():
+        if prop == "BackgroundColor":
+            targets = [tb.find(_q("Style"))]
+        else:
+            targets = [tr.find(_q("Style")) for tr in tb.iter(_q("TextRun"))]
+        for st in targets:
+            if st is None:
+                continue
+            cur = st.find(_q(prop))
+            dflt = (cur.text if cur is not None and (cur.text or "")
+                    and not (cur.text or "").startswith("=")
+                    else _FT_STYLE_DEFAULTS.get(prop, "Normal"))
+            expr = f'=IIf({cond}, "{val}", "{dflt}")'
+            if cur is None:
+                cur = _sub(st, prop)
+            cur.text = expr
+            _reorder_style_children(st)
+            applied = True
+    return applied
+
+
+_STYLE_CHILD_ORDER = [
+    "Border", "TopBorder", "BottomBorder", "LeftBorder", "RightBorder",
+    "BackgroundColor", "BackgroundGradientType", "BackgroundGradientEndColor",
+    "BackgroundImage", "FontStyle", "FontFamily", "FontSize", "FontWeight",
+    "Format", "TextDecoration", "TextAlign", "VerticalAlign", "Color",
+    "PaddingLeft", "PaddingRight", "PaddingTop", "PaddingBottom",
+    "LineHeight", "Direction", "WritingMode", "Language", "UnicodeBiDi",
+    "Calendar", "NumeralLanguage", "NumeralVariant",
+]
+_STYLE_ORDER_IDX = {n: i for i, n in enumerate(_STYLE_CHILD_ORDER)}
+
+
+def _reorder_style_children(st) -> None:
+    """RDL <Style> is a SEQUENCE in the schema — children out of canonical
+    order fail deserialization ("... is not a valid value"). Re-sort after
+    any post-hoc style patch (stable for unknown tags)."""
+    kids = list(st)
+    def _key(el):
+        nm = el.tag.split('}')[-1]
+        return _STYLE_ORDER_IDX.get(nm, len(_STYLE_CHILD_ORDER))
+    ordered = sorted(kids, key=_key)
+    if ordered != kids:
+        for k in kids:
+            st.remove(k)
+        for k in ordered:
+            st.append(k)
+
+
+def _apply_format_trigger_hidden(el, report, trigger_name) -> bool:
+    """Attach <Visibility><Hidden>=expr</Hidden></Visibility> to a report
+    item when its format trigger translated. Returns True when applied."""
+    nm = (trigger_name or "").strip().lower()
+    if not nm:
+        return False
+    h = _format_trigger_hidden_map(report).get(nm)
+    if not h:
+        return False
+    if el.find(_q("Visibility")) is not None:
+        return False
+    _sub(_sub(el, "Visibility"), "Hidden", h)
+    return True
+
+
 def _lexical_slot_token(src: str, start: int, end: int) -> str:
     """``"NULL "`` when the ``&REF`` at ``src[start:end]`` fills a COMPLETE
     operand slot (both non-space neighbours are delimiters: prev in ``(,`` and
@@ -2193,19 +2329,33 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     _widths = [_ora_w.get(c.upper(), 0.0) for c in columns]
     if all(w > 0 for w in _widths) and _widths:
         _sum = sum(_widths)
-        _scale = min(1.0, _target_w / _sum) if _sum > 0 else 1.0
-        _per_col = [max(0.5, round(w * _scale, 2)) for w in _widths]
-        # The 0.5in floor + per-column rounding can push the total a hair past the
-        # usable width and spill the last column onto a 2nd page. Trim that small
-        # overflow from the columns ABOVE the floor, proportionally, so the whole
-        # table fits one page (never below the 0.5in floor).
-        _over = sum(_per_col) - _target_w
-        if _over > 0.01:
-            _slack = [(i, w - 0.5) for i, w in enumerate(_per_col) if w - 0.5 > 0.01]
-            _slack_total = sum(s for _i, s in _slack)
-            if _slack_total > 0:
-                for _i, _s in _slack:
-                    _per_col[_i] = round(_per_col[_i] - _over * (_s / _slack_total), 2)
+        if len(columns) * 0.5 > _target_w:
+            # IMPOSSIBLE FIT (wild-corpus: a 54-column, 81in-wide report):
+            # even 0.5in floors overflow the printable width. Forcing a fit
+            # previously produced a NEGATIVE remainder column (schema-
+            # invalid, upload rejected). Keep the source's legibility ratios
+            # (narrowest column = 0.5in) and let SSRS paginate ACROSS --
+            # horizontal pagination is the honest rendering of a report
+            # that is genuinely wider than the page.
+            _scale = min(1.0, 0.5 / max(0.01, min(_widths)))
+            _per_col = [max(0.5, round(w * _scale, 2)) for w in _widths]
+        else:
+            _scale = min(1.0, _target_w / _sum) if _sum > 0 else 1.0
+            _per_col = [max(0.5, round(w * _scale, 2)) for w in _widths]
+            # The 0.5in floor + per-column rounding can push the total a hair
+            # past the usable width and spill the last column onto a 2nd page.
+            # Trim that small overflow from the columns ABOVE the floor,
+            # proportionally, NEVER below the floor (a trim larger than the
+            # available slack must spill, not go negative).
+            _over = sum(_per_col) - _target_w
+            if _over > 0.01:
+                _slack = [(i, w - 0.5) for i, w in enumerate(_per_col)
+                          if w - 0.5 > 0.01]
+                _slack_total = sum(s for _i, s in _slack)
+                if _slack_total > 0:
+                    for _i, _s in _slack:
+                        _per_col[_i] = max(0.5, round(
+                            _per_col[_i] - _over * (_s / _slack_total), 2))
     else:
         _per_col = [_colw] * len(columns)
     for _w in _per_col:
@@ -2251,6 +2401,7 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     col_dt = {}
     col_align = {}
     col_font = {}
+    col_ft = {}
     try:
         for _y, _x, _d, lf in _layout_fields_in_order(report):
             src = (getattr(lf, "source", "") or "").upper()
@@ -2275,6 +2426,8 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
                     bool(getattr(lf, "bold", False)),
                     bool(getattr(lf, "italic", False)),
                 )
+            if src and src not in col_ft and getattr(lf, "format_trigger", ""):
+                col_ft[src] = lf.format_trigger
     except Exception:  # noqa: BLE001 -- links must never break the table
         col_dt = {}
     for col in columns:
@@ -2299,6 +2452,13 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             bold=bld,
             italic=ital,
         )
+        # Conditional print/styling from the column's format trigger
+        # (bold-the-subtotal-row etc. — wild-corpus dominant pattern).
+        _ftn = col_ft.get(col.upper())
+        if _ftn:
+            _cell_tb = contents[-1]
+            if not _apply_format_trigger_hidden(_cell_tb, report, _ftn):
+                _apply_format_trigger_style(_cell_tb, report, _ftn)
 
     # Report-level <summary> grand totals -> a static FOOTER total row, so a
     # flat report's "Total: N" line actually renders (the summary tokens
@@ -7893,6 +8053,13 @@ def _emit_field_textbox(
     _sub(tb, "Left", f"{rel_left:.2f}in")
     _sub(tb, "Width", f"{place_w:.2f}in")
     _sub(tb, "Height", f"{place_h:.2f}in")
+    # Conditional print: a field-level format trigger whose PL/SQL body
+    # reduces to a boolean becomes a REAL <Hidden> expression (Oracle
+    # RETURN FALSE = suppress -> Hidden true). Conditional STYLING
+    # triggers (bold-the-subtotal pattern) become IIf() style exprs.
+    _ft = getattr(lf, "format_trigger", "")
+    if not _apply_format_trigger_hidden(tb, report, _ft):
+        _apply_format_trigger_style(tb, report, _ft)
     return (True, rel_top + place_h)
 
 
@@ -7957,8 +8124,15 @@ def _emit_frame_rect(
     # (no trigger -> always prints, e.g. CLP's M_Error_Contact_G) is never
     # dropped, and a frame merely named M_TERMS / M_VENDOR never matches.
     _gname = getattr(group, "name", "") or ""
-    if (getattr(group, "format_trigger", "")
+    _ft_name = getattr(group, "format_trigger", "") or ""
+    _ft_hidden = (_format_trigger_hidden_map(report).get(
+        _ft_name.strip().lower()) if _ft_name else None)
+    if (_ft_name and not _ft_hidden
             and re.search(r"(?i)(^|_)err(or)?($|_)", _gname)):
+        # Untranslatable conditional-ERROR frame: keep the drop (emitting it
+        # unconditionally would stack the error paragraph on the happy
+        # path). A TRANSLATED trigger instead emits the frame with a real
+        # <Hidden> expression below — Oracle's conditional print, honored.
         return parent_y
     gx = float(getattr(group, "x", 0.0) or 0.0)
     gy = float(getattr(group, "y", 0.0) or 0.0)
@@ -7978,6 +8152,8 @@ def _emit_frame_rect(
     rect.set("Name", f"{name_prefix}_Rect_{counter[0]}")
     counter[0] += 1
     _sub(rect, "KeepTogether", "true")
+    if _ft_hidden:
+        _sub(_sub(rect, "Visibility"), "Hidden", _ft_hidden)
     style = _sub(rect, "Style")
     border_w = float(getattr(group, "border_width", 0) or 0)
     if border_w > 0:
@@ -9740,15 +9916,17 @@ def _build_label_body(report, main, spec):
     return body, ncols, col_gap
 
 
-def _find_matrix_spec(report) -> Optional[dict]:
+def _find_matrix_spec(report, index: int = 0) -> Optional[dict]:
     """Locate an Oracle cross-tab (matrix) and derive its SSRS wiring.
 
-    Returns {row, col, cells, query, dominant} or None. Handles BOTH wild
-    dialects: 6i inline (<matrix> nesting matrixCol/matrixRow/matrixCell
-    with the dimension/cell fields) and 9.0.2 frame-ref (<matrix
+    Returns {row, col, cells, query, dominant, ...} or None. Handles BOTH
+    wild dialects: 6i inline (<matrix> nesting matrixCol/matrixRow/
+    matrixCell with the dimension/cell fields) and 9.0.2 frame-ref (<matrix
     horizontalFrame=... verticalFrame=...> pointing at repeatingFrames).
-    ``dominant`` is True only when the matrix is its section's primary
-    content — mixed layouts keep the existing (safe) rendering path."""
+    ``dominant`` is True only when the matrices are their sections' primary
+    content — mixed layouts keep the existing (safe) rendering path.
+    ``index`` selects WHICH matrix to derive (multi-matrix reports carry
+    3-5 pivots; ``n_matrices`` in the result tells the caller how many)."""
     matrices = []
 
     def walk(g, root):
@@ -9759,9 +9937,9 @@ def _find_matrix_spec(report) -> Optional[dict]:
 
     for lg in (report.layout or []):
         walk(lg, lg)
-    if not matrices:
+    if not matrices or index >= len(matrices):
         return None
-    mx, sec_root = matrices[0]
+    mx, sec_root = matrices[index]
 
     def dim_fields(kind):
         out = []
@@ -9799,20 +9977,9 @@ def _find_matrix_spec(report) -> Optional[dict]:
         col_fields = col_fields or frame_fields(attrs.get("horizontalFrame"))
         row_fields = row_fields or frame_fields(attrs.get("verticalFrame"))
 
-    if not (col_fields and row_fields):
-        return None
-    row0, col0 = row_fields[0], col_fields[0]
-
-    # CELL = the measure. THE DECLARED TRUTH COMES FIRST: a <summary> whose
-    # reset group is one of the matrix's DIMENSION groups names the measure
-    # column AND its aggregate function exactly (wild-corpus: the cell
-    # previously guessed a column and rendered the dimension value / Sum()ed
-    # text). Only when no summary declares a measure do the heuristics run.
     _summ_names = {(f.name or "").upper()
                    for f in (getattr(report, "formulas", None) or [])
                    if getattr(f, "agg_function", "")}
-    _dimset = {row0.upper(), col0.upper()}
-    _dim_groups = set()
     _attrs0 = getattr(mx, "matrix_attrs", {}) or {}
 
     def _grp_of_frame(frame_name):
@@ -9829,11 +9996,72 @@ def _find_matrix_spec(report) -> Optional[dict]:
             w(lg)
         return out[0]
 
+    def _break_col_of_group(gname):
+        tgt = (gname or "").upper()
+        if not tgt:
+            return ""
+        for q in (getattr(report, "queries", None) or []):
+            stack = list(getattr(q, "groups", None) or [])
+            while stack:
+                g = stack.pop()
+                if (g.name or "").upper() == tgt:
+                    return (getattr(g, "break_col", "") or
+                            (g.items[0].name if getattr(g, "items", None)
+                             else ""))
+                stack.extend(getattr(g, "children", None) or [])
+        return ""
+
+    # A dimension frame may carry ONLY summary fields (or none at all) --
+    # the TRUE dimension is then its bound group's break column.
+    if not col_fields:
+        _bc = _break_col_of_group(_grp_of_frame(
+            (_attrs0.get("horizontalFrame") or "").strip()))
+        if _bc:
+            col_fields = [_bc]
+    if not row_fields:
+        _bc = _break_col_of_group(_grp_of_frame(
+            (_attrs0.get("verticalFrame") or "").strip()))
+        if _bc:
+            row_fields = [_bc]
+    if not (col_fields and row_fields):
+        return None
+
+    # Pick each dimension PREFERRING a real query column that is not a
+    # summary (a dim frame lists its subtotal fields alongside the break
+    # value; "SumMONTOPerCOL_SEMANA" must never become the row key), then
+    # the frame group's break column, then the first field.
+    _qcols_all = {(it.name or "").upper()
+                  for q in (getattr(report, "queries", None) or [])
+                  for it in (getattr(q, "items", None) or [])}
+
+    def _pick_dim(fields, frame_attr):
+        for f in fields:
+            if f.upper() in _qcols_all and f.upper() not in _summ_names:
+                return f
+        _bc = _break_col_of_group(_grp_of_frame(
+            (_attrs0.get(frame_attr) or "").strip()))
+        return _bc or fields[0]
+
+    row0 = _pick_dim(row_fields, "verticalFrame")
+    col0 = _pick_dim(col_fields, "horizontalFrame")
+
+    # CELL = the measure. THE DECLARED TRUTH COMES FIRST: a <summary> whose
+    # reset group is one of the matrix's DIMENSION groups names the measure
+    # column AND its aggregate function exactly (wild-corpus: the cell
+    # previously guessed a column and rendered the dimension value / Sum()ed
+    # text). Only when no summary declares a measure do the heuristics run.
+    _dimset = {row0.upper(), col0.upper()}
+    _dim_groups = set()
     for _fr in (_attrs0.get("horizontalFrame"), _attrs0.get("verticalFrame")):
         _gsrc = _grp_of_frame((_fr or "").strip())
         if _gsrc:
             _dim_groups.add(_gsrc.upper())
+    _row_grp = (_grp_of_frame((_attrs0.get("verticalFrame") or "").strip())
+                or "").upper()
+    _col_grp = (_grp_of_frame((_attrs0.get("horizontalFrame") or "").strip())
+                or "").upper()
     measure_fns: dict = {}
+    _cell_summ_names: set = set()
     for f in (getattr(report, "formulas", None) or []):
         _fn = (getattr(f, "agg_function", "") or "").lower()
         _src = (getattr(f, "agg_source", "") or "").strip()
@@ -9843,12 +10071,40 @@ def _find_matrix_spec(report) -> Optional[dict]:
                 and _src.upper() not in _summ_names
                 and _src not in measure_fns):
             measure_fns[_src] = _fn
+            _cell_summ_names.add((f.name or "").upper())
+    # MARGIN TOTALS: a summary whose SOURCE is the cell summary itself is a
+    # margin — its reset group says which one (row dim -> right per-row
+    # total, col dim -> bottom per-column total, report -> grand corner).
+    margins = {"row_total": False, "col_total": False, "grand": False}
+    for f in (getattr(report, "formulas", None) or []):
+        _src = (getattr(f, "agg_source", "") or "").upper()
+        _rst = (getattr(f, "agg_scope", "") or "").upper()
+        if _src in _cell_summ_names:
+            if _rst == _row_grp:
+                margins["row_total"] = True
+            elif _rst == _col_grp:
+                margins["col_total"] = True
+            elif _rst == "REPORT":
+                margins["grand"] = True
 
     cells = list(cell_fields)
     if not cells and measure_fns:
         cells = list(measure_fns.keys())
     if not cells:
         _dims = {row0.upper(), col0.upper()}
+        # A break column of ANY matrix's DIMENSION-frame group is a
+        # dimension somewhere (this pivot's or a sibling's) — never a
+        # measure. Without this, a sibling pivot's dims leak into this
+        # pivot's cells (multi-matrix, shared query). Only dimension-frame
+        # groups count: a 9.0.2 measure-holder group's break_col IS the
+        # measure and must stay eligible.
+        for _m, _ in matrices:
+            _a = getattr(_m, "matrix_attrs", {}) or {}
+            for _fr2 in (_a.get("horizontalFrame"), _a.get("verticalFrame")):
+                _bc = _break_col_of_group(
+                    _grp_of_frame((_fr2 or "").strip()))
+                if _bc:
+                    _dims.add(_bc.upper())
         _NUMERIC = {"number", "integer", "float", "decimal", "long", "money"}
         for q in (report.queries or []):
             for it in (q.items or []):
@@ -9875,26 +10131,34 @@ def _find_matrix_spec(report) -> Optional[dict]:
     # and measure frames counted as "others").
     _mx_fields = {row0.upper(), col0.upper()} | {c.upper() for c in cells}
     attrs = getattr(mx, "matrix_attrs", {}) or {}
-    _own_frames = {(attrs.get("horizontalFrame") or "").strip(),
-                   (attrs.get("verticalFrame") or "").strip(),
-                   (mx.name or "").strip()}
+    # Own-frame set is the UNION over ALL matrices: in a multi-matrix
+    # report each pivot's frames must not count as "competing content"
+    # against its siblings (they all render, one Tablix each).
+    _own_frames = set()
+    for _m, _ in matrices:
+        _a = getattr(_m, "matrix_attrs", {}) or {}
+        _own_frames |= {(_a.get("horizontalFrame") or "").strip(),
+                        (_a.get("verticalFrame") or "").strip(),
+                        (_m.name or "").strip()}
     _own_frames.discard("")
 
-    # Frames that CONTAIN the matrix are outer break bands (matrix-with-
-    # break: one matrix instance per band value) — never competing regions.
+    # Frames that CONTAIN the matrix's dimension frames are outer break
+    # bands (matrix-with-break: one matrix instance per band value) — never
+    # competing regions. NB: the <matrix> node itself is a SECTION-LEVEL
+    # SIBLING that references its frames by name, so containment must be
+    # tested against the dimension frames, not the matrix node.
     _mx_ancestors: set = set()
 
-    def _mark_ancestors(g, path):
-        if g is mx:
-            _mx_ancestors.update(id(p) for p in path)
-            return True
+    def _mark_ancestors(g):
+        hit = (g.name or "").strip() in _own_frames or g is mx
         for c in (getattr(g, "children", None) or []):
-            if _mark_ancestors(c, path + [g]):
-                return True
-        return False
+            if _mark_ancestors(c):
+                hit = True
+        if hit:
+            _mx_ancestors.add(id(g))
+        return hit
     for _lg in (report.layout or []):
-        if _mark_ancestors(_lg, [_lg]):
-            break
+        _mark_ancestors(_lg)
 
     def count_outside(g, inside_mx):
         # A frame is the matrix's own if it's the matrix, nested in it, or is
@@ -9921,19 +10185,51 @@ def _find_matrix_spec(report) -> Optional[dict]:
 
     dominant = count_outside(sec_root, False) == 0
 
+    # OUTER BREAK BAND (matrix-with-break): the deepest repeating-frame
+    # ANCESTOR of the dimension frames is the band; its group's break column
+    # keys one sub-matrix per band value with a band header above it.
+    band_col = ""
+
+    def _deepest_band(g, depth, best):
+        if (id(g) in _mx_ancestors
+                and (getattr(g, "kind", "") or "") == "repeating_frame"
+                and (g.name or "").strip() not in _own_frames
+                and (getattr(g, "source_query", "") or "")):
+            if depth > best[0]:
+                best[0], best[1] = depth, g
+        for c in (getattr(g, "children", None) or []):
+            _deepest_band(c, depth + 1, best)
+    _best = [-1, None]
+    for _lg in (report.layout or []):
+        _deepest_band(_lg, 0, _best)
+    if _best[1] is not None:
+        _bgrp = (getattr(_best[1], "source_query", "") or "").upper()
+        for q in (getattr(report, "queries", None) or []):
+            stack = list(getattr(q, "groups", None) or [])
+            while stack and not band_col:
+                g = stack.pop()
+                if (g.name or "").upper() == _bgrp:
+                    band_col = (getattr(g, "break_col", "") or
+                                (g.items[0].name if getattr(g, "items", None)
+                                 else ""))
+                stack.extend(getattr(g, "children", None) or [])
+            if band_col:
+                break
+
     query = None
     for q in (report.queries or []):
         names = {(it.name or "").upper() for it in (q.items or [])}
-        if cells[0].upper() in names or col_fields[0].upper() in names:
+        if cells[0].upper() in names or col0.upper() in names:
             query = q
             break
     if query is None:
         query = _pick_main_query(report)
     if query is None:
         return None
-    return {"row": row_fields[0], "col": col_fields[0], "cells": cells,
+    return {"row": row0, "col": col0, "cells": cells,
             "query": query, "dominant": dominant,
-            "measure_fns": measure_fns}
+            "measure_fns": measure_fns, "margins": margins,
+            "band": band_col, "n_matrices": len(matrices)}
 
 
 def _prepare_matrix(report) -> None:
@@ -9943,21 +10239,29 @@ def _prepare_matrix(report) -> None:
     that no plain query group declares."""
     spec = _find_matrix_spec(report)
     report._matrix_spec = spec
+    specs = [spec] if spec else []
+    for _i in range(1, (spec or {}).get("n_matrices", 1)):
+        _s = _find_matrix_spec(report, _i)
+        if _s:
+            specs.append(_s)
+    report._matrix_specs = specs
     if not spec or not spec.get("dominant"):
         return
     from ..models import DataItem
-    q = spec["query"]
-    have = {(it.name or "").upper() for it in (q.items or [])}
-    for cname in [spec["row"], spec["col"], *spec["cells"]]:
-        if cname.upper() not in have:
-            is_measure = cname in spec["cells"]
-            q.items.append(DataItem(
-                name=cname, expression=cname,
-                datatype="number" if is_measure else "vchar2"))
-            have.add(cname.upper())
+    for spec in specs:
+        q = spec["query"]
+        have = {(it.name or "").upper() for it in (q.items or [])}
+        for cname in [spec["row"], spec["col"], *spec["cells"],
+                      *( [spec["band"]] if spec.get("band") else [] )]:
+            if cname.upper() not in have:
+                is_measure = cname in spec["cells"]
+                q.items.append(DataItem(
+                    name=cname, expression=cname,
+                    datatype="number" if is_measure else "vchar2"))
+                have.add(cname.upper())
 
 
-def _build_matrix_tablix(report, spec) -> ET.Element:
+def _build_matrix_tablix(report, spec, suffix: str = "") -> ET.Element:
     """A REAL two-axis SSRS cross-tab: dynamic row group (down), dynamic
     column group (across), Sum() cells. Multiple measures stack inside the
     cell as labeled lines (data-complete; geometry approximated)."""
@@ -9965,34 +10269,62 @@ def _build_matrix_tablix(report, spec) -> ET.Element:
     row_f, col_f = _safe(spec["row"]), _safe(spec["col"])
     cells = [_safe(c) for c in spec["cells"]]
 
+    _mg = spec.get("margins") or {}
+    _rt = bool(_mg.get("row_total"))   # right per-row total column
+    _ct = bool(_mg.get("col_total"))   # bottom per-column total row
+
     t = ET.Element(_q("Tablix"))
-    t.set("Name", "Tablix_Matrix")
+    t.set("Name", f"Tablix_Matrix{suffix}")
     body = _sub(t, "TablixBody")
     cols_el = _sub(body, "TablixColumns")
-    for w in ("1.8in", "1.5in"):
+    for w in (("1.8in", "1.5in", "1.0in") if _rt else ("1.8in", "1.5in")):
         _sub(_sub(cols_el, "TablixColumn"), "Width", w)
     rows_el = _sub(body, "TablixRows")
 
+    band_f = _safe(spec["band"]) if spec.get("band") else ""
     hdr_bg, hdr_fg = "#4a6a8a", "#ffffff"
     r0 = _sub(rows_el, "TablixRow")
     _sub(r0, "Height", "0.30in")
     c0 = _sub(r0, "TablixCells")
     cont = _sub(_sub(c0, "TablixCell"), "CellContents")
-    _build_textbox(cont, "Mx_Corner", spec["row"].replace("_", " "),
+    _build_textbox(cont, f"Mx_Corner{suffix}", spec["row"].replace("_", " "),
                    bold=True, bg=hdr_bg, fg=hdr_fg, text_align="Left",
                    vertical_align="Middle", border_color="#a0a0a0",
                    padding="5pt")
     cont = _sub(_sub(c0, "TablixCell"), "CellContents")
-    _build_textbox(cont, "Mx_ColHdr", f"=Fields!{col_f}.Value",
+    _build_textbox(cont, f"Mx_ColHdr{suffix}", f"=Fields!{col_f}.Value",
                    bold=True, bg=hdr_bg, fg=hdr_fg, text_align="Center",
                    vertical_align="Middle", border_color="#a0a0a0",
                    padding="5pt")
+    if _rt:
+        cont = _sub(_sub(c0, "TablixCell"), "CellContents")
+        _build_textbox(cont, f"Mx_TotColHdr{suffix}", "Total",
+                       bold=True, bg=hdr_bg, fg=hdr_fg, text_align="Center",
+                       vertical_align="Middle", border_color="#a0a0a0",
+                       padding="5pt")
+
+    if band_f:
+        # Band header row: the break value spans visually via the first
+        # cell; sibling cells stay empty (cell count MUST match columns).
+        rb = _sub(rows_el, "TablixRow")
+        _sub(rb, "Height", "0.28in")
+        cb = _sub(rb, "TablixCells")
+        cont = _sub(_sub(cb, "TablixCell"), "CellContents")
+        _build_textbox(cont, f"Mx_BandHdr{suffix}",
+                       f'=Fields!{band_f}.Value',
+                       bold=True, font_size="11pt", text_align="Left",
+                       vertical_align="Middle", border_color="#d0d0d0",
+                       padding="4pt")
+        for _bi in range(2 if _rt else 1):
+            cont = _sub(_sub(cb, "TablixCell"), "CellContents")
+            _build_textbox(cont, f"Mx_BandPad{suffix}_{_bi}", "",
+                           border_color="#d0d0d0", padding="4pt")
 
     r1 = _sub(rows_el, "TablixRow")
     _sub(r1, "Height", f"{0.25 + 0.15 * max(0, len(cells) - 1):.2f}in")
     c1 = _sub(r1, "TablixCells")
     cont = _sub(_sub(c1, "TablixCell"), "CellContents")
-    _build_textbox(cont, "Mx_RowHdr", f"=Fields!{row_f}.Value",
+    _build_textbox(cont, f"Mx_RowHdr{suffix}", f"=Fields!{row_f}.Value",
                    bold=True, text_align="Left", vertical_align="Middle",
                    border_color="#d0d0d0", padding="4pt")
     # Aggregate per the DECLARED <summary> function (a count matrix must
@@ -10012,21 +10344,48 @@ def _build_matrix_tablix(report, spec) -> ET.Element:
                  for c in cells]
         expr = "=" + " & vbCrLf & ".join(parts)
     cont = _sub(_sub(c1, "TablixCell"), "CellContents")
-    _build_textbox(cont, "Mx_Cell", expr, text_align="Right",
+    _build_textbox(cont, f"Mx_Cell{suffix}", expr, text_align="Right",
                    vertical_align="Middle", border_color="#d0d0d0",
                    padding="4pt")
+    if _rt:
+        cont = _sub(_sub(c1, "TablixCell"), "CellContents")
+        _build_textbox(cont, f"Mx_RowTotal{suffix}", expr, bold=True,
+                       text_align="Right", vertical_align="Middle",
+                       border_color="#d0d0d0", padding="4pt")
+    if _ct:
+        # Bottom per-column total row (+ grand corner when a right total
+        # column also exists). The SAME measure expression auto-scopes to
+        # each static member's intersection (SSRS aggregate-scope rule).
+        r2 = _sub(rows_el, "TablixRow")
+        _sub(r2, "Height", "0.25in")
+        c2 = _sub(r2, "TablixCells")
+        cont = _sub(_sub(c2, "TablixCell"), "CellContents")
+        _build_textbox(cont, f"Mx_TotRowLbl{suffix}", "Total", bold=True,
+                       text_align="Left", vertical_align="Middle",
+                       border_color="#d0d0d0", padding="4pt")
+        cont = _sub(_sub(c2, "TablixCell"), "CellContents")
+        _build_textbox(cont, f"Mx_ColTotal{suffix}", expr, bold=True,
+                       text_align="Right", vertical_align="Middle",
+                       border_color="#d0d0d0", padding="4pt")
+        if _rt:
+            cont = _sub(_sub(c2, "TablixCell"), "CellContents")
+            _build_textbox(cont, f"Mx_GrandTotal{suffix}", expr, bold=True,
+                           text_align="Right", vertical_align="Middle",
+                           border_color="#d0d0d0", padding="4pt")
 
     ch = _sub(t, "TablixColumnHierarchy")
     chm = _sub(ch, "TablixMembers")
     _sub(chm, "TablixMember")                      # static row-header column
     dyn = _sub(chm, "TablixMember")
     g = _sub(dyn, "Group")
-    g.set("Name", "MxColG")
+    g.set("Name", f"MxColG{suffix}")
     _sub(_sub(g, "GroupExpressions"), "GroupExpression",
          f"=Fields!{col_f}.Value")
     se = _sub(dyn, "SortExpressions")
     s = _sub(se, "SortExpression")
     _sub(s, "Value", f"=Fields!{col_f}.Value")
+    if _rt:
+        _sub(chm, "TablixMember")                  # static right total column
 
     rh = _sub(t, "TablixRowHierarchy")
     rhm = _sub(rh, "TablixMembers")
@@ -10036,19 +10395,51 @@ def _build_matrix_tablix(report, spec) -> ET.Element:
     # trailing blank page (engine-measured). The dynamic column header
     # already repeats naturally with horizontal pagination.
     _sub(rhm, "TablixMember")
-    dynr = _sub(rhm, "TablixMember")
+    if band_f:
+        # Matrix-with-break: OUTER band group wraps (band header row,
+        # dynamic row group, per-band total row) -- one sub-matrix per
+        # band value, mirroring Oracle's break band above each instance.
+        bandm = _sub(rhm, "TablixMember")
+        bg_ = _sub(bandm, "Group")
+        bg_.set("Name", f"MxBandG{suffix}")
+        _sub(_sub(bg_, "GroupExpressions"), "GroupExpression",
+             f"=Fields!{band_f}.Value")
+        _bse = _sub(bandm, "SortExpressions")
+        _bs = _sub(_bse, "SortExpression")
+        _sub(_bs, "Value", f"=Fields!{band_f}.Value")
+        _inner = _sub(bandm, "TablixMembers")
+        _bh = _sub(_inner, "TablixMember")         # band header row
+        _sub(_bh, "KeepWithGroup", "After")
+        dynr = _sub(_inner, "TablixMember")
+    else:
+        dynr = _sub(rhm, "TablixMember")
     gr = _sub(dynr, "Group")
-    gr.set("Name", "MxRowG")
+    gr.set("Name", f"MxRowG{suffix}")
     _sub(_sub(gr, "GroupExpressions"), "GroupExpression",
          f"=Fields!{row_f}.Value")
     ser = _sub(dynr, "SortExpressions")
     sr = _sub(ser, "SortExpression")
     _sub(sr, "Value", f"=Fields!{row_f}.Value")
+    if _ct:
+        # Total row: per band when banded (inside the band group), else
+        # report-wide.
+        _sub(_inner if band_f else rhm, "TablixMember")
 
     _sub(t, "DataSetName", ds)
     _sub(t, "Top", "0.10in")
     _sub(t, "Left", "0.05in")
-    _sub(t, "Height", "0.55in")
+    # Height MUST equal the true sum of the static rows: an understated
+    # Height makes SSRS treat items placed below the declared bottom (grand
+    # totals) as INSIDE the real footprint -> they never push down and the
+    # matrix paints over them (engine-verified).
+    _true_h = 0.0
+    for _tr in rows_el.findall(_q("TablixRow")):
+        try:
+            _true_h += float((_tr.findtext(_q("Height")) or "0")
+                             .replace("in", ""))
+        except ValueError:
+            pass
+    _sub(t, "Height", f"{max(0.55, _true_h):.2f}in")
     _sub(t, "Width", "3.3in")
     return t
 
@@ -10278,6 +10669,32 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
                 if _bl is not None and (_bl.text or "") == "Start":
                     _bl.text = "Between"
         items.append(tablix)
+        # MULTI-MATRIX: every FURTHER dominant pivot renders as its own
+        # Tablix stacked below (each with unique suffixed names/groups).
+        # The stack tops use each Tablix's TRUE static height; SSRS pushes
+        # lower siblings down as upper ones grow.
+        if _is_matrix:
+            _sibs = [s for s in
+                     (getattr(report, "_matrix_specs", None) or [])[1:]
+                     if s and s.get("dominant")]
+            _prev_bottom = next_top
+            try:
+                _prev_bottom += float(
+                    (tablix.findtext(_q("Height")) or "0").replace("in", ""))
+            except ValueError:
+                pass
+            for _si, _s in enumerate(_sibs, start=2):
+                _t2 = _build_matrix_tablix(report, _s, suffix=f"_{_si}")
+                for _tt in _t2.findall(_q("Top")):
+                    _t2.remove(_tt)
+                _sub(_t2, "Top", f"{_prev_bottom + 0.25:.2f}in")
+                try:
+                    _prev_bottom += 0.25 + float(
+                        (_t2.findtext(_q("Height")) or "0").replace("in", ""))
+                except ValueError:
+                    _prev_bottom += 1.0
+                items.append(_t2)
+                next_top = _prev_bottom
     else:
         _is_matrix = False
 
@@ -11122,14 +11539,52 @@ def _ensure_layout_images_emitted(root: ET.Element, report) -> None:
             _emit_embedded_image(target, f"BodyImg_{counter}", ref,
                                  max(0.0, x), max(0.0, y), w, h)
             referenced.add(ref)
+            _img_rects.append((max(0.0, x), max(0.0, y), w, h))
             max_bottom = max(max_bottom, y + h)
         for c in (getattr(g, "children", None) or []):
             walk(c)
 
+    _img_rects: list = []
     for lg in (getattr(report, "layout", None) or []):
         walk(lg)
     if counter and body_h_el is not None and max_bottom > body_h:
         body_h_el.text = f"{max_bottom + 0.1:.2f}in"
+    # A source-anchored image (a header logo/seal) must never paint OVER a
+    # data region: if an image rect overlaps a top-level Tablix/List
+    # horizontally and reaches below its Top, push the region below the
+    # image (the clamp pass reconciles body height afterwards).
+    if _img_rects and ri is not None:
+        for tb in list(ri):
+            if tb.tag not in (_q("Tablix"), _q("List")):
+                continue
+
+            def _fin(tag, dflt):
+                try:
+                    return float((tb.findtext(_q(tag)) or dflt)
+                                 .replace("in", ""))
+                except ValueError:
+                    return float(dflt)
+            t_top, t_left = _fin("Top", "0"), _fin("Left", "0")
+            t_w = _fin("Width", "8")
+            push = t_top
+            for (ix, iy, iw, ih) in _img_rects:
+                if ix < t_left + t_w and ix + iw > t_left and iy + ih > t_top:
+                    push = max(push, iy + ih + 0.05)
+            if push > t_top:
+                _t = tb.find(_q("Top"))
+                if _t is None:
+                    _t = _sub(tb, "Top")
+                _t.text = f"{push:.2f}in"
+                # Grow the body so below-content stackers (grand totals)
+                # base off the pushed region's new bottom, not the old one.
+                _need = push + _fin("Height", "0") + 0.05
+                try:
+                    _bh_now = float((body_h_el.text or "0").replace("in", "")) \
+                        if body_h_el is not None else 0.0
+                except ValueError:
+                    _bh_now = 0.0
+                if body_h_el is not None and _need > _bh_now:
+                    body_h_el.text = f"{_need:.2f}in"
 
 
 def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
@@ -11172,7 +11627,13 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
             _collect(c)
     for lg in (getattr(report, "layout", None) or []):
         _collect(lg)
-    rep_summ = [f for f in rep_summ if (f.name or "").upper() in placed]
+    # Placement gate applies only when there IS a layout to place in: a
+    # data-model-only / web-source report (no paper layout) can't "place"
+    # anything, yet its declared report-level totals are real (wild-corpus:
+    # a per-report Sum dropped unflagged on a tutorial web source). Emit
+    # them below the auto-built body instead.
+    if getattr(report, "layout", None):
+        rep_summ = [f for f in rep_summ if (f.name or "").upper() in placed]
     if not rep_summ:
         return
 
@@ -11569,6 +12030,122 @@ def _clamp_body_height_to_page(root) -> None:
     bh_el.text = f"{target:.2f}in"
 
 
+def _append_charts(root, report) -> None:
+    """Emit each detected Oracle chart (<rw:graph>/<chart>) as a REAL SSRS
+    Chart — column chart, category group on the chart's category column,
+    Sum() of its plot value, the source title as caption — stacked below
+    the body content (wild-corpus: official Oracle tutorial charts were
+    detected + flagged but never built). Gated per chart on both columns
+    resolving to one dataset; unresolvable charts keep the honest note."""
+    charts = list(getattr(report, "charts", None) or [])
+    if not charts:
+        return
+    body = root.find(_q("Body"))
+    if body is None:
+        return
+    ri = body.find(_q("ReportItems"))
+    if ri is None:
+        ri = _sub(body, "ReportItems")
+    body_h_el = body.find(_q("Height"))
+    try:
+        y = float((body_h_el.text or "0").replace("in", "")) \
+            if body_h_el is not None else 0.0
+    except ValueError:
+        y = 0.0
+    n = 0
+    for ch in charts:
+        cat = (ch.get("category") or "").strip()
+        val = (ch.get("plot_value") or "").strip()
+        if not cat or not val:
+            continue
+        ds = None
+        for q in (getattr(report, "queries", None) or []):
+            names = {(it.name or "").upper() for it in (q.items or [])}
+            if cat.upper() in names and val.upper() in names:
+                ds = q
+                break
+        if ds is None:
+            continue
+        n += 1
+        el = ET.Element(_q("Chart"))
+        el.set("Name", f"Chart_{n}")
+        cah = _sub(el, "ChartCategoryHierarchy")
+        cam = _sub(_sub(cah, "ChartMembers"), "ChartMember")
+        cg = _sub(cam, "Group")
+        cg.set("Name", f"Chart_{n}_Cat")
+        _sub(_sub(cg, "GroupExpressions"), "GroupExpression",
+             f"=Fields!{_safe(cat)}.Value")
+        _sub(cam, "Label", f"=Fields!{_safe(cat)}.Value")
+        csh = _sub(el, "ChartSeriesHierarchy")
+        _csm = _sub(_sub(csh, "ChartMembers"), "ChartMember")
+        # The live engine (unlike the XSD) requires a Label on the static
+        # series member.
+        _sub(_csm, "Label", _abbrev_expand(val))
+        cd = _sub(el, "ChartData")
+        csc = _sub(cd, "ChartSeriesCollection")
+        cs = _sub(csc, "ChartSeries")
+        cs.set("Name", f"Chart_{n}_S1")
+        cdp = _sub(_sub(cs, "ChartDataPoints"), "ChartDataPoint")
+        _sub(_sub(cdp, "ChartDataPointValues"), "Y",
+             f"=Sum(Fields!{_safe(val)}.Value)")
+        _sub(cs, "Type", "Column")
+        _sub(cs, "Subtype", "Plain")
+        careas = _sub(el, "ChartAreas")
+        carea = _sub(careas, "ChartArea")
+        carea.set("Name", "Default")
+        cca = _sub(carea, "ChartCategoryAxes")
+        cax = _sub(cca, "ChartAxis")
+        cax.set("Name", "Primary")
+        cva = _sub(carea, "ChartValueAxes")
+        vax = _sub(cva, "ChartAxis")
+        vax.set("Name", "Primary")
+        titles = _sub(el, "ChartTitles")
+        ct = _sub(titles, "ChartTitle")
+        ct.set("Name", "Default")
+        _sub(ct, "Caption", (ch.get("title") or "").strip() or "Chart")
+        _sub(el, "DataSetName", _safe(ds.name))
+        _sub(el, "Top", f"{y + 0.15:.2f}in")
+        _sub(el, "Left", "0.10in")
+        _sub(el, "Height", "3.00in")
+        _sub(el, "Width", "6.50in")
+        ri.append(el)
+        y += 3.30
+        ch["built"] = True
+    if n and body_h_el is not None:
+        body_h_el.text = f"{y + 0.10:.2f}in"
+
+
+def _reconcile_tablix_widths(root) -> None:
+    """Every Tablix's declared <Width> must equal the SUM of its column
+    widths (its true static width). A stale source-geometry width (81in on
+    a table whose columns were normalized to 16in) breaks page sizing and
+    overflow math downstream — the same class as the stale static Height
+    that made SSRS paint over below-placed items."""
+    for t in root.iter(_q("Tablix")):
+        tb = t.find(_q("TablixBody"))
+        colsel = tb.find(_q("TablixColumns")) if tb is not None else None
+        if colsel is None:
+            continue
+        s = 0.0
+        n = 0
+        for c in colsel.findall(_q("TablixColumn")):
+            try:
+                s += float((c.findtext(_q("Width")) or "0").replace("in", ""))
+                n += 1
+            except ValueError:
+                pass
+        if n and s > 0:
+            w = t.find(_q("Width"))
+            if w is None:
+                w = _sub(t, "Width")
+            try:
+                old = float((w.text or "0").replace("in", ""))
+            except ValueError:
+                old = -1.0
+            if abs(old - s) > 0.05:
+                w.text = f"{s:.2f}in"
+
+
 def _canonicalize_field_ref_case(root) -> None:
     """Rewrite every ``Fields!X`` reference whose name case-insensitively
     matches exactly ONE declared dataset field to that field's DECLARED
@@ -11682,6 +12259,14 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # legacy matrix layouts reference lowercase 'city' while the dataset
     # declares CITY). Canonicalize every case-insensitively-unique ref.
     _canonicalize_field_ref_case(root)
+    # Declared Tablix widths must match their column sums (see the stale
+    # static Height class) — applied to EVERY exit path, not one branch.
+    _reconcile_tablix_widths(root)
+    # Detected Oracle charts become real SSRS Charts stacked below the body
+    # (before the height clamp so page math sees them)... appended here,
+    # after width reconciliation, and before dead-dataset pruning so a
+    # chart-only dataset is retained by its Chart binding.
+    _append_charts(root, report)
     # Datasets nothing references would still execute their SQL on every
     # render — prune them (after every net, so late-added refs are respected).
     _prune_dead_datasets(root)

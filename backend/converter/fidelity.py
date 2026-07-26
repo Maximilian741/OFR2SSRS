@@ -18,7 +18,12 @@ RD = "{http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition
 
 
 def _safe_up(s: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_]", "_", (s or "")).upper()
+    # MUST mirror the generator's _safe() rule exactly (incl. the leading-
+    # digit "_" prefix) or a legitimately-bound field reads as dropped.
+    out = re.sub(r"[^A-Za-z0-9_]", "_", (s or ""))
+    if out and out[0].isdigit():
+        out = "_" + out
+    return out.upper()
 
 
 def _walk_fields(groups) -> Iterable:
@@ -124,6 +129,14 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
     summ: List[dict] = []
     for q in (parsed.queries or []):
         summ.extend(_walk_summaries(getattr(q, "groups", None) or []))
+    # Report-level summaries parse into FORMULAS (agg_function/agg_source),
+    # not query-group summaries — the walk previously missed them entirely
+    # (wild-corpus: a per-report Sum dropped with declared=1 of 2).
+    for f in (getattr(parsed, "formulas", None) or []):
+        if getattr(f, "agg_function", "") and getattr(f, "agg_source", ""):
+            summ.append({"name": getattr(f, "name", ""),
+                         "source": f.agg_source,
+                         "function": f.agg_function})
     SSRS_AGG = re.compile(r"(?:Sum|Avg|Count|CountDistinct|Min|Max|First|Last|StDev|Var)"
                           r"\(Fields!", re.I)
     n_agg = len(SSRS_AGG.findall(rdl_xml or ""))
@@ -165,14 +178,22 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
     cats["charts"] = {"count": len(charts),
                       "titles": [c.get("title") or "(untitled)" for c in charts]}
     if charts:
+        _built = (rdl_xml or "").count("<Chart ")
         _desc = []
         for c in charts:
             t = c.get("title") or "(untitled)"
             pv = c.get("plot_value") or ""
             _desc.append(f"{t}" + (f" [plots {pv}]" if pv else ""))
-        needs.append(
-            f"{len(charts)} chart/graph(s) detected -- not auto-built; recreate "
-            f"as an SSRS Chart in Report Builder: {_desc[:6]}")
+        if _built >= len(charts):
+            needs.append(
+                f"{len(charts)} chart/graph(s) auto-built as basic SSRS "
+                f"Column Chart(s) -- verify chart type/styling in Report "
+                f"Builder: {_desc[:6]}")
+        else:
+            needs.append(
+                f"{len(charts) - _built} of {len(charts)} chart/graph(s) "
+                f"NOT auto-built (columns didn't resolve); recreate as an "
+                f"SSRS Chart in Report Builder: {_desc[:6]}")
 
     # 7) Non-SQL data source: an Oracle query with COLUMNS but NO SQL text is a
     # pluggable data source (text/CSV file, XML, a custom PDS) -- the converter
@@ -191,10 +212,71 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
             f"pluggable source) -- columns are mapped but the query is empty; "
             f"point the dataset at your data in Report Builder: {nonsql[:6]}")
 
-    # HARD score = the must-not-drop categories (params + columns).
-    hard_total = cats["parameters"]["total"] + cats["columns"]["total"]
-    hard_kept = cats["parameters"]["preserved"] + cats["columns"]["preserved"]
+    # 8) Dataset -> data region binding (wild-corpus: multi-query reports
+    # emitted datasets that NO region ever referenced — their rows silently
+    # never render, while the column score stayed perfect). A dataset is
+    # bound when a region names it (<DataSetName>) or a scoped expression
+    # mentions it (LookupSet/aggregate scope). Only data-carrying queries
+    # count.
+    _dsq = [(getattr(q, "name", "") or "") for q in (parsed.queries or [])
+            if getattr(q, "items", None) and (getattr(q, "name", "") or "")]
+
+    def _ds_bound(nm: str) -> bool:
+        for cand in (nm, _safe_up(nm)):
+            if (f"<DataSetName>{cand}</DataSetName>" in (rdl_xml or "")
+                    or f'"{cand}")' in (rdl_xml or "")):
+                return True
+        return False
+
+    orphan_ds = [nm for nm in _dsq if not _ds_bound(nm)]
+    cats["datasets"] = {"bound": len(_dsq) - len(orphan_ds),
+                        "total": len(_dsq), "orphaned": orphan_ds}
+    if orphan_ds:
+        # Informational, NOT a score hit: truth-verified corpus reports
+        # legitimately carry AUXILIARY queries (feeding PL/SQL formulas,
+        # format triggers, LOVs) that never print directly. Actual DISPLAY
+        # loss — a dataset whose columns Oracle placed in the layout but
+        # the RDL never references — is already scored via real_unbound.
+        needs.append(
+            f"{len(orphan_ds)} dataset(s) are never referenced by any data "
+            f"region (auxiliary queries, or detail sections not yet "
+            f"rendered): {orphan_ds[:6]}")
+
+    # HARD score = the must-not-drop categories: params + columns + REAL
+    # data columns Oracle placed in the layout (real_unbound above). A
+    # report with every column declared but part of its LAYOUT never
+    # referenced is NOT 1.0 (wild-corpus: hollow conversions scored perfect
+    # before this axis existed).
+    _real_layout_cols = [s for s in lsrcs if s.upper() in _col_up]
+    # DISPLAY-bound means an EXPRESSION references the field (Fields!X in
+    # some textbox/aggregate/lookup) — a dataset <Field> declaration alone
+    # renders nothing (wild-corpus: a 14-field detail section whose columns
+    # were all declared yet no textbox ever showed them scored 1.0).
+    _display_unbound = [
+        s for s in _real_layout_cols
+        if not any(x in rdl_refs or x in rdl_params
+                   for x in (s.upper(), _safe_up(s)))]
+    if len(_display_unbound) > len(real_unbound):
+        _extra = sorted(set(_display_unbound) - set(real_unbound))
+        needs.append(
+            f"{len(_extra)} layout column(s) declared in a dataset but "
+            f"never DISPLAYED by any expression: {_extra[:10]}")
+    # Headline score keeps its established contract (no silent loss of
+    # columns/params/placed layout fields per the loose binding rule). The
+    # STRICT display axis ships as a SECONDARY score — visible in the
+    # report and the notes, so a hollow conversion can never look perfect,
+    # without redefining the adoption metric for truth-verified reports
+    # whose only strict misses are conditionally-hidden frames (format-
+    # trigger ERROR frames etc., tracked separately).
+    hard_total = (cats["parameters"]["total"] + cats["columns"]["total"]
+                  + len(_real_layout_cols))
+    hard_kept = (cats["parameters"]["preserved"] + cats["columns"]["preserved"]
+                 + (len(_real_layout_cols) - len(real_unbound)))
     score = round(hard_kept / hard_total, 3) if hard_total else 1.0
+    display_cov = round(
+        (len(_real_layout_cols) - len(_display_unbound))
+        / len(_real_layout_cols), 3) if _real_layout_cols else 1.0
+    cats["layout_fields"]["display_coverage"] = display_cov
 
     summary = (f"{cats['columns']['preserved']}/{cats['columns']['total']} columns + "
                f"{cats['parameters']['preserved']}/{cats['parameters']['total']} params bound"

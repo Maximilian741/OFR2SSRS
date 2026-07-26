@@ -466,3 +466,326 @@ def test_select_realias_pairs_by_name_not_position():
     # (honest blank beats swapped data).
     out2 = _alias_select_items('SELECT a as "X Y" FROM t', ["Unrelated"])
     assert '"X Y"' in out2
+
+
+def test_matrix_cell_measure_from_summary_metadata():
+    """Fire 125 (wild-corpus): the matrix CELL measure comes from the
+    declared <summary> whose reset group is a matrix dimension group
+    (source column + aggregate function) — never a guessed numeric column;
+    an outer break band CONTAINING the dimension frames must not veto
+    matrix dominance (matrix-with-break)."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.generators.rdl import _find_matrix_spec
+
+    xml = (b'<?xml version="1.0" encoding="UTF-8"?>\n'
+           b'<report name="MX" DTDVersion="9.0.2.0.10"><data>'
+           b'<dataSource name="Q_1">'
+           b'<select><![CDATA[SELECT USER_ID, FIRST_NAME, NAME, BAND_ID '
+           b'FROM u, l]]></select>'
+           b'<group name="G_BAND"><dataItem name="BAND_ID" datatype="number"/>'
+           b'<group name="G_FIRST_NAME">'
+           b'<dataItem name="FIRST_NAME" datatype="vchar2"/></group>'
+           b'<group name="G_NAME"><dataItem name="NAME" datatype="vchar2"/>'
+           b'<summary name="CountUSER_ID" source="USER_ID" function="count" '
+           b'reset="G_NAME" compute="report"/></group>'
+           b'<group name="G_U"><dataItem name="USER_ID" datatype="number"/>'
+           b'</group></group></dataSource></data><layout><section name="main">'
+           b'<body width="8.5" height="11.0">'
+           b'<repeatingFrame name="R_G_BAND" source="G_BAND">'
+           b'<geometryInfo x="0" y="0" width="8" height="6"/>'
+           b'<field name="F_band" source="BAND_ID">'
+           b'<geometryInfo x="0" y="0" width="1" height="0.2"/></field>'
+           b'<repeatingFrame name="R_G_FIRST_NAME" source="G_FIRST_NAME" '
+           b'printDirection="across">'
+           b'<geometryInfo x="1" y="0.5" width="6" height="0.3"/>'
+           b'<field name="F_fn" source="FIRST_NAME">'
+           b'<geometryInfo x="1" y="0.5" width="1" height="0.2"/></field>'
+           b'</repeatingFrame>'
+           b'<repeatingFrame name="R_G_NAME" source="G_NAME">'
+           b'<geometryInfo x="0" y="1" width="1" height="4"/>'
+           b'<field name="F_nm" source="NAME">'
+           b'<geometryInfo x="0" y="1" width="1" height="0.2"/></field>'
+           b'</repeatingFrame></repeatingFrame>'
+           b'<matrix name="X_1" horizontalFrame="R_G_FIRST_NAME" '
+           b'verticalFrame="R_G_NAME" xProductGroup="G_X"/>'
+           b'</body></section></layout></report>')
+    rep = parse_oracle_xml(xml)
+    spec = _find_matrix_spec(rep)
+    assert spec is not None
+    assert spec["cells"] == ["USER_ID"]
+    assert spec["measure_fns"] == {"USER_ID": "count"}
+    assert spec["dominant"], "outer break band must not veto the matrix"
+    # Margin totals derive from summaries over the CELL summary, keyed by
+    # their reset target (row dim -> right total, col dim -> bottom total,
+    # report -> grand corner). None declared here -> no margins invented.
+    assert spec["margins"] == {"row_total": False, "col_total": False,
+                               "grand": False}
+    # Matrix-with-break: the deepest repeating-frame ancestor of the
+    # dimension frames is the band; its group's break column keys one
+    # sub-matrix (with band header) per band value.
+    assert spec["band"] == "BAND_ID"
+
+
+def test_multi_matrix_specs_and_unique_names():
+    """Fire 128 (wild-corpus): a multi-pivot report derives ONE spec per
+    matrix (index parameter + n_matrices), sibling pivots don't veto
+    dominance, and every stacked Tablix gets unique suffixed names."""
+    from converter.generators.rdl import _build_matrix_tablix
+    from converter.models import DataQuery, DataItem
+    import xml.etree.ElementTree as _ET
+
+    q = DataQuery(name="Q_1")
+    q.items = [DataItem(name="R"), DataItem(name="C"), DataItem(name="M")]
+    spec = {"row": "R", "col": "C", "cells": ["M"], "query": q,
+            "dominant": True, "measure_fns": {"M": "sum"},
+            "margins": {"row_total": False, "col_total": False,
+                        "grand": False}, "band": "", "n_matrices": 2}
+    t2 = _build_matrix_tablix(None, spec, suffix="_2")
+    x = _ET.tostring(t2, encoding="unicode")
+    assert 'Name="Tablix_Matrix_2"' in x
+    assert 'Name="MxRowG_2"' in x and 'Name="MxColG_2"' in x
+    assert "Mx_Cell_2" in x
+
+
+def test_column_widths_never_negative_and_tablix_width_reconciled():
+    """Fire 130 (hunt round 2): an ultra-wide report (impossible fit: even
+    0.5in floors overflow the page) must keep legible source ratios and
+    paginate ACROSS — never emit a negative remainder column; and every
+    Tablix's declared Width equals its column-width sum."""
+    import re as _re
+    from converter import convert
+
+    cols = "".join(
+        f'<dataItem name="C{i}" datatype="vchar2"/>' for i in range(40))
+    flds = "".join(
+        f'<field name="F{i}" source="C{i}">'
+        f'<geometryInfo x="{i * 2}" y="0.5" width="2.0" height="0.2"/>'
+        f'</field>' for i in range(40))
+    xml = (f'<?xml version="1.0"?><report name="WIDE" DTDVersion="9.0.2.0.10">'
+           f'<data><dataSource name="Q_1"><select><![CDATA[SELECT '
+           f'{", ".join("C%d" % i for i in range(40))} FROM t]]></select>'
+           f'<group name="G_1">{cols}</group></dataSource></data>'
+           f'<layout><section name="main"><body width="80" height="9">'
+           f'<repeatingFrame name="R_1" source="G_1">'
+           f'<geometryInfo x="0" y="0.5" width="80" height="0.3"/>{flds}'
+           f'</repeatingFrame></body></section></layout></report>').encode()
+    x = convert(xml)["rdl_xml"]
+    ws = _re.findall(r"<TablixColumn>\s*<Width>([^<]+)</Width>", x)
+    assert ws and not any(w.startswith("-") for w in ws), "negative width!"
+    assert all(float(w[:-2]) >= 0.5 for w in ws)
+    m = _re.search(
+        r"</TablixRowHierarchy>.*?<Width>([0-9.]+)in</Width>", x, _re.S)
+    if m:
+        assert abs(float(m.group(1)) - sum(float(w[:-2]) for w in ws)) < 0.1
+
+
+def test_unsupported_source_never_hollow_ready():
+    """Fire 131 (hunt round 2): a non-report XML (e.g. a Reports Server
+    <destinations> bursting spec) must degrade to an honest BLOCKER verdict
+    with fidelity 0.0 — never a hollow shell scoring 1.0. convert() still
+    never raises (crash-safety contract)."""
+    from converter import convert
+
+    out = convert(b'<?xml version="1.0"?><destinations>'
+                  b'<destination id="1"/></destinations>')
+    pf = out["preflight"]
+    assert pf["verdict"] == "BLOCKER"
+    assert pf["issues"][0]["rule"] == "source.unsupported_kind"
+    assert "BURSTING" in pf["issues"][0]["message"].upper() or \
+        "DISTRIBUTION" in pf["issues"][0]["message"].upper()
+    assert (out.get("fidelity_report") or {}).get("score") == 0.0
+
+
+def test_geometryless_groupleft_routes_tabular():
+    """The minimal DTD-1.0 grammar (<groupLeft><field/> with no geometry
+    anywhere) is a group-left TABULAR listing — the card path stacked every
+    field at one identical spot (100% overprint). Fixtures WITH repeating
+    frames keep their archetype."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.preview.html_mockup import detect_report_kind
+
+    xml = (b'<?xml version="1.0"?><report name="E" DTDVersion="1.0"><data>'
+           b'<dataSource name="Q_1"><select><![CDATA[select empno, ename, '
+           b'sal, comm from emp]]></select></dataSource></data>'
+           b'<layout><section name="main"><groupLeft name="M_emp">'
+           b'<group><field name="F1" source="empno"/>'
+           b'<field name="F2" source="ename"/>'
+           b'<field name="F3" source="sal"/>'
+           b'<field name="F4" source="comm"/></group></groupLeft>'
+           b'</section></layout></report>')
+    assert detect_report_kind(parse_oracle_xml(xml)) == "tabular_details"
+
+
+def test_fidelity_display_axis_catches_silent_loss():
+    """Fire 132 (hunt round 2): a layout column declared as a dataset Field
+    but never referenced by ANY expression must surface — display_coverage
+    drops + needs_attention names it — while the headline score keeps its
+    established contract (declarations satisfy the loose binding rule).
+    Orphan datasets are an informational note, never a score hit
+    (auxiliary formula/LOV queries are a legitimate Oracle pattern)."""
+    from converter.fidelity import build_fidelity_report
+    from converter.models import (ParsedReport, DataQuery, DataItem,
+                                  LayoutGroup, LayoutField)
+
+    rep = ParsedReport(name="R", dtd_version="9")
+    q = DataQuery(name="Q_1")
+    q.items = [DataItem(name="SHOWN"), DataItem(name="LOST")]
+    rep.queries.append(q)
+    q2 = DataQuery(name="Q_AUX")
+    q2.items = [DataItem(name="AUXCOL")]
+    rep.queries.append(q2)
+    lg = LayoutGroup(name="M")
+    lg.fields.append(LayoutField(name="F1", source="SHOWN", kind="field"))
+    lg.fields.append(LayoutField(name="F2", source="LOST", kind="field"))
+    rep.layout.append(lg)
+    rdl = ('<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/'
+           '2008/01/reportdefinition"><DataSets><DataSet Name="Q_1"><Fields>'
+           '<Field Name="SHOWN"><DataField>SHOWN</DataField></Field>'
+           '<Field Name="LOST"><DataField>LOST</DataField></Field></Fields>'
+           '</DataSet><DataSet Name="Q_AUX"><Fields><Field Name="AUXCOL">'
+           '<DataField>AUXCOL</DataField></Field></Fields></DataSet>'
+           '</DataSets><Body><V>=Fields!SHOWN.Value</V></Body></Report>')
+    fr = build_fidelity_report(rep, rdl)
+    lc = fr["categories"]["layout_fields"]
+    assert lc["display_coverage"] == 0.5
+    assert any("DISPLAYED" in n for n in fr["needs_attention"])
+    assert any("never referenced by any data region" in n
+               for n in fr["needs_attention"])
+    assert fr["score"] == 1.0, "headline contract unchanged"
+
+
+def test_format_trigger_hidden_translation():
+    """Fire 133: boolean show/hide format triggers translate to REAL
+    <Hidden> expressions (Oracle RETURN FALSE = suppress -> Hidden true);
+    styling-only triggers (srw.set_* then RETURN TRUE) correctly decline
+    (they never hide); translated ERROR frames emit hidden instead of
+    being dropped."""
+    from converter.translators.plsql_formula import translate_format_trigger
+
+    assert translate_format_trigger(
+        "function F return boolean is begin "
+        "IF :status = 'VOID' THEN RETURN FALSE; END IF; RETURN TRUE; end;"
+    ) == '=((Fields!status.Value = "VOID"))'
+    assert translate_format_trigger(
+        "begin RETURN :amt > 0; end;") == "=Not((Fields!amt.Value > 0))"
+    assert translate_format_trigger("begin RETURN TRUE; end;") is None
+    assert translate_format_trigger(
+        "begin if (:x = 'Sub Total') then srw.set_font_face('Tahoma'); "
+        "end if; return (TRUE); end;") is None
+
+    from converter.generators.rdl import _format_trigger_hidden_map
+    from converter.models import ParsedReport, TriggerCode
+    rep = ParsedReport(name="R", dtd_version="9")
+    rep.triggers.append(TriggerCode(
+        name="F_HideVoid",
+        body="begin IF :st = 'V' THEN RETURN FALSE; END IF; "
+             "RETURN TRUE; end;"))
+    m = _format_trigger_hidden_map(rep)
+    assert m == {"f_hidevoid": '=((Fields!st.Value = "V"))'}
+
+
+def test_conditional_style_trigger_translation():
+    """Fire 134: conditional-STYLING format triggers (if cond then
+    srw.set_font_*; return true — the dominant wild pattern) become IIf()
+    style expressions with schema-canonical <Style> child order."""
+    from converter.translators.plsql_formula import (
+        translate_format_trigger_style)
+
+    r = translate_format_trigger_style(
+        "function F return boolean is begin if (:P = 'Sub Total') then "
+        "srw.set_font_face('Tahoma'); srw.set_font_size(10); "
+        "srw.set_font_weight(SRW.BOLD_WEIGHT); end if; "
+        "return (TRUE); end;")
+    assert r is not None
+    cond, styles = r
+    assert cond == '(Fields!P.Value = "Sub Total")'
+    assert styles == {"FontFamily": "Tahoma", "FontSize": "10pt",
+                      "FontWeight": "Bold"}
+    # Unknown srw call -> decline (conservative).
+    assert translate_format_trigger_style(
+        "begin if (:x=1) then srw.do_weird(); end if; return true; end;"
+    ) is None
+
+    import xml.etree.ElementTree as _ET
+    from converter.generators.rdl import (_apply_format_trigger_style,
+                                          _reorder_style_children)
+    from converter.models import ParsedReport, TriggerCode
+    rep = ParsedReport(name="R", dtd_version="9")
+    rep.triggers.append(TriggerCode(
+        name="FT_S", body="begin if (:P = 'T') then "
+        "srw.set_font_weight(SRW.BOLD_WEIGHT); end if; return (true); end;"))
+    tb = _ET.fromstring(
+        '<Textbox xmlns="http://schemas.microsoft.com/sqlserver/reporting/'
+        '2008/01/reportdefinition"><Paragraphs><Paragraph><TextRuns>'
+        '<TextRun><Value>=Fields!P.Value</Value><Style>'
+        '<FontSize>10pt</FontSize></Style></TextRun></TextRuns>'
+        '</Paragraph></Paragraphs><Style/></Textbox>')
+    assert _apply_format_trigger_style(tb, rep, "FT_S")
+    x = _ET.tostring(tb, encoding="unicode")
+    assert 'FontWeight>=IIf((Fields!P.Value = "T"), "Bold", "Normal")' in x
+    # canonical order: FontSize must come BEFORE FontWeight
+    assert x.index("FontSize") < x.index("FontWeight")
+
+
+def test_chart_report_emits_real_ssrs_chart():
+    """Fire 135 (hunt round 3): a detected Oracle chart (<rw:graph>
+    series/dataValues) becomes a REAL SSRS Chart — category group on the
+    chart's category column, Sum() of the plot value, source title as
+    caption, series member Label (live-engine mandatory) — bound to the
+    resolving dataset. Unresolvable charts keep the honest note."""
+    import re as _re
+    from converter import convert
+
+    xml = (b'<?xml version="1.0"?>\n'
+           b'<report name="CH" DTDVersion="9.0.2.0.10"><data>'
+           b'<dataSource name="Q_1"><select><![CDATA[SELECT emp, sal '
+           b'FROM e]]></select><group name="G_1">'
+           b'<dataItem name="EMP" datatype="vchar2"/>'
+           b'<dataItem name="SAL" datatype="number"/></group>'
+           b'</dataSource></data>'
+           b'<rw:graph id="g" src="G_1" series="EMP" dataValues="SAL" '
+           b'xmlns:rw="http://x"><Graph><Title text="Pay by Person"/>'
+           b'</Graph></rw:graph></report>')
+    out = convert(xml)
+    x = out["rdl_xml"]
+    assert '<Chart Name="Chart_1">' in x
+    assert "=Sum(Fields!SAL.Value)" in x
+    assert _re.search(r"<GroupExpression>=Fields!EMP\.Value", x)
+    assert "Pay by Person" in x
+    fr = out.get("fidelity_report") or {}
+    assert any("auto-built" in n for n in fr.get("needs_attention", []))
+
+
+def test_linked_detail_honesty_and_report_level_summaries():
+    """Fire 136: (1) a <link> child query never bound/scoped in the RDL
+    surfaces as an AMBER preflight issue (visible, not alarming — truth-
+    verified reports carry legitimately-unprinted aux children); (2) the
+    fidelity summary walk counts report-level summaries (parsed as
+    formulas), and a layout-less report still emits its declared report-
+    scope totals below the auto-built body."""
+    from converter import convert
+
+    xml = (b'<?xml version="1.0"?>\n'
+           b'<report name="LK" DTDVersion="9.0.2.0.10"><data>'
+           b'<dataSource name="Q_M"><select><![CDATA[SELECT k, v FROM m]]>'
+           b'</select><group name="G_M"><dataItem name="K" datatype="number"/>'
+           b'<dataItem name="V" datatype="number"/>'
+           b'<summary name="SumVPerReport" source="V" function="sum" '
+           b'reset="report" compute="report"/></group></dataSource>'
+           b'<dataSource name="Q_D"><select><![CDATA[SELECT k, d FROM dts '
+           b'WHERE k = :k]]></select><group name="G_D">'
+           b'<dataItem name="K2" datatype="number"/>'
+           b'<dataItem name="D" datatype="vchar2"/></group></dataSource>'
+           b'<link parentGroup="G_M" childQuery="Q_D" condition="eq"/>'
+           b'</data></report>')
+    out = convert(xml)
+    pf = out["preflight"]
+    rules = [i.get("rule") for i in pf.get("issues", [])
+             if isinstance(i, dict)]
+    x = out["rdl_xml"]
+    if 'Q_D")' not in x and "<DataSetName>Q_D</DataSetName>" not in x:
+        assert any("linked_detail_not_rendered" in (r or "") for r in rules)
+    sc = (out.get("fidelity_report") or {}).get("categories", {}) \
+        .get("summaries", {})
+    assert sc.get("declared", 0) >= 1
+    assert "Tb_GrandTotal" in x or "Sum(Fields!V.Value" in x

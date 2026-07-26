@@ -258,6 +258,20 @@ def staticize(rdl_xml: str) -> str:
             # Hyperlink/Drillthrough/BookmarkLink"). Swap in a static literal
             # URL so the report still PUBLISHES + renders for layout checks.
             el.text = "http://localhost/o2s_static_link"
+        elif t in ("FontWeight", "FontStyle", "FontFamily", "FontSize",
+                   "TextDecoration", "Format", "TextAlign", "VerticalAlign"):
+            # Conditional STYLE expressions (=IIf(cond, "Bold", "Normal") —
+            # the bold-the-subtotal trigger pattern): collapse to the IIf's
+            # DEFAULT (last string literal) branch; a BLANKED style element
+            # is " is not a valid value" at publish. The live ReportViewer
+            # evaluates these natively in expression mode.
+            _lits = re.findall(r'"((?:[^"]|"")*)"', el.text or "")
+            _safe_const = {"FontWeight": "Normal", "FontStyle": "Normal",
+                           "FontFamily": "Arial", "FontSize": "10pt",
+                           "TextDecoration": "None", "TextAlign": "Left",
+                           "VerticalAlign": "Top"}
+            el.text = ((_lits[-1] if _lits else "")
+                       or _safe_const.get(t, ""))
         else:
             el.text = ""
     return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")

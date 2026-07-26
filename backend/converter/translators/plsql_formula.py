@@ -826,3 +826,109 @@ def _strip_redundant_outer(vb: str) -> str:
                     return vb
         return vb[1:-1]
     return vb
+
+
+def translate_format_trigger(body: str,
+                             resolve: Optional[Callable[[str], str]] = None
+                             ) -> Optional[str]:
+    """Reduce an Oracle FORMAT TRIGGER (a boolean show/hide function) to an
+    SSRS ``<Hidden>`` VB expression, or None when the body is beyond the
+    supported patterns (the caller keeps today's behavior + an honest note).
+
+    Truth table: Oracle ``RETURN TRUE`` = PRINT the object, ``FALSE`` =
+    suppress it; SSRS ``Hidden=True`` = suppress. So Hidden = NOT(result).
+    Supported shapes (the overwhelming wild-corpus majority):
+      RETURN <boolean-expr>;
+      IF <cond> THEN RETURN FALSE|TRUE; [ELSE RETURN ...;] END IF;
+      [RETURN TRUE|FALSE;]
+    """
+    if not (body or "").strip():
+        return None
+    src = _strip_comments(_body_between_begin_end(body))
+    up = re.sub(r"\s+", " ", src).strip().rstrip(";").strip()
+    m = re.fullmatch(
+        r"(?is)IF\s+(.+?)\s+THEN\s+RETURN\s*\(?\s*(TRUE|FALSE)\s*\)?\s*;?"
+        r"(?:\s*ELSE\s+RETURN\s*\(?\s*(TRUE|FALSE)\s*\)?\s*;?)?\s*END\s*IF"
+        r"\s*;?(?:\s*RETURN\s*\(?\s*(TRUE|FALSE)\s*\)?)?", up)
+    if m:
+        cond = m.group(1)
+        then_v = m.group(2).upper()
+        other = (m.group(3) or m.group(4) or
+                 ("TRUE" if then_v == "FALSE" else "FALSE")).upper()
+        if then_v == other:
+            return None if then_v == "TRUE" else "=True"
+        r = translate_expr(cond, resolve)
+        if not r.get("ok") or not r.get("vb"):
+            return None
+        return (f"=({r['vb']})" if then_v == "FALSE"
+                else f"=Not({r['vb']})")
+    m2 = re.fullmatch(r"(?is)RETURN\s+(.+)", up)
+    if m2:
+        val = m2.group(1).strip().rstrip(";").strip()
+        if val.upper() in ("TRUE", "(TRUE)"):
+            return None            # unconditionally shown: no Hidden needed
+        if val.upper() in ("FALSE", "(FALSE)"):
+            return "=True"
+        r = translate_expr(val, resolve)
+        if r.get("ok") and r.get("vb"):
+            return f"=Not({r['vb']})"
+    return None
+
+
+_SRW_STYLE_MAP = {
+    "set_font_face": ("FontFamily", lambda a: a.strip("'\" ")),
+    "set_font_size": ("FontSize", lambda a: f"{a.strip()}pt"),
+    "set_font_weight": ("FontWeight",
+                        lambda a: "Bold" if "BOLD" in a.upper() else "Normal"),
+    "set_font_style": ("FontStyle",
+                       lambda a: "Italic" if "ITALIC" in a.upper()
+                       else "Normal"),
+    "set_text_color": ("Color", lambda a: a.strip("'\" ").title()),
+    "set_foreground_fill_color": ("BackgroundColor",
+                                  lambda a: a.strip("'\" ").title()),
+    "set_fill_pattern": (None, None),        # recognized, no SSRS mapping
+    "set_charmode_text": (None, None),
+}
+
+
+def translate_format_trigger_style(body: str,
+                                   resolve: Optional[
+                                       Callable[[str], str]] = None
+                                   ) -> Optional[tuple]:
+    """Reduce a conditional-STYLING format trigger — the dominant wild
+    pattern ``if (<cond>) then srw.set_font_weight(...); ... end if;
+    return (true);`` — to ``(cond_vb, {ssrs_style_prop: value})``.
+    Returns None for anything else (incl. visibility triggers, which
+    translate_format_trigger handles)."""
+    if not (body or "").strip():
+        return None
+    src = _strip_comments(_body_between_begin_end(body))
+    up = re.sub(r"\s+", " ", src).strip()
+    m = re.fullmatch(
+        r"(?is)IF\s*\(?\s*(.+?)\s*\)?\s*THEN\s+(.*?)\s*END\s*IF\s*;?"
+        r"\s*RETURN\s*\(?\s*TRUE\s*\)?\s*;?", up)
+    if not m:
+        return None
+    cond, calls_src = m.group(1), m.group(2)
+    styles = {}
+    ok_calls = 0
+    for cm in re.finditer(r"(?is)srw\s*\.\s*(\w+)\s*\(\s*([^)]*)\s*\)\s*;?",
+                          calls_src):
+        fn, arg = cm.group(1).lower(), cm.group(2)
+        if fn not in _SRW_STYLE_MAP:
+            return None            # unknown srw call: stay conservative
+        prop, conv = _SRW_STYLE_MAP[fn]
+        ok_calls += 1
+        if prop:
+            try:
+                styles[prop] = conv(arg)
+            except Exception:  # noqa: BLE001
+                return None
+    # The THEN block must be srw calls ONLY (no assignments/returns hiding).
+    residue = re.sub(r"(?is)srw\s*\.\s*\w+\s*\([^)]*\)\s*;?", "", calls_src)
+    if residue.strip() or not ok_calls or not styles:
+        return None
+    r = translate_expr(cond, resolve)
+    if not r.get("ok") or not r.get("vb"):
+        return None
+    return (r["vb"], styles)

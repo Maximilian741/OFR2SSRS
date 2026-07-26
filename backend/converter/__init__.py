@@ -213,6 +213,21 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
         target_db = "oracle"
 
     parsed: ParsedReport = parse_oracle_xml(xml_bytes)
+    # EMPTY-PARSE GATE (wild-corpus): a document that parses but yields no
+    # data model, no layout, and no parameters is not a convertible report
+    # — without this, every crash-safety fallback compounds into a
+    # confident empty RDL with a vacuous fidelity of 1.0. NEVER raise
+    # (crash-safety contract) — the verdict/fidelity are forced honest
+    # after the pipeline runs (see _unsupported_note below).
+    _unsupported_note = ""
+    if (not (parsed.queries or []) and not (parsed.layout or [])
+            and not (parsed.parameters or [])):
+        _unsupported_note = (
+            "The XML parsed but contains no data model, layout, or "
+            "parameters — it is not a convertible Oracle Reports "
+            "definition."
+            + (f" Parser notes: {'; '.join(parsed.warnings[:3])}"
+               if parsed.warnings else ""))
     if images:
         _merge_user_images(parsed, images)
 
@@ -416,6 +431,56 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
                                         0: "READY"}[_worst]
         except Exception:  # noqa: BLE001 -- deep verify must never sink a convert
             pass
+
+    # LINKED-DETAIL HONESTY (wild-corpus: 5-link chains and parallel
+    # sibling details silently lost rows — the child datasets existed but
+    # nothing rendered them). A <link> child query whose dataset the RDL
+    # never binds OR scopes is a RED verdict, not a footnote.
+    try:
+        import re as _re
+        for _q in (parsed.queries or []):
+            if not getattr(_q, "parent_group", "") or not (_q.items or []):
+                continue
+            _nm = _re.sub(r"[^A-Za-z0-9_]", "_", _q.name or "")
+            if (_nm and rdl_xml
+                    and f"<DataSetName>{_nm}</DataSetName>" not in rdl_xml
+                    and f'"{_nm}")' not in rdl_xml):
+                if isinstance(preflight, dict):
+                    # AMBER, not RED: truth-verified reports legitimately
+                    # carry linked aux queries whose rows Oracle's own
+                    # output never printed — but the loss must be VISIBLE
+                    # so a silently-dropped detail section (5-link chains)
+                    # is never a surprise.
+                    preflight.setdefault("issues", []).append({
+                        "severity": "AMBER",
+                        "rule": f"rdl.linked_detail_not_rendered.{_nm}",
+                        "message": (
+                            f"Linked detail query '{_q.name}' (child of "
+                            f"{_q.parent_group}) is never bound to any data "
+                            f"region — its detail rows will NOT render. "
+                            f"Add a nested region or subreport for it, or "
+                            f"confirm the data is intentionally unused."),
+                    })
+                    if preflight.get("verdict") in (None, "READY"):
+                        preflight["verdict"] = "AMBER"
+    except Exception:  # noqa: BLE001
+        pass
+
+    if _unsupported_note:
+        # Force the verdict + fidelity honest on an unsupported/empty
+        # source: everything downstream ran on crash-safety fallbacks and
+        # the output is a shell, not a report.
+        if isinstance(preflight, dict):
+            preflight.setdefault("issues", []).insert(0, {
+                "severity": "BLOCKER",
+                "rule": "source.unsupported_kind",
+                "message": _unsupported_note,
+            })
+            preflight["verdict"] = "BLOCKER"
+        if isinstance(fidelity_report, dict):
+            fidelity_report["score"] = 0.0
+            fidelity_report.setdefault("needs_attention", []).append(
+                _unsupported_note)
 
     return {
         "report": parsed.to_dict(),

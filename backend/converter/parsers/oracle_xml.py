@@ -1225,6 +1225,37 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
             warnings=["XML parse returned no root element"],
         )
 
+    # SOURCE SANITY GATE (wild-corpus): only a <report> document is a
+    # convertible report definition. Anything else previously fell through
+    # every crash-safety fallback and compounded into a confident EMPTY
+    # RDL scoring a vacuous fidelity 1.0. Classify the common lookalikes
+    # honestly instead.
+    _root_tag = _localname(root)
+    if _root_tag != "report":
+        _KNOWN_KINDS = {
+            "destinations": ("a Reports Server DISTRIBUTION/BURSTING spec "
+                             "(delivery instructions, not a report "
+                             "definition)"),
+            "jasperreport": "a JasperReports design (.jrxml)",
+            "module": "an Oracle Forms module, not a report",
+            "formmodule": "an Oracle Forms module, not a report",
+            "report_definition": "an unrelated report-definition dialect",
+        }
+        _kind = _KNOWN_KINDS.get(_root_tag.lower(),
+                                 f"an unsupported document (root element "
+                                 f"<{_root_tag}>)")
+        # NEVER raise (crash-safety contract: garbage input degrades
+        # gracefully) — return an empty parse carrying the classification;
+        # convert() turns it into a BLOCKER verdict, not a hollow READY.
+        return ParsedReport(
+            name="",
+            raw_xml=raw_xml,
+            warnings=[f"unsupported source: not an Oracle Reports "
+                      f"definition — this file is {_kind}. Export the "
+                      f"report itself (rwconverter ... DTYPE=XMLFILE) and "
+                      f"convert that."],
+        )
+
     # Top-level metadata
     name = _attr(root, "name")
     dtd_version = _attr(root, "DTDVersion")
