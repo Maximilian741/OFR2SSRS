@@ -262,11 +262,98 @@ def _apply_sql_artifacts(report: ParsedReport,
             n += 1
         existing_names.add(name)
         new_q = DataQuery(name=name, sql=sql_clean)
+        # Column inference (same depth-aware SELECT-list parser the subreport
+        # path uses). Without items the generator emits a PLACEHOLDER field
+        # and the body binds NOTHING -> fully blank pages (production
+        # verified on a SQL-only bundle).
+        try:
+            from .subreports import _select_columns
+            for _cn in _select_columns(sql_clean):
+                new_q.items.append(DataItem(name=_cn))
+        except Exception:  # noqa: BLE001
+            pass
+        if not new_q.items:
+            new_q.add_warning(
+                "No columns could be inferred from the SELECT list — fields "
+                "must be wired after Refresh Fields.")
         new_q.add_warning(f"Added from bundle artifact: {os.path.basename(fname)}")
         report.queries.append(new_q)
         by_name[name] = new_q
         added += 1
     return added, replaced
+
+
+def _wire_bare_sql_master_detail(report) -> int:
+    """Bare-SQL master-detail: a query binding ``:X`` where a SIBLING query
+    OUTPUTS a column named X is that sibling's detail — the Oracle <link>
+    contract, reconstructed from SQL alone. Populates the SAME model fields
+    the XML parser fills (``parent_group`` + ``link_pairs``) so the
+    generator's existing link/LookupSet machinery applies unchanged. When the
+    child does not SELECT the key, the standard ``<alias>.<X> = :X``
+    predicate is rewritten: the key column joins the SELECT list and the
+    equality predicate (now the join condition) is stripped with its bind —
+    an equality bind left as a hidden NULL param would guarantee ZERO rows."""
+    wired = 0
+    qs = list(report.queries or [])
+    for child in qs:
+        sql = child.sql or ""
+        binds = re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", sql)
+        if not binds:
+            continue
+        for master in qs:
+            if master is child:
+                continue
+            mcols = {(it.name or "").upper(): it.name
+                     for it in (master.items or []) if it.name}
+            keys = [b for b in dict.fromkeys(binds) if b.upper() in mcols]
+            if not keys:
+                continue
+            pairs = []
+            for b in keys:
+                ccols = {(it.name or "").upper(): it.name
+                         for it in (child.items or []) if it.name}
+                child_col = ccols.get(b.upper())
+                if not child_col:
+                    pm = re.search(
+                        r"((?:[A-Za-z_][A-Za-z0-9_]*\.)?\s*" + re.escape(b)
+                        + r")\s*=\s*:" + re.escape(b), sql, re.I)
+                    if not pm:
+                        continue
+                    colref, whole = pm.group(1), pm.group(0)
+                    sql_new = re.sub(r"(?i)\bAND\s+" + re.escape(whole), "", sql)
+                    if sql_new == sql:
+                        sql_new = re.sub(
+                            r"(?i)\bWHERE\s+" + re.escape(whole) + r"\s+AND\b",
+                            "WHERE", sql)
+                    if sql_new == sql:
+                        # The key equality is the ONLY predicate: drop the
+                        # whole WHERE clause (the join replaces it).
+                        sql_new = re.sub(
+                            r"(?i)\bWHERE\s+" + re.escape(whole)
+                            + r"\s*(?=$|\bORDER\b|\bGROUP\b|\bHAVING\b|\))",
+                            "", sql)
+                    if sql_new == sql:
+                        continue
+                    sql = re.sub(r"(?i)\bSELECT\b",
+                                 f"SELECT\n\t{colref} {b},", sql_new, count=1)
+                    child.items.insert(0, DataItem(name=b))
+                    child_col = b
+                pairs.append((mcols[b.upper()], child_col))
+            if pairs:
+                child.sql = sql
+                child.parent_group = f"G_{master.name}"
+                child.link_pairs = list(pairs)
+                try:
+                    if f"G_{master.name}" not in (master.group_names or []):
+                        master.group_names.append(f"G_{master.name}")
+                except Exception:  # noqa: BLE001
+                    pass
+                child.add_warning(
+                    f"Master-detail reconstructed from SQL: detail of "
+                    f"{master.name} on {', '.join(p[0] for p in pairs)}.")
+                wired += 1
+                break
+    return wired
 
 
 # ---------------------------------------------------------------------------
@@ -342,6 +429,15 @@ def enrich_synthetic_from_artifacts(sql_files: List[Tuple[str, str]],
     added, replaced = _apply_sql_artifacts(report, sql_files or [])
     summary["sql_added"] = added
     summary["sql_replaced"] = replaced
+    # 1b) Reconstruct master-detail links from bind-vs-output-column matches
+    # so multi-query bundles render joined data instead of one lone dataset.
+    try:
+        _wired = _wire_bare_sql_master_detail(report)
+        if _wired:
+            summary["hints"].append(
+                f"{_wired} master-detail link(s) reconstructed from SQL binds")
+    except Exception:  # noqa: BLE001
+        pass
 
     if not report.queries:
         report.warnings.append(

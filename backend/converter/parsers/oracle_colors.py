@@ -5,7 +5,8 @@ Oracle Reports XML uses a mix of color formats in attributes like
 fillBackgroundColor, fillForegroundColor, lineColor, edgeLineColor:
 
     - Named colors      : "white", "black", "red", "darkblue", ...
-    - Grayscale shades  : "gray0".."gray100" (0=black, 100=white, percent scale)
+    - Grayscale shades  : "gray0".."gray100" (Oracle INK percent: 0=white,
+                          8=light #EBEBEB, 100=black — truth-calibrated)
     - Hex passthroughs  : "#aabbcc" or bare "aabbcc"
     - RGB triplet form  : "r0g0b50" / "r100g0b0" (each channel 0-100, percent scale)
     - Specials          : "transparent", "no_fill"
@@ -107,11 +108,15 @@ def resolve_color(token):
     if t in _NAMED_COLORS:
         return _NAMED_COLORS[t]
 
-    # Grayscale grayNN (must come before named, but named "gray" already handled)
+    # Grayscale grayNN — Oracle's scale is INK percent (gray8 = 8% black =
+    # a LIGHT #EBEBEB band, gray16 slightly darker). Truth-calibrated against
+    # the real Oracle PDF output: the gray8 master band and gray16 column
+    # strip of a banded receipts log are light grays; the previous
+    # brightness-percent reading painted them near-BLACK.
     m = _GRAY_RE.match(t)
     if m:
         pct = _clamp(int(m.group(1)), 0, 100)
-        byte = _pct_to_byte(pct)
+        byte = _pct_to_byte(100 - pct)
         return "#{0:02X}{0:02X}{0:02X}".format(byte)
 
     # RGB triplet r{R}g{G}b{B} with each channel 0-100

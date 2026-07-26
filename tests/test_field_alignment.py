@@ -512,8 +512,9 @@ def test_summary_section_value_columns_right_aligned():
     assert '"Right" if ci > 0 else "Left"' in src, (
         "summary-section DETAIL value cells must right-align cols[1:]"
     )
-    assert 'Value))", "Right"' in src, (
-        "summary-section TOTAL value cells must right-align (not Center)"
+    assert "=Sum(Val(" in src and '_falign = "Right"' in src, (
+        "summary-section TOTAL value cells must Sum(Val(...)) and right-align "
+        "(not Center)"
     )
 
 

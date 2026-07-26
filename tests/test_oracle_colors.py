@@ -50,22 +50,27 @@ def test_named_colors_are_case_insensitive():
 # Grayscale shades
 # ---------------------------------------------------------------------------
 
-def test_gray0_is_black():
-    assert resolve_color("gray0") == "#000000"
+# Oracle grayN is INK percent — truth-calibrated against the real Oracle PDF
+# output of a banded report: its gray8 master band and gray16 column strip
+# print as LIGHT grays (the old brightness-percent reading painted them
+# near-black, an inverted band the truth disproves).
+
+def test_gray0_is_white():
+    assert resolve_color("gray0") == "#FFFFFF"
 
 
-def test_gray100_is_white():
-    assert resolve_color("gray100") == "#FFFFFF"
+def test_gray100_is_black():
+    assert resolve_color("gray100") == "#000000"
 
 
-def test_gray4_matches_spec_example():
-    # spec: gray4 == #0a0a0a
-    assert resolve_color("gray4") == "#0A0A0A"
+def test_gray8_is_light_band_gray():
+    # 8% ink -> 92% of 255 = 234.6 -> 0xEA (the truth's light master band)
+    assert resolve_color("gray8") == "#EAEAEA"
 
 
-def test_gray16_is_dark_gray():
-    # 16% of 255 = 40.8, floor -> 40 -> 0x28
-    assert resolve_color("gray16") == "#282828"
+def test_gray16_is_light_gray():
+    # 16% ink -> 84% of 255 -> 0xD6-ish (the truth's column-header strip)
+    assert resolve_color("gray16") == "#D6D6D6"
 
 
 def test_gray50_is_mid_gray():

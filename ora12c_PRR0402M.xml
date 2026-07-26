@@ -1,0 +1,2469 @@
+<?xml version="1.0" encoding="WINDOWS-1252" ?>
+<report name="PRR0402M" DTDVersion="9.0.2.0.10"
+ beforeReportTrigger="beforereport">
+  <xmlSettings xmlTag="PRR0402M" xmlPrologType="text">
+  <![CDATA[<?xml version="1.0" encoding="&Encoding"?>]]>
+  </xmlSettings>
+  <reportHtmlEscapes>
+    <beforePageHtmlEscape>
+    <![CDATA[#NULL#]]>
+    </beforePageHtmlEscape>
+  </reportHtmlEscapes>
+  <data>
+    <userParameter name="P_COD_CLIENTE" datatype="character" width="30"
+     precision="10" initialValue="570102" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_FECHA_HOY" datatype="date" precision="10"
+     initialValue="08/04/2026" inputMask="dd/mm/yyyy" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="PG_COD_AGENCIA" datatype="character" width="5"
+     precision="10" initialValue="1101" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PG_COD_EMPRESA" datatype="character" width="5"
+     precision="10" initialValue="1" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PG_COD_IDIOMA" datatype="character" width="4"
+     precision="10" initialValue="ESPA" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PG_COD_SISTEMA" datatype="character" width="4"
+     precision="10" initialValue="PR" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="PG_NOM_REPORTE" datatype="character" width="10"
+     precision="10" initialValue="PRR0402M" defaultWidth="0" defaultHeight="0"
+    />
+    <userParameter name="PG_USUARIO" datatype="character" precision="10"
+     initialValue="ALEMOLINA" defaultWidth="0" defaultHeight="0"/>
+    <systemParameter name="MODE" initialValue="Default" display="yes"/>
+    <systemParameter name="ORIENTATION" initialValue="Landscape" display="yes"
+    />
+    <dataSource name="Q_General">
+      <select>
+      <![CDATA[select sysdate
+from dual;]]>
+      </select>
+      <displayInfo x="0.34998" y="0.25000" width="1.30835" height="0.29163"/>
+      <group name="G_General">
+        <displayInfo x="0.37500" y="0.80823" width="1.35400" height="1.62695"
+        />
+        <dataItem name="sysdate" datatype="date" oracleDatatype="date"
+         columnOrder="19" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Sysdate">
+          <dataDescriptor expression="sysdate" descriptiveExpression="SYSDATE"
+           order="1" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_TitEmpresa" source="cf_titempresaformula"
+         datatype="character" width="80" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_TitAgencia" source="cf_titagenciaformula"
+         datatype="character" width="80" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_TitSistema" source="cf_titsistemaformula"
+         datatype="character" width="80" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_TitReporte" source="cf_titreporteformula"
+         datatype="character" width="200" precision="200" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_Empresa">
+      <select>
+      <![CDATA[  SELECT E.COD_EMPRESA, E.TIT_REPORTES
+    FROM PA.EMPRESA E
+   WHERE INSTR (PA.PARAMETRO_GENERAL ('PR', 'ANTECEDENTES_CRED'),
+                '|' || E.COD_EMPRESA || '|') >
+         0
+ORDER BY TO_NUMBER (E.COD_EMPRESA);]]>
+      </select>
+      <displayInfo x="2.38330" y="0.21667" width="1.24170" height="0.26660"/>
+      <group name="G_EMPRESA">
+        <displayInfo x="2.32922" y="0.67700" width="1.46655" height="2.99414"
+        />
+        <dataItem name="cod_empresa" datatype="vchar2" columnOrder="24"
+         width="5" defaultWidth="50000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Cod Empresa">
+          <dataDescriptor expression="E.COD_EMPRESA"
+           descriptiveExpression="COD_EMPRESA" order="1" width="5"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="TIT_REPORTES" datatype="vchar2" columnOrder="25"
+         width="80" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Tit Reportes">
+          <dataDescriptor expression="E.TIT_REPORTES"
+           descriptiveExpression="TIT_REPORTES" order="2" width="80"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <summary name="CS_LINEAS" source="COD_EMPRESA_LIN" function="count"
+         width="20" precision="10" reset="G_EMPRESA" compute="report"
+         defaultWidth="0" defaultHeight="0" columnFlags="8"
+         defaultLabel="Cs Lineas">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <summary name="CS_TOT_DIR_BL" source="SALDO_DIRECTO_BL" function="sum"
+         width="18" precision="16" scale="2" reset="G_EMPRESA"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8"
+         defaultLabel="Cs Tot Dir Bl" valueIfNull="0">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <summary name="CS_TOT_CONT_BL" source="SALDO_CONTINGENTE_BL"
+         function="sum" width="18" precision="16" scale="2" reset="G_EMPRESA"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8"
+         defaultLabel="Cs Tot Cont Bl" valueIfNull="0">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <summary name="CS_FL" source="COD_EMPRESA_FL" function="count"
+         width="20" precision="10" reset="G_EMPRESA" compute="report"
+         defaultWidth="0" defaultHeight="0" columnFlags="8"
+         defaultLabel="Cs Fl">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <summary name="CS_TOT_DIR_FL" source="SALDO_DIRECTO_FL" function="sum"
+         width="18" precision="16" scale="2" reset="G_EMPRESA"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8"
+         defaultLabel="Cs Tot Dir Fl" valueIfNull="0">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <summary name="CS_TOT_CONT_FL" source="SALDO_CONTINGENTE_FL"
+         function="sum" width="18" precision="16" scale="2" reset="G_EMPRESA"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8"
+         defaultLabel="Cs Tot Cont Fl" valueIfNull="0">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <summary name="CS_IND" source="COD_EMPRESA_IND" function="count"
+         width="20" precision="10" reset="G_EMPRESA" compute="report"
+         defaultWidth="0" defaultHeight="0" columnFlags="8"
+         defaultLabel="Cs Ind">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <summary name="CS_SAL_DIR_IND" source="SALDO_DIRECTO_IND"
+         function="sum" width="20" precision="10" reset="G_EMPRESA"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8"
+         defaultLabel="Cs Sal Dir Ind">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <summary name="CS_SAL_CONT_IND" source="SALDO_CONTINGENTE_IND"
+         function="sum" width="20" precision="10" reset="G_EMPRESA"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8"
+         defaultLabel="Cs Sal Cont Ind">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <formula name="CF_TOT_DIR" source="cf_tot_dirformula"
+         datatype="number" width="18" precision="16" scale="2"
+         defaultWidth="0" defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_TOT_CONT" source="cf_tot_contformula"
+         datatype="number" width="18" precision="16" scale="2"
+         defaultWidth="0" defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_PREV_DIR" source="cf_prev_dirformula"
+         datatype="number" width="18" precision="16" scale="2"
+         defaultWidth="0" defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_PREV_CONT" source="cf_prev_contformula"
+         datatype="number" width="18" precision="16" scale="2"
+         defaultWidth="0" defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_COD_CALIF" source="cf_cod_califformula"
+         datatype="character" width="2" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_CAEDEC" source="cf_caedecformula"
+         datatype="character" width="150" precision="150" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_Linea">
+      <select>
+      <![CDATA[SELECT COD_EMPRESA            AS COD_EMPRESA_LIN,
+       NO_OPERACION           AS NO_OPERACION_LIN,
+       NUM_TRAMITE            AS NUM_TRAMITE_LIN,
+       FEC_INICIO             AS FEC_INICIO_LIN,
+       FEC_VENCIMIENTO        AS FEC_VENCIMIENTO_LIN,
+       SALDO_CONTINGENTE      AS SALDO_CONTINGENTE_LIN,
+       FEC_PROX_REVISION      AS FEC_PROX_REVISION_LIN,
+       SALDO_DIRECTO          AS SALDO_DIRECTO_LIN,
+       MONTO_DESEMBOLSADO     AS MONTO_DESEMBOLSADO_LIN,
+       DES_MONEDA             AS DES_MONEDA_LIN,
+       DES_ESTADO             AS DES_ESTADO_LIN,
+       DES_INSTRUMENTO        AS DES_INSTRUMENTO_LIN,
+       DES_PRODUCTO           AS DES_PRODUCTO_LIN,
+       NUM_TRAMITE_MODIF AS NUM_TRAM_MOD_LIN
+  FROM PR.PR_ANTEC_CRED_GTT
+ WHERE TIPO_REGISTRO = 'LIN';]]>
+      </select>
+      <displayInfo x="5.02502" y="0.24170" width="1.08325" height="0.32983"/>
+      <group name="G_LINEAS">
+        <displayInfo x="4.84595" y="0.78308" width="2.15405" height="3.18945"
+        />
+        <dataItem name="COD_EMPRESA_LIN" datatype="vchar2" columnOrder="41"
+         width="5" defaultWidth="50000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Cod Empresa Lin">
+          <dataDescriptor expression="COD_EMPRESA"
+           descriptiveExpression="COD_EMPRESA_LIN" order="1" width="5"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NO_OPERACION_LIN" datatype="vchar2" columnOrder="42"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="No Operacion Lin">
+          <dataDescriptor expression="NO_OPERACION"
+           descriptiveExpression="NO_OPERACION_LIN" order="2" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NUM_TRAMITE_LIN" oracleDatatype="number"
+         columnOrder="43" width="22" defaultWidth="120000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Num Tramite Lin">
+          <dataDescriptor expression="NUM_TRAMITE"
+           descriptiveExpression="NUM_TRAMITE_LIN" order="3"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_INICIO_LIN" datatype="date" oracleDatatype="date"
+         columnOrder="44" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Fec Inicio Lin">
+          <dataDescriptor expression="FEC_INICIO"
+           descriptiveExpression="FEC_INICIO_LIN" order="4"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_VENCIMIENTO_LIN" datatype="date"
+         oracleDatatype="date" columnOrder="45" width="9" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Fec Vencimiento Lin">
+          <dataDescriptor expression="FEC_VENCIMIENTO"
+           descriptiveExpression="FEC_VENCIMIENTO_LIN" order="5"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SALDO_CONTINGENTE_LIN" oracleDatatype="number"
+         columnOrder="46" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Saldo Contingente Lin">
+          <dataDescriptor expression="SALDO_CONTINGENTE"
+           descriptiveExpression="SALDO_CONTINGENTE_LIN" order="6"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_PROX_REVISION_LIN" datatype="date"
+         oracleDatatype="date" columnOrder="47" width="9" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Fec Prox Revision Lin">
+          <dataDescriptor expression="FEC_PROX_REVISION"
+           descriptiveExpression="FEC_PROX_REVISION_LIN" order="7"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SALDO_DIRECTO_LIN" oracleDatatype="number"
+         columnOrder="48" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Saldo Directo Lin">
+          <dataDescriptor expression="SALDO_DIRECTO"
+           descriptiveExpression="SALDO_DIRECTO_LIN" order="8"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="MONTO_DESEMBOLSADO_LIN" oracleDatatype="number"
+         columnOrder="49" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Monto Desembolsado Lin">
+          <dataDescriptor expression="MONTO_DESEMBOLSADO"
+           descriptiveExpression="MONTO_DESEMBOLSADO_LIN" order="9"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_MONEDA_LIN" datatype="vchar2" columnOrder="50"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Moneda Lin">
+          <dataDescriptor expression="DES_MONEDA"
+           descriptiveExpression="DES_MONEDA_LIN" order="10" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_ESTADO_LIN" datatype="vchar2" columnOrder="51"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Estado Lin">
+          <dataDescriptor expression="DES_ESTADO"
+           descriptiveExpression="DES_ESTADO_LIN" order="11" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_INSTRUMENTO_LIN" datatype="vchar2"
+         columnOrder="52" width="60" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Des Instrumento Lin">
+          <dataDescriptor expression="DES_INSTRUMENTO"
+           descriptiveExpression="DES_INSTRUMENTO_LIN" order="12" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_PRODUCTO_LIN" datatype="vchar2" columnOrder="53"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Producto Lin">
+          <dataDescriptor expression="DES_PRODUCTO"
+           descriptiveExpression="DES_PRODUCTO_LIN" order="13" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NUM_TRAM_MOD_LIN" oracleDatatype="number"
+         columnOrder="54" width="22" defaultWidth="120000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Num Tram Mod">
+          <xmlSettings xmlTag="NUM_TRAM_MOD"/>
+          <dataDescriptor expression="NUM_TRAMITE_MODIF"
+           descriptiveExpression="NUM_TRAM_MOD_LIN" order="14"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_OP_BL">
+      <select>
+      <![CDATA[  SELECT COD_EMPRESA            AS COD_EMPRESA_BL,
+         NO_OPERACION           AS NO_OPERACION_BL,
+         NUM_TRAMITE            AS NUM_TRAMITE_BL,
+         FEC_INICIO             AS FEC_INICIO_BL,
+         FEC_VENCIMIENTO        AS FEC_VENCIMIENTO_BL,
+         SALDO_CONTINGENTE      AS SALDO_CONTINGENTE_BL,
+         SALDO_DIRECTO          AS SALDO_DIRECTO_BL,
+         MONTO_DESEMBOLSADO     AS MONTO_DESEMBOLSADO_BL,
+         DES_MONEDA             AS DES_MONEDA_BL,
+         DES_ESTADO             AS DES_ESTADO_BL,
+         DES_INSTRUMENTO        AS DES_INSTRUMENTO_BL,
+         DES_PRODUCTO           AS DES_PRODUCTO_BL,
+         NUM_TRAMITE_PADRE      AS NUM_TRAMITE_PADRE_BL,
+         FEC_VTO_PROX_CUOTA     AS FEC_VTO_PROX_CUOTA_BL
+    FROM PR.PR_ANTEC_CRED_GTT
+   WHERE TIPO_REGISTRO = 'BL'
+ORDER BY FEC_INICIO;]]>
+      </select>
+      <displayInfo x="7.98328" y="0.23328" width="1.60010" height="0.47974"/>
+      <group name="G_OPERACIONES_BL">
+        <displayInfo x="7.97095" y="1.04993" width="1.87488" height="2.99414"
+        />
+        <dataItem name="COD_EMPRESA_BL" datatype="vchar2" columnOrder="55"
+         width="5" defaultWidth="50000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Cod Empresa Bl">
+          <dataDescriptor expression="COD_EMPRESA"
+           descriptiveExpression="COD_EMPRESA_BL" order="1" width="5"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NO_OPERACION_BL" datatype="vchar2" columnOrder="56"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="No Operacion Bl">
+          <dataDescriptor expression="NO_OPERACION"
+           descriptiveExpression="NO_OPERACION_BL" order="2" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NUM_TRAMITE_BL" oracleDatatype="number"
+         columnOrder="57" width="22" defaultWidth="120000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Num Tramite Bl">
+          <dataDescriptor expression="NUM_TRAMITE"
+           descriptiveExpression="NUM_TRAMITE_BL" order="3"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_INICIO_BL" datatype="date" oracleDatatype="date"
+         columnOrder="58" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Fec Inicio Bl">
+          <dataDescriptor expression="FEC_INICIO"
+           descriptiveExpression="FEC_INICIO_BL" order="4"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_VENCIMIENTO_BL" datatype="date"
+         oracleDatatype="date" columnOrder="59" width="9" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Fec Vencimiento Bl">
+          <dataDescriptor expression="FEC_VENCIMIENTO"
+           descriptiveExpression="FEC_VENCIMIENTO_BL" order="5"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SALDO_CONTINGENTE_BL" oracleDatatype="number"
+         columnOrder="60" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Saldo Contingente Bl">
+          <dataDescriptor expression="SALDO_CONTINGENTE"
+           descriptiveExpression="SALDO_CONTINGENTE_BL" order="6"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SALDO_DIRECTO_BL" oracleDatatype="number"
+         columnOrder="61" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Saldo Directo Bl">
+          <dataDescriptor expression="SALDO_DIRECTO"
+           descriptiveExpression="SALDO_DIRECTO_BL" order="7"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="MONTO_DESEMBOLSADO_BL" oracleDatatype="number"
+         columnOrder="62" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Monto Desembolsado Bl">
+          <dataDescriptor expression="MONTO_DESEMBOLSADO"
+           descriptiveExpression="MONTO_DESEMBOLSADO_BL" order="8"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_MONEDA_BL" datatype="vchar2" columnOrder="63"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Moneda Bl">
+          <dataDescriptor expression="DES_MONEDA"
+           descriptiveExpression="DES_MONEDA_BL" order="9" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_ESTADO_BL" datatype="vchar2" columnOrder="64"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Estado Bl">
+          <dataDescriptor expression="DES_ESTADO"
+           descriptiveExpression="DES_ESTADO_BL" order="10" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_INSTRUMENTO_BL" datatype="vchar2" columnOrder="65"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Instrumento Bl">
+          <dataDescriptor expression="DES_INSTRUMENTO"
+           descriptiveExpression="DES_INSTRUMENTO_BL" order="11" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_PRODUCTO_BL" datatype="vchar2" columnOrder="66"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Producto Bl">
+          <dataDescriptor expression="DES_PRODUCTO"
+           descriptiveExpression="DES_PRODUCTO_BL" order="12" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NUM_TRAMITE_PADRE_BL" oracleDatatype="number"
+         columnOrder="67" width="22" defaultWidth="120000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Num Tramite Padre Bl">
+          <dataDescriptor expression="NUM_TRAMITE_PADRE"
+           descriptiveExpression="NUM_TRAMITE_PADRE_BL" order="13"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_VTO_PROX_CUOTA_BL" datatype="date"
+         oracleDatatype="date" columnOrder="68" width="9" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Fec Vto Prox Cuota Bl">
+          <dataDescriptor expression="FEC_VTO_PROX_CUOTA"
+           descriptiveExpression="FEC_VTO_PROX_CUOTA_BL" order="14"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_OP_FL">
+      <select>
+      <![CDATA[SELECT COD_EMPRESA            AS COD_EMPRESA_FL,
+         NO_OPERACION           AS NO_OPERACION_FL,
+         NUM_TRAMITE            AS NUM_TRAMITE_FL,
+         FEC_INICIO             AS FEC_INICIO_FL,
+         FEC_VENCIMIENTO        AS FEC_VENCIMIENTO_FL,
+         SALDO_CONTINGENTE      AS SALDO_CONTINGENTE_FL,
+         SALDO_DIRECTO          AS SALDO_DIRECTO_FL,
+         MONTO_DESEMBOLSADO     AS MONTO_DESEMBOLSADO_FL,
+         DES_MONEDA             AS DES_MONEDA_FL,
+         DES_ESTADO             AS DES_ESTADO_FL,
+         DES_INSTRUMENTO        AS DES_INSTRUMENTO_FL,
+         DES_PRODUCTO           AS DES_PRODUCTO_FL,
+         FEC_VTO_PROX_CUOTA     AS FEC_VTO_PROX_CUOTA_FL
+    FROM PR.PR_ANTEC_CRED_GTT
+   WHERE TIPO_REGISTRO = 'FL'
+ORDER BY FEC_INICIO;]]>
+      </select>
+      <displayInfo x="2.79590" y="4.11133" width="1.14160" height="0.32983"/>
+      <group name="G_OPERACIONES_FL">
+        <displayInfo x="2.25427" y="4.65601" width="2.22485" height="2.60352"
+        />
+        <dataItem name="COD_EMPRESA_FL" datatype="vchar2" columnOrder="69"
+         width="5" defaultWidth="50000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Cod Empresa Fl">
+          <dataDescriptor expression="COD_EMPRESA"
+           descriptiveExpression="COD_EMPRESA_FL" order="1" width="5"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NO_OPERACION_FL" datatype="vchar2" columnOrder="70"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="No Operacion Fl">
+          <dataDescriptor expression="NO_OPERACION"
+           descriptiveExpression="NO_OPERACION_FL" order="2" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NUM_TRAMITE_FL" oracleDatatype="number"
+         columnOrder="71" width="22" defaultWidth="120000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Num Tramite Fl">
+          <dataDescriptor expression="NUM_TRAMITE"
+           descriptiveExpression="NUM_TRAMITE_FL" order="3" width="22"
+           precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_INICIO_FL" datatype="date" oracleDatatype="date"
+         columnOrder="72" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Fec Inicio Fl">
+          <dataDescriptor expression="FEC_INICIO"
+           descriptiveExpression="FEC_INICIO_FL" order="4" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_VENCIMIENTO_FL" datatype="date"
+         oracleDatatype="date" columnOrder="73" width="9" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Fec Vencimiento Fl">
+          <dataDescriptor expression="FEC_VENCIMIENTO"
+           descriptiveExpression="FEC_VENCIMIENTO_FL" order="5" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SALDO_CONTINGENTE_FL" oracleDatatype="number"
+         columnOrder="74" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Saldo Contingente Fl">
+          <dataDescriptor expression="SALDO_CONTINGENTE"
+           descriptiveExpression="SALDO_CONTINGENTE_FL" order="6" width="22"
+           scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SALDO_DIRECTO_FL" oracleDatatype="number"
+         columnOrder="75" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Saldo Directo Fl">
+          <dataDescriptor expression="SALDO_DIRECTO"
+           descriptiveExpression="SALDO_DIRECTO_FL" order="7" width="22"
+           scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="MONTO_DESEMBOLSADO_FL" oracleDatatype="number"
+         columnOrder="76" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Monto Desembolsado Fl">
+          <dataDescriptor expression="MONTO_DESEMBOLSADO"
+           descriptiveExpression="MONTO_DESEMBOLSADO_FL" order="8" width="22"
+           scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_MONEDA_FL" datatype="vchar2" columnOrder="77"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Moneda Fl">
+          <dataDescriptor expression="DES_MONEDA"
+           descriptiveExpression="DES_MONEDA_FL" order="9" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_ESTADO_FL" datatype="vchar2" columnOrder="78"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Estado Fl">
+          <dataDescriptor expression="DES_ESTADO"
+           descriptiveExpression="DES_ESTADO_FL" order="10" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_INSTRUMENTO_FL" datatype="vchar2" columnOrder="79"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Instrumento Fl">
+          <dataDescriptor expression="DES_INSTRUMENTO"
+           descriptiveExpression="DES_INSTRUMENTO_FL" order="11" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_PRODUCTO_FL" datatype="vchar2" columnOrder="80"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Producto Fl">
+          <dataDescriptor expression="DES_PRODUCTO"
+           descriptiveExpression="DES_PRODUCTO_FL" order="12" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_VTO_PROX_CUOTA_FL" datatype="date"
+         oracleDatatype="date" columnOrder="81" width="9" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Fec Vto Prox Cuota Fl">
+          <dataDescriptor expression="FEC_VTO_PROX_CUOTA"
+           descriptiveExpression="FEC_VTO_PROX_CUOTA_FL" order="13" width="9"
+          />
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_OP_IND">
+      <select>
+      <![CDATA[  SELECT COD_EMPRESA            AS COD_EMPRESA_IND,
+         NO_OPERACION           AS NO_OPERACION_IND,
+         NUM_TRAMITE            AS NUM_TRAMITE_IND,
+         FEC_INICIO             AS FEC_INICIO_IND,
+         FEC_VENCIMIENTO        AS FEC_VENCIMIENTO_IND,
+         SALDO_CONTINGENTE      AS SALDO_CONTINGENTE_IND,
+         SALDO_DIRECTO          AS SALDO_DIRECTO_IND,
+         MONTO_DESEMBOLSADO     AS MONTO_DESEMBOLSADO_IND,
+         DES_MONEDA             AS DES_MONEDA_IND,
+         DES_ESTADO             AS DES_ESTADO_IND,
+         NOM_CLIENTE            AS NOM_CLIENTE_IND,
+         DES_PRODUCTO           AS DES_PRODUCTO_IND
+    FROM PR.PR_ANTEC_CRED_GTT
+   WHERE TIPO_REGISTRO = 'IND'
+ORDER BY FEC_INICIO;]]>
+      </select>
+      <displayInfo x="5.06665" y="4.43335" width="2.24170" height="0.32983"/>
+      <group name="G_OPERACIONES_IND">
+        <displayInfo x="5.07495" y="4.99170" width="2.27490" height="2.40820"
+        />
+        <dataItem name="COD_EMPRESA_IND" datatype="vchar2" columnOrder="82"
+         width="5" defaultWidth="50000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Cod Empresa Ind">
+          <dataDescriptor expression="COD_EMPRESA"
+           descriptiveExpression="COD_EMPRESA_IND" order="1" width="5"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NO_OPERACION_IND" datatype="vchar2" columnOrder="83"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="No Operacion Ind">
+          <dataDescriptor expression="NO_OPERACION"
+           descriptiveExpression="NO_OPERACION_IND" order="2" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NUM_TRAMITE_IND" oracleDatatype="number"
+         columnOrder="84" width="22" defaultWidth="120000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Num Tramite Ind">
+          <dataDescriptor expression="NUM_TRAMITE"
+           descriptiveExpression="NUM_TRAMITE_IND" order="3" width="22"
+           precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_INICIO_IND" datatype="date" oracleDatatype="date"
+         columnOrder="85" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Fec Inicio Ind">
+          <dataDescriptor expression="FEC_INICIO"
+           descriptiveExpression="FEC_INICIO_IND" order="4" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FEC_VENCIMIENTO_IND" datatype="date"
+         oracleDatatype="date" columnOrder="86" width="9" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Fec Vencimiento Ind">
+          <dataDescriptor expression="FEC_VENCIMIENTO"
+           descriptiveExpression="FEC_VENCIMIENTO_IND" order="5" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SALDO_CONTINGENTE_IND" oracleDatatype="number"
+         columnOrder="87" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Saldo Contingente Ind">
+          <dataDescriptor expression="SALDO_CONTINGENTE"
+           descriptiveExpression="SALDO_CONTINGENTE_IND" order="6" width="22"
+           scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SALDO_DIRECTO_IND" oracleDatatype="number"
+         columnOrder="88" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Saldo Directo Ind">
+          <dataDescriptor expression="SALDO_DIRECTO"
+           descriptiveExpression="SALDO_DIRECTO_IND" order="7" width="22"
+           scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="MONTO_DESEMBOLSADO_IND" oracleDatatype="number"
+         columnOrder="89" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Monto Desembolsado Ind">
+          <dataDescriptor expression="MONTO_DESEMBOLSADO"
+           descriptiveExpression="MONTO_DESEMBOLSADO_IND" order="8" width="22"
+           scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_MONEDA_IND" datatype="vchar2" columnOrder="90"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Moneda Ind">
+          <dataDescriptor expression="DES_MONEDA"
+           descriptiveExpression="DES_MONEDA_IND" order="9" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_ESTADO_IND" datatype="vchar2" columnOrder="91"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Estado Ind">
+          <dataDescriptor expression="DES_ESTADO"
+           descriptiveExpression="DES_ESTADO_IND" order="10" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NOM_CLIENTE_IND" datatype="vchar2" columnOrder="92"
+         width="100" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Nom Cliente Ind">
+          <dataDescriptor expression="NOM_CLIENTE"
+           descriptiveExpression="NOM_CLIENTE_IND" order="11" width="100"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DES_PRODUCTO_IND" datatype="vchar2" columnOrder="93"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Producto Ind">
+          <dataDescriptor expression="DES_PRODUCTO"
+           descriptiveExpression="DES_PRODUCTO_IND" order="12" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <formula name="CF_DIREC" source="cf_direcformula" datatype="character"
+     width="160" precision="10" defaultWidth="0" defaultHeight="0"
+     columnFlags="16" breakOrder="none">
+      <displayInfo x="0.38538" y="3.31250" width="1.34375" height="0.21875"/>
+    </formula>
+    <summary name="CS_ME_TOT_CONT" source="CF_TOT_CONT" function="sum"
+     width="18" precision="16" scale="2" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8"
+     defaultLabel="Cs Me Tot Cont">
+      <displayInfo x="0.39587" y="2.91663" width="1.35413" height="0.22925"/>
+    </summary>
+    <formula name="CF_TipoCambio" source="cf_tipocambioformula"
+     datatype="character" width="80" precision="10" defaultWidth="0"
+     defaultHeight="0" columnFlags="16" breakOrder="none">
+      <displayInfo x="0.40002" y="4.35828" width="1.30835" height="0.25000"/>
+    </formula>
+    <summary name="CS_ME_TOT_DIR" source="CF_TOT_DIR" function="sum"
+     width="18" precision="16" scale="2" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8"
+     defaultLabel="Cs Me Tot Dir">
+      <displayInfo x="0.40625" y="2.64587" width="1.37500" height="0.19995"/>
+    </summary>
+    <formula name="CF_NUM_ID" source="cf_num_idformula" datatype="character"
+     width="30" precision="10" defaultWidth="0" defaultHeight="0"
+     columnFlags="16" breakOrder="none">
+      <displayInfo x="0.40649" y="3.65625" width="1.31250" height="0.29163"/>
+    </formula>
+    <formula name="CF_TEL" source="cf_telformula" datatype="number" width="20"
+     precision="10" defaultWidth="0" defaultHeight="0" columnFlags="16"
+     breakOrder="none">
+      <displayInfo x="0.42712" y="4.04163" width="1.28125" height="0.21875"/>
+    </formula>
+    <link name="L_1" parentGroup="G_EMPRESA" parentColumn="cod_empresa"
+     childQuery="Q_Linea" childColumn="COD_EMPRESA_LIN" condition="eq"
+     sqlClause="where"/>
+    <link name="L_2" parentGroup="G_LINEAS" parentColumn="COD_EMPRESA_LIN"
+     childQuery="Q_OP_BL" childColumn="COD_EMPRESA_BL" condition="eq"
+     sqlClause="where"/>
+    <link name="L_3" parentGroup="G_LINEAS" parentColumn="NUM_TRAMITE_LIN"
+     childQuery="Q_OP_BL" childColumn="NUM_TRAMITE_PADRE_BL" condition="eq"
+     sqlClause="where"/>
+    <link name="L_4" parentGroup="G_EMPRESA" parentColumn="cod_empresa"
+     childQuery="Q_OP_FL" childColumn="COD_EMPRESA_FL" condition="eq"
+     sqlClause="where"/>
+    <link name="L_5" parentGroup="G_EMPRESA" parentColumn="cod_empresa"
+     childQuery="Q_OP_IND" childColumn="COD_EMPRESA_IND" condition="eq"
+     sqlClause="where"/>
+  </data>
+  <layout>
+    <rulers numberOfSnapPoints="4"/>
+  <section name="header" width="11.00000" height="8.50000">
+    <body width="11.00000" height="8.50000">
+      <location x="0.00000" y="0.00000"/>
+    </body>
+  </section>
+  <section name="trailer" width="11.00000" height="8.50000">
+    <body width="11.00000" height="8.50000">
+      <location x="0.00000" y="0.00000"/>
+    </body>
+  </section>
+  <section name="main" width="11.00000" height="8.50000">
+    <body width="11.00000" height="7.25000">
+      <location x="0.00000" y="0.75000"/>
+      <frame name="M_DAT_CLI">
+        <geometryInfo x="0.00000" y="0.00000" width="11.00000"
+         height="0.50000"/>
+        <generalLayout verticalElasticity="variable"/>
+        <visualSettings fillBackgroundColor="black"/>
+        <text name="B_1" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="0.25000" y="0.00000" width="0.66663"
+           height="0.13330"/>
+          <visualSettings fillBackgroundColor="black"/>
+          <textSegment>
+            <font face="Courier New" size="8"/>
+            <string>
+            <![CDATA[Direccion:]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_2" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="6.00000" y="0.00000" width="0.59998"
+           height="0.13330"/>
+          <visualSettings fillBackgroundColor="black"/>
+          <textSegment>
+            <font face="Courier New" size="8"/>
+            <string>
+            <![CDATA[Telefono:]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_3" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="8.25000" y="0.00000" width="1.00000"
+           height="0.25000"/>
+          <visualSettings fillBackgroundColor="black"/>
+          <textSegment>
+            <font face="Courier New" size="8"/>
+            <string>
+            <![CDATA[ID. Cliente:]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_CF_DIR" source="CF_DIREC" minWidowLines="1"
+         spacing="single" alignment="start">
+          <font face="Courier New" size="8"/>
+          <geometryInfo x="1.00000" y="0.00000" width="4.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand"/>
+          <visualSettings fillBackgroundColor="black"/>
+        </field>
+        <field name="F_CF_TIPOCAMBIO" source="CF_TipoCambio" minWidowLines="1"
+         spacing="single" alignment="center">
+          <font face="Courier New" size="7" italic="yes"/>
+          <geometryInfo x="0.00000" y="0.25000" width="11.00000"
+           height="0.25000"/>
+          <visualSettings fillBackgroundColor="black"/>
+        </field>
+        <field name="F_CF_TEL" source="CF_TEL" minWidowLines="1"
+         spacing="single" alignment="start">
+          <font face="Courier New" size="8"/>
+          <geometryInfo x="6.75000" y="0.00000" width="1.25000"
+           height="0.25000"/>
+          <visualSettings fillBackgroundColor="black"/>
+        </field>
+        <field name="F_CF_IDCLI" source="CF_NUM_ID" minWidowLines="1"
+         spacing="single" alignment="start">
+          <font face="Courier New" size="8"/>
+          <geometryInfo x="9.25000" y="0.00000" width="1.50000"
+           height="0.25000"/>
+          <visualSettings fillBackgroundColor="black"/>
+        </field>
+      </frame>
+      <frame name="M_G_EMPRESA_GRPFR">
+        <geometryInfo x="0.00000" y="0.50000" width="11.00000"
+         height="4.50000"/>
+        <generalLayout verticalElasticity="variable"/>
+        <visualSettings fillBackgroundColor="black"/>
+        <repeatingFrame name="R_G_EMPRESA" source="G_EMPRESA"
+         printDirection="down" minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.00000" y="0.50000" width="10.92188"
+           height="4.50000"/>
+          <generalLayout verticalElasticity="variable"/>
+          <visualSettings fillBackgroundColor="black"/>
+          <text name="B_EmpresaLbl" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.05005" y="0.50000" width="0.90002"
+             height="0.14587"/>
+            <textSegment>
+              <font face="Courier New" size="10" bold="yes"
+               textColor="r0g0b50"/>
+              <string>
+              <![CDATA[Empresa :]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_cod_empresa" source="cod_empresa" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="Courier New" size="10" bold="yes" textColor="r0g0b50"
+            />
+            <geometryInfo x="0.94995" y="0.50000" width="0.50000"
+             height="0.14587"/>
+          </field>
+          <field name="F_TIT_REPORTES" source="TIT_REPORTES" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="Courier New" size="10" bold="yes" textColor="r0g0b50"
+            />
+            <geometryInfo x="1.50000" y="0.50000" width="6.00000"
+             height="0.14587"/>
+          </field>
+          <text name="B_CalifLbl" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.00000" y="0.75000" width="0.94788"
+             height="0.14587"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Calificacion]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_COD_CALIF" source="CF_COD_CALIF" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="Courier New" size="8" bold="yes"/>
+            <geometryInfo x="1.00000" y="0.75000" width="0.50000"
+             height="0.25000"/>
+          </field>
+          <field name="F_CAEDEC" source="CF_CAEDEC" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="Courier New" size="8" bold="yes"/>
+            <geometryInfo x="2.25000" y="0.75000" width="3.25000"
+             height="0.25000"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <frame name="M_LINEAS_WRAP">
+            <geometryInfo x="0.03003" y="1.20996" width="10.84998"
+             height="1.29126"/>
+            <generalLayout verticalElasticity="variable"/>
+            <advancedLayout formatTrigger="m_lineas_wrapformattrigger"/>
+            <visualSettings fillPattern="transparent"/>
+            <text name="B_LineasTitle" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.05005" y="1.20996" width="3.00000"
+               height="0.14587"/>
+              <textSegment>
+                <font face="Courier New" size="10" bold="yes"/>
+                <string>
+                <![CDATA[LINEAS DE CREDITO]]>
+                </string>
+              </textSegment>
+            </text>
+            <repeatingFrame name="R_G_LINEAS" source="G_LINEAS"
+             printDirection="down" minWidowRecords="1" columnMode="no">
+              <geometryInfo x="0.05005" y="1.36987" width="10.80005"
+               height="0.88135"/>
+              <generalLayout verticalElasticity="variable"/>
+              <visualSettings fillPattern="transparent"
+               lineForegroundColor="darkgray"/>
+              <text name="B_L_NoLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.05005" y="1.45996" width="0.69995"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Linea No.:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_NO_OPERACION_LIN" source="NO_OPERACION_LIN"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="0.80005" y="1.45996" width="1.00000"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_ProdLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="1.90002" y="1.45996" width="0.69995"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Producto:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_DES_PRODUCTO_LIN" source="DES_PRODUCTO_LIN"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="2.65002" y="1.45996" width="2.30005"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_EstLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="5.00000" y="1.45996" width="0.55005"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Estado:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_DES_ESTADO_LIN" source="DES_ESTADO_LIN"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="5.59998" y="1.45996" width="1.40002"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_TramLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="7.50000" y="1.45996" width="0.65002"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Tramite:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_NUM_TRAMITE_LIN" source="NUM_TRAMITE_LIN"
+               minWidowLines="1" spacing="0" alignment="end">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="8.19995" y="1.45996" width="1.00000"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_MonLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.05005" y="1.59998" width="0.69995"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Moneda:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_DES_MONEDA_LIN" source="DES_MONEDA_LIN"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="0.80005" y="1.59998" width="1.00000"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_MtoLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="2.05005" y="1.59998" width="1.00000"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Monto Linea:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_MONTO_DESEMBOLSADO_LIN"
+               source="MONTO_DESEMBOLSADO_LIN" minWidowLines="1"
+               formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="3.09998" y="1.59998" width="1.59998"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_PRevLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="8.09998" y="1.59998" width="0.80005"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Prox.Rev.:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_FEC_PROX_REVISION_LIN"
+               source="FEC_PROX_REVISION_LIN" minWidowLines="1"
+               formatMask="dd/mm/yyyy" spacing="0" alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="8.94995" y="1.59998" width="0.90002"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_AptLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.05005" y="1.73999" width="0.94995"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Fec.Apertura:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_FEC_INICIO_LIN" source="FEC_INICIO_LIN"
+               minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="1.05005" y="1.73999" width="0.90002"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_VenLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="2.40002" y="1.73999" width="1.09998"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Fec.Vencimiento:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_FEC_VENCIMIENTO_LIN" source="FEC_VENCIMIENTO_LIN"
+               minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="3.55005" y="1.73999" width="0.90002"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_SDirLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="5.00000" y="1.59998" width="1.19995"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Saldo Utilizado:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_SALDO_DIRECTO_LIN" source="SALDO_DIRECTO_LIN"
+               minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+               spacing="0" alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="6.25000" y="1.59998" width="1.59998"
+                 height="0.12500"/>
+              </field>
+              <text name="B_L_SConLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="5.00000" y="1.73999" width="1.09998"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Saldo Disponib:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_SALDO_CONTINGENTE_LIN"
+               source="SALDO_CONTINGENTE_LIN" minWidowLines="1"
+               formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="6.15002" y="1.73999" width="1.59998"
+                 height="0.12500"/>
+              </field>
+              <frame name="M_G_OP_BL_HDR">
+                <geometryInfo x="0.19995" y="1.90002" width="10.65002"
+                 height="0.09998"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings fillBackgroundColor="black"
+                 lineForegroundColor="darkgray"/>
+                <text name="B_H_BL_Op" minWidowLines="1">
+                  <textSettings spacing="0"/>
+                  <geometryInfo x="0.19995" y="1.90002" width="0.84998"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[No.Operacion]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_Tram" minWidowLines="1">
+                  <textSettings spacing="0"/>
+                  <geometryInfo x="1.09998" y="1.90002" width="0.59998"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Tramite]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_Ini" minWidowLines="1">
+                  <textSettings spacing="0"/>
+                  <geometryInfo x="1.75000" y="1.90002" width="0.65002"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Fec.Inicio]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_Ven" minWidowLines="1">
+                  <textSettings spacing="0"/>
+                  <geometryInfo x="2.44995" y="1.90002" width="0.65002"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Fec.Vencto.]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_Mon" minWidowLines="1">
+                  <textSettings spacing="0"/>
+                  <geometryInfo x="3.15002" y="1.90002" width="0.55005"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Moneda]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_Est" minWidowLines="1">
+                  <textSettings spacing="0"/>
+                  <geometryInfo x="3.75000" y="1.90002" width="0.65002"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Estado]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_Ins" minWidowLines="1">
+                  <textSettings spacing="0"/>
+                  <geometryInfo x="4.44995" y="1.90002" width="1.00000"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Instrumento]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_Pro" minWidowLines="1">
+                  <textSettings spacing="0"/>
+                  <geometryInfo x="5.50000" y="1.90002" width="1.00000"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Producto]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_Mto" minWidowLines="1">
+                  <textSettings justify="center" spacing="0"/>
+                  <geometryInfo x="6.55005" y="1.90002" width="1.05005"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Mto.Inicial]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_FPC" minWidowLines="1">
+                  <textSettings spacing="0"/>
+                  <geometryInfo x="7.65002" y="1.90002" width="0.65002"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Fec.Prx.Cta]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_SDir" minWidowLines="1">
+                  <textSettings justify="end" spacing="0"/>
+                  <geometryInfo x="8.34998" y="1.90002" width="1.09998"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Saldo Directo]]>
+                    </string>
+                  </textSegment>
+                </text>
+                <text name="B_H_BL_SCon" minWidowLines="1">
+                  <textSettings justify="end" spacing="0"/>
+                  <geometryInfo x="9.50000" y="1.90002" width="1.09998"
+                   height="0.09998"/>
+                  <textSegment>
+                    <font face="Courier New" size="6" bold="yes"/>
+                    <string>
+                    <![CDATA[Saldo Conting.]]>
+                    </string>
+                  </textSegment>
+                </text>
+              </frame>
+              <repeatingFrame name="R_G_OP_BL" source="G_OPERACIONES_BL"
+               printDirection="down" minWidowRecords="1" columnMode="no">
+                <geometryInfo x="0.09998" y="2.00000" width="10.75000"
+                 height="0.09998"/>
+                <generalLayout verticalElasticity="expand"/>
+                <field name="F_NO_OPERACION_BL" source="NO_OPERACION_BL"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="0.15002" y="2.00000" width="0.80005"
+                   height="0.09998"/>
+                </field>
+                <field name="F_NUM_TRAMITE_BL" source="NUM_TRAMITE_BL"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="1.00000" y="2.00000" width="0.59998"
+                   height="0.09998"/>
+                </field>
+                <field name="F_FEC_INICIO_BL" source="FEC_INICIO_BL"
+                 minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+                 alignment="start">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="1.75000" y="2.00000" width="0.65002"
+                   height="0.09998"/>
+                </field>
+                <field name="F_FEC_VENCIMIENTO_BL" source="FEC_VENCIMIENTO_BL"
+                 minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+                 alignment="start">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="2.44995" y="2.00000" width="0.65002"
+                   height="0.09998"/>
+                </field>
+                <field name="F_DES_MONEDA_BL" source="DES_MONEDA_BL"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="3.15002" y="2.00000" width="0.55005"
+                   height="0.09998"/>
+                </field>
+                <field name="F_DES_ESTADO_BL" source="DES_ESTADO_BL"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="3.75000" y="2.00000" width="0.65002"
+                   height="0.09998"/>
+                  <generalLayout verticalElasticity="expand"/>
+                </field>
+                <field name="F_DES_INSTRUMENTO_BL" source="DES_INSTRUMENTO_BL"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="4.44995" y="2.00000" width="1.00000"
+                   height="0.09998"/>
+                  <generalLayout verticalElasticity="expand"/>
+                </field>
+                <field name="F_DES_PRODUCTO_BL" source="DES_PRODUCTO_BL"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="5.50000" y="2.00000" width="1.00000"
+                   height="0.09998"/>
+                  <generalLayout verticalElasticity="expand"/>
+                </field>
+                <field name="F_MONTO_DESEMBOLSADO_BL"
+                 source="MONTO_DESEMBOLSADO_BL" minWidowLines="1"
+                 formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+                 alignment="end">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="6.55005" y="2.00000" width="1.05005"
+                   height="0.09998"/>
+                </field>
+                <field name="F_FEC_VTO_PROX_CUOTA_BL"
+                 source="FEC_VTO_PROX_CUOTA_BL" minWidowLines="1"
+                 formatMask="dd/mm/yyyy" spacing="0" alignment="start">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="7.65002" y="2.00000" width="0.65002"
+                   height="0.09998"/>
+                </field>
+                <field name="F_SALDO_DIRECTO_BL" source="SALDO_DIRECTO_BL"
+                 minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+                 spacing="0" alignment="end">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="8.34998" y="2.00000" width="1.09998"
+                   height="0.09998"/>
+                </field>
+                <field name="F_SALDO_CONTINGENTE_BL"
+                 source="SALDO_CONTINGENTE_BL" minWidowLines="1"
+                 formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+                 alignment="end">
+                  <font face="Courier New" size="7"/>
+                  <geometryInfo x="9.50000" y="2.00000" width="1.09998"
+                   height="0.09998"/>
+                </field>
+              </repeatingFrame>
+              <text name="B_TramModLbl" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="8.00000" y="1.73999" width="1.00000"
+                 height="0.12500"/>
+                <textSegment>
+                  <font face="Courier New" size="8" bold="yes"/>
+                  <string>
+                  <![CDATA[Tramite Mod:]]>
+                  </string>
+                </textSegment>
+              </text>
+              <field name="F_TRAM_MOD" source="NUM_TRAM_MOD_LIN"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="8"/>
+                <geometryInfo x="9.00000" y="1.73999" width="0.75000"
+                 height="0.12500"/>
+              </field>
+            </repeatingFrame>
+            <text name="B_TotLinLbl" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="5.00000" y="2.34998" width="3.19995"
+               height="0.14587"/>
+              <textSegment>
+                <font face="Courier New" size="8" bold="yes"/>
+                <string>
+                <![CDATA[Total Lineas (Directo / Contingente):]]>
+                </string>
+              </textSegment>
+            </text>
+            <field name="F_CS_TOT_DIR_BL" source="CS_TOT_DIR_BL"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="end">
+              <font face="Courier New" size="8" bold="yes"/>
+              <geometryInfo x="8.34998" y="2.34998" width="1.09998"
+               height="0.14587"/>
+            </field>
+            <field name="F_CS_TOT_CONT_BL" source="CS_TOT_CONT_BL"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="end">
+              <font face="Courier New" size="8" bold="yes"/>
+              <geometryInfo x="9.50000" y="2.34998" width="1.09998"
+               height="0.14587"/>
+            </field>
+          </frame>
+          <frame name="M_FL_WRAP">
+            <geometryInfo x="0.03003" y="2.57996" width="10.84998"
+             height="0.90002"/>
+            <generalLayout verticalElasticity="variable"/>
+            <advancedLayout formatTrigger="m_fl_wrapformattrigger"/>
+            <visualSettings fillPattern="transparent"/>
+            <text name="B_FLTitle" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.05005" y="2.59998" width="3.00000"
+               height="0.14587"/>
+              <textSegment>
+                <font face="Courier New" size="10" bold="yes"/>
+                <string>
+                <![CDATA[OPERACIONES FUERA DE LINEA]]>
+                </string>
+              </textSegment>
+            </text>
+            <repeatingFrame name="R_G_OP_FL" source="G_OPERACIONES_FL"
+             printDirection="down" minWidowRecords="1" columnMode="no">
+              <geometryInfo x="0.05005" y="3.05005" width="10.80005"
+               height="0.12500"/>
+              <generalLayout verticalElasticity="expand"/>
+              <field name="F_NO_OPERACION_FL" source="NO_OPERACION_FL"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="0.19995" y="3.05005" width="0.84998"
+                 height="0.12500"/>
+              </field>
+              <field name="F_NUM_TRAMITE_FL" source="NUM_TRAMITE_FL"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="1.09998" y="3.05005" width="0.59998"
+                 height="0.12500"/>
+              </field>
+              <field name="F_FEC_INICIO_FL" source="FEC_INICIO_FL"
+               minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="1.75000" y="3.05005" width="0.65002"
+                 height="0.12500"/>
+              </field>
+              <field name="F_FEC_VENCIMIENTO_FL" source="FEC_VENCIMIENTO_FL"
+               minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="2.44995" y="3.05005" width="0.65002"
+                 height="0.12500"/>
+              </field>
+              <field name="F_DES_MONEDA_FL" source="DES_MONEDA_FL"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="3.15002" y="3.05005" width="0.55005"
+                 height="0.12500"/>
+              </field>
+              <field name="F_DES_ESTADO_FL" source="DES_ESTADO_FL"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="3.75000" y="3.05005" width="0.65002"
+                 height="0.12500"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <field name="F_DES_INSTRUMENTO_FL" source="DES_INSTRUMENTO_FL"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="4.44995" y="3.05005" width="1.00000"
+                 height="0.12500"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <field name="F_DES_PRODUCTO_FL" source="DES_PRODUCTO_FL"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="5.50000" y="3.05005" width="1.00000"
+                 height="0.12500"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <field name="F_MONTO_DESEMBOLSADO_FL"
+               source="MONTO_DESEMBOLSADO_FL" minWidowLines="1"
+               formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+               alignment="end">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="6.55005" y="3.05005" width="1.05005"
+                 height="0.12500"/>
+              </field>
+              <field name="F_FEC_VTO_PROX_CUOTA_FL"
+               source="FEC_VTO_PROX_CUOTA_FL" minWidowLines="1"
+               formatMask="dd/mm/yyyy" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="7.65002" y="3.05005" width="0.65002"
+                 height="0.12500"/>
+              </field>
+              <field name="F_SALDO_DIRECTO_FL" source="SALDO_DIRECTO_FL"
+               minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+               spacing="0" alignment="end">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="8.34998" y="3.05005" width="1.09998"
+                 height="0.12500"/>
+              </field>
+              <field name="F_SALDO_CONTINGENTE_FL"
+               source="SALDO_CONTINGENTE_FL" minWidowLines="1"
+               formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+               alignment="end">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="9.50000" y="3.05005" width="1.09998"
+                 height="0.12500"/>
+              </field>
+            </repeatingFrame>
+            <text name="B_TotFLLbl" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="5.00000" y="3.30005" width="3.19995"
+               height="0.14587"/>
+              <textSegment>
+                <font face="Courier New" size="8" bold="yes"/>
+                <string>
+                <![CDATA[Total F.Linea (Directo / Contingente):]]>
+                </string>
+              </textSegment>
+            </text>
+            <field name="F_CS_TOT_DIR_FL" source="CS_TOT_DIR_FL"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="end">
+              <font face="Courier New" size="8" bold="yes"/>
+              <geometryInfo x="8.34998" y="3.30005" width="1.09998"
+               height="0.14587"/>
+            </field>
+            <field name="F_CS_TOT_CONT_FL" source="CS_TOT_CONT_FL"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="end">
+              <font face="Courier New" size="8" bold="yes"/>
+              <geometryInfo x="9.50000" y="3.30005" width="1.09998"
+               height="0.14587"/>
+            </field>
+            <text name="B_H_FL_Op" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.19995" y="2.95496" width="0.84998"
+               height="0.09998"/>
+              <visualSettings fillBackgroundColor="black"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[No.Operacion]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_Tram" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.09998" y="2.95496" width="0.59998"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Tramite]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_Ini" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.75000" y="2.95496" width="0.65002"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Fec.Inicio]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_Ven" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="2.44995" y="2.95496" width="0.65002"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Fec.Vencto.]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_Mon" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="3.15002" y="2.95496" width="0.55005"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Moneda]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_Est" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="3.75000" y="2.95496" width="0.65002"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Estado]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_Ins" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="4.44995" y="2.95496" width="1.00000"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Instrumento]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_Pro" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="5.50000" y="2.95496" width="1.00000"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Producto]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_Mto" minWidowLines="1">
+              <textSettings justify="center" spacing="0"/>
+              <geometryInfo x="6.55005" y="2.95496" width="1.05005"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Mto.Inicial]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_FPC" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="7.65002" y="2.95496" width="0.65002"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Fec.Prx.Cta]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_SDir" minWidowLines="1">
+              <textSettings justify="end" spacing="0"/>
+              <geometryInfo x="8.34998" y="2.95496" width="1.09998"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Saldo Directo]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_FL_SCon" minWidowLines="1">
+              <textSettings justify="end" spacing="0"/>
+              <geometryInfo x="9.50000" y="2.95496" width="1.09998"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Saldo Conting.]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+          <frame name="M_IND_WRAP">
+            <geometryInfo x="0.03003" y="3.53003" width="10.84998"
+             height="0.96997"/>
+            <generalLayout verticalElasticity="variable"/>
+            <advancedLayout formatTrigger="m_ind_wrapformattrigger"/>
+            <visualSettings fillPattern="transparent"/>
+            <text name="B_INDTitle" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.05005" y="3.55005" width="3.80005"
+               height="0.14587"/>
+              <textSegment>
+                <font face="Courier New" size="10" bold="yes"/>
+                <string>
+                <![CDATA[OPERACIONES INDIRECTAS]]>
+                </string>
+              </textSegment>
+            </text>
+            <repeatingFrame name="R_G_OP_IND" source="G_OPERACIONES_IND"
+             printDirection="down" minWidowRecords="1" columnMode="no">
+              <geometryInfo x="0.05005" y="4.00000" width="10.80005"
+               height="0.12500"/>
+              <generalLayout verticalElasticity="expand"/>
+              <field name="F_NO_OPERACION_IND" source="NO_OPERACION_IND"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="0.19995" y="4.00000" width="0.84998"
+                 height="0.12500"/>
+              </field>
+              <field name="F_NUM_TRAMITE_IND" source="NUM_TRAMITE_IND"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="1.09998" y="4.00000" width="0.59998"
+                 height="0.12500"/>
+              </field>
+              <field name="F_FEC_INICIO_IND" source="FEC_INICIO_IND"
+               minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="1.75000" y="4.00000" width="0.65002"
+                 height="0.12500"/>
+              </field>
+              <field name="F_FEC_VENCIMIENTO_IND" source="FEC_VENCIMIENTO_IND"
+               minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="2.44995" y="4.00000" width="0.65002"
+                 height="0.12500"/>
+              </field>
+              <field name="F_DES_MONEDA_IND" source="DES_MONEDA_IND"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="3.15002" y="4.00000" width="0.55005"
+                 height="0.12500"/>
+              </field>
+              <field name="F_DES_ESTADO_IND" source="DES_ESTADO_IND"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="3.75000" y="4.00000" width="0.65002"
+                 height="0.12500"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <field name="F_NOM_CLIENTE_IND" source="NOM_CLIENTE_IND"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="4.44995" y="4.00000" width="1.00000"
+                 height="0.12500"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <field name="F_DES_PRODUCTO_IND" source="DES_PRODUCTO_IND"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="5.50000" y="4.00000" width="1.00000"
+                 height="0.12500"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <field name="F_MONTO_DESEMBOLSADO_IND"
+               source="MONTO_DESEMBOLSADO_IND" minWidowLines="1"
+               formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+               alignment="end">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="6.55005" y="4.00000" width="1.69995"
+                 height="0.12500"/>
+              </field>
+              <field name="F_SALDO_DIRECTO_IND" source="SALDO_DIRECTO_IND"
+               minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+               spacing="0" alignment="end">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="8.34998" y="4.00000" width="1.09998"
+                 height="0.12500"/>
+              </field>
+              <field name="F_SALDO_CONTINGENTE_IND"
+               source="SALDO_CONTINGENTE_IND" minWidowLines="1"
+               formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+               alignment="end">
+                <font face="Courier New" size="7"/>
+                <geometryInfo x="9.50000" y="4.00000" width="1.09998"
+                 height="0.12500"/>
+              </field>
+            </repeatingFrame>
+            <text name="B_TotINDLbl" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="5.00000" y="4.25000" width="3.19995"
+               height="0.14587"/>
+              <textSegment>
+                <font face="Courier New" size="8" bold="yes"/>
+                <string>
+                <![CDATA[Total Indirectas (Directo / Contingente):]]>
+                </string>
+              </textSegment>
+            </text>
+            <field name="F_CS_SAL_DIR_IND" source="CS_SAL_DIR_IND"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="end">
+              <font face="Courier New" size="8" bold="yes"/>
+              <geometryInfo x="8.34998" y="4.25000" width="1.09998"
+               height="0.14587"/>
+            </field>
+            <field name="F_CS_SAL_CONT_IND" source="CS_SAL_CONT_IND"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="end">
+              <font face="Courier New" size="8" bold="yes"/>
+              <geometryInfo x="9.50000" y="4.25000" width="1.09998"
+               height="0.14587"/>
+            </field>
+            <text name="B_H_IND_Op" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.19995" y="3.90503" width="0.84998"
+               height="0.09998"/>
+              <visualSettings fillBackgroundColor="black"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[No.Operacion]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_Tram" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.09998" y="3.90503" width="0.59998"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Tramite]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_Ini" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.75000" y="3.90503" width="0.65002"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Fec.Inicio]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_Ven" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="2.44995" y="3.90503" width="0.65002"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Fec.Vencto.]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_Mon" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="3.15002" y="3.90503" width="0.55005"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Moneda]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_Est" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="3.75000" y="3.90503" width="0.65002"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Estado]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_Nom" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="4.44995" y="3.90503" width="1.00000"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Nombre]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_Pro" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="5.50000" y="3.90503" width="1.00000"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Producto]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_Mto" minWidowLines="1">
+              <textSettings justify="end" spacing="0"/>
+              <geometryInfo x="6.55005" y="3.90503" width="1.69995"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Mto.Desemb.]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_SDir" minWidowLines="1">
+              <textSettings justify="end" spacing="0"/>
+              <geometryInfo x="8.34998" y="3.90503" width="1.09998"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Saldo Directo]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_H_IND_SCon" minWidowLines="1">
+              <textSettings justify="end" spacing="0"/>
+              <geometryInfo x="9.50000" y="3.90503" width="1.09998"
+               height="0.09998"/>
+              <textSegment>
+                <font face="Courier New" size="6" bold="yes"/>
+                <string>
+                <![CDATA[Saldo Conting.]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+          <field name="F_CF_TOT_CONT" source="CF_TOT_CONT" minWidowLines="1"
+           formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+           alignment="end">
+            <font face="Courier New" size="10" bold="yes"/>
+            <geometryInfo x="9.50000" y="4.75000" width="1.25000"
+             height="0.25000"/>
+          </field>
+          <field name="F_CF_TOT_DIR" source="CF_TOT_DIR" minWidowLines="1"
+           formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+           alignment="end">
+            <font face="Courier New" size="10" bold="yes"/>
+            <geometryInfo x="8.25000" y="4.75122" width="1.25000"
+             height="0.24878"/>
+          </field>
+          <text name="B_TotDeudaLbl" minWidowLines="1">
+            <textSettings justify="center" spacing="0"/>
+            <geometryInfo x="4.00000" y="4.75000" width="4.00000"
+             height="0.25000"/>
+            <textSegment>
+              <font face="Courier New" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Total Deuda Cliente (Directo / Contingente)]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_CaedecLbl" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="1.75000" y="0.75000" width="0.51038"
+             height="0.14587"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Caedec:]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_PREV_DIR" source="CF_PREV_DIR" minWidowLines="1"
+           formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+           alignment="end">
+            <font face="Courier New" size="8" bold="yes"/>
+            <geometryInfo x="6.75000" y="0.75000" width="1.25000"
+             height="0.25000"/>
+          </field>
+          <field name="F_PREV_CONT" source="CF_PREV_CONT" minWidowLines="1"
+           formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+           alignment="end">
+            <font face="Courier New" size="8" bold="yes"/>
+            <geometryInfo x="9.50000" y="0.75000" width="1.25000"
+             height="0.25000"/>
+          </field>
+          <text name="B_PrevDirLbl" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="5.75000" y="0.75000" width="1.00000"
+             height="0.25000"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Prev. Directa]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_PrevContLbl" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="8.25000" y="0.75000" width="1.21875"
+             height="0.25000"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Prev. Contingente]]>
+              </string>
+            </textSegment>
+          </text>
+        </repeatingFrame>
+      </frame>
+      <field name="F_CS_ME_TOT_CONT" source="CS_ME_TOT_CONT" minWidowLines="1"
+       formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0" alignment="end">
+        <font face="Courier New" size="10" bold="yes"/>
+        <geometryInfo x="9.50000" y="5.25000" width="1.25000" height="0.25000"
+        />
+      </field>
+      <field name="F_CS_ME_TOT_DIR" source="CS_ME_TOT_DIR" minWidowLines="1"
+       formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0" alignment="end">
+        <font face="Courier New" size="10" bold="yes"/>
+        <geometryInfo x="8.25000" y="5.25000" width="1.25000" height="0.25000"
+        />
+      </field>
+      <text name="B_TotMultiEmpLbl" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="2.50000" y="5.25000" width="5.12500" height="0.25000"
+        />
+        <textSegment>
+          <font face="Courier New" size="10" bold="yes"/>
+          <string>
+          <![CDATA[Total Deuda Cliente Multi Empresa (Directo / Contingente)]]>
+          </string>
+        </textSegment>
+      </text>
+    </body>
+    <margin>
+      <repeatingFrame name="R_General" source="G_General"
+       printDirection="down" minWidowRecords="1" columnMode="no">
+        <geometryInfo x="0.00000" y="0.00000" width="11.00000"
+         height="0.75000"/>
+        <generalLayout verticalElasticity="variable"
+         horizontalElasticity="variable"/>
+        <visualSettings fillBackgroundColor="black"/>
+        <field name="F_CF_TitEmpresa" source="CF_TitEmpresa" minWidowLines="1"
+         spacing="single" alignment="start">
+          <font face="Courier New" size="9" bold="yes" textColor="r0g0b50"/>
+          <geometryInfo x="0.06250" y="0.05005" width="6.00000"
+           height="0.14587"/>
+        </field>
+        <field name="F_CF_TitAgencia" source="CF_TitAgencia" minWidowLines="1"
+         spacing="single" alignment="start">
+          <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+          <geometryInfo x="0.06250" y="0.21997" width="6.00000"
+           height="0.14587"/>
+        </field>
+        <field name="F_NOM_REPORTE" source="PG_NOM_REPORTE" minWidowLines="1"
+         spacing="single" alignment="start">
+          <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+          <geometryInfo x="0.06250" y="0.38000" width="6.00000"
+           height="0.14587"/>
+        </field>
+        <field name="F_CF_TitReporte" source="CF_TitReporte" minWidowLines="1"
+         spacing="single" alignment="center">
+          <font face="Courier New" size="10" bold="yes" textColor="r0g0b50"/>
+          <geometryInfo x="0.06250" y="0.56006" width="10.80005"
+           height="0.18005"/>
+          <visualSettings fillBackgroundColor="black"/>
+        </field>
+        <text name="B_Usr" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="7.50000" y="0.05005" width="0.80005"
+           height="0.14587"/>
+          <textSegment>
+            <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+            <string>
+            <![CDATA[USUARIO :]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_PG_USUARIO" source="PG_USUARIO" minWidowLines="1"
+         spacing="single" alignment="start">
+          <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+          <geometryInfo x="8.34998" y="0.05005" width="1.50000"
+           height="0.14587"/>
+        </field>
+        <text name="B_FecLbl" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="7.50000" y="0.21997" width="0.80005"
+           height="0.14587"/>
+          <textSegment>
+            <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+            <string>
+            <![CDATA[FECHA   :]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_CF_Fecha" source="sysdate" minWidowLines="1"
+         formatMask="DD-MM-YYYY HH24:MI" spacing="single" alignment="start">
+          <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+          <geometryInfo x="8.34998" y="0.21997" width="1.80005"
+           height="0.14587"/>
+        </field>
+        <text name="B_PagLbl" minWidowLines="1">
+          <textSettings spacing="single"/>
+          <geometryInfo x="7.50000" y="0.38000" width="0.80005"
+           height="0.14587"/>
+          <textSegment>
+            <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+            <string>
+            <![CDATA[PAGINA  :]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_NUM_PAG" source="PhysicalPageNumber" minWidowLines="1"
+         spacing="0" alignment="center">
+          <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+          <geometryInfo x="8.30005" y="0.36584" width="0.25000"
+           height="0.24878"/>
+          <pageNumbering header="yes" main="yes" trailer="yes" startAt="1"
+           incrementBy="1" resetAt="report"/>
+        </field>
+        <text name="B_DeDivLbl" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="8.55005" y="0.36584" width="0.25000"
+           height="0.12756"/>
+          <textSegment>
+            <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+            <string>
+            <![CDATA[DE]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_PAG_TOT" source="TotalPhysicalPages" minWidowLines="1"
+         spacing="0" alignment="center">
+          <font face="Courier New" size="8" bold="yes" textColor="r0g0b50"/>
+          <geometryInfo x="8.80005" y="0.36584" width="0.25000"
+           height="0.25000"/>
+          <pageNumbering header="yes" main="yes" trailer="yes" startAt="1"
+           incrementBy="1" resetAt="report"/>
+        </field>
+      </repeatingFrame>
+    </margin>
+  </section>
+  </layout>
+  <programUnits>
+    <function name="cf_titempresaformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_TITEMPRESAFormula return VARCHAR2 is
+
+   vTitEmpresa varchar2(80);
+   vTexto      varchar2(80);
+
+begin
+   select tit_reportes 
+   into   vTitEmpresa
+   from   empresa
+   where  cod_empresa = :pg_cOD_EMPRESA;
+
+   return  upper(vTitEmpresa);
+exception
+
+   when SRW.NO_DATA_FOUND then
+       
+      select texto
+      into   vTexto
+      from   mensajes_sistema
+      where  num_mensaje  = '000046'
+        and  cod_sistema  = 'PA'
+        and  cod_idioma   = :pg_coD_IDIOMA;
+
+        SRW.message(0, 'PA-000046 ' || vTexto);
+        raise SRW.program_abort;
+
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_titsistemaformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_TitSistemaFormula return VARCHAR2 is
+   vTitSistema varchar2(80);
+   vTexto      varchar2(80);
+begin
+   select  titulo
+   into    vTitSistema
+   from    titulos_sistemas
+   where   cod_sistema = :pg_COD_SISTEMA
+     and   cod_idioma  = :pg_COD_IDIOMA;
+
+   return upper(vTitSistema);
+
+exception
+
+   when SRW.NO_DATA_FOUND then
+       
+      select texto
+      into   vTexto
+      from   mensajes_sistema
+      where  num_mensaje  = '000048'
+        and  cod_sistema  = 'PA'
+        and  cod_idioma   = :pg_COD_IDIOMA;
+
+        SRW.message(0, 'PA-000048 ' || vTexto);
+        raise SRW.program_abort;
+
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_titagenciaformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_TitAgenciaFormula return VARCHAR2 is
+
+   vTitAgencia varchar2(80);
+   vTexto      varchar2(80);
+
+begin
+
+   select descripcion
+   into   vTitAgencia
+   from   agencia
+   where  cod_empresa = :pg_COD_EMPRESA
+     and  cod_agencia = :pg_COD_AGENCIA;
+
+   return upper(vTitAgencia); 
+
+exception
+
+   when SRW.NO_DATA_FOUND then
+       
+      select texto
+      into   vTexto
+      from   mensajes_sistema
+      where  num_mensaje  = '000045'
+        and  cod_sistema  = 'PA'
+        and  cod_idioma   = :pg_COD_IDIOMA;
+
+        SRW.message(0, 'PA-000045 ' || vTexto);
+        raise SRW.program_abort;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_titreporteformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_TitReporteFormula return VARCHAR2 is
+   vTitReporte varchar2(200);
+   vTexto      varchar2(200);
+
+begin
+   select titulo || ' Cliente: ' || :p_cod_cliente || ' ' || F_RET_NOM_CLIENTE(:p_cod_cliente)
+   into   vTitReporte
+   from   titulos_reportes
+   where  nom_reporte = :pg_NOM_REPORTE
+     and  cod_idioma  = :pg_COD_IDIOMA;
+
+   return vTitReporte;
+
+exception
+
+   when SRW.NO_DATA_FOUND then
+       
+      select texto
+      into   vTexto
+      from   mensajes_sistema
+      where  num_mensaje  = '000047'
+        and  cod_sistema  = 'PA'
+        and  cod_idioma   = :pg_COD_IDIOMA;
+
+        SRW.message(0, 'PA-000047 ' || vTexto);
+        raise SRW.program_abort;
+  
+end;]]>
+      </textSource>
+    </function>
+    <function name="beforereport">
+      <textSource>
+      <![CDATA[function BeforeReport return boolean is
+	v_error varchar2(3000);
+begin
+  pr.Carga_Prr0402M(
+        :p_cod_cliente,
+        :p_fecha_hoy,
+        v_error
+    );
+   IF v_error IS NOT NULL THEN
+       return (FALSE);
+    END IF;
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_lineas_wrapformattrigger">
+      <textSource>
+      <![CDATA[function M_LINEAS_WRAPFormatTrigger return boolean is
+begin
+  if nvl(:CS_LINEAS,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_fl_wrapformattrigger">
+      <textSource>
+      <![CDATA[function M_FL_WRAPFormatTrigger return boolean is
+begin
+  if nvl(:CS_FL,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_ind_wrapformattrigger">
+      <textSource>
+      <![CDATA[function M_IND_WRAPFormatTrigger return boolean is
+begin
+  if nvl(:CS_IND,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_tot_dirformula" returnType="number">
+      <textSource>
+      <![CDATA[function CF_TOT_DIRFormula return Number is
+begin
+  return NVL(:cs_tot_dir_bl, 0) + NVL(:cs_tot_dir_fl, 0) + NVL(:cs_sal_dir_ind, 0);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_tot_contformula" returnType="number">
+      <textSource>
+      <![CDATA[function CF_TOT_CONTFormula return Number is
+begin
+  return NVL(:cs_tot_cont_bl, 0) + NVL(:cs_tot_cont_fl, 0) + NVL(:cs_sal_cont_ind, 0);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_prev_dirformula" returnType="number">
+      <textSource>
+      <![CDATA[function CF_PREV_DIRFormula return Number is
+begin
+  pr.pkg_obt_prevision.cargar(:cod_empresa, :p_cod_cliente, :p_fecha_hoy);
+  return pr.pkg_obt_prevision.tot_prevision;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_prev_contformula" returnType="number">
+      <textSource>
+      <![CDATA[function CF_PREV_CONTFormula return Number is
+begin
+  pr.pkg_obt_prevision.cargar(:cod_empresa, :p_cod_cliente, :p_fecha_hoy);
+  return pr.pkg_obt_prevision.tot_pre_con;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_cod_califformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_COD_CALIFFormula return varchar2 is
+	v_calif varchar2(2);
+begin
+	begin
+		SELECT cod_calif
+		   into v_calif
+		  FROM PR_CALIF_X_CLIENTE a
+		  WHERE a.cod_empresa = :cod_empresa
+		    AND a.cod_persona = :p_cod_cliente
+			  AND a.fec_calif IN (SELECT  MAX(b.fec_calif)
+		                          FROM PR_CALIF_X_CLIENTE b
+		                   		    WHERE b.cod_empresa = :cod_empresa
+		                      		  AND b.cod_persona = a.cod_persona);
+	exception when no_data_found then
+		v_calif := 'A';
+	end;
+	return v_calif;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_caedecformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_CAEDECFormula return varchar2 is
+	v_descripcion varchar2(150);
+begin
+	begin
+		SELECT b.descripcion
+			INTO v_descripcion
+      	FROM cliente a, caedec b
+      WHERE a.cod_actividad = cod_caedec
+       AND a.cod_cliente = :p_cod_cliente
+       AND a.cod_empresa = :cod_empresa;
+  exception
+   	     when no_data_found then
+   	        v_descripcion := 'Sin CAEDEC';
+   	     when too_many_rows then
+   	        srw.message (0, 'Muchos Caedec');
+  end;
+  return v_descripcion;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_num_idformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_NUM_IDFormula return Char is
+begin
+  return F_Tipo_Id(:p_cod_cliente);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_direcformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_DIRECFormula return Char is
+begin
+  return F_Direccion(:p_cod_cliente);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_telformula" returnType="number">
+      <textSource>
+      <![CDATA[function CF_TELFormula return Number is
+begin
+  return F_Num_Telefono(:p_cod_cliente);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_tipocambioformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_TipoCambioFormula return VARCHAR2 is
+   v_tipcamb number(16,2);
+   v_mensaje varchar2(100);
+begin
+    begin
+		    Cg_Utl.Obtiene_TC_Conta(1, :p_fecha_hoy, v_tipcamb, v_mensaje);
+    exception
+        when others then
+          v_tipcamb := null;
+    end;
+    return 'Expresado en dolares - Tipo de cambio: ' || v_tipcamb;
+end;]]>
+      </textSource>
+    </function>
+  </programUnits>
+  <webSource>
+  <![CDATA[<%@ taglib uri="/WEB-INF/lib/reports_tld.jar" prefix="rw" %> 
+<%@ page language="java" import="java.io.*" errorPage="/rwerror.jsp" session="false" %>
+<%@ page contentType="text/html;charset=ISO-8859-1" %>
+<!--
+<rw:report id="report"> 
+<rw:objects id="objects">
+</rw:objects>
+-->
+
+<html>
+
+<head>
+<meta name="GENERATOR" content="Oracle 11gR1 Reports Developer"/>
+<title> Your Title </title>
+
+<rw:style id="yourStyle">
+   <!-- Report Wizard inserts style link clause here -->
+</rw:style>
+
+</head>
+
+
+<body>
+
+<rw:dataArea id="yourDataArea">
+   <!-- Report Wizard inserts the default jsp here -->
+</rw:dataArea>
+
+
+
+</body>
+</html>
+
+<!--
+</rw:report> 
+-->
+]]>
+  </webSource>
+  <reportPrivate versionFlags2="0" templateName="rwbeige"/>
+  <reportWebSettings>
+  <![CDATA[#NULL#]]>
+  </reportWebSettings>
+</report>

@@ -243,6 +243,10 @@ class LayoutField:
     # emits one TextRun per segment so e.g. an UNbold caption + a BOLD value on
     # the next line render with their real weights (the license body).
     segments: list = field(default_factory=list)
+    # Oracle <visualSettings linePattern="...">: "solid" (etc.) draws the box
+    # border on the printed output; "transparent"/"" draws none. Reproduces
+    # boxed form grids 1:1.
+    line_pattern: str = ""
     # Oracle <generalLayout verticalElasticity="..."> for a <text>: "variable"/
     # "expand" = the box GROWS to fit its content at run time (flowing prose);
     # "contract"/"fixed"/"" = the box is sized to its content and does NOT grow.

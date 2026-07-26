@@ -418,11 +418,15 @@ def _select_columns(sql: str) -> List[str]:
         if single:
             cols.append(single.group(1))
             continue
-        # trailing identifier alias: "func(...) NAME"
+        # trailing identifier alias: "func(...) NAME" — the expression may
+        # also end in a string literal ("... || ')' Site_Label"), so a quote
+        # is a valid pre-alias terminator too. Keywords are never aliases
+        # (CASE...END must not yield "END").
         tm = re.search(
-            r"(?:\)|[A-Za-z0-9_])\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", item,
+            r"(?:\)|'|\"|[A-Za-z0-9_])\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", item,
         )
-        if tm:
+        if tm and tm.group(1).upper() not in (
+                "END", "NULL", "FROM", "DESC", "ASC", "DISTINCT"):
             cols.append(tm.group(1))
     # Dedupe (preserve order)
     seen = set()
@@ -879,6 +883,21 @@ def _synth_report_from_sql(child_name: str, sql: str,
     "the parameter 'X' is not declared" when the link is clicked).
     """
     from .models import ParsedReport, DataQuery, DataItem, ReportParameter
+
+    def _null_safe_widen_binds(s: str, bind_names) -> str:
+        """Widen bare equality ``col = :b`` to ``(:b IS NULL OR col = :b)``
+        so a nulled optional prompt means ALL rows instead of ZERO rows.
+        Skips binds that already appear in an IS NULL guard."""
+        for b in bind_names:
+            if re.search(r"(?i):" + re.escape(b) + r"\s+IS\s+NULL", s):
+                continue
+            pat = re.compile(
+                r"(?i)((?:[A-Za-z_][A-Za-z0-9_]*\.)?[A-Za-z_][A-Za-z0-9_]*)"
+                r"\s*=\s*:" + re.escape(b) + r"\b")
+            s = pat.sub(lambda m, _b=b:
+                        f"(:{_b} IS NULL OR {m.group(1)} = :{_b})", s)
+        return s
+
     safe = re.sub(r"[^A-Za-z0-9_]", "_", child_name or "SubReport") or "SubReport"
     rep = ParsedReport(name=child_name or "SubReport", dtd_version="(from artifacts)")
     cols = _select_columns(sql)
@@ -887,12 +906,25 @@ def _synth_report_from_sql(child_name: str, sql: str,
                                  tsql=sql or "", items=items))
     pset = {p.upper() for p in (parent_param_names or [])}
     dt_set = {p.upper() for p in (drillthrough_params or [])}
+    # STANDALONE build (no parent parameter set): the user is the only
+    # possible source of a bind's value, so binds must be VISIBLE prompts
+    # (still Nullable with an =Nothing default -- never a forced prompt).
+    # An all-hidden standalone report could never receive any value. Bare
+    # equality binds are also NULL-safe widened below so an empty prompt
+    # means "all rows", not "zero rows".
+    if not pset:
+        _widen = [b for b in _bind_params_in_sql(sql)
+                  if b.upper() not in dt_set]
+        sql = _null_safe_widen_binds(sql, _widen)
+        rep.queries[-1].sql = sql
+        rep.queries[-1].tsql = sql
     declared = set()
     for b in _bind_params_in_sql(sql):
         # A forwarded drill-through param stays HIDDEN even though the filter we
         # inject now binds it in the SQL -- the parent sets it; a standalone user
         # must never get a prompt box for it.
-        visible = (b.upper() in pset) and (b.upper() not in dt_set)
+        visible = ((b.upper() in pset) if pset else True) \
+            and (b.upper() not in dt_set)
         rep.parameters.append(
             ReportParameter(name=b, label=b, display=visible)
         )
@@ -1121,21 +1153,41 @@ def _strip_chrome_textboxes(rdl_xml: str) -> str:
     return rdl_xml
 
 
-def _first_sql_from_paths(artifact_paths: Iterable[str]) -> str:
-    """Pull the first runnable SELECT out of any artifact, trimmed to one
-    statement (reuses the same extraction the stub builder uses)."""
-    sql = ""
+def _all_sql_from_paths(artifact_paths: Iterable[str]) -> List[str]:
+    """EVERY runnable top-level SELECT across the artifacts (in order), one
+    trimmed statement each. A multi-query artifact (one file carrying a
+    report's several SELECTs) previously kept only the first and dropped the
+    rest SILENTLY. Scanning stops at the first PL/SQL block start per blob so
+    cursor SELECTs inside pasted CF_/package code are never harvested as
+    datasets (same boundary _trim_to_first_statement applies)."""
+    stmts: List[str] = []
     for a in artifact_paths or []:
         if not os.path.isfile(a):
             continue
-        candidate = _sql_from_artifact(a)
-        if re.search(r"\bSELECT\b.+?\bFROM\b", candidate or "",
-                     re.IGNORECASE | re.DOTALL):
-            sql = candidate
-            break
-    if sql:
-        sql = _trim_to_first_statement(sql)
-    return sql
+        blob = _sql_from_artifact(a) or ""
+        kw = re.search(r"(?im)^[ \t]*(FUNCTION|PROCEDURE|PACKAGE|DECLARE|BEGIN)\b",
+                       blob)
+        scan = blob[:kw.start()] if kw else blob
+        pos = 0
+        while True:
+            m = re.search(r"\bSELECT\b", scan[pos:], re.IGNORECASE)
+            if not m:
+                break
+            stmt = _trim_to_first_statement(scan[pos + m.start():])
+            if not stmt:
+                break
+            if re.search(r"\bSELECT\b.+?\bFROM\b", stmt,
+                         re.IGNORECASE | re.DOTALL):
+                stmts.append(stmt.strip())
+            pos = pos + m.start() + max(len(stmt), 1)
+    return stmts
+
+
+def _first_sql_from_paths(artifact_paths: Iterable[str]) -> str:
+    """Pull the first runnable SELECT out of any artifact, trimmed to one
+    statement (reuses the same extraction the stub builder uses)."""
+    stmts = _all_sql_from_paths(artifact_paths)
+    return stmts[0] if stmts else ""
 
 
 def _alias_outer_join_set(sql: str) -> set:
@@ -1193,12 +1245,55 @@ def _inject_drillthrough_filter(sql: str,
         return sql, []
     frag = "\n\t" + "\n\t".join(
         f"AND (:{p} IS NULL OR {c} = :{p})" for p, c in applied) + "\n"
-    first = lexicals[0]
-    new_sql = re.sub(r"&" + re.escape(first) + r"\b", frag, sql, count=1)
-    # Any remaining lexical refs -> runnable comment (no SSRS equivalent).
-    new_sql = re.sub(r"&([A-Za-z_][A-Za-z0-9_]*)",
-                     r"/* lexical ref &\1 -- neutralized (no SSRS equivalent) */",
-                     new_sql)
+    # Splice ONLY at a lexical in PREDICATE position (the nearest preceding
+    # keyword is WHERE/AND/OR) -- an "AND (...)" fragment dropped into an
+    # ORDER BY / SELECT-list lexical slot is a syntax error. When no lexical
+    # sits in a predicate slot, append the filter as its own clause before
+    # GROUP/ORDER/HAVING (or at the end), which is always valid.
+    def _in_predicate_slot(name: str) -> bool:
+        m = re.search(r"&" + re.escape(name) + r"\b", sql)
+        if not m:
+            return False
+        head = sql[:m.start()]
+        kw = re.findall(r"(?i)\b(WHERE|AND|OR|SELECT|FROM|GROUP|ORDER|HAVING)\b",
+                        head)
+        return bool(kw) and kw[-1].upper() in ("WHERE", "AND", "OR")
+
+    def _top_level(pattern: str):
+        """First match of ``pattern`` at paren-depth 0 (ignores subqueries)."""
+        depth = 0
+        for m in re.finditer(r"[()]|" + pattern, sql, re.I):
+            t = m.group(0)
+            if t == "(":
+                depth += 1
+            elif t == ")":
+                depth -= 1
+            elif depth == 0:
+                return m
+        return None
+
+    slot = next((lx for lx in lexicals if _in_predicate_slot(lx)), None)
+    if slot is not None:
+        new_sql = re.sub(r"&" + re.escape(slot) + r"\b", frag, sql, count=1)
+    else:
+        tail = _top_level(r"\b(?:GROUP\s+BY|ORDER\s+BY|HAVING)\b")
+        clause = ("\n" + frag.lstrip("\n") if _top_level(r"\bWHERE\b")
+                  else "\nWHERE 1=1" + frag)
+        if tail:
+            new_sql = sql[:tail.start()] + clause + "\n" + sql[tail.start():]
+        else:
+            new_sql = sql.rstrip() + clause
+    # Any remaining lexical refs -> runnable comment, with the generator's
+    # complete-operand-slot rule (NVL(&X, y) needs NULL, not a bare comment).
+    from .generators.rdl import _lexical_slot_token
+    _src = new_sql
+
+    def _neutralize(m):
+        tok = _lexical_slot_token(_src, m.start(), m.end())
+        return (tok + f"/* lexical ref &{m.group(1)} -- neutralized "
+                      f"(no SSRS equivalent) */")
+
+    new_sql = re.sub(r"&([A-Za-z_][A-Za-z0-9_]*)", _neutralize, new_sql)
     return new_sql, applied
 
 
@@ -1347,7 +1442,8 @@ def build_subreport(child_name: str,
                 }
 
     # 3. SQL-bearing artifacts (.sql/.docx/.txt) -> synth report -> real RDL.
-    sql = _first_sql_from_paths(artifact_paths)
+    _stmts = _all_sql_from_paths(artifact_paths)
+    sql = _stmts[0] if _stmts else ""
     applied_filter: List[Tuple[str, str]] = []
     if sql:
         # Wire the parent's forwarded params into the child's WHERE so the link
@@ -1357,6 +1453,34 @@ def build_subreport(child_name: str,
         _cols = _select_columns(sql)
         rep = _synth_report_from_sql(child_name, sql, parent_param_names,
                                      drillthrough_params)
+        # Every FURTHER top-level SELECT becomes a sibling dataset (the old
+        # path dropped them silently); key binds matching a sibling's output
+        # column auto-wire master-detail exactly like the bundle path.
+        if len(_stmts) > 1:
+            from .models import DataQuery as _DQ, DataItem as _DI, \
+                ReportParameter as _RP
+            for _i, _extra in enumerate(_stmts[1:], start=2):
+                _ecols = _select_columns(_extra)
+                rep.queries.append(_DQ(
+                    name=f"DS_Q{_i}", sql=_extra, tsql=_extra,
+                    items=[_DI(name=c, label=c.replace("_", " ").title())
+                           for c in _ecols]))
+            try:
+                from .artifact_enrich import _wire_bare_sql_master_detail
+                _wire_bare_sql_master_detail(rep)
+            except Exception:  # noqa: BLE001
+                pass
+            _dcl = {(p.name or "").upper() for p in rep.parameters}
+            for _q in rep.queries[1:]:
+                for _b in _bind_params_in_sql(_q.sql or ""):
+                    if _b.upper() not in _dcl:
+                        rep.parameters.append(
+                            _RP(name=_b, label=_b, display=True))
+                        _dcl.add(_b.upper())
+            issues.append(
+                f"{len(_stmts)} SELECT statements found in the artifacts; "
+                f"all added as datasets (master-detail auto-wired where a "
+                f"bind matches a sibling's output column).")
         _envelope = _looks_like_envelope(child_name, _cols)
         _env_dims = _parse_envelope_dims(display_label) if _envelope else None
         if _envelope:

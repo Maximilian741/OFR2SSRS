@@ -290,6 +290,27 @@ def _parse_queries(data_el, warnings: List[str]) -> List[DataQuery]:
 
             groups = [_build_group_tree(g) for g in _findall(ds, "group")]
 
+            # Data-model exports may carry a <select> with NO <dataItem>
+            # children at all (the items are implicit in the SQL). An empty
+            # items list previously fell through to a PLACEHOLDER dataset --
+            # a hollow report that still claimed READY. Infer the columns
+            # from the SELECT list instead (same parser the sub-report and
+            # bundle paths use; handles alias-without-AS, quoted aliases,
+            # function expressions).
+            if not items and sql:
+                try:
+                    from ..subreports import _select_columns
+                    for c in _select_columns(sql):
+                        if c and c not in seen:
+                            seen.add(c)
+                            items.append(DataItem(name=c))
+                    if items:
+                        warnings.append(
+                            f"dataSource {_attr(ds, 'name')}: no <dataItem> "
+                            f"elements; {len(items)} column(s) inferred from "
+                            f"the SELECT list.")
+                except Exception:  # noqa: BLE001
+                    pass
             queries.append(
                 DataQuery(
                     name=_attr(ds, "name"),
@@ -684,6 +705,7 @@ def _parse_visual_settings(el):
             "fill_pattern": "",
             "line_color": "",
             "edge_line_color": "",
+            "line_pattern": "",
         }
     line_color = _attr(vs, "lineColor")
     edge_color_raw = _attr(vs, "edgeLineColor") or line_color
@@ -693,6 +715,10 @@ def _parse_visual_settings(el):
         "fill_pattern": _attr(vs, "fillPattern").lower(),
         "line_color": resolve_color(line_color),
         "edge_line_color": resolve_color(edge_color_raw),
+        # Oracle linePattern: "solid" (etc.) draws the box's border on the
+        # printed output; "transparent"/absent draws none. Carried so the
+        # generator can reproduce boxed form grids.
+        "line_pattern": _attr(vs, "linePattern").lower(),
     }
 
 
@@ -859,6 +885,7 @@ def _layout_field_from_element(el) -> LayoutField:
         rotation=rotation,
         segments=segments,
         vertical_elasticity=vertical_elasticity,
+        line_pattern=vs_attrs.get("line_pattern", ""),
     )
 
 

@@ -195,6 +195,104 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
     # collection, or upload fails with:
     #   "The value of the Value property for the image '<X>' is '<Y>',
     #    which is not a valid Value."
+    # WHERE-position lexical dropped -> the query runs UNFILTERED. The source
+    # report filtered its rows through a &LEXICAL WHERE fragment built at run
+    # time; the converter honestly leaves a comment, but the resulting query
+    # silently WIDENS to the whole table — the worst production failure mode
+    # because nothing errors. RED so the pre-download verdict + deployment
+    # checklist demand the filter be reimplemented before go-live.
+    # Position-aware + DEDUPED per (class, lexical): one lexical bound into
+    # 50 predicates previously emitted 50 identical issues, burying every
+    # other finding. Each grammatical position also carries a DIFFERENT
+    # truth: an identifier/table-source lexical leaves INVALID SQL (BLOCKER);
+    # a NULL-stubbed IN/comparison operand can NEVER match (zero rows — the
+    # old message claimed the opposite); a dropped WHERE predicate widens to
+    # every row; an expression operand degrades the column to NULL.
+    _lex_seen: dict = {}
+    for ct in find_all(tree, "CommandText"):
+        sql = ct.text or ""
+        for m in re.finditer(
+                r"(NULL\s*)?/\*\s*lexical ref &(\w+)[^*]*\*/(\s*\.)?", sql):
+            name = m.group(2)
+            head = sql[:m.start()]
+            j = len(head.rstrip()) - 1
+            prev = head.rstrip()[-1:] if head.strip() else ""
+            null_filled = bool(m.group(1))
+            if prev == "." or m.group(3):
+                cls, sev = "identifier", "BLOCKER"
+            elif re.search(r"(?i)\bFROM\s*\(\s*$", head) and null_filled:
+                cls, sev = "tablesource", "BLOCKER"
+            elif null_filled and (
+                    re.search(r"(?i)\bIN\s*\(\s*$", head)
+                    or re.search(r"(?:=|<=|>=|<|>)\s*(?:ANY|ALL|SOME)?\s*\(?\s*$",
+                                 head)):
+                cls, sev = "nevermatch", "RED"
+            elif re.search(r"\bWHERE\b", head, re.I):
+                cls, sev = "where_dropped", "RED"
+            else:
+                cls, sev = "operand_null", "AMBER"
+            k = (cls, sev, name)
+            _lex_seen[k] = _lex_seen.get(k, 0) + 1
+    _lex_msg = {
+        "identifier": ("is part of an IDENTIFIER (table/column name fragment) "
+                       "— the statement is INVALID SQL and will fail with "
+                       "ORA-00903/00936 until the identifier is rewritten"),
+        "tablesource": ("supplies the whole FROM-clause table source — the "
+                        "statement is INVALID SQL until a real table or view "
+                        "is substituted"),
+        "nevermatch": ("was NULL-stubbed inside an IN/comparison operand — "
+                       "that predicate can NEVER match, so the dataset "
+                       "returns ZERO rows until the filter is reimplemented"),
+        "where_dropped": ("filtered rows inside the WHERE clause; the "
+                          "converted query runs UNFILTERED until the filter "
+                          "is reimplemented (dynamic WHERE at deploy time, "
+                          "or parameter-guarded predicates). Nothing errors "
+                          "at run time — the report just returns every row"),
+        "operand_null": ("fills an expression operand and was NULL-stubbed — "
+                         "the computed column degrades to NULL until the "
+                         "expression is reimplemented"),
+    }
+    for (cls, sev, name), n in sorted(_lex_seen.items()):
+        cnt = f" ({n} occurrence{'s' if n > 1 else ''})" if n > 1 else ""
+        issues.append((
+            sev,
+            f"sql.lexical_{cls}.{name}",
+            f"The runtime lexical &{name}{cnt} {_lex_msg[cls]}.",
+        ))
+
+    # HOLLOW-OUTPUT NET (wild-corpus calibrated): a report whose datasets
+    # carry only the PLACEHOLDER stub column, or whose body references ZERO
+    # dataset fields while real fields exist, renders blank/static pages —
+    # the worst kind of "successful" conversion. Never READY.
+    _all_fields_by_ds: dict = {}
+    for ds_el in find_all(tree, "DataSet"):
+        _fn = [f.get("Name") or "" for f in find_all(ds_el, "Field")]
+        _all_fields_by_ds[ds_el.get("Name") or ""] = _fn
+        if _fn and all(n.upper() == "PLACEHOLDER" for n in _fn):
+            issues.append((
+                "RED",
+                f"rdl.placeholder_dataset.{ds_el.get('Name')}",
+                f"Dataset '{ds_el.get('Name')}' carries only the PLACEHOLDER "
+                f"stub column — column extraction failed for its query, so "
+                f"anything bound to it renders empty. The query's SELECT "
+                f"list needs manual column mapping.",
+            ))
+    _real_fields = [n for fl in _all_fields_by_ds.values() for n in fl
+                    if n.upper() != "PLACEHOLDER"]
+    _body_txt = ""
+    for _b in find_all(tree, "Body"):
+        _body_txt = ET.tostring(_b, encoding="unicode")
+        break
+    if _real_fields and _body_txt and "Fields!" not in _body_txt:
+        issues.append((
+            "BLOCKER",
+            "rdl.hollow_body",
+            f"The report body references ZERO dataset fields while "
+            f"{len(_real_fields)} field(s) exist across its datasets — every "
+            f"page renders static/empty. The layout-to-dataset binding "
+            f"failed and must be repaired before this report is usable.",
+        ))
+
     valid_image_source = {"External", "Embedded", "Database"}
     valid_image_sizing = {"AutoSize", "Fit", "FitProportional", "Clip"}
     embedded_names = set()

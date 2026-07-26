@@ -1,0 +1,4244 @@
+<?xml version="1.0" encoding="WINDOWS-1252" ?>
+<report name="Test_Warehouse_Report" DTDVersion="9.0.2.0.10">
+  <xmlSettings xmlTag="TEST_WAREHOUSE_REPORT" xmlPrologType="text">
+  <![CDATA[<?xml version="1.0" encoding="&Encoding"?>]]>
+  </xmlSettings>
+  <reportHtmlEscapes>
+    <beforeReportHtmlEscape>
+    <![CDATA[<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html dir=&Direction>
+<head>
+<meta http-equiv="Content-Type"  content="text/html; charset=&Encoding">
+</head>
+<body bgcolor="#ffffff">
+
+]]>
+    </beforeReportHtmlEscape>
+    <beforePageHtmlEscape>
+    <![CDATA[#NULL#]]>
+    </beforePageHtmlEscape>
+    <afterPageHtmlEscape>
+    <![CDATA[<hr size=5 noshade>
+]]>
+    </afterPageHtmlEscape>
+    <beforeFormHtmlEscape>
+    <![CDATA[<html dir=&Direction>
+<body bgcolor="#ffffff">
+<form method=post action="_action_">
+<input name="hidden_run_parameters" type=hidden value="_hidden_">
+<font color=red><!--error--></font>
+<center>
+<p><table border=0 cellspacing=0 cellpadding=0>
+<tr>
+<td><input type=submit></td>
+<td width=15>
+<td><input type=reset></td>
+</tr>
+</table>
+<p><hr><p>
+]]>
+    </beforeFormHtmlEscape>
+    <pageNavigationHtmlEscape>
+    <![CDATA[<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html dir=&Direction>
+<head>
+<meta http-equiv="Content-Type"  content="text/html; charset=&Encoding">
+<TITLE>Oracle HTML Navigator</TITLE>
+<SCRIPT type="text/javascript" LANGUAGE = "JavaScript">
+
+var jump_index = 1			// Jump to this page
+var num_pages = &TotalPages			// Total number of pages
+var basefilename = "&file_name"		// Base file name
+var fileext = "&file_ext"		//File extension
+
+/* jumps to "new_page" */
+function new_page(form, new_page)
+{
+	form.reqpage.value = new_page;
+	parent.frames[0].location = basefilename + "_" + new_page + "."+fileext;
+}
+
+/* go back one page */
+function back(form)
+{
+	/* if we are not in first page */
+	if (jump_index > 1)
+	{
+		jump_index--;
+		new_page(form, jump_index);
+	}
+}
+
+/* go forward one page */
+function forward(form)
+{
+	/* if we are not in last page */
+	if (jump_index < num_pages)
+	{
+		jump_index++;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to first page */
+function first(form)
+{
+	if(jump_index != 1)
+	{
+		jump_index = 1;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to last page */
+function last(form)
+{
+	if(jump_index != num_pages)
+	{
+		jump_index = num_pages;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to the user specified page number */
+function pagenum(form)
+{
+	/* sanity check */
+	if (form.reqpage.value < 1)
+	{
+		form.reqpage.value = 1;
+	}
+	if (form.reqpage.value > num_pages)
+	{
+		form.reqpage.value = num_pages;
+	}
+	jump_index = form.reqpage.value;
+	new_page(form, jump_index);
+}
+</SCRIPT>
+</HEAD>
+
+<BODY>
+<FORM NAME="ThisForm" action="" onSubmit="pagenum(this); return false;">
+<center><table><tr>
+<td> <INPUT TYPE="button"  VALUE="<< " onClick="first(this.form)">
+<td> <INPUT TYPE="button"  VALUE=" < " onClick="back(this.form)">
+<td> <INPUT TYPE="button"  VALUE="Page:" onClick="pagenum(this.form)">
+<td> <INPUT NAME="reqpage" VALUE="1" SIZE=2>
+<td> <INPUT TYPE="button"  VALUE=" > " onClick="forward(this.form)">
+<td> <INPUT TYPE="button"  VALUE=" >>" onClick="last(this.form)">
+</table></center>
+</FORM>
+</body></html>]]>
+    </pageNavigationHtmlEscape>
+  </reportHtmlEscapes>
+  <data>
+    <dataSource name="Q_1">
+      <select canParse="no">
+      <![CDATA[SELECT 
+    territory, 
+    COALESCE(party_name, 'Sub Total') AS party_name,
+    SUM(CASE WHEN department = 'Aluminum' THEN t_qty ELSE 0 END) AS Aluminum_Qty,
+    SUM(CASE WHEN department = 'Aluminum' THEN g_total ELSE 0 END) AS Aluminum_Gross,
+    SUM(CASE WHEN department = 'Anodize' THEN t_qty ELSE 0 END) AS Anodize_Qty,
+    SUM(CASE WHEN department = 'Anodize' THEN g_total ELSE 0 END) AS Anodize_Gross,
+    SUM(CASE WHEN department = 'Blender' THEN t_qty ELSE 0 END) AS Blender_Qty,
+    SUM(CASE WHEN department = 'Blender' THEN g_total ELSE 0 END) AS Blender_Gross,
+    SUM(CASE WHEN department = 'Cast Aluminum (Karai)' THEN t_qty ELSE 0 END) AS CastAluminumKarai_Qty,
+    SUM(CASE WHEN department = 'Cast Aluminum (Karai)' THEN g_total ELSE 0 END) AS CastAluminumKarai_Gross,
+    SUM(CASE WHEN department = 'Ceramic Gift Box' THEN t_qty ELSE 0 END) AS Ceramic_Gift_Box_Qty,
+    SUM(CASE WHEN department = 'Ceramic Gift Box' THEN g_total ELSE 0 END) AS Ceramic_Gift_Box_Gross,
+    SUM(CASE WHEN department = 'Die Casting' THEN t_qty ELSE 0 END) AS Die_Casting_Qty,
+    SUM(CASE WHEN department = 'Die Casting' THEN g_total ELSE 0 END) AS Die_Casting_Gross,
+    SUM(CASE WHEN department = 'Die Casting Gift Box' THEN t_qty ELSE 0 END) AS Die_Casting_Gift_Box_Qty,
+    SUM(CASE WHEN department = 'Die Casting Gift Box' THEN g_total ELSE 0 END) AS Die_Casting_Gift_Box_Gross,
+    SUM(CASE WHEN department = 'Electric Iron' THEN t_qty ELSE 0 END) AS Electric_Iron_Qty,
+    SUM(CASE WHEN department = 'Electric Iron' THEN g_total ELSE 0 END) AS Electric_Iron_Gross,
+    SUM(CASE WHEN department = 'Flask' THEN t_qty ELSE 0 END) AS Flask_Qty,
+    SUM(CASE WHEN department = 'Flask' THEN g_total ELSE 0 END) AS Flask_Gross,
+    SUM(CASE WHEN department = 'Food Pot' THEN t_qty ELSE 0 END) AS Food_Pot_Qty,
+    SUM(CASE WHEN department = 'Food Pot' THEN g_total ELSE 0 END) AS Food_Pot_Gross,
+    SUM(CASE WHEN department = 'Gas Stove' THEN t_qty ELSE 0 END) AS Gas_Stove_Qty,
+    SUM(CASE WHEN department = 'Gas Stove' THEN g_total ELSE 0 END) AS Gas_Stove_Gross,
+    SUM(CASE WHEN department = 'Induction Cooker' THEN t_qty ELSE 0 END) AS Induction_Cooker_Qty,
+    SUM(CASE WHEN department = 'Induction Cooker' THEN g_total ELSE 0 END) AS Induction_Cooker_Gross,
+    SUM(CASE WHEN department = 'Kettle' THEN t_qty ELSE 0 END) AS Kettle_Qty,
+    SUM(CASE WHEN department = 'Kettle' THEN g_total ELSE 0 END) AS Kettle_Gross,
+    SUM(CASE WHEN department = 'Non Stick' THEN t_qty ELSE 0 END) AS Non_Stick_Qty,
+    SUM(CASE WHEN department = 'Non Stick' THEN g_total ELSE 0 END) AS Non_Stick_Gross,
+    SUM(CASE WHEN department = 'Non Stick Ceramic' THEN t_qty ELSE 0 END) AS Non_Stick_Ceramic_Qty,
+    SUM(CASE WHEN department = 'Non Stick Ceramic' THEN g_total ELSE 0 END) AS Non_Stick_Ceramic_Gross,
+    SUM(CASE WHEN department = 'Nonstick Gift Box' THEN t_qty ELSE 0 END) AS Nonstick_Gift_Box_Qty,
+    SUM(CASE WHEN department = 'Nonstick Gift Box' THEN g_total ELSE 0 END) AS Nonstick_Gift_Box_Gross,
+    SUM(CASE WHEN department = 'Others' THEN t_qty ELSE 0 END) AS Others_Qty,
+    SUM(CASE WHEN department = 'Others' THEN g_total ELSE 0 END) AS Others_Gross,
+    SUM(CASE WHEN department = 'Packing Materials' THEN t_qty ELSE 0 END) AS Packing_Materials_Qty,
+    SUM(CASE WHEN department = 'Packing Materials' THEN g_total ELSE 0 END) AS Packing_Materials_Gross,
+    SUM(CASE WHEN department = 'Polish Hari (Pcs)' THEN t_qty ELSE 0 END) AS Polish_Hari_Qty,
+    SUM(CASE WHEN department = 'Polish Hari (Pcs)' THEN g_total ELSE 0 END) AS Polish_Hari_Gross,
+    SUM(CASE WHEN department = 'Pressure Cooker' THEN t_qty ELSE 0 END) AS Pressure_Cooker_Qty,
+    SUM(CASE WHEN department = 'Pressure Cooker' THEN g_total ELSE 0 END) AS Pressure_Cooker_Gross,
+    SUM(CASE WHEN department = 'Raw Materials' THEN t_qty ELSE 0 END) AS Raw_Materials_Qty,
+    SUM(CASE WHEN department = 'Raw Materials' THEN g_total ELSE 0 END) AS Raw_Materials_Gross,
+    SUM(CASE WHEN department = 'Rice Cooker' THEN t_qty ELSE 0 END) AS Rice_Cooker_Qty,
+    SUM(CASE WHEN department = 'Rice Cooker' THEN g_total ELSE 0 END) AS Rice_Cooker_Gross,
+    SUM(CASE WHEN department = 'Spoon and Knife' THEN t_qty ELSE 0 END) AS Spoon_Knife_Qty,
+    SUM(CASE WHEN department = 'Spoon and Knife' THEN g_total ELSE 0 END) AS Spoon_Knife_Gross,
+    SUM(CASE WHEN department = 'SS Pressure Cooker' THEN t_qty ELSE 0 END) AS SS_Pressure_Cooker_Qty,
+    SUM(CASE WHEN department = 'SS Pressure Cooker' THEN g_total ELSE 0 END) AS SS_Pressure_Cooker_Gross,
+    SUM(CASE WHEN department = 'Steel (Pcs)' THEN t_qty ELSE 0 END) AS Steel_Pcs_Qty,
+    SUM(CASE WHEN department = 'Steel (Pcs)' THEN g_total ELSE 0 END) AS Steel_Pcs_Gross,
+    (SUM(CASE WHEN department = 'Aluminum' THEN t_qty ELSE 0 END) +
+    SUM(CASE WHEN department = 'Anodize' THEN t_qty ELSE 0 END) +
+    SUM(CASE WHEN department = 'Blender' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Cast Aluminum (Karai)' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Ceramic Gift Box' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Die Casting' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Die Casting Gift Box' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Electric Iron' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Flask' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Food Pot' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Gas Stove' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Induction Cooker' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Kettle' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Non Stick' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Non Stick Ceramic' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Nonstick Gift Box' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Others' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Packing Materials' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Polish Hari (Pcs)' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Pressure Cooker' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Raw Materials' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Rice Cooker' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Spoon and Knife' THEN t_qty ELSE 0 END)+
+   SUM(CASE WHEN department = 'SS Pressure Cooker' THEN t_qty ELSE 0 END)+
+    SUM(CASE WHEN department = 'Steel (Pcs)' THEN t_qty ELSE 0 END)) AS Total_Qty,
+    (SUM(CASE WHEN department = 'Aluminum' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Anodize' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Blender' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Cast Aluminum (Karai)' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Ceramic Gift Box' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Die Casting' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Die Casting Gift Box' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Electric Iron' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Flask' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Food Pot' THEN g_total ELSE 0 END)+     
+    SUM(CASE WHEN department = 'Gas Stove' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Induction Cooker' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Kettle' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Non Stick' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Non Stick Ceramic' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Nonstick Gift Box' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Others' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Packing Materials' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Polish Hari (Pcs)' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Pressure Cooker' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Raw Materials' THEN g_total ELSE 0 END)+ 
+    SUM(CASE WHEN department = 'Rice Cooker' THEN g_total ELSE 0 END)+   
+  SUM(CASE WHEN department = 'SS Pressure Cooker' THEN g_total ELSE 0 END)+
+    SUM(CASE WHEN department = 'Spoon and Knife' THEN g_total ELSE 0 END)+    
+    SUM(CASE WHEN department = 'Steel (Pcs)' THEN g_total ELSE 0 END)) AS Total_Gross
+FROM 
+    test_sales_report
+GROUP BY 
+    ROLLUP (territory, party_name)
+ORDER BY 
+    territory, 
+    party_name]]>
+      </select>
+      <displayInfo x="1.65002" y="1.00000" width="0.69995" height="0.19995"/>
+      <group name="G_TERRITORY">
+        <displayInfo x="0.71814" y="1.94995" width="2.56384" height="1.69922"
+        />
+        <dataItem name="TERRITORY" datatype="vchar2" columnOrder="11"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Territory">
+          <dataDescriptor expression="TERRITORY"
+           descriptiveExpression="TERRITORY" order="1" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="PARTY_NAME" datatype="vchar2" columnOrder="12"
+         width="120" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Party Name">
+          <dataDescriptor expression="PARTY_NAME"
+           descriptiveExpression="PARTY_NAME" order="2" width="120"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ALUMINUM_QTY" oracleDatatype="number" columnOrder="13"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Aluminum Qty">
+          <dataDescriptor expression="ALUMINUM_QTY"
+           descriptiveExpression="ALUMINUM_QTY" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ALUMINUM_GROSS" oracleDatatype="number"
+         columnOrder="14" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Aluminum Gross">
+          <dataDescriptor expression="ALUMINUM_GROSS"
+           descriptiveExpression="ALUMINUM_GROSS" order="4" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ANODIZE_QTY" oracleDatatype="number" columnOrder="15"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Anodize Qty">
+          <dataDescriptor expression="ANODIZE_QTY"
+           descriptiveExpression="ANODIZE_QTY" order="5" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ANODIZE_GROSS" oracleDatatype="number"
+         columnOrder="16" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Anodize Gross">
+          <dataDescriptor expression="ANODIZE_GROSS"
+           descriptiveExpression="ANODIZE_GROSS" order="6" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="BLENDER_QTY" oracleDatatype="number" columnOrder="17"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Blender Qty">
+          <dataDescriptor expression="BLENDER_QTY"
+           descriptiveExpression="BLENDER_QTY" order="7" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="BLENDER_GROSS" oracleDatatype="number"
+         columnOrder="18" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Blender Gross">
+          <dataDescriptor expression="BLENDER_GROSS"
+           descriptiveExpression="BLENDER_GROSS" order="8" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="CASTALUMINUMKARAI_QTY" oracleDatatype="number"
+         columnOrder="19" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Castaluminumkarai Qty">
+          <dataDescriptor expression="CASTALUMINUMKARAI_QTY"
+           descriptiveExpression="CASTALUMINUMKARAI_QTY" order="9" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="CASTALUMINUMKARAI_GROSS" oracleDatatype="number"
+         columnOrder="20" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Castaluminumkarai Gross">
+          <dataDescriptor expression="CASTALUMINUMKARAI_GROSS"
+           descriptiveExpression="CASTALUMINUMKARAI_GROSS" order="10"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="CERAMIC_GIFT_BOX_QTY" oracleDatatype="number"
+         columnOrder="21" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Ceramic Gift Box Qty">
+          <dataDescriptor expression="CERAMIC_GIFT_BOX_QTY"
+           descriptiveExpression="CERAMIC_GIFT_BOX_QTY" order="11" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="CERAMIC_GIFT_BOX_GROSS" oracleDatatype="number"
+         columnOrder="22" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Ceramic Gift Box Gross">
+          <dataDescriptor expression="CERAMIC_GIFT_BOX_GROSS"
+           descriptiveExpression="CERAMIC_GIFT_BOX_GROSS" order="12"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DIE_CASTING_QTY" oracleDatatype="number"
+         columnOrder="23" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Die Casting Qty">
+          <dataDescriptor expression="DIE_CASTING_QTY"
+           descriptiveExpression="DIE_CASTING_QTY" order="13" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DIE_CASTING_GROSS" oracleDatatype="number"
+         columnOrder="24" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Die Casting Gross">
+          <dataDescriptor expression="DIE_CASTING_GROSS"
+           descriptiveExpression="DIE_CASTING_GROSS" order="14" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DIE_CASTING_GIFT_BOX_QTY" oracleDatatype="number"
+         columnOrder="25" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Die Casting Gift Box Qty">
+          <dataDescriptor expression="DIE_CASTING_GIFT_BOX_QTY"
+           descriptiveExpression="DIE_CASTING_GIFT_BOX_QTY" order="15"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="DIE_CASTING_GIFT_BOX_GROSS" oracleDatatype="number"
+         columnOrder="26" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Die Casting Gift Box Gross">
+          <dataDescriptor expression="DIE_CASTING_GIFT_BOX_GROSS"
+           descriptiveExpression="DIE_CASTING_GIFT_BOX_GROSS" order="16"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ELECTRIC_IRON_QTY" oracleDatatype="number"
+         columnOrder="27" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Electric Iron Qty">
+          <dataDescriptor expression="ELECTRIC_IRON_QTY"
+           descriptiveExpression="ELECTRIC_IRON_QTY" order="17" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ELECTRIC_IRON_GROSS" oracleDatatype="number"
+         columnOrder="28" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Electric Iron Gross">
+          <dataDescriptor expression="ELECTRIC_IRON_GROSS"
+           descriptiveExpression="ELECTRIC_IRON_GROSS" order="18" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FLASK_QTY" oracleDatatype="number" columnOrder="29"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Flask Qty">
+          <dataDescriptor expression="FLASK_QTY"
+           descriptiveExpression="FLASK_QTY" order="19" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FLASK_GROSS" oracleDatatype="number" columnOrder="30"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Flask Gross">
+          <dataDescriptor expression="FLASK_GROSS"
+           descriptiveExpression="FLASK_GROSS" order="20" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FOOD_POT_QTY" oracleDatatype="number" columnOrder="31"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Food Pot Qty">
+          <dataDescriptor expression="FOOD_POT_QTY"
+           descriptiveExpression="FOOD_POT_QTY" order="21" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="FOOD_POT_GROSS" oracleDatatype="number"
+         columnOrder="32" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Food Pot Gross">
+          <dataDescriptor expression="FOOD_POT_GROSS"
+           descriptiveExpression="FOOD_POT_GROSS" order="22" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="GAS_STOVE_QTY" oracleDatatype="number"
+         columnOrder="33" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Gas Stove Qty">
+          <dataDescriptor expression="GAS_STOVE_QTY"
+           descriptiveExpression="GAS_STOVE_QTY" order="23" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="GAS_STOVE_GROSS" oracleDatatype="number"
+         columnOrder="34" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Gas Stove Gross">
+          <dataDescriptor expression="GAS_STOVE_GROSS"
+           descriptiveExpression="GAS_STOVE_GROSS" order="24" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="INDUCTION_COOKER_QTY" oracleDatatype="number"
+         columnOrder="35" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Induction Cooker Qty">
+          <dataDescriptor expression="INDUCTION_COOKER_QTY"
+           descriptiveExpression="INDUCTION_COOKER_QTY" order="25" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="INDUCTION_COOKER_GROSS" oracleDatatype="number"
+         columnOrder="36" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Induction Cooker Gross">
+          <dataDescriptor expression="INDUCTION_COOKER_GROSS"
+           descriptiveExpression="INDUCTION_COOKER_GROSS" order="26"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="KETTLE_QTY" oracleDatatype="number" columnOrder="37"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Kettle Qty">
+          <dataDescriptor expression="KETTLE_QTY"
+           descriptiveExpression="KETTLE_QTY" order="27" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="KETTLE_GROSS" oracleDatatype="number" columnOrder="38"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Kettle Gross">
+          <dataDescriptor expression="KETTLE_GROSS"
+           descriptiveExpression="KETTLE_GROSS" order="28" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NON_STICK_QTY" oracleDatatype="number"
+         columnOrder="39" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Non Stick Qty">
+          <dataDescriptor expression="NON_STICK_QTY"
+           descriptiveExpression="NON_STICK_QTY" order="29" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NON_STICK_GROSS" oracleDatatype="number"
+         columnOrder="40" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Non Stick Gross">
+          <dataDescriptor expression="NON_STICK_GROSS"
+           descriptiveExpression="NON_STICK_GROSS" order="30" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NON_STICK_CERAMIC_QTY" oracleDatatype="number"
+         columnOrder="41" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Non Stick Ceramic Qty">
+          <dataDescriptor expression="NON_STICK_CERAMIC_QTY"
+           descriptiveExpression="NON_STICK_CERAMIC_QTY" order="31" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NON_STICK_CERAMIC_GROSS" oracleDatatype="number"
+         columnOrder="42" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Non Stick Ceramic Gross">
+          <dataDescriptor expression="NON_STICK_CERAMIC_GROSS"
+           descriptiveExpression="NON_STICK_CERAMIC_GROSS" order="32"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NONSTICK_GIFT_BOX_QTY" oracleDatatype="number"
+         columnOrder="43" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Nonstick Gift Box Qty">
+          <dataDescriptor expression="NONSTICK_GIFT_BOX_QTY"
+           descriptiveExpression="NONSTICK_GIFT_BOX_QTY" order="33" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="NONSTICK_GIFT_BOX_GROSS" oracleDatatype="number"
+         columnOrder="44" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Nonstick Gift Box Gross">
+          <dataDescriptor expression="NONSTICK_GIFT_BOX_GROSS"
+           descriptiveExpression="NONSTICK_GIFT_BOX_GROSS" order="34"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="OTHERS_QTY" oracleDatatype="number" columnOrder="45"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Others Qty">
+          <dataDescriptor expression="OTHERS_QTY"
+           descriptiveExpression="OTHERS_QTY" order="35" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="OTHERS_GROSS" oracleDatatype="number" columnOrder="46"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Others Gross">
+          <dataDescriptor expression="OTHERS_GROSS"
+           descriptiveExpression="OTHERS_GROSS" order="36" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="PACKING_MATERIALS_QTY" oracleDatatype="number"
+         columnOrder="47" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Packing Materials Qty">
+          <dataDescriptor expression="PACKING_MATERIALS_QTY"
+           descriptiveExpression="PACKING_MATERIALS_QTY" order="37" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="PACKING_MATERIALS_GROSS" oracleDatatype="number"
+         columnOrder="48" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Packing Materials Gross">
+          <dataDescriptor expression="PACKING_MATERIALS_GROSS"
+           descriptiveExpression="PACKING_MATERIALS_GROSS" order="38"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="POLISH_HARI_QTY" oracleDatatype="number"
+         columnOrder="49" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Polish Hari Qty">
+          <dataDescriptor expression="POLISH_HARI_QTY"
+           descriptiveExpression="POLISH_HARI_QTY" order="39" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="POLISH_HARI_GROSS" oracleDatatype="number"
+         columnOrder="50" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Polish Hari Gross">
+          <dataDescriptor expression="POLISH_HARI_GROSS"
+           descriptiveExpression="POLISH_HARI_GROSS" order="40" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="PRESSURE_COOKER_QTY" oracleDatatype="number"
+         columnOrder="51" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Pressure Cooker Qty">
+          <dataDescriptor expression="PRESSURE_COOKER_QTY"
+           descriptiveExpression="PRESSURE_COOKER_QTY" order="41" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="PRESSURE_COOKER_GROSS" oracleDatatype="number"
+         columnOrder="52" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Pressure Cooker Gross">
+          <dataDescriptor expression="PRESSURE_COOKER_GROSS"
+           descriptiveExpression="PRESSURE_COOKER_GROSS" order="42" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="RAW_MATERIALS_QTY" oracleDatatype="number"
+         columnOrder="53" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Raw Materials Qty">
+          <dataDescriptor expression="RAW_MATERIALS_QTY"
+           descriptiveExpression="RAW_MATERIALS_QTY" order="43" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="RAW_MATERIALS_GROSS" oracleDatatype="number"
+         columnOrder="54" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Raw Materials Gross">
+          <dataDescriptor expression="RAW_MATERIALS_GROSS"
+           descriptiveExpression="RAW_MATERIALS_GROSS" order="44" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="RICE_COOKER_QTY" oracleDatatype="number"
+         columnOrder="55" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Rice Cooker Qty">
+          <dataDescriptor expression="RICE_COOKER_QTY"
+           descriptiveExpression="RICE_COOKER_QTY" order="45" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="RICE_COOKER_GROSS" oracleDatatype="number"
+         columnOrder="56" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Rice Cooker Gross">
+          <dataDescriptor expression="RICE_COOKER_GROSS"
+           descriptiveExpression="RICE_COOKER_GROSS" order="46" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SPOON_KNIFE_QTY" oracleDatatype="number"
+         columnOrder="57" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Spoon Knife Qty">
+          <dataDescriptor expression="SPOON_KNIFE_QTY"
+           descriptiveExpression="SPOON_KNIFE_QTY" order="47" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SPOON_KNIFE_GROSS" oracleDatatype="number"
+         columnOrder="58" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Spoon Knife Gross">
+          <dataDescriptor expression="SPOON_KNIFE_GROSS"
+           descriptiveExpression="SPOON_KNIFE_GROSS" order="48" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SS_PRESSURE_COOKER_QTY" oracleDatatype="number"
+         columnOrder="59" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Ss Pressure Cooker Qty">
+          <dataDescriptor expression="SS_PRESSURE_COOKER_QTY"
+           descriptiveExpression="SS_PRESSURE_COOKER_QTY" order="49"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="SS_PRESSURE_COOKER_GROSS" oracleDatatype="number"
+         columnOrder="60" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33"
+         defaultLabel="Ss Pressure Cooker Gross">
+          <dataDescriptor expression="SS_PRESSURE_COOKER_GROSS"
+           descriptiveExpression="SS_PRESSURE_COOKER_GROSS" order="50"
+           width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="STEEL_PCS_QTY" oracleDatatype="number"
+         columnOrder="61" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Steel Pcs Qty">
+          <dataDescriptor expression="STEEL_PCS_QTY"
+           descriptiveExpression="STEEL_PCS_QTY" order="51" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="STEEL_PCS_GROSS" oracleDatatype="number"
+         columnOrder="62" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Steel Pcs Gross">
+          <dataDescriptor expression="STEEL_PCS_GROSS"
+           descriptiveExpression="STEEL_PCS_GROSS" order="52" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="TOTAL_QTY" oracleDatatype="number" columnOrder="63"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Total Qty">
+          <dataDescriptor expression="TOTAL_QTY"
+           descriptiveExpression="TOTAL_QTY" order="53" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="TOTAL_GROSS" oracleDatatype="number" columnOrder="64"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Total Gross">
+          <dataDescriptor expression="TOTAL_GROSS"
+           descriptiveExpression="TOTAL_GROSS" order="54" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+  <section name="header" width="50.00000" height="163.00000"
+   orientation="landscape">
+    <body width="49.00000" height="161.00000"/>
+  </section>
+  <section name="trailer" width="50.00000" height="163.00000"
+   orientation="landscape">
+    <body width="49.00000" height="161.00000"/>
+  </section>
+  <section name="main" width="50.00000" height="163.00000"
+   orientation="landscape">
+    <body width="49.00000" height="161.00000">
+      <repeatingFrame name="R_G_TERRITORY" source="G_TERRITORY"
+       printDirection="down" minWidowRecords="1" columnMode="no">
+        <geometryInfo x="0.00000" y="0.50000" width="48.93750"
+         height="0.25000"/>
+        <generalLayout verticalElasticity="expand"/>
+        <visualSettings fillPattern="transparent"/>
+        <field name="F_TERRITORY" source="TERRITORY" minWidowLines="1"
+         spacing="0" alignment="start">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="0.00000" y="0.50000" width="1.43750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:PARTY_NAME = &apos;Sub Total&apos;) and (:TERRITORY NOT BETWEEN &apos;a&apos; and &apos;z&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="PARTY_NAME" exception="1"
+               lowValue="Sub Total" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_territoryformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_PARTY_NAME" source="PARTY_NAME" minWidowLines="1"
+         spacing="0" alignment="start">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="1.43604" y="0.50000" width="2.93896"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException label="(:PARTY_NAME = &apos;Sub Total&apos;)">
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="PARTY_NAME" exception="1"
+               lowValue="Sub Total" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_party_nameformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_ALUMINUM_QTY" source="ALUMINUM_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="4.37500" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:PARTY_NAME = &apos;Sub Total&apos;) and (:ALUMINUM_QTY BETWEEN &apos;0&apos; and &apos;9999999999999&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="PARTY_NAME" exception="1"
+               lowValue="Sub Total" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_aluminum_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_ALUMINUM_GROSS" source="ALUMINUM_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="5.12500" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:ALUMINUM_GROSS BETWEEN &apos;0&apos; and &apos;99999999999999999999&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="ALUMINUM_GROSS" exception="7"
+               lowValue="0" highValue="99999999999999999999" conjunction="1"/>
+              </formatException>
+              <formatException
+               label="((:ANODIZE_QTY BETWEEN &apos;0&apos; and &apos;999999999999999999&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="ANODIZE_QTY" exception="7"
+               lowValue="0" highValue="999999999999999999" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_aluminum_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_ANODIZE_QTY" source="ANODIZE_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="6.06250" y="0.50000" width="0.68750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:ANODIZE_QTY BETWEEN &apos;0&apos; and &apos;9999999999999999999&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="ANODIZE_QTY" exception="7"
+               lowValue="0" highValue="9999999999999999999" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_anodize_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_ANODIZE_GROSS" source="ANODIZE_GROSS" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="6.75000" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:ANODIZE_GROSS BETWEEN &apos;0&apos; and &apos;999999999999999999999&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="ANODIZE_GROSS" exception="7"
+               lowValue="0" highValue="999999999999999999999" conjunction="1"
+              />
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_anodize_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_BLENDER_QTY" source="BLENDER_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="7.68750" y="0.50000" width="0.68750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:BLENDER_QTY BETWEEN &apos;0&apos; and &apos;99999999999999999&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="BLENDER_QTY" exception="7"
+               lowValue="0" highValue="99999999999999999" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_blender_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_BLENDER_GROSS" source="BLENDER_GROSS" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="8.37500" y="0.50000" width="0.87500"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:BLENDER_GROSS BETWEEN &apos;0&apos; and &apos;9999999999999999999999&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="BLENDER_GROSS" exception="7"
+               lowValue="0" highValue="9999999999999999999999" conjunction="1"
+              />
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_blender_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_CASTALUMINUMKARAI_QTY" source="CASTALUMINUMKARAI_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="9.25000" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:CASTALUMINUMKARAI_QTY BETWEEN &apos;0&apos; and &apos;999999999999999999&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="CASTALUMINUMKARAI_QTY" exception="7"
+               lowValue="0" highValue="999999999999999999" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_castaluminumkarai_qtyformatt"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_CASTALUMINUMKARAI_GROSS"
+         source="CASTALUMINUMKARAI_GROSS" minWidowLines="1" spacing="0"
+         alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="10.00000" y="0.50000" width="1.00000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:CASTALUMINUMKARAI_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="CASTALUMINUMKARAI_GROSS"
+               exception="4" lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_castaluminumkarai_grossforma"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_CERAMIC_GIFT_BOX_QTY" source="CERAMIC_GIFT_BOX_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="11.00000" y="0.50000" width="0.68750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:CERAMIC_GIFT_BOX_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="CERAMIC_GIFT_BOX_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_ceramic_gift_box_qtyformattr"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_CERAMIC_GIFT_BOX_GROSS" source="CERAMIC_GIFT_BOX_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="11.68750" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:CERAMIC_GIFT_BOX_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="CERAMIC_GIFT_BOX_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+              <formatException
+               label="((:DIE_CASTING_GIFT_BOX_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="DIE_CASTING_GIFT_BOX_GROSS"
+               exception="4" lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_ceramic_gift_box_grossformat"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_DIE_CASTING_QTY" source="DIE_CASTING_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="12.62500" y="0.50000" width="0.68750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:DIE_CASTING_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="DIE_CASTING_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_die_casting_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_DIE_CASTING_GROSS" source="DIE_CASTING_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="13.31250" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:OTHERS_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="OTHERS_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_die_casting_grossformattrigg"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_DIE_CASTING_GIFT_BOX_QTY"
+         source="DIE_CASTING_GIFT_BOX_QTY" minWidowLines="1" spacing="0"
+         alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="14.25000" y="0.50000" width="0.68750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:DIE_CASTING_GIFT_BOX_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="DIE_CASTING_GIFT_BOX_QTY"
+               exception="4" lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_die_casting_gift_box_qtyform"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_DIE_CASTING_GIFT_BOX_GROSS"
+         source="DIE_CASTING_GIFT_BOX_GROSS" minWidowLines="1" spacing="0"
+         alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="14.93750" y="0.50000" width="0.87500"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:DIE_CASTING_GIFT_BOX_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="DIE_CASTING_GIFT_BOX_GROSS"
+               exception="4" lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_die_casting_gift_box_grossfo"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_ELECTRIC_IRON_QTY" source="ELECTRIC_IRON_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="15.81250" y="0.50000" width="0.68750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:ELECTRIC_IRON_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="ELECTRIC_IRON_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_electric_iron_qtyformattrigg"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_ELECTRIC_IRON_GROSS" source="ELECTRIC_IRON_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="16.50000" y="0.50000" width="0.87500"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:ELECTRIC_IRON_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="ELECTRIC_IRON_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_electric_iron_grossformattri"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_FLASK_QTY" source="FLASK_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="17.37500" y="0.50000" width="0.68750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:FLASK_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="FLASK_QTY" exception="4" lowValue="0"
+               conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_flask_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_FLASK_GROSS" source="FLASK_GROSS" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="18.06250" y="0.50000" width="0.87500"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:FLASK_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="FLASK_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_flask_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_FOOD_POT_QTY" source="FOOD_POT_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="18.93750" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:FOOD_POT_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="FOOD_POT_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_food_pot_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_FOOD_POT_GROSS" source="FOOD_POT_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="19.68750" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:FOOD_POT_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="FOOD_POT_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_food_pot_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_GAS_STOVE_QTY" source="GAS_STOVE_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="20.62500" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:GAS_STOVE_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="GAS_STOVE_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_gas_stove_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_GAS_STOVE_GROSS" source="GAS_STOVE_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="21.37500" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:GAS_STOVE_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="GAS_STOVE_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_gas_stove_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_INDUCTION_COOKER_QTY" source="INDUCTION_COOKER_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="22.31250" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:INDUCTION_COOKER_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="INDUCTION_COOKER_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_induction_cooker_qtyformattr"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_INDUCTION_COOKER_GROSS" source="INDUCTION_COOKER_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="23.06250" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:INDUCTION_COOKER_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="INDUCTION_COOKER_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_induction_cooker_grossformat"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_KETTLE_QTY" source="KETTLE_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="24.00000" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:KETTLE_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="KETTLE_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_kettle_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_KETTLE_GROSS" source="KETTLE_GROSS" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="24.75000" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:KETTLE_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="KETTLE_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_kettle_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_NON_STICK_QTY" source="NON_STICK_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="25.68750" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:NON_STICK_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="NON_STICK_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_non_stick_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_NON_STICK_GROSS" source="NON_STICK_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="26.43750" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:NON_STICK_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="NON_STICK_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_non_stick_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_NON_STICK_CERAMIC_QTY" source="NON_STICK_CERAMIC_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="27.37500" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:NON_STICK_CERAMIC_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="NON_STICK_CERAMIC_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_non_stick_ceramic_qtyformatt"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_NON_STICK_CERAMIC_GROSS"
+         source="NON_STICK_CERAMIC_GROSS" minWidowLines="1" spacing="0"
+         alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="28.12500" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:NON_STICK_CERAMIC_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="NON_STICK_CERAMIC_GROSS"
+               exception="4" lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_non_stick_ceramic_grossforma"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_NONSTICK_GIFT_BOX_QTY" source="NONSTICK_GIFT_BOX_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="29.06250" y="0.50000" width="0.68750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:NONSTICK_GIFT_BOX_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="NONSTICK_GIFT_BOX_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_nonstick_gift_box_qtyformatt"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_NONSTICK_GIFT_BOX_GROSS"
+         source="NONSTICK_GIFT_BOX_GROSS" minWidowLines="1" spacing="0"
+         alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="29.75000" y="0.50000" width="1.00000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:NONSTICK_GIFT_BOX_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="NONSTICK_GIFT_BOX_GROSS"
+               exception="4" lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_nonstick_gift_box_grossforma"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_OTHERS_QTY" source="OTHERS_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="30.75000" y="0.50000" width="0.68750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:OTHERS_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="OTHERS_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_others_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_OTHERS_GROSS" source="OTHERS_GROSS" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="31.43750" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:OTHERS_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="OTHERS_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_others_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_PACKING_MATERIALS_QTY" source="PACKING_MATERIALS_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="32.37500" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:PACKING_MATERIALS_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="PACKING_MATERIALS_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_packing_materials_qtyformatt"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_PACKING_MATERIALS_GROSS"
+         source="PACKING_MATERIALS_GROSS" minWidowLines="1" spacing="0"
+         alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="33.12500" y="0.50000" width="1.00000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:PACKING_MATERIALS_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="PACKING_MATERIALS_GROSS"
+               exception="4" lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_packing_materials_grossforma"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_POLISH_HARI_QTY" source="POLISH_HARI_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="34.12500" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:POLISH_HARI_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="POLISH_HARI_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_polish_hari_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_POLISH_HARI_GROSS" source="POLISH_HARI_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="34.87500" y="0.50000" width="1.00000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:POLISH_HARI_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="POLISH_HARI_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_polish_hari_grossformattrigg"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_PRESSURE_COOKER_QTY" source="PRESSURE_COOKER_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="35.87280" y="0.50000" width="0.75220"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:PRESSURE_COOKER_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="PRESSURE_COOKER_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_pressure_cooker_qtyformattri"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_PRESSURE_COOKER_GROSS" source="PRESSURE_COOKER_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="36.62500" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:PRESSURE_COOKER_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="PRESSURE_COOKER_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_pressure_cooker_grossformatt"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_RAW_MATERIALS_QTY" source="RAW_MATERIALS_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="37.56250" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:RAW_MATERIALS_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="RAW_MATERIALS_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_raw_materials_qtyformattrigg"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_RAW_MATERIALS_GROSS" source="RAW_MATERIALS_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="38.31250" y="0.50000" width="1.00000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:RAW_MATERIALS_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="RAW_MATERIALS_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_raw_materials_grossformattri"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_RICE_COOKER_QTY" source="RICE_COOKER_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="39.31250" y="0.50000" width="0.75000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:RICE_COOKER_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="RICE_COOKER_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_rice_cooker_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_RICE_COOKER_GROSS" source="RICE_COOKER_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="40.06250" y="0.50000" width="1.00000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:RICE_COOKER_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="RICE_COOKER_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_rice_cooker_grossformattrigg"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_SPOON_KNIFE_QTY" source="SPOON_KNIFE_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="41.06250" y="0.50000" width="0.81250"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:SPOON_KNIFE_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="SPOON_KNIFE_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_spoon_knife_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_SPOON_KNIFE_GROSS" source="SPOON_KNIFE_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="41.87500" y="0.50000" width="1.00000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:SPOON_KNIFE_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="SPOON_KNIFE_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_spoon_knife_grossformattrigg"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_SS_PRESSURE_COOKER_QTY" source="SS_PRESSURE_COOKER_QTY"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="42.87500" y="0.50000" width="0.81250"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:SS_PRESSURE_COOKER_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="SS_PRESSURE_COOKER_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_ss_pressure_cooker_qtyformat"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_SS_PRESSURE_COOKER_GROSS"
+         source="SS_PRESSURE_COOKER_GROSS" minWidowLines="1" spacing="0"
+         alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="43.68750" y="0.50000" width="1.06250"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:SS_PRESSURE_COOKER_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="SS_PRESSURE_COOKER_GROSS"
+               exception="4" lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_ss_pressure_cooker_grossform"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_STEEL_PCS_QTY" source="STEEL_PCS_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="44.75000" y="0.50000" width="0.87500"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:STEEL_PCS_QTY &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="STEEL_PCS_QTY" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_steel_pcs_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_STEEL_PCS_GROSS" source="STEEL_PCS_GROSS"
+         minWidowLines="1" spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="45.62500" y="0.50000" width="1.00000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="((:STEEL_PCS_GROSS &gt;= &apos;0&apos;) and (:PARTY_NAME = &apos;Sub Total&apos;)) "
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="STEEL_PCS_GROSS" exception="4"
+               lowValue="0" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_steel_pcs_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_TOTAL_QTY" source="TOTAL_QTY" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="46.62500" y="0.50000" width="0.93750"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="(:TOTAL_QTY BETWEEN &apos;0&apos; and &apos;999999999999&apos;)"
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="TOTAL_QTY" exception="7" lowValue="0"
+               highValue="999999999999" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_total_qtyformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+        <field name="F_TOTAL_GROSS" source="TOTAL_GROSS" minWidowLines="1"
+         spacing="0" alignment="end">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="47.56250" y="0.50000" width="1.25000"
+           height="0.25000"/>
+          <generalLayout verticalElasticity="expand">
+            <conditionalFormat>
+              <formatException
+               label="(:TOTAL_GROSS BETWEEN &apos;0&apos; and &apos;9999999999999999&apos;)"
+                >
+                <font face="Tahoma" size="10" bold="yes"/>
+                <formatVisualSettings fillPattern="transparent"
+                 borderPattern="solid"/>
+              <cond name="first" column="TOTAL_GROSS" exception="7"
+               lowValue="0" highValue="9999999999999999" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_total_grossformattrigger"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+        </field>
+      </repeatingFrame>
+      <frame name="M_G_TERRITORY_HDR">
+        <geometryInfo x="0.00000" y="0.00000" width="48.93750"
+         height="0.50000"/>
+        <advancedLayout printObjectOnPage="allPage"
+         basePrintingOn="anchoringObject"/>
+        <visualSettings fillPattern="transparent"/>
+        <text name="B_TERRITORY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="0.00000" y="0.25000" width="1.43750"
+           height="0.25000"/>
+          <advancedLayout printObjectOnPage="firstPage"
+           basePrintingOn="enclosingObject"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Territory Name]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_PARTY_NAME" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="1.43750" y="0.25000" width="2.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Party Name]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_ALUMINUM_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="4.37500" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_ALUMINUM_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="5.12500" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_ANODIZE_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="6.06250" y="0.25000" width="0.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_ANODIZE_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="6.75000" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_BLENDER_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="7.68750" y="0.25000" width="0.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_BLENDER_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="8.37500" y="0.25000" width="0.87500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="9.25000" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="10.00000" y="0.25000" width="1.00000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CERAMIC_GIFT_BOX_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="11.00000" y="0.25000" width="0.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CERAMIC_GIFT_BOX_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="11.68750" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_DIE_CASTING_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="12.62500" y="0.25000" width="0.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_DIE_CASTING_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="13.31250" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_DIE_CASTING_GIFT_BOX_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="14.25000" y="0.25000" width="0.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_DIE_CASTING_GIFT_BOX_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="14.93750" y="0.25000" width="0.87500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_ELECTRIC_IRON_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="15.81250" y="0.25000" width="0.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_ELECTRIC_IRON_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="16.50000" y="0.25000" width="0.87500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_FLASK_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="17.37500" y="0.25000" width="0.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_FLASK_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="18.06250" y="0.25000" width="0.87500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_FOOD_POT_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="18.93750" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_FOOD_POT_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="19.68750" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_GAS_STOVE_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="20.62500" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_GAS_STOVE_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="21.37500" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_INDUCTION_COOKER_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="22.31250" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_INDUCTION_COOKER_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="23.06250" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_KETTLE_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="24.00000" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_KETTLE_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="24.75000" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_NON_STICK_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="25.68750" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_NON_STICK_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="26.43750" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_NON_STICK_CERAMIC_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="27.37500" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_NON_STICK_CERAMIC_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="28.12500" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_NONSTICK_GIFT_BOX_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="29.06250" y="0.25000" width="0.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_NONSTICK_GIFT_BOX_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="29.75000" y="0.25000" width="1.00000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_OTHERS_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="30.75000" y="0.25000" width="0.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_OTHERS_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="31.43750" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_PACKING_MATERIALS_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="32.37500" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_PACKING_MATERIALS_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="33.12500" y="0.25000" width="1.00000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_POLISH_HARI_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="34.12500" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_POLISH_HARI_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="34.87500" y="0.25000" width="1.00000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_RAW_MATERIALS_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="37.56250" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_RAW_MATERIALS_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="38.31250" y="0.25000" width="1.00000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_RICE_COOKER_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="39.31250" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_RICE_COOKER_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="40.06250" y="0.25000" width="1.00000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_SPOON_KNIFE_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="41.06250" y="0.25000" width="0.81250"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_SPOON_KNIFE_GROSS" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="41.87500" y="0.25000" width="1.00000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_SS_PRESSURE_COOKER_QTY" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="42.87500" y="0.25000" width="0.81250"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_ALUMINUM_QTY1" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="4.37500" y="0.00000" width="1.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Aluminum]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_ANODIZE_GROSS1" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="6.06250" y="0.00000" width="1.62500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Anodize]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_BLENDER_QTY1" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="7.68750" y="0.00000" width="1.56250"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Blender]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY1" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="9.25000" y="0.00000" width="1.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Cast Aluminum (karai)]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY2" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="11.00000" y="0.00000" width="1.62500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Ceramic Gift Box]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY3" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="12.62500" y="0.00000" width="1.62500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Die Casting]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY4" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="14.25000" y="0.00000" width="1.56250"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Die Casting Gift Box]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY5" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="15.81250" y="0.00000" width="1.56250"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Electric Iron]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY6" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="17.37500" y="0.00000" width="1.56250"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Flask ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY7" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="18.93750" y="0.00000" width="1.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Food Pot ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY8" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="20.62500" y="0.00000" width="1.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gas Stove ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY9" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="22.31250" y="0.00000" width="1.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Induction Cooker ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY10" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="24.00000" y="0.00000" width="1.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Kettle  ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY11" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="25.68750" y="0.00000" width="1.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Non Stick  ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY12" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="29.06250" y="0.00000" width="1.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Non Stick Gift Box ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY13" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="27.37500" y="0.00000" width="1.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Non Stick Ceramic]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY14" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="30.75000" y="0.00000" width="1.62500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Others ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY15" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="32.37500" y="0.00000" width="1.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Packing Materials  ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY16" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="34.12500" y="0.00000" width="1.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Polish Hari (Pcs) ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY17" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="37.56250" y="0.00000" width="1.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Raw Materials ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY18" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="39.31250" y="0.00000" width="1.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Rice Cooker  ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY19" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="41.06250" y="0.00000" width="1.81250"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Spoon Knife  ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY20" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="42.87500" y="0.00000" width="1.87500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Ss Pressure Cooker  ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY21" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="44.75000" y="0.00000" width="1.87500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Steel (Pcs) ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY22" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="46.62500" y="0.00000" width="2.18750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Total ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_SPOON_KNIFE_GROSS1" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="43.68750" y="0.25000" width="1.06250"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_SS_PRESSURE_COOKER_QTY1" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="44.75000" y="0.25000" width="0.87500"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_SPOON_KNIFE_GROSS2" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="45.62500" y="0.25000" width="1.00000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_SS_PRESSURE_COOKER_QTY2" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="46.62500" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[ Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_SPOON_KNIFE_GROSS3" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="47.56250" y="0.25000" width="1.25000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_RAW_MATERIALS_QTY1" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="35.87500" y="0.25000" width="0.75000"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Qty]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_RAW_MATERIALS_GROSS1" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="36.62500" y="0.25000" width="0.93750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Gross]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_CASTALUMINUMKARAI_QTY23" minWidowLines="1">
+          <textSettings justify="center" spacing="0"/>
+          <geometryInfo x="35.87500" y="0.00000" width="1.68750"
+           height="0.25000"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Pressure Cooker ]]>
+            </string>
+          </textSegment>
+        </text>
+        <text name="B_2" minWidowLines="1">
+          <textSettings justify="center" spacing="single"/>
+          <geometryInfo x="0.00000" y="0.00000" width="4.37500"
+           height="0.25000"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="anchoringObject"/>
+          <visualSettings fillPattern="transparent" linePattern="solid"/>
+          <textSegment>
+            <font face="Tahoma" size="10" bold="yes"/>
+            <string>
+            <![CDATA[Territory and Party Name]]>
+            </string>
+          </textSegment>
+        </text>
+      </frame>
+    </body>
+    <margin>
+      <text name="B_1" minWidowLines="1">
+        <textSettings spacing="0"/>
+        <geometryInfo x="23.56250" y="0.11462" width="3.02209"
+         height="0.24084"/>
+        <advancedLayout printObjectOnPage="allPage"
+         basePrintingOn="anchoringObject"/>
+        <textSegment>
+          <font face="Tahoma" size="14" bold="yes"/>
+          <string>
+          <![CDATA[Kiam Metal Industries Limited]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_3" minWidowLines="1">
+        <textSettings spacing="0"/>
+        <geometryInfo x="23.84375" y="0.39587" width="2.51160"
+         height="0.13660"/>
+        <advancedLayout printObjectOnPage="allPage"
+         basePrintingOn="anchoringObject"/>
+        <textSegment>
+          <font face="Tahoma" size="8"/>
+          <string>
+          <![CDATA[BSCIC Industrial Estate Kushtia-7000, Bangladesh]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_4" minWidowLines="1">
+        <textSettings spacing="0"/>
+        <geometryInfo x="0.46875" y="0.68750" width="0.46997" height="0.18872"
+        />
+        <advancedLayout printObjectOnPage="allPage"
+         basePrintingOn="anchoringObject"/>
+        <textSegment>
+          <font face="Tahoma" size="11"/>
+          <string>
+          <![CDATA[Till to :]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_DATE1" source="CurrentDate" minWidowLines="1"
+       formatMask="fmMonth DD, RRRR" spacing="0" alignment="center">
+        <font face="Tahoma" size="11"/>
+        <geometryInfo x="1.01038" y="0.68750" width="1.35413" height="0.18750"
+        />
+        <generalLayout horizontalElasticity="variable"/>
+      </field>
+    </margin>
+  </section>
+  </layout>
+  <programUnits>
+    <function name="f_party_nameformattrigger">
+      <textSource>
+      <![CDATA[function F_PARTY_NAMEFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if (:PARTY_NAME = 'Sub Total')
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_total_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_TOTAL_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if (:TOTAL_QTY BETWEEN '0' and '999999999999')
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_total_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_TOTAL_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if (:TOTAL_GROSS BETWEEN '0' and '9999999999999999')
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_aluminum_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_ALUMINUM_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:PARTY_NAME = 'Sub Total') and
+      (:ALUMINUM_QTY BETWEEN '0' and '9999999999999')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_territoryformattrigger">
+      <textSource>
+      <![CDATA[function F_TERRITORYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:PARTY_NAME = 'Sub Total') and
+      (:TERRITORY NOT BETWEEN 'a' and 'z')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_aluminum_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_ALUMINUM_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:ALUMINUM_GROSS BETWEEN '0' and '99999999999999999999') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:ANODIZE_QTY BETWEEN '0' and '999999999999999999') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_anodize_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_ANODIZE_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:ANODIZE_QTY BETWEEN '0' and '9999999999999999999') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_anodize_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_ANODIZE_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:ANODIZE_GROSS BETWEEN '0' and '999999999999999999999') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_blender_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_BLENDER_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:BLENDER_QTY BETWEEN '0' and '99999999999999999') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_blender_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_BLENDER_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:BLENDER_GROSS BETWEEN '0' and '9999999999999999999999') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_castaluminumkarai_qtyformatt">
+      <textSource>
+      <![CDATA[function F_CASTALUMINUMKARAI_QTYFormatT return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:CASTALUMINUMKARAI_QTY BETWEEN '0' and '999999999999999999') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_castaluminumkarai_grossforma">
+      <textSource>
+      <![CDATA[function F_CASTALUMINUMKARAI_GROSSForma return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:CASTALUMINUMKARAI_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_ceramic_gift_box_qtyformattr">
+      <textSource>
+      <![CDATA[function F_CERAMIC_GIFT_BOX_QTYFormatTr return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:CERAMIC_GIFT_BOX_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_text_color('black');
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_ceramic_gift_box_grossformat">
+      <textSource>
+      <![CDATA[function F_CERAMIC_GIFT_BOX_GROSSFormat return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:CERAMIC_GIFT_BOX_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:DIE_CASTING_GIFT_BOX_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_die_casting_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_DIE_CASTING_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:DIE_CASTING_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_die_casting_grossformattrigg">
+      <textSource>
+      <![CDATA[function F_DIE_CASTING_GROSSFormatTrigg return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:OTHERS_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_die_casting_gift_box_qtyform">
+      <textSource>
+      <![CDATA[function F_DIE_CASTING_GIFT_BOX_QTYForm return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:DIE_CASTING_GIFT_BOX_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_die_casting_gift_box_grossfo">
+      <textSource>
+      <![CDATA[function F_DIE_CASTING_GIFT_BOX_GROSSFo return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:DIE_CASTING_GIFT_BOX_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_electric_iron_qtyformattrigg">
+      <textSource>
+      <![CDATA[function F_ELECTRIC_IRON_QTYFormatTrigg return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:ELECTRIC_IRON_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_electric_iron_grossformattri">
+      <textSource>
+      <![CDATA[function F_ELECTRIC_IRON_GROSSFormatTri return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:ELECTRIC_IRON_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_flask_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_FLASK_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:FLASK_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_flask_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_FLASK_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:FLASK_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_food_pot_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_FOOD_POT_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:FOOD_POT_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_food_pot_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_FOOD_POT_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:FOOD_POT_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_gas_stove_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_GAS_STOVE_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:GAS_STOVE_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_gas_stove_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_GAS_STOVE_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:GAS_STOVE_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_induction_cooker_qtyformattr">
+      <textSource>
+      <![CDATA[function F_INDUCTION_COOKER_QTYFormatTr return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:INDUCTION_COOKER_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_induction_cooker_grossformat">
+      <textSource>
+      <![CDATA[function F_INDUCTION_COOKER_GROSSFormat return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:INDUCTION_COOKER_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_kettle_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_KETTLE_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:KETTLE_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_kettle_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_KETTLE_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:KETTLE_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_non_stick_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_NON_STICK_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:NON_STICK_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_non_stick_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_NON_STICK_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:NON_STICK_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_non_stick_ceramic_qtyformatt">
+      <textSource>
+      <![CDATA[function F_NON_STICK_CERAMIC_QTYFormatT return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:NON_STICK_CERAMIC_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_non_stick_ceramic_grossforma">
+      <textSource>
+      <![CDATA[function F_NON_STICK_CERAMIC_GROSSForma return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:NON_STICK_CERAMIC_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_nonstick_gift_box_qtyformatt">
+      <textSource>
+      <![CDATA[function F_NONSTICK_GIFT_BOX_QTYFormatT return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:NONSTICK_GIFT_BOX_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_nonstick_gift_box_grossforma">
+      <textSource>
+      <![CDATA[function F_NONSTICK_GIFT_BOX_GROSSForma return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:NONSTICK_GIFT_BOX_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_others_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_OTHERS_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:OTHERS_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_others_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_OTHERS_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:OTHERS_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_packing_materials_qtyformatt">
+      <textSource>
+      <![CDATA[function F_PACKING_MATERIALS_QTYFormatT return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:PACKING_MATERIALS_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_packing_materials_grossforma">
+      <textSource>
+      <![CDATA[function F_PACKING_MATERIALS_GROSSForma return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:PACKING_MATERIALS_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_polish_hari_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_POLISH_HARI_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:POLISH_HARI_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_polish_hari_grossformattrigg">
+      <textSource>
+      <![CDATA[function F_POLISH_HARI_GROSSFormatTrigg return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:POLISH_HARI_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_pressure_cooker_qtyformattri">
+      <textSource>
+      <![CDATA[function F_PRESSURE_COOKER_QTYFormatTri return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:PRESSURE_COOKER_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_pressure_cooker_grossformatt">
+      <textSource>
+      <![CDATA[function F_PRESSURE_COOKER_GROSSFormatT return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:PRESSURE_COOKER_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_raw_materials_qtyformattrigg">
+      <textSource>
+      <![CDATA[function F_RAW_MATERIALS_QTYFormatTrigg return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:RAW_MATERIALS_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_raw_materials_grossformattri">
+      <textSource>
+      <![CDATA[function F_RAW_MATERIALS_GROSSFormatTri return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:RAW_MATERIALS_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_rice_cooker_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_RICE_COOKER_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:RICE_COOKER_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_rice_cooker_grossformattrigg">
+      <textSource>
+      <![CDATA[function F_RICE_COOKER_GROSSFormatTrigg return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:RICE_COOKER_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_spoon_knife_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_SPOON_KNIFE_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:SPOON_KNIFE_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_spoon_knife_grossformattrigg">
+      <textSource>
+      <![CDATA[function F_SPOON_KNIFE_GROSSFormatTrigg return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:SPOON_KNIFE_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_ss_pressure_cooker_qtyformat">
+      <textSource>
+      <![CDATA[function F_SS_PRESSURE_COOKER_QTYFormat return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:SS_PRESSURE_COOKER_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_ss_pressure_cooker_grossform">
+      <textSource>
+      <![CDATA[function F_SS_PRESSURE_COOKER_GROSSForm return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:SS_PRESSURE_COOKER_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_steel_pcs_qtyformattrigger">
+      <textSource>
+      <![CDATA[function F_STEEL_PCS_QTYFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:STEEL_PCS_QTY >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_steel_pcs_grossformattrigger">
+      <textSource>
+      <![CDATA[function F_STEEL_PCS_GROSSFormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Oracle Reports Builder.
+  if ((:STEEL_PCS_GROSS >= '0') and
+      (:PARTY_NAME = 'Sub Total')) 
+  then
+    srw.set_font_face('Tahoma');
+    srw.set_font_size(10);
+    srw.set_font_weight(srw.bold_weight);
+    srw.set_font_style(srw.plain_style);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+  </programUnits>
+  <webSource>
+  <![CDATA[<%@ taglib uri="/WEB-INF/lib/reports_tld.jar" prefix="rw" %>
+<%@ page language="java" import="java.io.*" errorPage="/rwerror.jsp" session="false" %>
+<!--
+<rw:report id="report">
+<rw:objects id="objects">
+</rw:objects>
+-->
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<HTML>
+
+<HEAD>
+  <TITLE> Your Title </TITLE>
+  <rw:style id="rwbeige39">
+<link rel="StyleSheet" type="text/css" href="css/rwbeige.css">
+</rw:style>
+
+  <META http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+</HEAD>
+
+<BODY bgColor="#ffffff" link="#000000" vLink="#000000">
+
+<TABLE border=0 cellPadding=0 cellSpacing=0 width="100%">
+  <TBODY>
+  <TR>
+    <TD bgColor="#ffffff" rowSpan=2 vAlign=middle width=188><IMG alt="" src="images/rwbeige_logo.gif" width="135" height="36"></TD>
+    <TD bgColor="#ffffff" height=40 vAlign=top><IMG alt="" height=1 src="images/stretch.gif" width=5></TD>
+    <TD align=right bgColor="#ffffff" vAlign=bottom>&nbsp;</TD>
+  </TR>
+  </TBODY>
+</TABLE>
+
+<TABLE bgColor="#ff0000" border=0 cellPadding=0 cellSpacing=0 width="100%">
+  <TBODY>
+  <TR>
+    <TD bgColor="#ff0000" class="OraColumnHeader">&nbsp;</TD>
+  </TR>
+  </TBODY>
+</TABLE>
+
+<TABLE border=0 cellPadding=0 cellSpacing=0 width="100%">
+  <TBODY>
+  <TR>
+    <TD bgColor="#ff0000" vAlign=top class="OraColumnHeader"><IMG alt="" border=0 height=17 src="images/topcurl.gif" width=30></TD>
+    <TD vAlign=top width="100%">
+      <TABLE border=0 cellPadding=0 cellSpacing=0 width="100%">
+        <TBODY>
+        <TR>
+          <TD bgColor="#000000" height=1><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+        </TR>
+        <TR>
+          <TD bgColor="#9a9c9a" height=1><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+        </TR>
+        <TR>
+          <TD bgColor="#b3b4b3" height=1><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+        </TR>
+        </TBODY>
+      </TABLE>
+    </TD>
+  </TR>
+  </TBODY>
+</TABLE>
+
+<TABLE width="100%" border="0" cellspacing="0" cellpadding="0">
+  <TR>
+    <TD width="29%" valign="top">
+      <TABLE width="77%" border="0" cellspacing="0" cellpadding="0">
+        <TR>
+          <TD width="10%" class="OraCellText"><IMG alt="" src="images/blue_d_arrow.gif" width="10" height="10"></TD>
+          <TD width="90%" class="OraCellText">Navigation goes here </TD>
+        </TR>
+        <TR>
+          <TD width="10%" class="OraCellText"><IMG alt="" src="images/blue_r_arrow.gif" width="10" height="10"></TD>
+          <TD width="90%" class="OraCellText">Navigation Item</TD>
+        </TR>
+      </TABLE>
+    </TD>
+    <TD width="71%">
+      <DIV align="center">
+      <!-- Data Area Generated by Reports Developer -->
+<rw:dataArea id="MGTERRITORYGRPFR195">
+<table class="OraTable">
+<caption>  </caption>
+ <!-- Header -->
+ <thead>
+  <tr>
+   <th <rw:id id="HBTERRITORY195" asArray="no"/> class="OraColumnHeader"> Territory </th>
+   <th <rw:id id="HBPARTYNAME195" asArray="no"/> class="OraColumnHeader"> Party
+Name </th>
+   <th <rw:id id="HBALUMINUMQTY195" asArray="no"/> class="OraColumnHeader"> Aluminum Qty </th>
+   <th <rw:id id="HBALUMINUMGROSS195" asArray="no"/> class="OraColumnHeader"> Aluminum Gross </th>
+   <th <rw:id id="HBANODIZEQTY195" asArray="no"/> class="OraColumnHeader"> Anodize Qty </th>
+   <th <rw:id id="HBANODIZEGROSS195" asArray="no"/> class="OraColumnHeader"> Anodize Gross </th>
+   <th <rw:id id="HBBLENDERQTY195" asArray="no"/> class="OraColumnHeader"> Blender Qty </th>
+   <th <rw:id id="HBBLENDERGROSS195" asArray="no"/> class="OraColumnHeader"> Blender Gross </th>
+   <th <rw:id id="HBCASTALUMINUMKARAIQTY195" asArray="no"/> class="OraColumnHeader"> Castaluminumkarai
+Qty </th>
+   <th <rw:id id="HBCASTALUMINUMKARAIGROSS195" asArray="no"/> class="OraColumnHeader"> Castaluminumkarai
+Gross </th>
+   <th <rw:id id="HBCERAMICGIFTBOXQTY195" asArray="no"/> class="OraColumnHeader"> Ceramic Gift
+Box Qty </th>
+   <th <rw:id id="HBCERAMICGIFTBOXGROSS195" asArray="no"/> class="OraColumnHeader"> Ceramic Gift
+Box Gross </th>
+   <th <rw:id id="HBDIECASTINGQTY195" asArray="no"/> class="OraColumnHeader"> Die Casting Qty </th>
+   <th <rw:id id="HBDIECASTINGGROSS195" asArray="no"/> class="OraColumnHeader"> Die Casting Gross </th>
+   <th <rw:id id="HBDIECASTINGGIFTBOXQTY195" asArray="no"/> class="OraColumnHeader"> Die Casting
+Gift Box Qty </th>
+   <th <rw:id id="HBDIECASTINGGIFTBOXGROSS195" asArray="no"/> class="OraColumnHeader"> Die Casting
+Gift Box Gross </th>
+   <th <rw:id id="HBELECTRICIRONQTY195" asArray="no"/> class="OraColumnHeader"> Electric Iron Qty </th>
+   <th <rw:id id="HBELECTRICIRONGROSS195" asArray="no"/> class="OraColumnHeader"> Electric Iron Gross </th>
+   <th <rw:id id="HBFLASKQTY195" asArray="no"/> class="OraColumnHeader"> Flask Qty </th>
+   <th <rw:id id="HBFLASKGROSS195" asArray="no"/> class="OraColumnHeader"> Flask Gross </th>
+   <th <rw:id id="HBFOODPOTQTY195" asArray="no"/> class="OraColumnHeader"> Food Pot Qty </th>
+   <th <rw:id id="HBFOODPOTGROSS195" asArray="no"/> class="OraColumnHeader"> Food Pot Gross </th>
+   <th <rw:id id="HBGASSTOVEQTY195" asArray="no"/> class="OraColumnHeader"> Gas Stove Qty </th>
+   <th <rw:id id="HBGASSTOVEGROSS195" asArray="no"/> class="OraColumnHeader"> Gas Stove Gross </th>
+   <th <rw:id id="HBINDUCTIONCOOKERQTY195" asArray="no"/> class="OraColumnHeader"> Induction
+Cooker Qty </th>
+   <th <rw:id id="HBINDUCTIONCOOKERGROSS195" asArray="no"/> class="OraColumnHeader"> Induction
+Cooker Gross </th>
+   <th <rw:id id="HBKETTLEQTY195" asArray="no"/> class="OraColumnHeader"> Kettle Qty </th>
+   <th <rw:id id="HBKETTLEGROSS195" asArray="no"/> class="OraColumnHeader"> Kettle Gross </th>
+   <th <rw:id id="HBNONSTICKQTY195" asArray="no"/> class="OraColumnHeader"> Non Stick Qty </th>
+   <th <rw:id id="HBNONSTICKGROSS195" asArray="no"/> class="OraColumnHeader"> Non Stick Gross </th>
+   <th <rw:id id="HBNONSTICKCERAMICQTY195" asArray="no"/> class="OraColumnHeader"> Non Stick
+Ceramic Qty </th>
+   <th <rw:id id="HBNONSTICKCERAMICGROSS195" asArray="no"/> class="OraColumnHeader"> Non Stick
+Ceramic Gross </th>
+   <th <rw:id id="HBNONSTICKGIFTBOXQTY195" asArray="no"/> class="OraColumnHeader"> Nonstick
+Gift Box Qty </th>
+   <th <rw:id id="HBNONSTICKGIFTBOXGROSS195" asArray="no"/> class="OraColumnHeader"> Nonstick Gift
+Box Gross </th>
+   <th <rw:id id="HBOTHERSQTY195" asArray="no"/> class="OraColumnHeader"> Others Qty </th>
+   <th <rw:id id="HBOTHERSGROSS195" asArray="no"/> class="OraColumnHeader"> Others Gross </th>
+   <th <rw:id id="HBPACKINGMATERIALSQTY195" asArray="no"/> class="OraColumnHeader"> Packing
+Materials Qty </th>
+   <th <rw:id id="HBPACKINGMATERIALSGROSS195" asArray="no"/> class="OraColumnHeader"> Packing
+Materials Gross </th>
+   <th <rw:id id="HBPOLISHHARIQTY195" asArray="no"/> class="OraColumnHeader"> Polish Hari Qty </th>
+   <th <rw:id id="HBPOLISHHARIGROSS195" asArray="no"/> class="OraColumnHeader"> Polish Hari Gross </th>
+   <th <rw:id id="HBPRESSURECOOKERQTY195" asArray="no"/> class="OraColumnHeader"> Pressure
+Cooker Qty </th>
+   <th <rw:id id="HBPRESSURECOOKERGROSS195" asArray="no"/> class="OraColumnHeader"> Pressure
+Cooker Gross </th>
+   <th <rw:id id="HBRAWMATERIALSQTY195" asArray="no"/> class="OraColumnHeader"> Raw Materials Qty </th>
+   <th <rw:id id="HBRAWMATERIALSGROSS195" asArray="no"/> class="OraColumnHeader"> Raw Materials
+Gross </th>
+   <th <rw:id id="HBRICECOOKERQTY195" asArray="no"/> class="OraColumnHeader"> Rice Cooker Qty </th>
+   <th <rw:id id="HBRICECOOKERGROSS195" asArray="no"/> class="OraColumnHeader"> Rice Cooker Gross </th>
+   <th <rw:id id="HBSPOONKNIFEQTY195" asArray="no"/> class="OraColumnHeader"> Spoon Knife Qty </th>
+   <th <rw:id id="HBSPOONKNIFEGROSS195" asArray="no"/> class="OraColumnHeader"> Spoon Knife Gross </th>
+   <th <rw:id id="HBSSPRESSURECOOKERQTY195" asArray="no"/> class="OraColumnHeader"> Ss Pressure Cooker Qty </th>
+   <th <rw:id id="HBSSPRESSURECOOKERGROSS195" asArray="no"/> class="OraColumnHeader"> Ss Pressure Cooker Gross </th>
+   <th <rw:id id="HBSTEELPCSQTY195" asArray="no"/> class="OraColumnHeader"> Steel Pcs Qty </th>
+   <th <rw:id id="HBSTEELPCSGROSS195" asArray="no"/> class="OraColumnHeader"> Steel Pcs Gross </th>
+   <th <rw:id id="HBTOTALQTY195" asArray="no"/> class="OraColumnHeader"> Total Qty </th>
+   <th <rw:id id="HBTOTALGROSS195" asArray="no"/> class="OraColumnHeader"> Total Gross </th>
+  </tr>
+ </thead>
+ <!-- Body -->
+ <tbody>
+  <rw:foreach id="RGTERRITORY1951" src="G_TERRITORY">
+   <tr>
+    <td <rw:headers id="HFTERRITORY195" src="HBTERRITORY195"/> class="OraCellText"><rw:field id="FTERRITORY195" src="TERRITORY" nullValue="&nbsp;"> F_TERRITORY </rw:field></td>
+    <td <rw:headers id="HFPARTYNAME195" src="HBPARTYNAME195"/> class="OraCellText"><rw:field id="FPARTYNAME195" src="PARTY_NAME" nullValue="&nbsp;"> F_PARTY_NAME </rw:field></td>
+    <td <rw:headers id="HFALUMINUMQTY195" src="HBALUMINUMQTY195"/> class="OraCellNumber"><rw:field id="FALUMINUMQTY195" src="ALUMINUM_QTY" nullValue="&nbsp;"> F_ALUMINUM_QTY </rw:field></td>
+    <td <rw:headers id="HFALUMINUMGROSS195" src="HBALUMINUMGROSS195"/> class="OraCellNumber"><rw:field id="FALUMINUMGROSS195" src="ALUMINUM_GROSS" nullValue="&nbsp;"> F_ALUMINUM_GROSS </rw:field></td>
+    <td <rw:headers id="HFANODIZEQTY195" src="HBANODIZEQTY195"/> class="OraCellNumber"><rw:field id="FANODIZEQTY195" src="ANODIZE_QTY" nullValue="&nbsp;"> F_ANODIZE_QTY </rw:field></td>
+    <td <rw:headers id="HFANODIZEGROSS195" src="HBANODIZEGROSS195"/> class="OraCellNumber"><rw:field id="FANODIZEGROSS195" src="ANODIZE_GROSS" nullValue="&nbsp;"> F_ANODIZE_GROSS </rw:field></td>
+    <td <rw:headers id="HFBLENDERQTY195" src="HBBLENDERQTY195"/> class="OraCellNumber"><rw:field id="FBLENDERQTY195" src="BLENDER_QTY" nullValue="&nbsp;"> F_BLENDER_QTY </rw:field></td>
+    <td <rw:headers id="HFBLENDERGROSS195" src="HBBLENDERGROSS195"/> class="OraCellNumber"><rw:field id="FBLENDERGROSS195" src="BLENDER_GROSS" nullValue="&nbsp;"> F_BLENDER_GROSS </rw:field></td>
+    <td <rw:headers id="HFCASTALUMINUMKARAIQTY195" src="HBCASTALUMINUMKARAIQTY195"/> class="OraCellNumber"><rw:field id="FCASTALUMINUMKARAIQTY195" src="CASTALUMINUMKARAI_QTY" nullValue="&nbsp;"> F_CASTALUMINUMKARAI_QTY </rw:field></td>
+    <td <rw:headers id="HFCASTALUMINUMKARAIGROSS195" src="HBCASTALUMINUMKARAIGROSS195"/> class="OraCellNumber"><rw:field id="FCASTALUMINUMKARAIGROSS195" src="CASTALUMINUMKARAI_GROSS" nullValue="&nbsp;"> F_CASTALUMINUMKARAI_GROSS </rw:field></td>
+    <td <rw:headers id="HFCERAMICGIFTBOXQTY195" src="HBCERAMICGIFTBOXQTY195"/> class="OraCellNumber"><rw:field id="FCERAMICGIFTBOXQTY195" src="CERAMIC_GIFT_BOX_QTY" nullValue="&nbsp;"> F_CERAMIC_GIFT_BOX_QTY </rw:field></td>
+    <td <rw:headers id="HFCERAMICGIFTBOXGROSS195" src="HBCERAMICGIFTBOXGROSS195"/> class="OraCellNumber"><rw:field id="FCERAMICGIFTBOXGROSS195" src="CERAMIC_GIFT_BOX_GROSS" nullValue="&nbsp;"> F_CERAMIC_GIFT_BOX_GROSS </rw:field></td>
+    <td <rw:headers id="HFDIECASTINGQTY195" src="HBDIECASTINGQTY195"/> class="OraCellNumber"><rw:field id="FDIECASTINGQTY195" src="DIE_CASTING_QTY" nullValue="&nbsp;"> F_DIE_CASTING_QTY </rw:field></td>
+    <td <rw:headers id="HFDIECASTINGGROSS195" src="HBDIECASTINGGROSS195"/> class="OraCellNumber"><rw:field id="FDIECASTINGGROSS195" src="DIE_CASTING_GROSS" nullValue="&nbsp;"> F_DIE_CASTING_GROSS </rw:field></td>
+    <td <rw:headers id="HFDIECASTINGGIFTBOXQTY195" src="HBDIECASTINGGIFTBOXQTY195"/> class="OraCellNumber"><rw:field id="FDIECASTINGGIFTBOXQTY195" src="DIE_CASTING_GIFT_BOX_QTY" nullValue="&nbsp;"> F_DIE_CASTING_GIFT_BOX_QTY </rw:field></td>
+    <td <rw:headers id="HFDIECASTINGGIFTBOXGROSS195" src="HBDIECASTINGGIFTBOXGROSS195"/> class="OraCellNumber"><rw:field id="FDIECASTINGGIFTBOXGROSS195" src="DIE_CASTING_GIFT_BOX_GROSS" nullValue="&nbsp;"> F_DIE_CASTING_GIFT_BOX_GROSS </rw:field></td>
+    <td <rw:headers id="HFELECTRICIRONQTY195" src="HBELECTRICIRONQTY195"/> class="OraCellNumber"><rw:field id="FELECTRICIRONQTY195" src="ELECTRIC_IRON_QTY" nullValue="&nbsp;"> F_ELECTRIC_IRON_QTY </rw:field></td>
+    <td <rw:headers id="HFELECTRICIRONGROSS195" src="HBELECTRICIRONGROSS195"/> class="OraCellNumber"><rw:field id="FELECTRICIRONGROSS195" src="ELECTRIC_IRON_GROSS" nullValue="&nbsp;"> F_ELECTRIC_IRON_GROSS </rw:field></td>
+    <td <rw:headers id="HFFLASKQTY195" src="HBFLASKQTY195"/> class="OraCellNumber"><rw:field id="FFLASKQTY195" src="FLASK_QTY" nullValue="&nbsp;"> F_FLASK_QTY </rw:field></td>
+    <td <rw:headers id="HFFLASKGROSS195" src="HBFLASKGROSS195"/> class="OraCellNumber"><rw:field id="FFLASKGROSS195" src="FLASK_GROSS" nullValue="&nbsp;"> F_FLASK_GROSS </rw:field></td>
+    <td <rw:headers id="HFFOODPOTQTY195" src="HBFOODPOTQTY195"/> class="OraCellNumber"><rw:field id="FFOODPOTQTY195" src="FOOD_POT_QTY" nullValue="&nbsp;"> F_FOOD_POT_QTY </rw:field></td>
+    <td <rw:headers id="HFFOODPOTGROSS195" src="HBFOODPOTGROSS195"/> class="OraCellNumber"><rw:field id="FFOODPOTGROSS195" src="FOOD_POT_GROSS" nullValue="&nbsp;"> F_FOOD_POT_GROSS </rw:field></td>
+    <td <rw:headers id="HFGASSTOVEQTY195" src="HBGASSTOVEQTY195"/> class="OraCellNumber"><rw:field id="FGASSTOVEQTY195" src="GAS_STOVE_QTY" nullValue="&nbsp;"> F_GAS_STOVE_QTY </rw:field></td>
+    <td <rw:headers id="HFGASSTOVEGROSS195" src="HBGASSTOVEGROSS195"/> class="OraCellNumber"><rw:field id="FGASSTOVEGROSS195" src="GAS_STOVE_GROSS" nullValue="&nbsp;"> F_GAS_STOVE_GROSS </rw:field></td>
+    <td <rw:headers id="HFINDUCTIONCOOKERQTY195" src="HBINDUCTIONCOOKERQTY195"/> class="OraCellNumber"><rw:field id="FINDUCTIONCOOKERQTY195" src="INDUCTION_COOKER_QTY" nullValue="&nbsp;"> F_INDUCTION_COOKER_QTY </rw:field></td>
+    <td <rw:headers id="HFINDUCTIONCOOKERGROSS195" src="HBINDUCTIONCOOKERGROSS195"/> class="OraCellNumber"><rw:field id="FINDUCTIONCOOKERGROSS195" src="INDUCTION_COOKER_GROSS" nullValue="&nbsp;"> F_INDUCTION_COOKER_GROSS </rw:field></td>
+    <td <rw:headers id="HFKETTLEQTY195" src="HBKETTLEQTY195"/> class="OraCellNumber"><rw:field id="FKETTLEQTY195" src="KETTLE_QTY" nullValue="&nbsp;"> F_KETTLE_QTY </rw:field></td>
+    <td <rw:headers id="HFKETTLEGROSS195" src="HBKETTLEGROSS195"/> class="OraCellNumber"><rw:field id="FKETTLEGROSS195" src="KETTLE_GROSS" nullValue="&nbsp;"> F_KETTLE_GROSS </rw:field></td>
+    <td <rw:headers id="HFNONSTICKQTY195" src="HBNONSTICKQTY195"/> class="OraCellNumber"><rw:field id="FNONSTICKQTY195" src="NON_STICK_QTY" nullValue="&nbsp;"> F_NON_STICK_QTY </rw:field></td>
+    <td <rw:headers id="HFNONSTICKGROSS195" src="HBNONSTICKGROSS195"/> class="OraCellNumber"><rw:field id="FNONSTICKGROSS195" src="NON_STICK_GROSS" nullValue="&nbsp;"> F_NON_STICK_GROSS </rw:field></td>
+    <td <rw:headers id="HFNONSTICKCERAMICQTY195" src="HBNONSTICKCERAMICQTY195"/> class="OraCellNumber"><rw:field id="FNONSTICKCERAMICQTY195" src="NON_STICK_CERAMIC_QTY" nullValue="&nbsp;"> F_NON_STICK_CERAMIC_QTY </rw:field></td>
+    <td <rw:headers id="HFNONSTICKCERAMICGROSS195" src="HBNONSTICKCERAMICGROSS195"/> class="OraCellNumber"><rw:field id="FNONSTICKCERAMICGROSS195" src="NON_STICK_CERAMIC_GROSS" nullValue="&nbsp;"> F_NON_STICK_CERAMIC_GROSS </rw:field></td>
+    <td <rw:headers id="HFNONSTICKGIFTBOXQTY195" src="HBNONSTICKGIFTBOXQTY195"/> class="OraCellNumber"><rw:field id="FNONSTICKGIFTBOXQTY195" src="NONSTICK_GIFT_BOX_QTY" nullValue="&nbsp;"> F_NONSTICK_GIFT_BOX_QTY </rw:field></td>
+    <td <rw:headers id="HFNONSTICKGIFTBOXGROSS195" src="HBNONSTICKGIFTBOXGROSS195"/> class="OraCellNumber"><rw:field id="FNONSTICKGIFTBOXGROSS195" src="NONSTICK_GIFT_BOX_GROSS" nullValue="&nbsp;"> F_NONSTICK_GIFT_BOX_GROSS </rw:field></td>
+    <td <rw:headers id="HFOTHERSQTY195" src="HBOTHERSQTY195"/> class="OraCellNumber"><rw:field id="FOTHERSQTY195" src="OTHERS_QTY" nullValue="&nbsp;"> F_OTHERS_QTY </rw:field></td>
+    <td <rw:headers id="HFOTHERSGROSS195" src="HBOTHERSGROSS195"/> class="OraCellNumber"><rw:field id="FOTHERSGROSS195" src="OTHERS_GROSS" nullValue="&nbsp;"> F_OTHERS_GROSS </rw:field></td>
+    <td <rw:headers id="HFPACKINGMATERIALSQTY195" src="HBPACKINGMATERIALSQTY195"/> class="OraCellNumber"><rw:field id="FPACKINGMATERIALSQTY195" src="PACKING_MATERIALS_QTY" nullValue="&nbsp;"> F_PACKING_MATERIALS_QTY </rw:field></td>
+    <td <rw:headers id="HFPACKINGMATERIALSGROSS195" src="HBPACKINGMATERIALSGROSS195"/> class="OraCellNumber"><rw:field id="FPACKINGMATERIALSGROSS195" src="PACKING_MATERIALS_GROSS" nullValue="&nbsp;"> F_PACKING_MATERIALS_GROSS </rw:field></td>
+    <td <rw:headers id="HFPOLISHHARIQTY195" src="HBPOLISHHARIQTY195"/> class="OraCellNumber"><rw:field id="FPOLISHHARIQTY195" src="POLISH_HARI_QTY" nullValue="&nbsp;"> F_POLISH_HARI_QTY </rw:field></td>
+    <td <rw:headers id="HFPOLISHHARIGROSS195" src="HBPOLISHHARIGROSS195"/> class="OraCellNumber"><rw:field id="FPOLISHHARIGROSS195" src="POLISH_HARI_GROSS" nullValue="&nbsp;"> F_POLISH_HARI_GROSS </rw:field></td>
+    <td <rw:headers id="HFPRESSURECOOKERQTY195" src="HBPRESSURECOOKERQTY195"/> class="OraCellNumber"><rw:field id="FPRESSURECOOKERQTY195" src="PRESSURE_COOKER_QTY" nullValue="&nbsp;"> F_PRESSURE_COOKER_QTY </rw:field></td>
+    <td <rw:headers id="HFPRESSURECOOKERGROSS195" src="HBPRESSURECOOKERGROSS195"/> class="OraCellNumber"><rw:field id="FPRESSURECOOKERGROSS195" src="PRESSURE_COOKER_GROSS" nullValue="&nbsp;"> F_PRESSURE_COOKER_GROSS </rw:field></td>
+    <td <rw:headers id="HFRAWMATERIALSQTY195" src="HBRAWMATERIALSQTY195"/> class="OraCellNumber"><rw:field id="FRAWMATERIALSQTY195" src="RAW_MATERIALS_QTY" nullValue="&nbsp;"> F_RAW_MATERIALS_QTY </rw:field></td>
+    <td <rw:headers id="HFRAWMATERIALSGROSS195" src="HBRAWMATERIALSGROSS195"/> class="OraCellNumber"><rw:field id="FRAWMATERIALSGROSS195" src="RAW_MATERIALS_GROSS" nullValue="&nbsp;"> F_RAW_MATERIALS_GROSS </rw:field></td>
+    <td <rw:headers id="HFRICECOOKERQTY195" src="HBRICECOOKERQTY195"/> class="OraCellNumber"><rw:field id="FRICECOOKERQTY195" src="RICE_COOKER_QTY" nullValue="&nbsp;"> F_RICE_COOKER_QTY </rw:field></td>
+    <td <rw:headers id="HFRICECOOKERGROSS195" src="HBRICECOOKERGROSS195"/> class="OraCellNumber"><rw:field id="FRICECOOKERGROSS195" src="RICE_COOKER_GROSS" nullValue="&nbsp;"> F_RICE_COOKER_GROSS </rw:field></td>
+    <td <rw:headers id="HFSPOONKNIFEQTY195" src="HBSPOONKNIFEQTY195"/> class="OraCellNumber"><rw:field id="FSPOONKNIFEQTY195" src="SPOON_KNIFE_QTY" nullValue="&nbsp;"> F_SPOON_KNIFE_QTY </rw:field></td>
+    <td <rw:headers id="HFSPOONKNIFEGROSS195" src="HBSPOONKNIFEGROSS195"/> class="OraCellNumber"><rw:field id="FSPOONKNIFEGROSS195" src="SPOON_KNIFE_GROSS" nullValue="&nbsp;"> F_SPOON_KNIFE_GROSS </rw:field></td>
+    <td <rw:headers id="HFSSPRESSURECOOKERQTY195" src="HBSSPRESSURECOOKERQTY195"/> class="OraCellNumber"><rw:field id="FSSPRESSURECOOKERQTY195" src="SS_PRESSURE_COOKER_QTY" nullValue="&nbsp;"> F_SS_PRESSURE_COOKER_QTY </rw:field></td>
+    <td <rw:headers id="HFSSPRESSURECOOKERGROSS195" src="HBSSPRESSURECOOKERGROSS195"/> class="OraCellNumber"><rw:field id="FSSPRESSURECOOKERGROSS195" src="SS_PRESSURE_COOKER_GROSS" nullValue="&nbsp;"> F_SS_PRESSURE_COOKER_GROSS </rw:field></td>
+    <td <rw:headers id="HFSTEELPCSQTY195" src="HBSTEELPCSQTY195"/> class="OraCellNumber"><rw:field id="FSTEELPCSQTY195" src="STEEL_PCS_QTY" nullValue="&nbsp;"> F_STEEL_PCS_QTY </rw:field></td>
+    <td <rw:headers id="HFSTEELPCSGROSS195" src="HBSTEELPCSGROSS195"/> class="OraCellNumber"><rw:field id="FSTEELPCSGROSS195" src="STEEL_PCS_GROSS" nullValue="&nbsp;"> F_STEEL_PCS_GROSS </rw:field></td>
+    <td <rw:headers id="HFTOTALQTY195" src="HBTOTALQTY195"/> class="OraCellNumber"><rw:field id="FTOTALQTY195" src="TOTAL_QTY" nullValue="&nbsp;"> F_TOTAL_QTY </rw:field></td>
+    <td <rw:headers id="HFTOTALGROSS195" src="HBTOTALGROSS195"/> class="OraCellNumber"><rw:field id="FTOTALGROSS195" src="TOTAL_GROSS" nullValue="&nbsp;"> F_TOTAL_GROSS </rw:field></td>
+   </tr>
+  </rw:foreach>
+ </tbody>
+</table>
+</rw:dataArea> <!-- id="MGTERRITORYGRPFR195" -->
+<!-- End of Data Area Generated by Reports Developer -->
+
+      </DIV>
+    </TD>
+  </TR>
+</TABLE>
+
+<P>
+  <BR>
+</P>
+
+<TABLE border=0 cellPadding=0 cellSpacing=0 width="100%">
+  <TBODY>
+  <TR>
+    <TD bgColor="#000000" colSpan=2><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+  </TR>
+  <TR>
+    <TD bgColor="#ff0000" colSpan=2 class="OraColumnHeader"><IMG alt="" border=0 height=4 src="images/stretch.gif" width=1></TD>
+  </TR>
+  <TR>
+    <TD bgColor="#000000" colSpan=2><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+  </TR>
+  <TR>
+    <TD bgColor="#ffffff">&nbsp;</TD>
+    <TD align=right bgColor="#ffffff">&nbsp;</TD>
+  </TR>
+  </TBODY>
+</TABLE>
+
+</BODY>
+
+</HTML>
+
+<!--
+</rw:report>
+-->
+]]>
+  </webSource>
+  <colorPalette>
+    <color index="190" displayName="TextColor" value="#336699"/>
+    <color index="191" displayName="TableHeading" value="#cccc99"/>
+    <color index="192" displayName="TableCell" value="#f7f7e7"/>
+    <color index="193" displayName="Totals" value="#ffffcc"/>
+  </colorPalette>
+  <reportPrivate defaultReportType="tabular" versionFlags2="0"
+   templateName="rwbeige"/>
+  <reportWebSettings>
+  <![CDATA[#NULL#]]>
+  </reportWebSettings>
+</report>

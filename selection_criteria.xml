@@ -1,0 +1,4488 @@
+<?xml version="1.0" encoding="WINDOWS-1252" ?>
+<report name="selection_criteria" DTDVersion="9.0.2.0.10"
+ beforeParameterFormTrigger="beforepform" beforeReportTrigger="beforereport">
+  <xmlSettings xmlTag="SELECTION_CRITERIA" xmlPrologType="text">
+  <![CDATA[<?xml version="1.0" encoding="&Encoding"?>]]>
+  </xmlSettings>
+  <reportHtmlEscapes>
+    <beforeReportHtmlEscape>
+    <![CDATA[<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html dir=&Direction>
+<head>
+<meta http-equiv="Content-Type"  content="text/html; charset=&Encoding">
+</head>
+<body bgcolor="#ffffff">
+
+]]>
+    </beforeReportHtmlEscape>
+    <beforePageHtmlEscape>
+    <![CDATA[#NULL#]]>
+    </beforePageHtmlEscape>
+    <afterPageHtmlEscape>
+    <![CDATA[<hr size=5 noshade>
+]]>
+    </afterPageHtmlEscape>
+    <beforeFormHtmlEscape>
+    <![CDATA[<html dir=&Direction>
+<body bgcolor="#ffffff">
+<form method=post action="_action_">
+<input name="hidden_run_parameters" type=hidden value="_hidden_">
+<font color=red><!--error--></font>
+<center>
+<p><table border=0 cellspacing=0 cellpadding=0>
+<tr>
+<td><input type=submit></td>
+<td width=15>
+<td><input type=reset></td>
+</tr>
+</table>
+<p><hr><p>
+]]>
+    </beforeFormHtmlEscape>
+    <pageNavigationHtmlEscape>
+    <![CDATA[<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+<html dir=&Direction>
+<head>
+<meta http-equiv="Content-Type"  content="text/html; charset=&Encoding">
+<TITLE>Oracle HTML Navigator</TITLE>
+<SCRIPT type="text/javascript" LANGUAGE = "JavaScript">
+
+var jump_index = 1			// Jump to this page
+var num_pages = &TotalPages			// Total number of pages
+var basefilename = "&file_name"		// Base file name
+var fileext = "&file_ext"		//File extension
+
+/* jumps to "new_page" */
+function new_page(form, new_page)
+{
+	form.reqpage.value = new_page;
+	parent.frames[0].location = basefilename + "_" + new_page + "."+fileext;
+}
+
+/* go back one page */
+function back(form)
+{
+	/* if we are not in first page */
+	if (jump_index > 1)
+	{
+		jump_index--;
+		new_page(form, jump_index);
+	}
+}
+
+/* go forward one page */
+function forward(form)
+{
+	/* if we are not in last page */
+	if (jump_index < num_pages)
+	{
+		jump_index++;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to first page */
+function first(form)
+{
+	if(jump_index != 1)
+	{
+		jump_index = 1;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to last page */
+function last(form)
+{
+	if(jump_index != num_pages)
+	{
+		jump_index = num_pages;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to the user specified page number */
+function pagenum(form)
+{
+	/* sanity check */
+	if (form.reqpage.value < 1)
+	{
+		form.reqpage.value = 1;
+	}
+	if (form.reqpage.value > num_pages)
+	{
+		form.reqpage.value = num_pages;
+	}
+	jump_index = form.reqpage.value;
+	new_page(form, jump_index);
+}
+</SCRIPT>
+</HEAD>
+
+<BODY>
+<FORM NAME="ThisForm" action="" onSubmit="pagenum(this); return false;">
+<center><table><tr>
+<td> <INPUT TYPE="button"  VALUE="<< " onClick="first(this.form)">
+<td> <INPUT TYPE="button"  VALUE=" < " onClick="back(this.form)">
+<td> <INPUT TYPE="button"  VALUE="Page:" onClick="pagenum(this.form)">
+<td> <INPUT NAME="reqpage" VALUE="1" SIZE=2>
+<td> <INPUT TYPE="button"  VALUE=" > " onClick="forward(this.form)">
+<td> <INPUT TYPE="button"  VALUE=" >>" onClick="last(this.form)">
+</table></center>
+</FORM>
+</body></html>]]>
+    </pageNavigationHtmlEscape>
+  </reportHtmlEscapes>
+  <data>
+    <userParameter name="P_NAVDBID" datatype="character" width="40"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_CYCLE" datatype="number" precision="10"
+     defaultWidth="0" defaultHeight="0"/>
+    <dataSource name="Q_list_criteria_values">
+      <select>
+      <![CDATA[select a.select_by_id lv_selbyid, a.record_type_code lv_rectypecode, a.include_exclude_ind lv_incexcl,
+       b.value_seq lv_seq, b.value lv_value,
+       c.identifier_label lv_label, d.record_type_descr lv_record_descr
+from   navdb_select_criteria a,
+         selection_criteria_value b,
+         record_identifier  c,
+         record_type  d
+where  a.navdb_id = :p_navdbid
+and     a.geo_area_id = -2
+and     a.select_by_id = b.select_by_id
+and    a.record_type_code = c.record_type_code
+and    a.record_type_code = d.record_type_code
+and    b.value_descr = c.identifier_column_name
+order by 1, 2, 3]]>
+      </select>
+      <displayInfo x="0.56238" y="19.82068" width="1.40625" height="0.19995"/>
+      <group name="G_list_criteria_values">
+        <displayInfo x="0.42847" y="20.25183" width="1.68494" height="1.11426"
+        />
+        <dataItem name="lv_incexcl" datatype="vchar2" columnOrder="14"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="Lv Incexcl" breakOrder="none">
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="LV_INCEXCL" order="3" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="lv_rectypecode" oracleDatatype="number"
+         columnOrder="13" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="33" defaultLabel="Lv Rectypecode">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="LV_RECTYPECODE" order="2" width="22"
+           precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="lv_record_descr" datatype="vchar2" columnOrder="18"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Lv Record Descr">
+          <dataDescriptor expression="d.record_type_descr"
+           descriptiveExpression="LV_RECORD_DESCR" order="7" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="lv_selbyid" oracleDatatype="number" columnOrder="12"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Lv Selbyid">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="LV_SELBYID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_lv_incexcl_display"
+         source="cf_lv_incexcl_displayformula" datatype="character" width="20"
+         precision="10" defaultWidth="0" defaultHeight="0" columnFlags="16"
+         breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+      <group name="G_lv_seq">
+        <displayInfo x="0.72095" y="21.82898" width="1.09998" height="0.43066"
+        />
+        <dataItem name="lv_seq" oracleDatatype="number" columnOrder="15"
+         width="22" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Lv Seq">
+          <dataDescriptor expression="b.value_seq"
+           descriptiveExpression="LV_SEQ" order="4" width="22" precision="38"
+          />
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+      <group name="G_lv_label">
+        <displayInfo x="0.64819" y="23.01868" width="1.24548" height="0.43066"
+        />
+        <dataItem name="lv_label" datatype="vchar2" columnOrder="17"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Lv Label">
+          <dataDescriptor expression="c.identifier_label"
+           descriptiveExpression="LV_LABEL" order="6" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+      <group name="G_lv_value">
+        <displayInfo x="0.39185" y="23.98010" width="1.75818" height="0.77246"
+        />
+        <dataItem name="lv_value" datatype="vchar2" columnOrder="16"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="32" defaultLabel="Lv Value" breakOrder="none">
+          <dataDescriptor expression="b.value"
+           descriptiveExpression="LV_VALUE" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_general_criteria">
+      <select>
+      <![CDATA[select a.criteria_id gen_criteria_id, b.criteria_descr gen_criteria_descr
+from    navdb_general_criteria a, general_criteria b
+where a.navdb_id = :p_navdbid
+and  a.criteria_id = b.criteria_id
+and a.apply_ind = 'X'  -- Just to make this query get nothing
+order by 2]]>
+      </select>
+      <displayInfo x="0.37610" y="0.73950" width="1.23962" height="0.19995"/>
+      <group name="G_gen_criteria">
+        <displayInfo x="0.19666" y="1.25269" width="1.59839" height="0.94336"
+        />
+        <dataItem name="gen_criteria_id" oracleDatatype="number"
+         columnOrder="20" width="22" defaultWidth="70000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Gen Criteria Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="GEN_CRITERIA_ID" order="1"
+           oracleDatatype="number" width="22" precision="5"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gen_criteria_descr" datatype="vchar2" columnOrder="21"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Gen Criteria Descr">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="GEN_CRITERIA_DESCR" order="2" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_default_criteria">
+      <select>
+      <![CDATA[select a.select_by_id, a.record_type_code, a.criteria_id, a.include_exclude_ind,
+          b.criteria_descr, c.record_type_descr
+from   navdb_select_criteria a,
+          select_criteria b,
+          record_type    c
+where a.navdb_id = :p_navdbid
+and    geo_area_id = -1
+and    parent_select_by_id is null
+and    a.criteria_id = b.criteria_id
+and   a.record_type_code = c.record_type_code
+order by 2]]>
+      </select>
+      <displayInfo x="2.34399" y="0.43750" width="1.23926" height="0.19995"/>
+      <group name="G_default_criteria">
+        <displayInfo x="2.03491" y="1.11658" width="1.86096" height="1.79785"
+        />
+        <dataItem name="criteria_descr" datatype="vchar2" columnOrder="29"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Criteria Descr">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="CRITERIA_DESCR" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="record_type_descr" datatype="vchar2" columnOrder="30"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Record Type Descr">
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="RECORD_TYPE_DESCR" order="6" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="include_exclude_ind" datatype="vchar2"
+         columnOrder="28" width="1" defaultWidth="10000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Include Exclude Ind">
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="INCLUDE_EXCLUDE_IND" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="select_by_id" oracleDatatype="number" columnOrder="25"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Select By Id">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="SELECT_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="record_type_code" oracleDatatype="number"
+         columnOrder="26" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Record Type Code">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="RECORD_TYPE_CODE" order="2" width="22"
+           precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="criteria_id" oracleDatatype="number" columnOrder="27"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Criteria Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="CRITERIA_ID" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_default_selection_rule"
+         source="cf_selection_ruleformula" datatype="character" width="30"
+         precision="10" defaultWidth="0" defaultHeight="0" columnFlags="16"
+         breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_default_crit_children">
+      <select>
+      <![CDATA[select a.select_by_id dcc_sel_by_id, a.record_type_code dcc_rec_type_code,           a.criteria_id dcc_crit_id, 
+         a.include_exclude_ind dcc_inc_excl_ind,
+          b.criteria_descr dcc_crit_desc, c.record_type_descr dcc_rec_type_descr, a.parent_select_by_id dcc_parent_id
+from   navdb_select_criteria a,
+          select_criteria b,
+          record_type    c
+where a.navdb_id = :p_navdbid
+and    geo_area_id = -1
+and    a.criteria_id = b.criteria_id
+and   a.record_type_code = c.record_type_code
+and   a.include_exclude_ind in ('I','X')
+order by 2]]>
+      </select>
+      <displayInfo x="4.58337" y="0.40686" width="1.43750" height="0.32983"/>
+      <group name="G_default_crit_children">
+        <displayInfo x="4.44666" y="1.10681" width="1.70251" height="1.79785"
+        />
+        <dataItem name="dcc_crit_desc" datatype="vchar2" columnOrder="35"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Dcc Crit Desc">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="DCC_CRIT_DESC" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="dcc_sel_by_id" oracleDatatype="number"
+         columnOrder="31" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Dcc Sel By Id">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="DCC_SEL_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="dcc_rec_type_code" oracleDatatype="number"
+         columnOrder="32" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Dcc Rec Type Code">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="DCC_REC_TYPE_CODE" order="2" width="22"
+           precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="dcc_crit_id" oracleDatatype="number" columnOrder="33"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Dcc Crit Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="DCC_CRIT_ID" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="dcc_inc_excl_ind" datatype="vchar2" columnOrder="34"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Dcc Inc Excl Ind">
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="DCC_INC_EXCL_IND" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="dcc_rec_type_descr" datatype="vchar2" columnOrder="36"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Dcc Rec Type Descr">
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="DCC_REC_TYPE_DESCR" order="6" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="dcc_parent_id" oracleDatatype="number"
+         columnOrder="37" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Dcc Parent Id">
+          <dataDescriptor expression="a.parent_select_by_id"
+           descriptiveExpression="DCC_PARENT_ID" order="7" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <summary name="CS_dcc_nval" source="dccv_value" function="count"
+         width="20" precision="10" reset="G_default_crit_children"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8"
+         valueIfNull="0">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <formula name="CF_dcc_incexcl_display"
+         source="cf_dcc_incexcl_displayformula" datatype="character"
+         width="20" precision="10" defaultWidth="0" defaultHeight="0"
+         columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_dcc_value">
+      <select>
+      <![CDATA[select select_by_id dccv_sel_by_id, value_descr dccv_value_descr, 
+          value dccv_value
+from    selection_criteria_value
+order by value_seq]]>
+      </select>
+      <displayInfo x="7.08337" y="0.39587" width="1.30115" height="0.32983"/>
+      <group name="G_dcc_value">
+        <displayInfo x="6.95947" y="1.09583" width="1.56128" height="1.28516"
+        />
+        <dataItem name="dccv_value" datatype="vchar2" columnOrder="40"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Dccv Value">
+          <dataDescriptor expression="value"
+           descriptiveExpression="DCCV_VALUE" order="3" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="dccv_sel_by_id" oracleDatatype="number"
+         columnOrder="38" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Dccv Sel By Id">
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="DCCV_SEL_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="dccv_value_descr" datatype="vchar2" columnOrder="39"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Dccv Value Descr">
+          <dataDescriptor expression="value_descr"
+           descriptiveExpression="DCCV_VALUE_DESCR" order="2" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_dccv_display" source="cf_dccv_displayformula"
+         datatype="character" width="2000" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_supplemental">
+      <select>
+      <![CDATA[select a.select_by_id sup_selbyid, a.record_type_code sup_rtc, a.criteria_id sup_criteria_id, 
+          decode(a.include_exclude_ind, 'I','Include',null) sup_incexci,
+          b.criteria_descr sup_criteria_descr, c.record_type_descr sup_rec_descr
+from   navdb_select_criteria a,
+          select_criteria b,
+          record_type    c
+where a.navdb_id = :p_navdbid
+and    a.criteria_id in (select criteria_id from select_criteria where criteria_descr like '%SUPPL%')
+and    a.criteria_id = b.criteria_id
+and    a.record_type_code = c.record_type_code
+and    a.geo_area_id = -1
+order by 2]]>
+      </select>
+      <displayInfo x="8.92615" y="0.44788" width="1.16809" height="0.19995"/>
+      <group name="G_supplemental">
+        <displayInfo x="8.70642" y="1.06482" width="1.59839" height="1.28516"
+        />
+        <dataItem name="sup_criteria_descr" datatype="vchar2" columnOrder="50"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Sup Criteria Descr">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="SUP_CRITERIA_DESCR" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="sup_selbyid" oracleDatatype="number" columnOrder="46"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Sup Selbyid">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="SUP_SELBYID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="sup_incexci" datatype="vchar2" columnOrder="49"
+         width="7" defaultWidth="70000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Sup Incexci">
+          <dataDescriptor
+           expression="decode ( a.include_exclude_ind , &apos;I&apos; , &apos;Include&apos; , null )"
+           descriptiveExpression="SUP_INCEXCI" order="4" width="7"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="sup_rtc" oracleDatatype="number" columnOrder="47"
+         width="22" defaultWidth="60000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Sup Rtc">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="SUP_RTC" order="2" width="22" precision="4"
+          />
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="sup_criteria_id" oracleDatatype="number"
+         columnOrder="48" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Sup Criteria Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="SUP_CRITERIA_ID" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="sup_rec_descr" datatype="vchar2" columnOrder="51"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Sup Rec Descr">
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="SUP_REC_DESCR" order="6" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_geo_area">
+      <select>
+      <![CDATA[select select_by_id g_selbyid,
+           geo_area_name  g_geo_aria_name,
+           include_exclude_ind g_incexcl
+from    select_by_geographic_area
+where  navdb_id = :p_navdbid
+order by 1]]>
+      </select>
+      <displayInfo x="0.35046" y="3.54236" width="1.02539" height="0.32983"/>
+      <group name="G_g_geo_area">
+        <displayInfo x="0.15564" y="4.11780" width="1.41724" height="0.94336"
+        />
+        <dataItem name="g_selbyid" oracleDatatype="number" columnOrder="52"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="G Selbyid">
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="G_SELBYID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="g_geo_aria_name" datatype="vchar2" columnOrder="53"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="G Geo Aria Name">
+          <dataDescriptor expression="geo_area_name"
+           descriptiveExpression="G_GEO_ARIA_NAME" order="2" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="g_incexcl" datatype="vchar2" columnOrder="54"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="G Incexcl">
+          <dataDescriptor expression="include_exclude_ind"
+           descriptiveExpression="G_INCEXCL" order="3" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_geo_points">
+      <select>
+      <![CDATA[select select_by_id geop_selbyid,
+           sequence_number geop_seqn,
+           latitude ,
+           longitude
+from    geographic_area_point
+order by 2]]>
+      </select>
+      <displayInfo x="2.35437" y="3.36548" width="1.09375" height="0.32983"/>
+      <group name="G_geo_points">
+        <displayInfo x="2.24292" y="4.08618" width="1.31714" height="0.94336"
+        />
+        <dataItem name="geop_seqn" oracleDatatype="number" columnOrder="56"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Geop Seqn">
+          <dataDescriptor expression="sequence_number"
+           descriptiveExpression="GEOP_SEQN" order="2" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="latitude" datatype="vchar2" columnOrder="57" width="9"
+         defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Latitude">
+          <dataDescriptor expression="latitude"
+           descriptiveExpression="LATITUDE" order="3" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="longitude" datatype="vchar2" columnOrder="58"
+         defaultWidth="100000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Longitude">
+          <dataDescriptor expression="longitude"
+           descriptiveExpression="LONGITUDE" order="4" width="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="geop_selbyid" oracleDatatype="number" columnOrder="55"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Geop Selbyid">
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="GEOP_SELBYID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_geo_children">
+      <select>
+      <![CDATA[select a.select_by_id gc_select_by_id, a.record_type_code gc_record_type_code, a.criteria_id gc_criteria_id, a.include_exclude_ind gc_incexcl,
+          b.criteria_descr gc_criteria_desc, c.record_type_descr gc_record_type_descr, a.geo_area_id gc_geo_area_id
+from   navdb_select_criteria a,
+          select_criteria b,
+          record_type    c
+where a.navdb_id = :p_navdbid
+and    a.parent_select_by_id is null
+and    a.criteria_id = b.criteria_id
+and   a.record_type_code = c.record_type_code
+order by 2]]>
+      </select>
+      <displayInfo x="4.00171" y="3.39587" width="1.77026" height="0.32983"/>
+      <group name="G_geo_children">
+        <displayInfo x="3.99829" y="4.09583" width="1.79333" height="1.79785"
+        />
+        <dataItem name="gc_select_by_id" oracleDatatype="number"
+         columnOrder="59" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Gc Select By Id">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="GC_SELECT_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gc_record_type_code" oracleDatatype="number"
+         columnOrder="60" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Gc Record Type Code">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="GC_RECORD_TYPE_CODE" order="2" width="22"
+           precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gc_criteria_id" oracleDatatype="number"
+         columnOrder="61" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Gc Criteria Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="GC_CRITERIA_ID" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gc_incexcl" datatype="vchar2" columnOrder="62"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Gc Incexcl">
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="GC_INCEXCL" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gc_record_type_descr" datatype="vchar2"
+         columnOrder="64" width="50" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Gc Record Type Descr">
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="GC_RECORD_TYPE_DESCR" order="6" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gc_criteria_desc" datatype="vchar2" columnOrder="63"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Gc Criteria Desc">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="GC_CRITERIA_DESC" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gc_geo_area_id" oracleDatatype="number"
+         columnOrder="65" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Gc Geo Area Id">
+          <dataDescriptor expression="a.geo_area_id"
+           descriptiveExpression="GC_GEO_AREA_ID" order="7" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_gc_incexcl" source="cf_gc_incexclformula"
+         datatype="character" width="30" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_geo_grand_children">
+      <select>
+      <![CDATA[select a.select_by_id gcc_sel_by_id, a.record_type_code gcc_rec_type_code,           a.criteria_id gcc_crit_id, 
+         a.include_exclude_ind gcc_inc_excl_ind,
+          b.criteria_descr gcc_crit_desc, c.record_type_descr gcc_rec_type_descr, a.parent_select_by_id gcc_parent_id
+from   navdb_select_criteria a,
+          select_criteria b,
+          record_type    c
+where a.navdb_id = :p_navdbid
+and    a.criteria_id = b.criteria_id
+and   a.record_type_code = c.record_type_code
+and   a.include_exclude_ind in ('I','X')
+order by 2]]>
+      </select>
+      <displayInfo x="6.30151" y="3.44788" width="1.59387" height="0.32983"/>
+      <group name="G_geo_grand_children">
+        <displayInfo x="6.24768" y="4.09595" width="1.70251" height="1.79785"
+        />
+        <dataItem name="gcc_sel_by_id" oracleDatatype="number"
+         columnOrder="67" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Gcc Sel By Id">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="GCC_SEL_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gcc_rec_type_code" oracleDatatype="number"
+         columnOrder="68" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Gcc Rec Type Code">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="GCC_REC_TYPE_CODE" order="2" width="22"
+           precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gcc_crit_id" oracleDatatype="number" columnOrder="69"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Gcc Crit Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="GCC_CRIT_ID" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gcc_inc_excl_ind" datatype="vchar2" columnOrder="70"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Gcc Inc Excl Ind">
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="GCC_INC_EXCL_IND" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gcc_crit_desc" datatype="vchar2" columnOrder="71"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Gcc Crit Desc">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="GCC_CRIT_DESC" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gcc_rec_type_descr" datatype="vchar2" columnOrder="72"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Gcc Rec Type Descr">
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="GCC_REC_TYPE_DESCR" order="6" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gcc_parent_id" oracleDatatype="number"
+         columnOrder="73" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Gcc Parent Id">
+          <dataDescriptor expression="a.parent_select_by_id"
+           descriptiveExpression="GCC_PARENT_ID" order="7" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <summary name="CS_gcc_nval" source="gccv_value_descr" function="count"
+         width="20" precision="10" reset="G_geo_grand_children"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <formula name="CF_gcc_incexcl_display"
+         source="cf_gcc_incexcl_displayformula" datatype="character"
+         width="15" precision="10" defaultWidth="0" defaultHeight="0"
+         columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_geo_grand_children_value">
+      <select>
+      <![CDATA[select select_by_id gccv_sel_by_id, value_descr gccv_value_descr, 
+          value gccv_value
+from    selection_criteria_value
+order by value_seq]]>
+      </select>
+      <displayInfo x="8.27136" y="3.45837" width="2.01086" height="0.32983"/>
+      <group name="G_geo_grand_children_value">
+        <displayInfo x="8.45874" y="4.19983" width="1.88501" height="1.11426"
+        />
+        <dataItem name="gccv_sel_by_id" oracleDatatype="number"
+         columnOrder="77" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Gccv Sel By Id">
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="GCCV_SEL_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gccv_value_descr" datatype="vchar2" columnOrder="78"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Gccv Value Descr">
+          <dataDescriptor expression="value_descr"
+           descriptiveExpression="GCCV_VALUE_DESCR" order="2" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="gccv_value" datatype="vchar2" columnOrder="79"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Gccv Value">
+          <dataDescriptor expression="value"
+           descriptiveExpression="GCCV_VALUE" order="3" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_gccv_display" source="cf_gcc_displayformula"
+         datatype="character" width="2000" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_area_code">
+      <select>
+      <![CDATA[select  select_by_id ac_selbyid,
+        area_code  ac_area_code,
+        include_exclude_ind ac_incexcl
+from    select_by_area
+where   navdb_id = :p_navdbid
+order by 2
+]]>
+      </select>
+      <displayInfo x="0.41565" y="6.91772" width="1.03271" height="0.19995"/>
+      <group name="G_area_code">
+        <displayInfo x="0.23865" y="7.61768" width="1.37964" height="0.77246"
+        />
+        <dataItem name="ac_selbyid" oracleDatatype="number" columnOrder="81"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Ac Selbyid">
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="AC_SELBYID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ac_area_code" datatype="vchar2" columnOrder="82"
+         width="3" defaultWidth="30000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Ac Area Code">
+          <dataDescriptor expression="area_code"
+           descriptiveExpression="AC_AREA_CODE" order="2" width="3"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ac_incexcl" datatype="vchar2" columnOrder="83"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Ac Incexcl">
+          <dataDescriptor expression="include_exclude_ind"
+           descriptiveExpression="AC_INCEXCL" order="3" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_area_code_children">
+      <select>
+      <![CDATA[select a.select_by_id acc_select_by_id, a.record_type_code acc_record_type_code, 
+       a.criteria_id acc_criteria_id, a.include_exclude_ind acc_incexcl,
+       b.criteria_descr acc_criteria_desc, c.record_type_descr acc_record_type_descr, a.area_code_id acc_area_code_id
+from   navdb_select_criteria a,
+       select_criteria b,
+       record_type    c
+where  a.navdb_id = :p_navdbid
+and    a.parent_select_by_id is null
+and    a.criteria_id = b.criteria_id
+and    a.record_type_code = c.record_type_code
+order by 2
+]]>
+      </select>
+      <displayInfo x="2.57239" y="6.47131" width="1.57275" height="0.32983"/>
+      <group name="G_area_code_children">
+        <displayInfo x="2.44189" y="7.18164" width="1.82751" height="1.79785"
+        />
+        <dataItem name="acc_area_code_id" oracleDatatype="number"
+         columnOrder="101" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Acc Area Code Id">
+          <dataDescriptor expression="a.area_code_id"
+           descriptiveExpression="ACC_AREA_CODE_ID" order="7" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="acc_select_by_id" oracleDatatype="number"
+         columnOrder="84" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Icc Select By Id"
+          >
+          <xmlSettings xmlTag="ICC_SELECT_BY_ID"/>
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="ACC_SELECT_BY_ID" order="1"
+           oracleDatatype="number" width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="acc_record_type_code" oracleDatatype="number"
+         columnOrder="85" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Icc Record Type Code">
+          <xmlSettings xmlTag="ICC_RECORD_TYPE_CODE"/>
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="ACC_RECORD_TYPE_CODE" order="2"
+           oracleDatatype="number" width="22" precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="acc_criteria_id" oracleDatatype="number"
+         columnOrder="86" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Icc Criteria Id">
+          <xmlSettings xmlTag="ICC_CRITERIA_ID"/>
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="ACC_CRITERIA_ID" order="3"
+           oracleDatatype="number" width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="acc_incexcl" datatype="vchar2" columnOrder="87"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Icc Incexcl">
+          <xmlSettings xmlTag="ICC_INCEXCL"/>
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="ACC_INCEXCL" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="acc_criteria_desc" datatype="vchar2" columnOrder="88"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Icc Criteria Desc">
+          <xmlSettings xmlTag="ICC_CRITERIA_DESC"/>
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="ACC_CRITERIA_DESC" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="acc_record_type_descr" datatype="vchar2"
+         columnOrder="89" width="50" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Icc Record Type Descr">
+          <xmlSettings xmlTag="ICC_RECORD_TYPE_DESCR"/>
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="ACC_RECORD_TYPE_DESCR" order="6" width="50"
+          />
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_acc_incexcl" source="cf_acc_incexclformula"
+         datatype="character" width="30" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_area_code_grand_children">
+      <select>
+      <![CDATA[select a.select_by_id accc_sel_by_id, a.record_type_code accc_rec_type_code,
+       a.criteria_id accc_crit_id, a.include_exclude_ind accc_inc_excl_ind,
+       b.criteria_descr accc_crit_desc, c.record_type_descr accc_rec_type_descr, 
+       a.parent_select_by_id accc_parent_id
+from   navdb_select_criteria a,
+       select_criteria b,
+       record_type    c
+where  a.navdb_id = :p_navdbid
+and    a.criteria_id = b.criteria_id
+and    a.record_type_code = c.record_type_code
+and    a.include_exclude_ind in ('I','X')
+order by 2]]>
+      </select>
+      <displayInfo x="4.94690" y="6.48193" width="1.79175" height="0.32983"/>
+      <group name="G_area_code_grand_children">
+        <displayInfo x="4.97302" y="7.17151" width="1.72339" height="1.79785"
+        />
+        <dataItem name="accc_sel_by_id" oracleDatatype="number"
+         columnOrder="90" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Iccc Sel By Id">
+          <xmlSettings xmlTag="ICCC_SEL_BY_ID"/>
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="ACCC_SEL_BY_ID" order="1"
+           oracleDatatype="number" width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="accc_rec_type_code" oracleDatatype="number"
+         columnOrder="91" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Iccc Rec Type Code">
+          <xmlSettings xmlTag="ICCC_REC_TYPE_CODE"/>
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="ACCC_REC_TYPE_CODE" order="2"
+           oracleDatatype="number" width="22" precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="accc_crit_id" oracleDatatype="number" columnOrder="92"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Iccc Crit Id">
+          <xmlSettings xmlTag="ICCC_CRIT_ID"/>
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="ACCC_CRIT_ID" order="3"
+           oracleDatatype="number" width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="accc_inc_excl_ind" datatype="vchar2" columnOrder="93"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Iccc Inc Excl Ind">
+          <xmlSettings xmlTag="ICCC_INC_EXCL_IND"/>
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="ACCC_INC_EXCL_IND" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="accc_crit_desc" datatype="vchar2" columnOrder="94"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Iccc Crit Desc">
+          <xmlSettings xmlTag="ICCC_CRIT_DESC"/>
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="ACCC_CRIT_DESC" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="accc_rec_type_descr" datatype="vchar2"
+         columnOrder="95" width="50" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Iccc Rec Type Descr">
+          <xmlSettings xmlTag="ICCC_REC_TYPE_DESCR"/>
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="ACCC_REC_TYPE_DESCR" order="6" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="accc_parent_id" oracleDatatype="number"
+         columnOrder="96" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Iccc Parent Id">
+          <xmlSettings xmlTag="ICCC_PARENT_ID"/>
+          <dataDescriptor expression="a.parent_select_by_id"
+           descriptiveExpression="ACCC_PARENT_ID" order="7"
+           oracleDatatype="number" width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <summary name="CS_accc_nval" source="acccv_value" function="count"
+         width="20" precision="10" reset="G_area_code_grand_children"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8"
+         valueIfNull="0">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <formula name="CF_accc_incexcl_display"
+         source="cf_accc_incexcl_displayformula" datatype="character"
+         width="15" precision="10" defaultWidth="0" defaultHeight="0"
+         columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_area_code_value">
+      <select>
+      <![CDATA[select select_by_id acccv_sel_by_id, value_descr acccv_value_descr, 
+          value acccv_value
+from    selection_criteria_value
+order by value_seq
+]]>
+      </select>
+      <displayInfo x="8.05737" y="6.45142" width="1.49597" height="0.32983"/>
+      <group name="G_area_code_value">
+        <displayInfo x="7.99915" y="7.14099" width="1.60876" height="1.11426"
+        />
+        <dataItem name="acccv_sel_by_id" oracleDatatype="number"
+         columnOrder="97" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Icccv Sel By Id">
+          <xmlSettings xmlTag="ICCCV_SEL_BY_ID"/>
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="ACCCV_SEL_BY_ID" order="1"
+           oracleDatatype="number" width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="acccv_value_descr" datatype="vchar2" columnOrder="98"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Icccv Value Descr">
+          <xmlSettings xmlTag="ICCCV_VALUE_DESCR"/>
+          <dataDescriptor expression="value_descr"
+           descriptiveExpression="ACCCV_VALUE_DESCR" order="2" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="acccv_value" datatype="vchar2" columnOrder="99"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Icccv Value">
+          <xmlSettings xmlTag="ICCCV_VALUE"/>
+          <dataDescriptor expression="value"
+           descriptiveExpression="ACCCV_VALUE" order="3" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_acccv_display" source="cf_acccv_displayformula"
+         datatype="character" width="2000" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_icao">
+      <select>
+      <![CDATA[select  select_by_id ic_selbyid,
+        icao_code  ic_icao_code,
+        include_exclude_ind ic_incexcl
+from    select_by_icao
+where   navdb_id = :p_navdbid
+order by 2
+]]>
+      </select>
+      <displayInfo x="0.33154" y="9.65771" width="1.19006" height="0.35266"/>
+      <group name="G_icao">
+        <displayInfo x="0.26379" y="10.39917" width="1.31714" height="0.77246"
+        />
+        <dataItem name="ic_selbyid" oracleDatatype="number" columnOrder="107"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Ic Selbyid">
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="IC_SELBYID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ic_icao_code" datatype="vchar2" columnOrder="108"
+         width="2" defaultWidth="20000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Ic Icao Code">
+          <dataDescriptor expression="icao_code"
+           descriptiveExpression="IC_ICAO_CODE" order="2" width="2"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ic_incexcl" datatype="vchar2" columnOrder="109"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Ic Incexcl">
+          <dataDescriptor expression="include_exclude_ind"
+           descriptiveExpression="IC_INCEXCL" order="3" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_icao_children">
+      <select>
+      <![CDATA[select a.select_by_id icc_select_by_id, a.record_type_code icc_record_type_code, 
+       a.criteria_id icc_criteria_id, a.include_exclude_ind icc_incexcl,
+       b.criteria_descr icc_criteria_desc, c.record_type_descr icc_record_type_descr, a.icao_code_id icc_icao_code_id
+from   navdb_select_criteria a,
+       select_criteria b,
+       record_type    c
+where  a.navdb_id = :p_navdbid
+and    a.parent_select_by_id is null
+and    a.criteria_id = b.criteria_id
+and    a.record_type_code = c.record_type_code
+order by 2
+
+]]>
+      </select>
+      <displayInfo x="2.26318" y="9.63684" width="1.46790" height="0.32983"/>
+      <group name="G_icao_children">
+        <displayInfo x="2.08167" y="10.37085" width="1.82751" height="1.62695"
+        />
+        <dataItem name="icc_select_by_id" oracleDatatype="number"
+         columnOrder="110" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Icc Select By Id">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="ICC_SELECT_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="icc_record_type_code" oracleDatatype="number"
+         columnOrder="111" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Icc Record Type Code">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="ICC_RECORD_TYPE_CODE" order="2" width="22"
+           precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="icc_criteria_id" oracleDatatype="number"
+         columnOrder="112" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Icc Criteria Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="ICC_CRITERIA_ID" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="icc_incexcl" datatype="vchar2" columnOrder="113"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Icc Incexcl">
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="ICC_INCEXCL" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="icc_criteria_desc" datatype="vchar2" columnOrder="114"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Icc Criteria Desc">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="ICC_CRITERIA_DESC" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="icc_icao_code_id" oracleDatatype="number"
+         columnOrder="116" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Icc Icao Code Id">
+          <dataDescriptor expression="a.icao_code_id"
+           descriptiveExpression="ICC_ICAO_CODE_ID" order="7" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="icc_record_type_descr" datatype="vchar2"
+         columnOrder="115" width="50" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Icc Record Type Descr">
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="ICC_RECORD_TYPE_DESCR" order="6" width="50"
+          />
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_icc_incexcl" source="cf_icc_incexclformula"
+         datatype="character" width="30" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_icao_grand_children">
+      <select>
+      <![CDATA[select a.select_by_id iccc_sel_by_id, a.record_type_code iccc_rec_type_code,
+       a.criteria_id iccc_crit_id, a.include_exclude_ind iccc_inc_excl_ind,
+       b.criteria_descr iccc_crit_desc, c.record_type_descr iccc_rec_type_descr, 
+       a.parent_select_by_id iccc_parent_id
+from   navdb_select_criteria a,
+       select_criteria b,
+       record_type    c
+where  a.navdb_id = :p_navdbid
+and    a.criteria_id = b.criteria_id
+and    a.record_type_code = c.record_type_code
+and    a.include_exclude_ind in ('I','X')
+order by 2
+]]>
+      </select>
+      <displayInfo x="4.64587" y="9.63757" width="1.56458" height="0.32983"/>
+      <group name="G_icao_grand_children">
+        <displayInfo x="4.57117" y="10.34790" width="1.72339" height="1.79785"
+        />
+        <dataItem name="iccc_sel_by_id" oracleDatatype="number"
+         columnOrder="117" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Iccc Sel By Id">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="ICCC_SEL_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="iccc_rec_type_code" oracleDatatype="number"
+         columnOrder="118" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Iccc Rec Type Code">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="ICCC_REC_TYPE_CODE" order="2" width="22"
+           precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="iccc_crit_id" oracleDatatype="number"
+         columnOrder="119" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Iccc Crit Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="ICCC_CRIT_ID" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="iccc_inc_excl_ind" datatype="vchar2" columnOrder="120"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Iccc Inc Excl Ind">
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="ICCC_INC_EXCL_IND" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="iccc_crit_desc" datatype="vchar2" columnOrder="121"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Iccc Crit Desc">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="ICCC_CRIT_DESC" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="iccc_parent_id" oracleDatatype="number"
+         columnOrder="123" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Iccc Parent Id">
+          <dataDescriptor expression="a.parent_select_by_id"
+           descriptiveExpression="ICCC_PARENT_ID" order="7" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="iccc_rec_type_descr" datatype="vchar2"
+         columnOrder="122" width="50" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Iccc Rec Type Descr">
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="ICCC_REC_TYPE_DESCR" order="6" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <summary name="CS_iccc_nval" source="icccv_value" function="count"
+         width="20" precision="10" reset="G_icao_grand_children"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <formula name="CF_iccc_incexcl_display"
+         source="cf_iccc_incexcl_displayformula" datatype="character"
+         width="15" precision="10" defaultWidth="0" defaultHeight="0"
+         columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_icao_value">
+      <select>
+      <![CDATA[select select_by_id icccv_sel_by_id, value_descr icccv_value_descr, 
+          value icccv_value
+from    selection_criteria_value
+order by value_seq]]>
+      </select>
+      <displayInfo x="7.59399" y="9.63916" width="1.55200" height="0.32983"/>
+      <group name="G_icao_value">
+        <displayInfo x="7.56604" y="10.32874" width="1.60876" height="0.94336"
+        />
+        <dataItem name="icccv_sel_by_id" oracleDatatype="number"
+         columnOrder="124" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Icccv Sel By Id">
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="ICCCV_SEL_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="icccv_value_descr" datatype="vchar2" columnOrder="125"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Icccv Value Descr">
+          <dataDescriptor expression="value_descr"
+           descriptiveExpression="ICCCV_VALUE_DESCR" order="2" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="icccv_value" datatype="vchar2" columnOrder="126"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Icccv Value">
+          <dataDescriptor expression="value"
+           descriptiveExpression="ICCCV_VALUE" order="3" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_icccv_display" source="cf_icccv_displayformula"
+         datatype="character" width="2000" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_arpt_grp">
+      <select>
+      <![CDATA[select  select_by_id ag_selbyid,
+        group_name  ag_group_name,
+        include_exclude_ind ag_incexcl
+from    select_by_airport_group
+where   navdb_id = :p_navdbid
+order by 2
+]]>
+      </select>
+      <displayInfo x="0.32373" y="12.98022" width="1.09375" height="0.19995"/>
+      <group name="G_arpt_grp">
+        <displayInfo x="0.13940" y="13.66980" width="1.46301" height="0.77246"
+        />
+        <dataItem name="ag_selbyid" oracleDatatype="number" columnOrder="131"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Ag Selbyid">
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="AG_SELBYID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ag_group_name" datatype="vchar2" columnOrder="132"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Ag Group Name">
+          <dataDescriptor expression="group_name"
+           descriptiveExpression="AG_GROUP_NAME" order="2" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ag_incexcl" datatype="vchar2" columnOrder="133"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Ag Incexcl">
+          <dataDescriptor expression="include_exclude_ind"
+           descriptiveExpression="AG_INCEXCL" order="3" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_arpt_grp_children">
+      <select>
+      <![CDATA[select a.select_by_id agc_select_by_id, a.record_type_code agc_record_type_code, 
+       a.criteria_id agc_criteria_id, a.include_exclude_ind agc_incexcl,
+       b.criteria_descr agc_criteria_desc, c.record_type_descr agc_record_type_descr, a.airport_group_id agc_airport_group_id
+from   navdb_select_criteria a,
+       select_criteria b,
+       record_type    c
+where  a.navdb_id = :p_navdbid
+and    a.parent_select_by_id is null
+and    a.criteria_id = b.criteria_id
+and    a.record_type_code = c.record_type_code
+order by 2
+
+]]>
+      </select>
+      <displayInfo x="2.39563" y="12.92725" width="1.58325" height="0.32983"/>
+      <group name="G_arpt_grp_children">
+        <displayInfo x="2.24878" y="13.65833" width="1.86926" height="1.79785"
+        />
+        <dataItem name="agc_select_by_id" oracleDatatype="number"
+         columnOrder="134" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Agc Select By Id">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="AGC_SELECT_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agc_record_type_code" oracleDatatype="number"
+         columnOrder="135" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Agc Record Type Code">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="AGC_RECORD_TYPE_CODE" order="2" width="22"
+           precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agc_criteria_id" oracleDatatype="number"
+         columnOrder="136" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Agc Criteria Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="AGC_CRITERIA_ID" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agc_incexcl" datatype="vchar2" columnOrder="137"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Agc Incexcl">
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="AGC_INCEXCL" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agc_criteria_desc" datatype="vchar2" columnOrder="138"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Agc Criteria Desc">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="AGC_CRITERIA_DESC" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agc_record_type_descr" datatype="vchar2"
+         columnOrder="139" width="50" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Agc Record Type Descr">
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="AGC_RECORD_TYPE_DESCR" order="6" width="50"
+          />
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agc_airport_group_id" oracleDatatype="number"
+         columnOrder="140" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Agc Airport Group Id">
+          <dataDescriptor expression="a.airport_group_id"
+           descriptiveExpression="AGC_AIRPORT_GROUP_ID" order="7" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_agc_incexcl" source="cf_agc_incexclformula"
+         datatype="character" width="30" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_arpt_grp_grand_children">
+      <select>
+      <![CDATA[select a.select_by_id agcc_sel_by_id, a.record_type_code agcc_rec_type_code,
+       a.criteria_id agcc_crit_id, a.include_exclude_ind agcc_inc_excl_ind,
+       b.criteria_descr agcc_crit_desc, c.record_type_descr agcc_rec_type_descr, 
+       a.parent_select_by_id agcc_parent_id
+from   navdb_select_criteria a,
+       select_criteria b,
+       record_type    c
+where  a.navdb_id = :p_navdbid
+and    a.criteria_id = b.criteria_id
+and    a.record_type_code = c.record_type_code
+and    a.include_exclude_ind in ('I','X')
+order by 2
+]]>
+      </select>
+      <displayInfo x="4.57336" y="12.87500" width="1.77087" height="0.32983"/>
+      <group name="G_arpt_grp_grand_children">
+        <displayInfo x="4.57166" y="13.67395" width="1.76501" height="1.96875"
+        />
+        <dataItem name="agcc_sel_by_id" oracleDatatype="number"
+         columnOrder="141" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Agcc Sel By Id">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="AGCC_SEL_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agcc_rec_type_code" oracleDatatype="number"
+         columnOrder="142" width="22" defaultWidth="60000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Agcc Rec Type Code">
+          <dataDescriptor expression="a.record_type_code"
+           descriptiveExpression="AGCC_REC_TYPE_CODE" order="2" width="22"
+           precision="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agcc_crit_id" oracleDatatype="number"
+         columnOrder="143" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Agcc Crit Id">
+          <dataDescriptor expression="a.criteria_id"
+           descriptiveExpression="AGCC_CRIT_ID" order="3" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agcc_inc_excl_ind" datatype="vchar2" columnOrder="144"
+         width="1" defaultWidth="10000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Agcc Inc Excl Ind">
+          <dataDescriptor expression="a.include_exclude_ind"
+           descriptiveExpression="AGCC_INC_EXCL_IND" order="4" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agcc_rec_type_descr" datatype="vchar2"
+         columnOrder="146" width="50" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Agcc Rec Type Descr">
+          <dataDescriptor expression="c.record_type_descr"
+           descriptiveExpression="AGCC_REC_TYPE_DESCR" order="6" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agcc_crit_desc" datatype="vchar2" columnOrder="145"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Agcc Crit Desc">
+          <dataDescriptor expression="b.criteria_descr"
+           descriptiveExpression="AGCC_CRIT_DESC" order="5" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agcc_parent_id" oracleDatatype="number"
+         columnOrder="147" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Agcc Parent Id">
+          <dataDescriptor expression="a.parent_select_by_id"
+           descriptiveExpression="AGCC_PARENT_ID" order="7" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <summary name="CS_agcc_nval" source="agccv_value" function="count"
+         width="20" precision="10" reset="G_arpt_grp_grand_children"
+         compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <formula name="CF_agcc_incexcl_display"
+         source="cf_agcc_incexcl_displayformula" datatype="character"
+         width="15" precision="10" defaultWidth="0" defaultHeight="0"
+         columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_arpt_grp_value">
+      <select>
+      <![CDATA[select select_by_id agccv_sel_by_id, value_descr agccv_value_descr, 
+          value agccv_value
+from    selection_criteria_value
+order by value_seq]]>
+      </select>
+      <displayInfo x="7.38647" y="12.86462" width="1.31250" height="0.32983"/>
+      <group name="G_arpt_grp_value">
+        <displayInfo x="7.22266" y="13.56458" width="1.65051" height="1.11426"
+        />
+        <dataItem name="agccv_sel_by_id" oracleDatatype="number"
+         columnOrder="148" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Agccv Sel By Id">
+          <dataDescriptor expression="select_by_id"
+           descriptiveExpression="AGCCV_SEL_BY_ID" order="1" width="22"
+           precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agccv_value_descr" datatype="vchar2" columnOrder="149"
+         width="50" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Agccv Value Descr">
+          <dataDescriptor expression="value_descr"
+           descriptiveExpression="AGCCV_VALUE_DESCR" order="2" width="50"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="agccv_value" datatype="vchar2" columnOrder="150"
+         width="1000" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Agccv Value">
+          <dataDescriptor expression="value"
+           descriptiveExpression="AGCCV_VALUE" order="3" width="1000"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_agccv_display" source="cf_agccv_displayformula"
+         datatype="character" width="2000" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_airport_groups">
+      <select>
+      <![CDATA[select a.select_by_id al_selbyid, a.navdb_id al_navdbid, a.group_name, 
+          b.airport_ident al_airport_ident, b.airport_icao al_airport_icao
+from    select_by_airport_group a, airport_to_select b
+where  a.navdb_id = :p_navdbid
+and     a.select_by_id = b.select_by_id
+order by 3, 4, 5]]>
+      </select>
+      <displayInfo x="0.44897" y="16.35413" width="1.20825" height="0.19995"/>
+      <group name="G_airport_group">
+        <displayInfo x="0.34778" y="17.05408" width="1.42126" height="0.94336"
+        />
+        <dataItem name="group_name" datatype="vchar2" columnOrder="158"
+         width="20" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Group Name">
+          <dataDescriptor expression="a.group_name"
+           descriptiveExpression="GROUP_NAME" order="3" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="al_selbyid" oracleDatatype="number" columnOrder="156"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Al Selbyid">
+          <dataDescriptor expression="a.select_by_id"
+           descriptiveExpression="AL_SELBYID" order="1"
+           oracleDatatype="number" width="22" precision="38"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="al_navdbid" datatype="vchar2" columnOrder="157"
+         width="8" defaultWidth="80000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Al Navdbid">
+          <dataDescriptor expression="a.navdb_id"
+           descriptiveExpression="AL_NAVDBID" order="2" width="8"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+      <group name="G_airport">
+        <displayInfo x="0.32690" y="18.40198" width="1.45422" height="0.77246"
+        />
+        <dataItem name="al_airport_ident" datatype="vchar2" columnOrder="159"
+         width="4" defaultWidth="40000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Al Airport Ident">
+          <dataDescriptor expression="b.airport_ident"
+           descriptiveExpression="AL_AIRPORT_IDENT" order="4" width="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="al_airport_icao" datatype="vchar2" columnOrder="160"
+         width="2" defaultWidth="20000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Al Airport Icao">
+          <dataDescriptor expression="b.airport_icao"
+           descriptiveExpression="AL_AIRPORT_ICAO" order="5" width="2"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_airport_data">
+      <select>
+      <![CDATA[select airport_ident, airport_icao, 
+          ata_iata_designator, airport_name, 'Std' type
+from pl_std_airport a, navdb b
+where processing_cycle = :p_cycle
+and navdb_id = :p_navdbid
+and    a.data_supplier = b.data_supplier
+union
+select airport_ident, airport_icao, 
+          ata_iata_designator, airport_name, 'Tld' type
+from   pl_tld_airport a, navdb b
+where processing_cycle = :p_cycle
+and customer_ident = :p_navdbid
+and navdb_id = :p_navdbid
+and    a.data_supplier = b.data_supplier]]>
+      </select>
+      <displayInfo x="3.12524" y="16.22937" width="1.65576" height="0.47974"/>
+      <group name="G_airport_data">
+        <displayInfo x="3.13416" y="17.02283" width="1.64001" height="1.45605"
+        />
+        <dataItem name="airport_ident" datatype="vchar2" columnOrder="161"
+         width="4" defaultWidth="40000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Airport Ident">
+          <dataDescriptor expression="airport_ident"
+           descriptiveExpression="AIRPORT_IDENT" order="1" width="4"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="airport_icao" datatype="vchar2" columnOrder="162"
+         width="2" defaultWidth="20000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Airport Icao">
+          <dataDescriptor expression="airport_icao"
+           descriptiveExpression="AIRPORT_ICAO" order="2" width="2"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="ata_iata_designator" datatype="vchar2"
+         columnOrder="163" width="3" defaultWidth="30000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Ata Iata Designator">
+          <dataDescriptor expression="ata_iata_designator"
+           descriptiveExpression="ATA_IATA_DESIGNATOR" order="3" width="3"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="airport_name" datatype="vchar2" columnOrder="164"
+         width="30" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Airport Name">
+          <dataDescriptor expression="airport_name"
+           descriptiveExpression="AIRPORT_NAME" order="4" width="30"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="type" datatype="character" oracleDatatype="aFixedChar"
+         columnOrder="165" width="3" defaultWidth="30000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Type">
+          <dataDescriptor expression="&apos;Std&apos;"
+           descriptiveExpression="TYPE" order="5" oracleDatatype="aFixedChar"
+           width="3"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_aif_rwy_limit">
+      <select>
+      <![CDATA[select nvl(to_char(aif_rwy_length_limit),'None Selected') aif_rwy_length_limit from navdb where navdb_id = :p_navdbid]]>
+      </select>
+      <displayInfo x="5.85632" y="16.72864" width="1.82300" height="0.19995"/>
+      <group name="G_aif_rwy_limit">
+        <displayInfo x="5.94141" y="17.29370" width="1.65051" height="0.43066"
+        />
+        <dataItem name="aif_rwy_length_limit" datatype="vchar2"
+         columnOrder="166" width="40" defaultWidth="100000"
+         defaultHeight="10000" columnFlags="1"
+         defaultLabel="Aif Rwy Length Limit">
+          <dataDescriptor
+           expression="nvl ( to_char ( aif_rwy_length_limit ) , &apos;None Selected&apos; )"
+           descriptiveExpression="AIF_RWY_LENGTH_LIMIT" order="1" width="40"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <dataSource name="Q_rnp">
+      <select>
+      <![CDATA[select nvl(to_char(rnp),'None Selected') rnp from navdb where navdb_id = :p_navdbid]]>
+      </select>
+      <displayInfo x="6.26147" y="18.34277" width="1.01050" height="0.19995"/>
+      <group name="G_rnp">
+        <displayInfo x="6.21716" y="18.80408" width="1.09998" height="0.60156"
+        />
+        <dataItem name="rnp" datatype="vchar2" columnOrder="167" width="40"
+         defaultWidth="100000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Rnp">
+          <dataDescriptor
+           expression="nvl ( to_char ( rnp ) , &apos;None Selected&apos; )"
+           descriptiveExpression="RNP" order="1" width="40"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_rnp" source="cf_rnpformula" datatype="character"
+         width="20" precision="10" defaultWidth="0" defaultHeight="0"
+         columnFlags="16" valueIfNull="None Selected" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <crossProduct name="G_Cross">
+      <displayInfo x="0.34827" y="21.52905" width="1.84534" height="2.13965"/>
+      <dimension>
+        <group name="G_lv_label"/>
+      </dimension>
+      <dimension>
+        <group name="G_lv_seq"/>
+      </dimension>
+    </crossProduct>
+    <placeholder name="CP_none_message" datatype="character" width="1000"
+     precision="10" defaultWidth="0" defaultHeight="0" columnFlags="16">
+      <displayInfo x="0.14734" y="0.06323" width="2.18604" height="0.19995"/>
+    </placeholder>
+    <summary name="CS_ngencrit" source="gen_criteria_id" function="count"
+     width="20" precision="10" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="0.21973" y="0.42712" width="0.79993" height="0.19995"/>
+    </summary>
+    <placeholder name="CP_supplier" datatype="character" width="1"
+     precision="10" defaultWidth="0" defaultHeight="0" columnFlags="16">
+      <displayInfo x="1.32385" y="0.41675" width="0.79993" height="0.19995"/>
+    </placeholder>
+    <summary name="CS_suppl_count" source="sup_criteria_descr"
+     function="count" width="20" precision="10" reset="report"
+     compute="report" defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="8.66663" y="0.08337" width="1.32300" height="0.19995"/>
+    </summary>
+    <summary name="CS_geo_count" source="g_geo_aria_name" function="count"
+     width="20" precision="10" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="0.24011" y="3.17712" width="1.35413" height="0.19995"/>
+    </summary>
+    <summary name="CS_area_count" source="ac_area_code" function="count"
+     width="20" precision="10" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="0.52087" y="6.51147" width="1.04163" height="0.19995"/>
+    </summary>
+    <summary name="CS_icao_count" source="ic_icao_code" function="count"
+     width="20" precision="10" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="0.39587" y="9.27075" width="0.79993" height="0.19995"/>
+    </summary>
+    <summary name="CS_arpt_grp_count" source="ag_group_name" function="count"
+     width="20" precision="10" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="0.34375" y="12.65625" width="1.36462" height="0.19995"/>
+    </summary>
+    <summary name="CS_aif_rwy_len_limit" source="aif_rwy_length_limit"
+     function="count" width="3" precision="1" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="6.08337" y="16.32251" width="1.46875" height="0.19995"/>
+    </summary>
+    <summary name="CS_rnp" source="rnp" function="count" width="3"
+     precision="1" reset="report" compute="report" defaultWidth="0"
+     defaultHeight="0" columnFlags="8">
+      <displayInfo x="6.12610" y="18.02087" width="1.21875" height="0.19995"/>
+    </summary>
+    <summary name="CS_lists_count" source="lv_selbyid" function="count"
+     width="20" precision="10" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="3.06311" y="20.11401" width="1.72913" height="0.19995"/>
+    </summary>
+    <link parentGroup="G_default_criteria" parentColumn="select_by_id"
+     childQuery="Q_default_crit_children" childColumn="dcc_parent_id"
+     condition="eq" sqlClause="where"/>
+    <link parentGroup="G_default_crit_children" parentColumn="dcc_sel_by_id"
+     childQuery="Q_dcc_value" childColumn="dccv_sel_by_id" condition="eq"
+     sqlClause="where"/>
+    <link parentGroup="G_g_geo_area" parentColumn="g_selbyid"
+     childQuery="Q_geo_points" childColumn="geop_selbyid" condition="eq"
+     sqlClause="where"/>
+    <link parentGroup="G_geo_children" parentColumn="gc_select_by_id"
+     childQuery="Q_geo_grand_children" childColumn="gcc_parent_id"
+     condition="eq" sqlClause="where"/>
+    <link parentGroup="G_geo_grand_children" parentColumn="gcc_sel_by_id"
+     childQuery="Q_geo_grand_children_value" childColumn="gccv_sel_by_id"
+     condition="eq" sqlClause="where"/>
+    <link parentGroup="G_area_code" parentColumn="ac_selbyid"
+     childQuery="Q_area_code_children" childColumn="acc_area_code_id"
+     condition="eq" sqlClause="where"/>
+    <link parentGroup="G_area_code_children" parentColumn="acc_select_by_id"
+     childQuery="Q_area_code_grand_children" childColumn="accc_parent_id"
+     condition="eq" sqlClause="where"/>
+    <link parentGroup="G_area_code_grand_children"
+     parentColumn="accc_sel_by_id" childQuery="Q_area_code_value"
+     childColumn="acccv_sel_by_id" condition="eq" sqlClause="where"/>
+    <link parentGroup="G_icao" parentColumn="ic_selbyid"
+     childQuery="Q_icao_children" childColumn="icc_icao_code_id"
+     condition="eq" sqlClause="where"/>
+    <link parentGroup="G_icao_grand_children" parentColumn="iccc_sel_by_id"
+     childQuery="Q_icao_value" childColumn="icccv_sel_by_id" condition="eq"
+     sqlClause="where"/>
+    <link parentGroup="G_arpt_grp" parentColumn="ag_selbyid"
+     childQuery="Q_arpt_grp_children" childColumn="agc_airport_group_id"
+     condition="eq" sqlClause="where"/>
+    <link parentGroup="G_arpt_grp_children" parentColumn="agc_select_by_id"
+     childQuery="Q_arpt_grp_grand_children" childColumn="agcc_parent_id"
+     condition="eq" sqlClause="where"/>
+    <link parentGroup="G_arpt_grp_grand_children"
+     parentColumn="agcc_sel_by_id" childQuery="Q_arpt_grp_value"
+     childColumn="agccv_sel_by_id" condition="eq" sqlClause="where"/>
+    <link parentGroup="G_airport" parentColumn="al_airport_ident"
+     childQuery="Q_airport_data" childColumn="airport_ident" condition="eq"
+     sqlClause="where"/>
+    <link parentGroup="G_airport" parentColumn="al_airport_icao"
+     childQuery="Q_airport_data" childColumn="airport_icao" condition="eq"
+     sqlClause="where"/>
+    <link parentGroup="G_g_geo_area" parentColumn="g_selbyid"
+     childQuery="Q_geo_children" childColumn="gc_geo_area_id" condition="eq"
+     sqlClause="where"/>
+    <link parentGroup="G_icao_children" parentColumn="icc_select_by_id"
+     childQuery="Q_icao_grand_children" childColumn="iccc_parent_id"
+     condition="eq" sqlClause="where"/>
+  </data>
+  <layout>
+  <section name="main">
+    <body>
+      <frame name="M_1">
+        <geometryInfo x="0.00000" y="0.06250" width="7.43750" height="0.68750"
+        />
+        <generalLayout verticalElasticity="variable"
+         horizontalElasticity="expand"/>
+        <advancedLayout formatTrigger="m_1formattrigger"/>
+        <visualSettings linePattern="solid"/>
+        <frame name="M_G_general_criteria_GRPFR1">
+          <geometryInfo x="0.00000" y="0.12500" width="7.25000"
+           height="0.62500"/>
+          <generalLayout verticalElasticity="variable"
+           horizontalElasticity="expand"/>
+          <frame name="M_G_general_criteria_HDR1">
+            <geometryInfo x="0.00000" y="0.12500" width="7.00000"
+             height="0.56250"/>
+            <generalLayout verticalElasticity="expand"
+             horizontalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <text name="B_tbp1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.18750" y="0.18750" width="2.68750"
+               height="0.25000"/>
+              <textSegment>
+                <font face="helvetica" size="14"/>
+                <string>
+                <![CDATA[General Criteria]]>
+                </string>
+              </textSegment>
+            </text>
+            <field name="F_gencrit_message1" source="CP_none_message"
+             minWidowLines="1" spacing="single" alignment="start">
+              <font face="Arial Unicode MS" size="10"/>
+              <geometryInfo x="1.87500" y="0.25000" width="4.93750"
+               height="0.43750"/>
+              <generalLayout verticalElasticity="expand"
+               horizontalElasticity="expand">
+                <conditionalFormat>
+                  <formatException label="CP_none_message">
+                    <font size="0"/>
+                  <cond name="first" column="CS_ngencrit" exception="3"
+                   lowValue="CP_none_message" conjunction="1"/>
+                  </formatException>
+                </conditionalFormat>
+              </generalLayout>
+              <advancedLayout formatTrigger="f_gencrit_message1formattrigge"/>
+            </field>
+          </frame>
+          <repeatingFrame name="R_G_general_criteria1" source="G_gen_criteria"
+           printDirection="down" minWidowRecords="1" columnMode="no">
+            <geometryInfo x="0.00000" y="0.68750" width="5.87500"
+             height="0.06250"/>
+            <generalLayout verticalElasticity="expand"/>
+            <visualSettings linePattern="solid"/>
+            <field name="F_gen_criteria_descr1" source="gen_criteria_descr"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="0.43750" y="0.68750" width="0.18750"
+               height="0.06250"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+          </repeatingFrame>
+        </frame>
+      </frame>
+      <frame name="M_G_default_criteria_GRPFR1">
+        <geometryInfo x="0.00000" y="0.81250" width="7.43750" height="2.25000"
+        />
+        <generalLayout verticalElasticity="variable"/>
+        <visualSettings linePattern="solid"/>
+        <repeatingFrame name="R_G_default_criteria1"
+         source="G_default_criteria" printDirection="down" minWidowRecords="1"
+         columnMode="no">
+          <geometryInfo x="0.43750" y="1.37500" width="6.93750"
+           height="0.75000"/>
+          <generalLayout verticalElasticity="variable"/>
+          <visualSettings linePattern="solid"/>
+          <field name="F_record_type_descr1" source="record_type_descr"
+           minWidowLines="1" spacing="0" alignment="start">
+            <font face="helvetica" size="10"/>
+            <geometryInfo x="0.56250" y="1.37500" width="2.75000"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <field name="F_default_selection_rule1"
+           source="CF_default_selection_rule" minWidowLines="1" spacing="0"
+           alignment="start">
+            <font face="helvetica" size="10"/>
+            <geometryInfo x="3.56250" y="1.37500" width="2.43750"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <frame name="M_G_default_crit_children_GRP1">
+            <geometryInfo x="0.93750" y="1.56250" width="6.37500"
+             height="0.50000"/>
+            <generalLayout verticalElasticity="variable">
+              <conditionalFormat>
+                <formatException label="BACKGROUND">
+                  <font size="0"/>
+                <cond name="first" column="include_exclude_ind" exception="2"
+                 lowValue="BACKGROUND" conjunction="1"/>
+                </formatException>
+              </conditionalFormat>
+            </generalLayout>
+            <advancedLayout formatTrigger="m_g_default_crit_children_grp1"/>
+            <repeatingFrame name="R_G_default_crit_children1"
+             source="G_default_crit_children" printDirection="down"
+             minWidowRecords="1" columnMode="no">
+              <geometryInfo x="1.81250" y="1.56250" width="5.43750"
+               height="0.43750"/>
+              <generalLayout verticalElasticity="variable"/>
+              <field name="F_dcc_crit_desc1" source="dcc_crit_desc"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="helvetica" size="10"/>
+                <geometryInfo x="1.87500" y="1.56250" width="2.93750"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand">
+                  <conditionalFormat>
+                    <formatException label="dcc_crit_desc">
+                      <font size="0"/>
+                    <cond name="first" column="CS_dcc_nval" exception="3"
+                     lowValue="dcc_crit_desc" conjunction="1"/>
+                    </formatException>
+                  </conditionalFormat>
+                </generalLayout>
+                <advancedLayout formatTrigger="f_dcc_crit_desc1formattrigger"
+                />
+              </field>
+              <repeatingFrame name="R_G_dcc_value1" source="G_dcc_value"
+               printDirection="down" minWidowRecords="1" columnMode="no">
+                <geometryInfo x="1.87500" y="1.75000" width="3.81250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <field name="F_dccv_display1" source="CF_dccv_display"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="1.87500" y="1.75000" width="3.75000"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand"/>
+                </field>
+              </repeatingFrame>
+              <field name="F_dcc_incexcl_display1"
+               source="CF_dcc_incexcl_display" minWidowLines="1" spacing="0"
+               alignment="start">
+                <font face="helvetica" size="10"/>
+                <geometryInfo x="5.75000" y="1.56250" width="1.18750"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout formatTrigger="f_dcc_incexcl_display1formattr"
+                />
+              </field>
+            </repeatingFrame>
+            <text name="B_2" minWidowLines="1">
+              <textSettings spacing="single"/>
+              <geometryInfo x="1.31250" y="1.56250" width="0.58337"
+               height="0.16663"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Rules: ]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+        </repeatingFrame>
+        <frame name="M_G_supplemental_GRPFR1">
+          <geometryInfo x="0.43750" y="2.25000" width="7.00000"
+           height="0.37500"/>
+          <generalLayout verticalElasticity="variable">
+            <conditionalFormat>
+              <formatException label="ac_area_code">
+                <font size="0"/>
+              <cond name="first" column="CS_suppl_count" exception="1"
+               lowValue="ac_area_code" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="m_g_supplemental_grpfr1formatt"/>
+          <repeatingFrame name="R_G_supplemental1" source="G_supplemental"
+           printDirection="down" minWidowRecords="1" columnMode="no">
+            <geometryInfo x="0.43750" y="2.43750" width="6.93750"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+            <visualSettings linePattern="solid"/>
+            <field name="F_sup_criteria_descr1" source="sup_criteria_descr"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="0.62500" y="2.43750" width="3.56250"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <field name="F_sup_include1" source="sup_incexci"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="4.31250" y="2.43750" width="1.37500"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+          </repeatingFrame>
+          <frame name="M_G_supplemental_HDR1">
+            <geometryInfo x="0.43750" y="2.25000" width="6.93750"
+             height="0.18750"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings linePattern="solid"/>
+            <text name="B_sup_criteria_descr1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.62500" y="2.25000" width="1.50000"
+               height="0.18750"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Supplemental Records]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+        </frame>
+        <frame name="M_2">
+          <geometryInfo x="0.00000" y="2.93750" width="7.43750"
+           height="0.06250"/>
+          <visualSettings fillPattern="transparent"
+           fillBackgroundColor="gray28"/>
+        </frame>
+        <frame name="M_G_default_criteria_HDR1">
+          <geometryInfo x="0.43750" y="1.18750" width="6.93750"
+           height="0.18750"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="anchoringObject"/>
+          <visualSettings linePattern="solid"/>
+          <text name="B_record_type_descr1" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.56250" y="1.18750" width="1.50000"
+             height="0.18750"/>
+            <textSegment>
+              <font face="helvetica" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Record Type]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_include_exclude_ind1" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="3.56250" y="1.18750" width="1.37500"
+             height="0.18750"/>
+            <textSegment>
+              <font face="helvetica" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Selection Rule]]>
+              </string>
+            </textSegment>
+          </text>
+        </frame>
+        <text name="B_tbp2" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.18750" y="0.87500" width="2.68750"
+           height="0.25000"/>
+          <textSegment>
+            <font face="helvetica" size="14"/>
+            <string>
+            <![CDATA[Default Criteria]]>
+            </string>
+          </textSegment>
+        </text>
+      </frame>
+      <repeatingFrame name="R_AIF_Rwy_Len_Limit1" source="G_aif_rwy_limit"
+       printDirection="down" minWidowRecords="1" columnMode="no">
+        <geometryInfo x="0.00000" y="3.12500" width="7.43750" height="0.43750"
+        />
+        <visualSettings linePattern="solid"/>
+        <text name="B_4" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.18750" y="3.12500" width="2.25000"
+           height="0.23962"/>
+          <textSegment>
+            <font face="helvetica" size="14"/>
+            <string>
+            <![CDATA[AIF Runway Length Limit]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_aif_rwy_len_limit1" source="aif_rwy_length_limit"
+         minWidowLines="1" spacing="0" alignment="start">
+          <font face="Arial Unicode MS" size="10"/>
+          <geometryInfo x="2.81250" y="3.18750" width="1.81250"
+           height="0.18750"/>
+        </field>
+        <frame name="M_4">
+          <geometryInfo x="0.00000" y="3.43750" width="7.43750"
+           height="0.06250"/>
+          <visualSettings fillPattern="transparent"
+           fillBackgroundColor="gray28"/>
+        </frame>
+      </repeatingFrame>
+      <repeatingFrame name="R_RNP1" source="G_rnp" printDirection="down"
+       minWidowRecords="1" columnMode="no">
+        <geometryInfo x="0.00000" y="3.62500" width="7.43750" height="0.43750"
+        />
+        <visualSettings linePattern="solid"/>
+        <text name="B_3" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.18750" y="3.62500" width="2.25000"
+           height="0.23962"/>
+          <textSegment>
+            <font face="helvetica" size="14"/>
+            <string>
+            <![CDATA[RNP (nms)]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_RNP1" source="CF_rnp" minWidowLines="1" spacing="0"
+         alignment="start">
+          <font face="Arial Unicode MS" size="10"/>
+          <geometryInfo x="2.81250" y="3.68750" width="1.81250"
+           height="0.18750"/>
+        </field>
+        <frame name="M_3">
+          <geometryInfo x="0.00000" y="3.93750" width="7.43750"
+           height="0.06250"/>
+          <visualSettings fillPattern="transparent"
+           fillBackgroundColor="gray28"/>
+        </frame>
+      </repeatingFrame>
+      <frame name="M_G_g_geo_area_GRPFR1">
+        <geometryInfo x="0.00000" y="4.12500" width="7.43750" height="3.12500"
+        />
+        <generalLayout verticalElasticity="variable"/>
+        <visualSettings linePattern="solid"/>
+        <repeatingFrame name="R_G_g_geo_area1" source="G_g_geo_area"
+         printDirection="down" minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.43750" y="4.43750" width="6.87500"
+           height="2.62500"/>
+          <generalLayout verticalElasticity="variable"/>
+          <advancedLayout formatTrigger="r_g_g_geo_area1formattrigger"/>
+          <visualSettings linePattern="solid"/>
+          <field name="F_g_geo_aria_name1" source="g_geo_aria_name"
+           minWidowLines="1" spacing="0" alignment="start">
+            <font face="helvetica" size="10"/>
+            <geometryInfo x="2.37500" y="4.50000" width="1.50000"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <field name="F_g_incexcl1" source="g_incexcl" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="helvetica" size="10"/>
+            <geometryInfo x="4.12500" y="4.50000" width="2.37500"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <frame name="M_G_geo_points_GRPFR1">
+            <geometryInfo x="2.81250" y="4.81250" width="3.62500"
+             height="0.37500"/>
+            <generalLayout verticalElasticity="variable"/>
+            <repeatingFrame name="R_G_geo_points1" source="G_geo_points"
+             printDirection="down" minWidowRecords="1" columnMode="no">
+              <geometryInfo x="2.81250" y="5.00000" width="3.62500"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+              <visualSettings linePattern="solid"/>
+              <field name="F_geop_seqn1" source="geop_seqn" minWidowLines="1"
+               spacing="0" alignment="end">
+                <font face="helvetica" size="10"/>
+                <geometryInfo x="3.00000" y="5.00000" width="0.56250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <field name="F_latitude1" source="latitude" minWidowLines="1"
+               spacing="0" alignment="start">
+                <font face="helvetica" size="10"/>
+                <geometryInfo x="3.68750" y="5.00000" width="1.18750"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <field name="F_longitude1" source="longitude" minWidowLines="1"
+               spacing="0" alignment="start">
+                <font face="helvetica" size="10"/>
+                <geometryInfo x="5.00000" y="5.00000" width="1.31250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+            </repeatingFrame>
+            <frame name="M_G_geo_points_HDR1">
+              <geometryInfo x="2.81250" y="4.81250" width="3.62500"
+               height="0.18750"/>
+              <advancedLayout printObjectOnPage="allPage"
+               basePrintingOn="anchoringObject"/>
+              <visualSettings linePattern="solid"/>
+              <text name="B_geop_seqn1" minWidowLines="1">
+                <textSettings justify="end" spacing="0"/>
+                <geometryInfo x="3.00000" y="4.81250" width="0.56250"
+                 height="0.18750"/>
+                <textSegment>
+                  <font face="helvetica" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Seq #]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_latitude1" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="3.68750" y="4.81250" width="1.18750"
+                 height="0.18750"/>
+                <textSegment>
+                  <font face="helvetica" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Latitude]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_longitude1" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="5.00000" y="4.81250" width="1.31250"
+                 height="0.18750"/>
+                <textSegment>
+                  <font face="helvetica" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Longitude]]>
+                  </string>
+                </textSegment>
+              </text>
+            </frame>
+          </frame>
+          <frame name="M_6">
+            <geometryInfo x="0.56250" y="5.31250" width="6.68750"
+             height="0.06250"/>
+          </frame>
+          <frame name="M_G_default_criteria_HDR2">
+            <geometryInfo x="0.87500" y="5.43750" width="6.25000"
+             height="0.18750"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings linePattern="solid"/>
+            <text name="B_record_type_descr2" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.00000" y="5.43750" width="1.50000"
+               height="0.18750"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Record Type]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_include_exclude_ind2" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="4.00000" y="5.43750" width="1.37500"
+               height="0.18750"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Selection Rule]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+          <repeatingFrame name="R_G_default_criteria2" source="G_geo_children"
+           printDirection="down" minWidowRecords="1" columnMode="no">
+            <geometryInfo x="0.87500" y="5.62500" width="6.25000"
+             height="1.18750"/>
+            <generalLayout verticalElasticity="variable"/>
+            <visualSettings linePattern="solid"/>
+            <field name="F_gc_record_type_descr1"
+             source="gc_record_type_descr" minWidowLines="1" spacing="0"
+             alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="1.00000" y="5.62500" width="2.75000"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <field name="F_gc_incexcl1" source="CF_gc_incexcl"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="4.00000" y="5.62500" width="2.43750"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <frame name="M_G_geo_grand_children_GRP1">
+              <geometryInfo x="1.37500" y="5.81250" width="5.75000"
+               height="0.87500"/>
+              <generalLayout verticalElasticity="variable">
+                <conditionalFormat>
+                  <formatException label="BACKGROUND">
+                    <font size="0"/>
+                  <cond name="first" column="gc_incexcl" exception="2"
+                   lowValue="BACKGROUND" conjunction="1"/>
+                  </formatException>
+                </conditionalFormat>
+              </generalLayout>
+              <advancedLayout formatTrigger="m_g_geo_grand_children_grp1for"/>
+              <repeatingFrame name="R_G_geo_grand_children1"
+               source="G_geo_grand_children" printDirection="down"
+               minWidowRecords="1" columnMode="no">
+                <geometryInfo x="2.25000" y="5.81250" width="4.81250"
+                 height="0.56250"/>
+                <generalLayout verticalElasticity="variable"/>
+                <field name="F_gcc_crit_desc1" source="gcc_crit_desc"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="2.31250" y="5.81250" width="2.93750"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand">
+                    <conditionalFormat>
+                      <formatException label="dcc_crit_desc">
+                        <font size="0"/>
+                      <cond name="first" column="CS_gcc_nval" exception="3"
+                       lowValue="dcc_crit_desc" conjunction="1"/>
+                      </formatException>
+                    </conditionalFormat>
+                  </generalLayout>
+                  <advancedLayout
+                   formatTrigger="f_gcc_crit_desc1formattrigger"/>
+                </field>
+                <frame name="M_G_gcc_value_GRPFR1">
+                  <geometryInfo x="2.31250" y="6.00000" width="3.50000"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="variable"/>
+                  <repeatingFrame name="R_G_geo_grand_children_value1"
+                   source="G_geo_grand_children_value" printDirection="down"
+                   minWidowRecords="1" columnMode="no">
+                    <geometryInfo x="2.31250" y="6.00000" width="3.50000"
+                     height="0.18750"/>
+                    <generalLayout verticalElasticity="expand"/>
+                    <field name="F_gccv_display1" source="CF_gccv_display"
+                     minWidowLines="1" spacing="0" alignment="start">
+                      <font face="helvetica" size="10"/>
+                      <geometryInfo x="2.31250" y="6.00000" width="3.50000"
+                       height="0.18750"/>
+                      <generalLayout verticalElasticity="expand"/>
+                    </field>
+                  </repeatingFrame>
+                </frame>
+                <field name="F_gcc_incexcl_display1"
+                 source="CF_gcc_incexcl_display" minWidowLines="1" spacing="0"
+                 alignment="start">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="5.87500" y="5.81250" width="1.12500"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand"/>
+                  <advancedLayout
+                   formatTrigger="f_gcc_incexcl_display1formattr"/>
+                </field>
+              </repeatingFrame>
+              <text name="B_5" minWidowLines="1">
+                <textSettings spacing="single"/>
+                <geometryInfo x="1.75000" y="5.81250" width="0.58337"
+                 height="0.16663"/>
+                <textSegment>
+                  <font face="Courier" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Rules: ]]>
+                  </string>
+                </textSegment>
+              </text>
+            </frame>
+          </repeatingFrame>
+          <frame name="M_5">
+            <geometryInfo x="0.50000" y="6.87500" width="6.81250"
+             height="0.06250"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings fillPattern="transparent"
+             fillBackgroundColor="gray28"/>
+          </frame>
+          <text name="B_6" minWidowLines="1">
+            <textSettings justify="end" spacing="0"/>
+            <geometryInfo x="0.50000" y="4.50000" width="1.73962"
+             height="0.16663"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="helvetica" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Geographic Area Name: ]]>
+              </string>
+            </textSegment>
+          </text>
+        </repeatingFrame>
+        <frame name="M_7">
+          <geometryInfo x="0.00000" y="7.12500" width="7.43750"
+           height="0.06250"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="anchoringObject"/>
+          <visualSettings fillPattern="transparent"
+           fillBackgroundColor="gray28"/>
+        </frame>
+        <text name="B_tbp3" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.18750" y="4.12500" width="2.68750"
+           height="0.25000"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="enclosingObject"/>
+          <textSegment>
+            <font face="helvetica" size="14"/>
+            <string>
+            <![CDATA[Selection By Geographic Area]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_geo_message1" source="CP_none_message"
+         minWidowLines="1" spacing="0" alignment="start">
+          <font face="@Arial Unicode MS" size="10"/>
+          <geometryInfo x="3.37500" y="4.18750" width="2.50000"
+           height="0.18750"/>
+          <generalLayout>
+            <conditionalFormat>
+              <formatException label="CP_none_message">
+                <font size="0"/>
+              <cond name="first" column="CS_geo_count" exception="3"
+               lowValue="CP_none_message" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_geo_message1formattrigger"/>
+        </field>
+      </frame>
+      <frame name="M_G_area_code_GRPFR1">
+        <geometryInfo x="0.00000" y="7.37500" width="7.43750" height="2.62500"
+        />
+        <generalLayout verticalElasticity="variable"/>
+        <visualSettings linePattern="solid"/>
+        <repeatingFrame name="R_G_area_code_GRP1" source="G_area_code"
+         printDirection="down" minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.43750" y="7.68750" width="6.87500"
+           height="2.06250"/>
+          <generalLayout pageProtect="yes" verticalElasticity="variable"/>
+          <advancedLayout formatTrigger="r_g_area_code_grp1formattrigge"/>
+          <visualSettings linePattern="solid"/>
+          <field name="F_area_code1" source="ac_area_code" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="helvetica" size="10"/>
+            <geometryInfo x="1.56250" y="7.75000" width="1.50000"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <field name="F_area_inclexcl1" source="ac_incexcl" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="helvetica" size="10"/>
+            <geometryInfo x="3.31250" y="7.75000" width="2.37500"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <frame name="M_8">
+            <geometryInfo x="0.43750" y="8.00000" width="6.87500"
+             height="0.06250"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings fillBackgroundColor="gray28"/>
+          </frame>
+          <frame name="M_G_default_criteria_HDR3">
+            <geometryInfo x="0.87500" y="8.12500" width="6.25000"
+             height="0.18750"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings linePattern="solid"/>
+            <text name="B_record_type_descr3" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.00000" y="8.12500" width="1.50000"
+               height="0.18750"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Record Type]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_include_exclude_ind3" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="4.00000" y="8.12500" width="1.37500"
+               height="0.18750"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Selection Rule]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+          <repeatingFrame name="R_G_area_code_children_GRP1"
+           source="G_area_code_children" printDirection="down"
+           minWidowRecords="1" columnMode="no">
+            <geometryInfo x="0.87500" y="8.31250" width="6.25000"
+             height="1.18750"/>
+            <generalLayout verticalElasticity="variable"/>
+            <visualSettings linePattern="solid"/>
+            <field name="F_acc_record_type_descr1"
+             source="acc_record_type_descr" minWidowLines="1" spacing="0"
+             alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="1.00000" y="8.31250" width="2.75000"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <field name="F_acc_incexcl1" source="CF_acc_incexcl"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="4.00000" y="8.31250" width="2.43750"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <frame name="M_G_area_grand_children_GRPFR1">
+              <geometryInfo x="1.37500" y="8.50000" width="5.75000"
+               height="0.87500"/>
+              <generalLayout verticalElasticity="variable">
+                <conditionalFormat>
+                  <formatException label="BACKGROUND">
+                    <font size="0"/>
+                  <cond name="first" column="acc_incexcl" exception="2"
+                   lowValue="BACKGROUND" conjunction="1"/>
+                  </formatException>
+                </conditionalFormat>
+              </generalLayout>
+              <advancedLayout formatTrigger="m_g_area_grand_children_grpfr1"/>
+              <repeatingFrame name="R_G_area_grand_children1"
+               source="G_area_code_grand_children" printDirection="down"
+               minWidowRecords="1" columnMode="no">
+                <geometryInfo x="2.25000" y="8.50000" width="4.81250"
+                 height="0.56250"/>
+                <generalLayout verticalElasticity="variable"/>
+                <field name="F_accc_crit_desc1" source="accc_crit_desc"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="2.31250" y="8.50000" width="2.93750"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand">
+                    <conditionalFormat>
+                      <formatException label="dcc_crit_desc">
+                        <font size="0"/>
+                      <cond name="first" column="CS_accc_nval" exception="3"
+                       lowValue="dcc_crit_desc" conjunction="1"/>
+                      </formatException>
+                    </conditionalFormat>
+                  </generalLayout>
+                  <advancedLayout
+                   formatTrigger="f_accc_crit_desc1formattrigger"/>
+                </field>
+                <frame name="M_G_accc_value_GRPFR1">
+                  <geometryInfo x="2.31250" y="8.68750" width="3.43750"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="variable"/>
+                  <repeatingFrame name="R_G_area_grand_children_value1"
+                   source="G_area_code_value" printDirection="down"
+                   minWidowRecords="1" columnMode="no">
+                    <geometryInfo x="2.31250" y="8.68750" width="3.43750"
+                     height="0.18750"/>
+                    <generalLayout verticalElasticity="expand"/>
+                    <field name="F_accv_display1" source="CF_acccv_display"
+                     minWidowLines="1" spacing="0" alignment="start">
+                      <font face="helvetica" size="10"/>
+                      <geometryInfo x="2.31250" y="8.68750" width="3.43750"
+                       height="0.18750"/>
+                      <generalLayout verticalElasticity="expand"/>
+                    </field>
+                  </repeatingFrame>
+                </frame>
+                <field name="F_accc_incexcl_display1"
+                 source="CF_accc_incexcl_display" minWidowLines="1"
+                 spacing="0" alignment="start">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="5.81250" y="8.50000" width="1.18750"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand"/>
+                  <advancedLayout
+                   formatTrigger="f_accc_incexcl_display1formatt"/>
+                </field>
+              </repeatingFrame>
+              <text name="B_7" minWidowLines="1">
+                <textSettings spacing="single"/>
+                <geometryInfo x="1.75000" y="8.50000" width="0.58337"
+                 height="0.16663"/>
+                <textSegment>
+                  <font face="Courier" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Rules: ]]>
+                  </string>
+                </textSegment>
+              </text>
+            </frame>
+          </repeatingFrame>
+          <frame name="M_9">
+            <geometryInfo x="0.43750" y="9.56250" width="6.87500"
+             height="0.06250"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings fillPattern="transparent"
+             fillBackgroundColor="gray28"/>
+          </frame>
+          <text name="B_8" minWidowLines="1">
+            <textSettings justify="end" spacing="0"/>
+            <geometryInfo x="0.50000" y="7.75000" width="0.92712"
+             height="0.16663"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="helvetica" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Area Code: ]]>
+              </string>
+            </textSegment>
+          </text>
+        </repeatingFrame>
+        <frame name="M_10">
+          <geometryInfo x="0.00000" y="9.81250" width="7.43750"
+           height="0.06250"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="anchoringObject"/>
+          <visualSettings fillPattern="transparent"
+           fillBackgroundColor="gray28"/>
+        </frame>
+        <text name="B_tbp4" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.18750" y="7.43750" width="2.68750"
+           height="0.25000"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="enclosingObject"/>
+          <textSegment>
+            <font face="helvetica" size="14"/>
+            <string>
+            <![CDATA[Selection By Area Code]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_area_code_message1" source="CP_none_message"
+         minWidowLines="1" spacing="0" alignment="start">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="3.18750" y="7.50000" width="2.50000"
+           height="0.18750"/>
+          <generalLayout>
+            <conditionalFormat>
+              <formatException label="CP_none_message">
+                <font size="0"/>
+              <cond name="first" column="CS_area_count" exception="3"
+               lowValue="CP_none_message" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_area_code_message1formattrig"/>
+        </field>
+      </frame>
+      <frame name="M_G_icao_code_GRPFR1">
+        <geometryInfo x="0.00000" y="10.06250" width="7.43750"
+         height="3.12500"/>
+        <generalLayout verticalElasticity="variable"/>
+        <visualSettings linePattern="solid"/>
+        <repeatingFrame name="R_G_icao_code_GRP1" source="G_icao"
+         printDirection="down" minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.43750" y="10.37500" width="6.87500"
+           height="2.62500"/>
+          <generalLayout pageProtect="yes" verticalElasticity="variable"/>
+          <advancedLayout formatTrigger="r_g_icao_code_grp1formattrigge"/>
+          <visualSettings linePattern="solid"/>
+          <field name="F_icao_code1" source="ic_icao_code" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="helvetica" size="10"/>
+            <geometryInfo x="1.56250" y="10.43750" width="1.50000"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <field name="F_icao_inclexcl1" source="ic_incexcl" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="helvetica" size="10"/>
+            <geometryInfo x="3.31250" y="10.43750" width="2.37500"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <frame name="M_11">
+            <geometryInfo x="0.43750" y="10.68750" width="6.87500"
+             height="0.06250"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings fillBackgroundColor="gray28"/>
+          </frame>
+          <frame name="M_G_default_criteria_HDR4">
+            <geometryInfo x="0.87500" y="10.81250" width="6.25000"
+             height="0.18750"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings linePattern="solid"/>
+            <text name="B_record_type_descr4" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.00000" y="10.81250" width="1.50000"
+               height="0.18750"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Record Type]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_include_exclude_ind4" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="4.00000" y="10.81250" width="1.37500"
+               height="0.18750"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Selection Rule]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+          <repeatingFrame name="R_G_icao_code_children_GRP1"
+           source="G_icao_children" printDirection="down" minWidowRecords="1"
+           columnMode="no">
+            <geometryInfo x="0.87500" y="11.00000" width="6.25000"
+             height="1.18750"/>
+            <generalLayout verticalElasticity="variable"/>
+            <visualSettings linePattern="solid"/>
+            <field name="F_icc_record_type_descr1"
+             source="icc_record_type_descr" minWidowLines="1" spacing="0"
+             alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="1.00000" y="11.00000" width="2.75000"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <field name="F_icc_incexcl1" source="CF_icc_incexcl"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="4.00000" y="11.00000" width="2.43750"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <frame name="M_G_area_grand_children_GRPFR2">
+              <geometryInfo x="1.37500" y="11.18750" width="5.75000"
+               height="0.87500"/>
+              <generalLayout verticalElasticity="variable">
+                <conditionalFormat>
+                  <formatException label="ac_area_code">
+                    <font size="0"/>
+                  <cond name="first" column="icc_incexcl" exception="2"
+                   lowValue="ac_area_code" conjunction="1"/>
+                  </formatException>
+                </conditionalFormat>
+              </generalLayout>
+              <advancedLayout formatTrigger="m_g_area_grand_children_grpfr2"/>
+              <repeatingFrame name="R_G_icao_grand_children1"
+               source="G_icao_grand_children" printDirection="down"
+               minWidowRecords="1" columnMode="no">
+                <geometryInfo x="2.25000" y="11.18750" width="4.81250"
+                 height="0.56250"/>
+                <generalLayout verticalElasticity="variable"/>
+                <field name="F_iccc_crit_desc1" source="iccc_crit_desc"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="2.31250" y="11.18750" width="2.93750"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand">
+                    <conditionalFormat>
+                      <formatException label="dcc_crit_desc">
+                        <font size="0"/>
+                      <cond name="first" column="CS_iccc_nval" exception="3"
+                       lowValue="dcc_crit_desc" conjunction="1"/>
+                      </formatException>
+                    </conditionalFormat>
+                  </generalLayout>
+                  <advancedLayout
+                   formatTrigger="f_iccc_crit_desc1formattrigger"/>
+                </field>
+                <frame name="M_G_iccc_value_GRPFR1">
+                  <geometryInfo x="2.31250" y="11.37500" width="3.50000"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="variable"/>
+                  <repeatingFrame name="R_G_icao_grand_children_value1"
+                   source="G_icao_value" printDirection="down"
+                   minWidowRecords="1" columnMode="no">
+                    <geometryInfo x="2.31250" y="11.37500" width="3.50000"
+                     height="0.18750"/>
+                    <generalLayout verticalElasticity="expand"/>
+                    <field name="F_iccv_display1" source="CF_icccv_display"
+                     minWidowLines="1" spacing="0" alignment="start">
+                      <font face="helvetica" size="10"/>
+                      <geometryInfo x="2.31250" y="11.37500" width="3.50000"
+                       height="0.18750"/>
+                      <generalLayout verticalElasticity="expand"/>
+                    </field>
+                  </repeatingFrame>
+                </frame>
+                <field name="F_iccc_incexcl_display1"
+                 source="CF_iccc_incexcl_display" minWidowLines="1"
+                 spacing="0" alignment="start">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="5.87500" y="11.18750" width="1.12500"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand"/>
+                  <advancedLayout
+                   formatTrigger="f_iccc_incexcl_display1formatt"/>
+                </field>
+              </repeatingFrame>
+              <text name="B_9" minWidowLines="1">
+                <textSettings spacing="single"/>
+                <geometryInfo x="1.75000" y="11.18750" width="0.58337"
+                 height="0.16663"/>
+                <textSegment>
+                  <font face="Courier" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Rules: ]]>
+                  </string>
+                </textSegment>
+              </text>
+            </frame>
+          </repeatingFrame>
+          <frame name="M_12">
+            <geometryInfo x="0.43750" y="12.25000" width="6.87500"
+             height="0.06250"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings fillPattern="transparent"
+             fillBackgroundColor="gray28"/>
+          </frame>
+          <text name="B_10" minWidowLines="1">
+            <textSettings justify="end" spacing="0"/>
+            <geometryInfo x="0.50000" y="10.43750" width="0.92712"
+             height="0.16663"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="helvetica" size="10" bold="yes"/>
+              <string>
+              <![CDATA[ICAO Code: ]]>
+              </string>
+            </textSegment>
+          </text>
+        </repeatingFrame>
+        <frame name="M_13">
+          <geometryInfo x="0.00000" y="13.06250" width="7.43750"
+           height="0.06250"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="anchoringObject"/>
+          <visualSettings fillPattern="transparent"
+           fillBackgroundColor="gray28"/>
+        </frame>
+        <text name="B_tbp5" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.18750" y="10.12500" width="2.68750"
+           height="0.25000"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="enclosingObject"/>
+          <textSegment>
+            <font face="helvetica" size="14"/>
+            <string>
+            <![CDATA[Selection By ICAO Code]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_icao_code_message1" source="CP_none_message"
+         minWidowLines="1" spacing="0" alignment="start">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="3.18750" y="10.18750" width="2.50000"
+           height="0.18750"/>
+          <advancedLayout formatTrigger="f_icao_code_message1formattrig"/>
+        </field>
+      </frame>
+      <frame name="M_G_arpt_grp_GRPFR1">
+        <geometryInfo x="0.00000" y="13.25000" width="7.43750"
+         height="3.12500"/>
+        <generalLayout verticalElasticity="variable"/>
+        <visualSettings linePattern="solid"/>
+        <repeatingFrame name="R_G_arpt_grp_GRP1" source="G_arpt_grp"
+         printDirection="down" minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.43750" y="13.56250" width="6.87500"
+           height="2.62500"/>
+          <generalLayout verticalElasticity="variable"/>
+          <advancedLayout formatTrigger="r_g_arpt_grp_grp1formattrigger"/>
+          <visualSettings linePattern="solid"/>
+          <repeatingFrame name="R_G_arpt_grp_children_GRP1"
+           source="G_arpt_grp_children" printDirection="down"
+           minWidowRecords="1" columnMode="no">
+            <geometryInfo x="0.87500" y="14.18750" width="6.37500"
+             height="1.18750"/>
+            <generalLayout verticalElasticity="variable"/>
+            <visualSettings linePattern="solid"/>
+            <field name="F_agc_record_type_descr1"
+             source="agc_record_type_descr" minWidowLines="1" spacing="0"
+             alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="1.00000" y="14.18750" width="2.75000"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <field name="F_agc_incexcl1" source="CF_agc_incexcl"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="4.00000" y="14.18750" width="2.43750"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <frame name="M_G_arpt_grand_children_GRPFR1">
+              <geometryInfo x="1.37500" y="14.37500" width="5.87500"
+               height="0.87500"/>
+              <generalLayout verticalElasticity="variable">
+                <conditionalFormat>
+                  <formatException label="ac_area_code">
+                    <font size="0"/>
+                  <cond name="first" column="agc_incexcl" exception="2"
+                   lowValue="ac_area_code" conjunction="1"/>
+                  </formatException>
+                </conditionalFormat>
+              </generalLayout>
+              <advancedLayout formatTrigger="m_g_arpt_grand_children_grpfr1"/>
+              <repeatingFrame name="R_G_arpt_grp_grand_children1"
+               source="G_arpt_grp_grand_children" printDirection="down"
+               minWidowRecords="1" columnMode="no">
+                <geometryInfo x="2.25000" y="14.37500" width="5.00000"
+                 height="0.56250"/>
+                <generalLayout verticalElasticity="variable"/>
+                <field name="F_agcc_crit_desc1" source="agcc_crit_desc"
+                 minWidowLines="1" spacing="0" alignment="start">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="2.31250" y="14.37500" width="2.93750"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand">
+                    <conditionalFormat>
+                      <formatException label="dcc_crit_desc">
+                        <font size="0"/>
+                      <cond name="first" column="CS_agcc_nval" exception="3"
+                       lowValue="dcc_crit_desc" conjunction="1"/>
+                      </formatException>
+                    </conditionalFormat>
+                  </generalLayout>
+                  <advancedLayout
+                   formatTrigger="f_agcc_crit_desc1formattrigger"/>
+                </field>
+                <frame name="M_G_arpt_grp_value_GRPFR1">
+                  <geometryInfo x="2.31250" y="14.56250" width="3.62500"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="variable"/>
+                  <repeatingFrame name="R_G_arpt_grp_value1"
+                   source="G_arpt_grp_value" printDirection="down"
+                   minWidowRecords="1" columnMode="no">
+                    <geometryInfo x="2.31250" y="14.56250" width="3.62500"
+                     height="0.18750"/>
+                    <generalLayout verticalElasticity="variable"/>
+                    <field name="F_agccv_display1" source="CF_agccv_display"
+                     minWidowLines="1" spacing="0" alignment="start">
+                      <font face="helvetica" size="10"/>
+                      <geometryInfo x="2.31250" y="14.56250" width="3.62500"
+                       height="0.18750"/>
+                      <generalLayout verticalElasticity="expand"/>
+                    </field>
+                  </repeatingFrame>
+                </frame>
+                <field name="F_agcc_incexcl_display1"
+                 source="CF_agcc_incexcl_display" minWidowLines="1"
+                 spacing="0" alignment="start">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="6.00000" y="14.37500" width="1.18750"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand"/>
+                  <advancedLayout
+                   formatTrigger="f_agcc_incexcl_display1formatt"/>
+                </field>
+              </repeatingFrame>
+              <text name="B_12" minWidowLines="1">
+                <textSettings spacing="single"/>
+                <geometryInfo x="1.75000" y="14.37500" width="0.58337"
+                 height="0.16663"/>
+                <textSegment>
+                  <font face="Courier" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Rules: ]]>
+                  </string>
+                </textSegment>
+              </text>
+            </frame>
+          </repeatingFrame>
+          <frame name="M_15">
+            <geometryInfo x="0.43750" y="15.43750" width="6.87500"
+             height="0.06250"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings fillPattern="transparent"
+             fillBackgroundColor="gray28"/>
+          </frame>
+          <frame name="M_G_default_criteria_HDR5">
+            <geometryInfo x="0.87500" y="14.00000" width="6.37500"
+             height="0.18750"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings linePattern="solid"/>
+            <text name="B_record_type_descr5" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.00000" y="14.00000" width="1.50000"
+               height="0.18750"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Record Type]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_include_exclude_ind5" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="4.00000" y="14.00000" width="1.37500"
+               height="0.18750"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Selection Rule]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+          <frame name="M_14">
+            <geometryInfo x="0.43750" y="13.56250" width="6.87500"
+             height="0.37500"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="anchoringObject"/>
+            <visualSettings fillBackgroundColor="gray28"/>
+            <field name="F_group_name1" source="ag_group_name"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="1.75000" y="13.62500" width="1.75000"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+              <advancedLayout printObjectOnPage="allPage"
+               basePrintingOn="enclosingObject"/>
+            </field>
+            <field name="F_ag_inclexcl1" source="ag_incexcl" minWidowLines="1"
+             spacing="0" alignment="start">
+              <font face="helvetica" size="10"/>
+              <geometryInfo x="3.75000" y="13.62500" width="2.37500"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+            <text name="B_11" minWidowLines="1">
+              <textSettings justify="end" spacing="0"/>
+              <geometryInfo x="0.50000" y="13.62500" width="1.18750"
+               height="0.16663"/>
+              <advancedLayout printObjectOnPage="allPage"
+               basePrintingOn="enclosingObject"/>
+              <textSegment>
+                <font face="helvetica" size="10" bold="yes"/>
+                <string>
+                <![CDATA[Airport Group: ]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+        </repeatingFrame>
+        <frame name="M_16">
+          <geometryInfo x="0.00000" y="16.25000" width="7.43750"
+           height="0.06250"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="anchoringObject"/>
+          <visualSettings fillPattern="transparent"
+           fillBackgroundColor="gray28"/>
+        </frame>
+        <text name="B_tbp6" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.18750" y="13.31250" width="2.68750"
+           height="0.25000"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="enclosingObject"/>
+          <textSegment>
+            <font face="helvetica" size="14"/>
+            <string>
+            <![CDATA[Selection By Airport Group]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_arpt_grp_message1" source="CP_none_message"
+         minWidowLines="1" spacing="0" alignment="start">
+          <font face="helvetica" size="10"/>
+          <geometryInfo x="3.18750" y="13.37500" width="2.50000"
+           height="0.18750"/>
+          <generalLayout>
+            <conditionalFormat>
+              <formatException label="CP_none_message">
+                <font size="0"/>
+              <cond name="first" column="CS_arpt_grp_count" exception="3"
+               lowValue="CP_none_message" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+          <advancedLayout formatTrigger="f_arpt_grp_message1formattrigg"/>
+        </field>
+      </frame>
+      <frame name="M_G_airport_group_GRPFR1">
+        <geometryInfo x="0.00000" y="16.43750" width="7.43750"
+         height="1.12500"/>
+        <generalLayout verticalElasticity="variable">
+          <conditionalFormat>
+            <formatException label="ac_area_code">
+              <font size="0"/>
+            <cond name="first" column="CS_arpt_grp_count" exception="1"
+             lowValue="ac_area_code" conjunction="1"/>
+            </formatException>
+          </conditionalFormat>
+        </generalLayout>
+        <advancedLayout formatTrigger="m_g_airport_group_grpfr1format"/>
+        <repeatingFrame name="R_G_airport_group1" source="G_airport_group"
+         printDirection="down" minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.18750" y="16.81250" width="7.18750"
+           height="0.68750"/>
+          <generalLayout verticalElasticity="expand"/>
+          <visualSettings linePattern="solid"/>
+          <field name="F_group_name2" source="group_name" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="helvetica" size="10" bold="yes"/>
+            <geometryInfo x="1.25000" y="16.87500" width="4.50000"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <frame name="M_G_airport_GRPFR1">
+            <geometryInfo x="1.37500" y="17.12500" width="6.00000"
+             height="0.37500"/>
+            <generalLayout verticalElasticity="variable"/>
+            <repeatingFrame name="R_G_airport1" source="G_airport"
+             printDirection="down" minWidowRecords="1" columnMode="no">
+              <geometryInfo x="1.43750" y="17.31250" width="5.87500"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+              <field name="F_al_airport_ident1" source="al_airport_ident"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="helvetica" size="10"/>
+                <geometryInfo x="1.56250" y="17.31250" width="0.50000"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <field name="F_al_airport_icao1" source="al_airport_icao"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="helvetica" size="10"/>
+                <geometryInfo x="2.12500" y="17.31250" width="0.37500"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+              </field>
+              <frame name="M_G_airport_data_GRPFR1">
+                <geometryInfo x="2.56250" y="17.31250" width="4.75000"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="variable"/>
+                <repeatingFrame name="R_G_airport_data1"
+                 source="G_airport_data" printDirection="down"
+                 minWidowRecords="1" columnMode="no">
+                  <geometryInfo x="2.56250" y="17.31250" width="4.75000"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand"/>
+                  <field name="F_ata_iata_designator1"
+                   source="ata_iata_designator" minWidowLines="1" spacing="0"
+                   alignment="start">
+                    <font face="helvetica" size="10"/>
+                    <geometryInfo x="2.56250" y="17.31250" width="0.68750"
+                     height="0.18750"/>
+                    <generalLayout verticalElasticity="expand"/>
+                  </field>
+                  <field name="F_airport_name1" source="airport_name"
+                   minWidowLines="1" spacing="0" alignment="start">
+                    <font face="helvetica" size="10"/>
+                    <geometryInfo x="3.37500" y="17.31250" width="3.31250"
+                     height="0.18750"/>
+                    <generalLayout verticalElasticity="expand"/>
+                  </field>
+                  <field name="F_type1" source="type" minWidowLines="1"
+                   spacing="0" alignment="start">
+                    <font face="helvetica" size="10"/>
+                    <geometryInfo x="6.75000" y="17.31250" width="0.50000"
+                     height="0.18750"/>
+                    <generalLayout verticalElasticity="expand"/>
+                  </field>
+                </repeatingFrame>
+              </frame>
+            </repeatingFrame>
+            <frame name="M_G_airport_HDR1">
+              <geometryInfo x="1.43750" y="17.12500" width="5.87500"
+               height="0.18750"/>
+              <advancedLayout printObjectOnPage="allPage"
+               basePrintingOn="anchoringObject"/>
+              <visualSettings linePattern="solid"/>
+              <text name="B_al_airport_ident1" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="1.56250" y="17.12500" width="0.50000"
+                 height="0.18750"/>
+                <textSegment>
+                  <font face="helvetica" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Ident]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_al_airport_icao1" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="2.12500" y="17.12500" width="0.37500"
+                 height="0.18750"/>
+                <textSegment>
+                  <font face="helvetica" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[ICAO]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_ata_iata_designator1" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="2.56250" y="17.12500" width="0.68750"
+                 height="0.18750"/>
+                <textSegment>
+                  <font face="helvetica" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[ATA/IATA]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_airport_name1" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="3.37500" y="17.12500" width="1.50000"
+                 height="0.18750"/>
+                <textSegment>
+                  <font face="helvetica" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Name]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_type1" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="6.75000" y="17.12500" width="0.50000"
+                 height="0.18750"/>
+                <textSegment>
+                  <font face="helvetica" size="10" bold="yes"/>
+                  <string>
+                  <![CDATA[Std/Tld]]>
+                  </string>
+                </textSegment>
+              </text>
+            </frame>
+          </frame>
+          <text name="B_13" minWidowLines="1">
+            <textSettings justify="end" spacing="0"/>
+            <geometryInfo x="0.56250" y="17.12500" width="0.73962"
+             height="0.16663"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="helvetica" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Airports:]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_group_name1" minWidowLines="1">
+            <textSettings justify="end" spacing="0"/>
+            <geometryInfo x="0.25000" y="16.87500" width="1.00000"
+             height="0.18750"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="helvetica" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Group Name: ]]>
+              </string>
+            </textSegment>
+          </text>
+        </repeatingFrame>
+        <text name="B_14" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.12500" y="16.50000" width="3.87500"
+           height="0.22913"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="enclosingObject"/>
+          <textSegment>
+            <font face="helvetica" size="14"/>
+            <string>
+            <![CDATA[Airport Group - Airport List]]>
+            </string>
+          </textSegment>
+        </text>
+      </frame>
+      <frame name="M_G_lv_rectypecode_GRPFR">
+        <geometryInfo x="0.06250" y="17.62500" width="7.37500"
+         height="1.12500"/>
+        <generalLayout verticalElasticity="variable"
+         horizontalElasticity="variable"/>
+        <visualSettings fillBackgroundColor="r100g100b100"/>
+        <repeatingFrame name="R_G_lv_rectypecode"
+         source="G_list_criteria_values" printDirection="down"
+         minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.12500" y="17.68750" width="7.31250"
+           height="1.00000"/>
+          <generalLayout verticalElasticity="variable"
+           horizontalElasticity="variable"/>
+          <visualSettings fillBackgroundColor="TableCell"/>
+          <text name="B_1" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.25000" y="17.75000" width="3.87500"
+             height="0.22913"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="helvetica" size="14"/>
+              <string>
+              <![CDATA[Select Records by List]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_lv_record_descr" source="lv_record_descr"
+           minWidowLines="1" spacing="0" alignment="end">
+            <font face="helvetica" size="10" bold="yes"/>
+            <geometryInfo x="0.25000" y="18.06250" width="1.62500"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <visualSettings fillBackgroundColor="custom1"/>
+          </field>
+          <frame name="M_G_Cross_GRPFR">
+            <geometryInfo x="0.25000" y="18.31250" width="2.93750"
+             height="0.37500"/>
+            <generalLayout verticalElasticity="variable"
+             horizontalElasticity="variable"/>
+            <visualSettings fillBackgroundColor="custom1"/>
+            <repeatingFrame name="R_G_lv_seq" source="G_lv_seq"
+             printDirection="down" minWidowRecords="1" columnMode="no">
+              <geometryInfo x="0.25000" y="18.50000" width="1.62500"
+               height="0.18750"/>
+              <generalLayout verticalElasticity="expand"/>
+              <visualSettings fillBackgroundColor="TableHeading"/>
+              <field name="F_lv_seq" source="lv_seq" minWidowLines="1"
+               spacing="0" alignment="center">
+                <font face="helvetica" size="10"/>
+                <geometryInfo x="0.25000" y="18.50000" width="0.56250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings linePattern="solid"/>
+              </field>
+            </repeatingFrame>
+            <repeatingFrame name="R_G_lv_label" source="G_lv_label"
+             printDirection="across" minWidowRecords="1" columnMode="no">
+              <geometryInfo x="0.81250" y="18.31250" width="1.06250"
+               height="0.37500"/>
+              <generalLayout verticalElasticity="expand"
+               horizontalElasticity="expand"/>
+              <visualSettings fillBackgroundColor="TableHeading"/>
+              <field name="F_lv_label" source="lv_label" minWidowLines="1"
+               spacing="0" alignment="end">
+                <font face="helvetica" size="10" bold="yes"/>
+                <geometryInfo x="0.81250" y="18.31250" width="1.06250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <advancedLayout printObjectOnPage="allPage"
+                 basePrintingOn="enclosingObject"/>
+                <visualSettings linePattern="solid"/>
+              </field>
+              <repeatingFrame name="R_G_lv_value" source="G_lv_value"
+               printDirection="down" minWidowRecords="1" columnMode="no">
+                <geometryInfo x="0.81250" y="18.50000" width="1.06250"
+                 height="0.18750"/>
+                <generalLayout verticalElasticity="expand"/>
+                <visualSettings fillBackgroundColor="TableCell"
+                 linePattern="solid"/>
+                <field name="F_lv_value" source="lv_value" minWidowLines="1"
+                 spacing="0" alignment="end">
+                  <font face="helvetica" size="10"/>
+                  <geometryInfo x="0.81250" y="18.50000" width="1.00000"
+                   height="0.18750"/>
+                  <generalLayout verticalElasticity="expand"/>
+                </field>
+              </repeatingFrame>
+            </repeatingFrame>
+          </frame>
+          <field name="F_lv_incexcl" source="CF_lv_incexcl_display"
+           minWidowLines="1" spacing="0" alignment="start">
+            <font face="helvetica" size="10" bold="yes"/>
+            <geometryInfo x="1.93750" y="18.06250" width="1.62500"
+             height="0.18750"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <visualSettings fillBackgroundColor="custom1"/>
+          </field>
+        </repeatingFrame>
+      </frame>
+      <matrix name="X_G_Cross" horizontalFrame="R_G_lv_seq"
+       verticalFrame="R_G_lv_label" xProductGroup="G_Cross">
+        <geometryInfo x="0.81250" y="18.50000" width="1.06250"
+         height="0.18750"/>
+      </matrix>
+    </body>
+    <margin>
+      <text name="B_16" minWidowLines="1">
+        <textSettings spacing="single"/>
+        <geometryInfo x="0.50000" y="0.25000" width="7.50000" height="0.37500"
+        />
+        <textSegment>
+          <font face="Courier" size="15" bold="yes"/>
+          <string>
+          <![CDATA[Selection Criteria for NAVDB:  &p_navdbid]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_DATE1" source="CurrentDate" minWidowLines="1"
+       formatMask="MM/DD/RRRR HH:MI:SS P.M." spacing="0" alignment="start">
+        <font face="Courier" size="12" bold="yes"/>
+        <geometryInfo x="3.58337" y="0.68750" width="4.41663" height="0.25000"
+        />
+        <generalLayout horizontalElasticity="variable"/>
+      </field>
+      <text name="B_15" minWidowLines="1">
+        <textSettings spacing="0"/>
+        <geometryInfo x="2.81250" y="0.68750" width="0.72913" height="0.18750"
+        />
+        <textSegment>
+          <font face="Courier" size="12" bold="yes"/>
+          <string>
+          <![CDATA[As Of: ]]>
+          </string>
+        </textSegment>
+      </text>
+      <text name="B_PAGENUM1" minWidowLines="1">
+        <textSettings justify="end" spacing="0"/>
+        <geometryInfo x="4.18750" y="0.06250" width="3.70837" height="0.23962"
+        />
+        <textSegment>
+          <font face="helvetica" size="10"/>
+          <string>
+          <![CDATA[Page &<PageNumber> of &<TotalPages>]]>
+          </string>
+        </textSegment>
+      </text>
+    </margin>
+  </section>
+  </layout>
+  <programUnits>
+    <function name="cf_selection_ruleformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_selection_ruleFormula return Char is
+  v_return varchar2(30);
+begin
+  if :include_exclude_ind = 'I' then
+  	v_return := 'Include All';
+  elsif :include_exclude_ind = 'X' then
+  	v_return := 'Exclude All';
+  elsif :include_exclude_ind = 'R' then
+  	v_return := 'By Rules (see below)';
+  else
+  	v_return := 'Referenced records only';
+  end if;
+  return v_return;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_dcc_incexcl_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_dcc_incexcl_displayFormula return Char is
+  v_return varchar2(15);
+begin
+-- Begin Fix - SCR 3724 - Sesha - 05-Dec-2008 	
+  /*if :dcc_inc_excl_ind = 'I' then
+  	v_return := 'Include';
+  elsif :dcc_inc_excl_ind = 'X' then
+  	v_return := 'Exclude';
+  end if;*/
+  if :dcc_inc_excl_ind = 'I' then
+  	v_return := 'Apply';
+  elsif :dcc_inc_excl_ind = 'X' then
+  	v_return := 'Do Not Apply';
+  end if;
+-- End Fix - SCR 3724 - Sesha - 05-Dec-2008   
+  return v_return;
+end;
+
+
+ ]]>
+      </textSource>
+    </function>
+    <function name="cf_dccv_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_dccv_displayFormula return Char is
+begin
+  return (:dcc_crit_desc||' '||:dccv_value);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_gc_incexclformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_gc_incexclFormula return Char is
+  v_return varchar2(30);
+begin
+  if :gc_incexcl = 'I' then
+  	v_return := 'Include All';
+  elsif :gc_incexcl = 'X' then
+  	v_return := 'Exclude All';
+  elsif :gc_incexcl = 'R' then
+  	v_return := 'By Rules (see below)';
+-- Start changes for SCR 4934, Neelima , 16-DEC-2010  	
+  elsif :gc_incexcl = 'N' then
+  	v_return := 'Reference Only';
+-- End changes for SCR 4934, Neelima , 16-DEC-2010  	
+  else
+  	v_return := 'Apply Default Criteria';
+  end if;
+  return v_return;
+end;
+
+]]>
+      </textSource>
+    </function>
+    <function name="cf_gcc_incexcl_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_gcc_incexcl_displayFormula return Char is
+  v_return varchar2(15);
+begin
+-- Begin Fix - SCR 3724 - Sesha - 05-Dec-2008   	
+ /* if :gcc_inc_excl_ind = 'I' then
+  	v_return := 'Include';
+  elsif :gcc_inc_excl_ind = 'X' then
+  	v_return := 'Exclude';
+  end if;*/
+  if :gcc_inc_excl_ind = 'I' then
+  	v_return := 'Apply';
+  elsif :gcc_inc_excl_ind = 'X' then
+  	v_return := 'Do Not Apply';
+  end if;
+-- End Fix - SCR 3724 - Sesha - 05-Dec-2008     
+  return v_return;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_gcc_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_gcc_displayFormula return Char is
+begin
+    return (:gcc_crit_desc||' '||:gccv_value);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_acc_incexclformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_acc_incexclFormula return Char is
+  v_return varchar2(30);
+begin
+  if :acc_incexcl = 'I' then
+  	v_return := 'Include All';
+  elsif :acc_incexcl = 'X' then
+  	v_return := 'Exclude All';
+  elsif :acc_incexcl = 'R' then
+  	v_return := 'By Rules (see below)';
+-- Start changes for SCR 4934, Neelima , 16-DEC-2010
+  elsif :acc_incexcl = 'N' then
+  	v_return := 'Reference Only';
+-- End changes for SCR 4934, Neelima , 16-DEC-2010
+  else
+  	v_return := 'Apply Default Criteria';
+  end if;
+  return v_return;  
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_accc_incexcl_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_accc_incexcl_displayFormula return Char is
+  v_return varchar2(15);
+begin
+-- Begin Fix - SCR 3724 - Sesha - 05-Dec-2008   		
+  /*if :accc_inc_excl_ind = 'I' then
+  	v_return := 'Include';
+  elsif :accc_inc_excl_ind = 'X' then
+  	v_return := 'Exclude';
+  end if;*/
+  if :accc_inc_excl_ind = 'I' then
+  	v_return := 'Apply';
+  elsif :accc_inc_excl_ind = 'X' then
+  	v_return := 'Do Not Apply';
+  end if;
+-- End Fix - SCR 3724 - Sesha - 05-Dec-2008   	  
+  return v_return;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_acccv_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_acccv_displayFormula return Char is
+begin
+    return (:accc_crit_desc||' '||:acccv_value);  
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_icc_incexclformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_icc_incexclFormula return Char is
+  v_return varchar2(30);
+begin
+  if :icc_incexcl = 'I' then
+  	v_return := 'Include All';
+  elsif :icc_incexcl = 'X' then
+  	v_return := 'Exclude All';
+  elsif :icc_incexcl = 'R' then
+  	v_return := 'By Rules (see below)';
+-- Start changes for SCR 4934, Neelima , 16-DEC-2010  
+  elsif :icc_incexcl = 'N' then
+  	v_return := 'Reference Only';
+-- End changes for SCR 4934, Neelima , 16-DEC-2010    	
+  else
+  	v_return := 'Apply Default Criteria';
+  end if;
+  return v_return;    
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_iccc_incexcl_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_iccc_incexcl_displayFormula return Char is
+  v_return varchar2(15);
+begin
+-- Begin Fix - SCR 3724 - Sesha - 05-Dec-2008   			
+  /*if :iccc_inc_excl_ind = 'I' then
+  	v_return := 'Include';
+  elsif :iccc_inc_excl_ind = 'X' then
+  	v_return := 'Exclude';
+  end if;*/
+  if :iccc_inc_excl_ind = 'I' then
+  	v_return := 'Apply';
+  elsif :iccc_inc_excl_ind = 'X' then
+  	v_return := 'Do Not Apply';
+  end if;
+-- End Fix - SCR 3724 - Sesha - 05-Dec-2008   		  
+  return v_return;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_icccv_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_icccv_displayFormula return Char is
+begin
+      return (:iccc_crit_desc||' '||:icccv_value);  
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_agc_incexclformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_agc_incexclFormula return Char is
+  v_return varchar2(30);
+begin
+  if :agc_incexcl = 'I' then
+  	v_return := 'Include All';
+  elsif :agc_incexcl = 'X' then
+  	v_return := 'Exclude All';
+  elsif :agc_incexcl = 'R' then
+  	v_return := 'By Rules (see below)';
+-- Start changes for SCR 4934, Neelima , 16-DEC-2010  
+  elsif :agc_incexcl = 'N' then
+  	v_return := 'Reference Only';
+-- End changes for SCR 4934, Neelima , 16-DEC-2010  
+  else
+  	v_return := 'Apply Default Criteria';
+  end if;
+  return v_return;    
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_agcc_incexcl_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_agcc_incexcl_displayFormula return Char is
+  v_return varchar2(15);
+begin
+ -- Begin Fix - SCR 3724 - Sesha - 05-Dec-2008	
+  /*if :agcc_inc_excl_ind = 'I' then
+  	v_return := 'Include';
+  elsif :agcc_inc_excl_ind = 'X' then
+  	v_return := 'Exclude';
+  end if;*/
+  if :agcc_inc_excl_ind = 'I' then
+  	v_return := 'Apply';
+  elsif :agcc_inc_excl_ind = 'X' then
+  	v_return := 'Do Not Apply';
+  end if;
+ -- End Fix - SCR 3724 - Sesha - 05-Dec-2008 
+  return v_return;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_agccv_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_agccv_displayFormula return Char is
+begin
+      return (:agcc_crit_desc||' '||:agccv_value);    
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_lv_incexcl_displayformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_lv_incexcl_displayFormula return Char is
+  v_return varchar2(20);
+begin
+  if :lv_incexcl = 'I' then
+  	v_return := 'to be INCLUDED';
+  elsif :lv_incexcl = 'X' then
+  	v_return := 'to be EXCLUDED';
+  end if;
+  return v_return;
+end;]]>
+      </textSource>
+    </function>
+    <function name="beforepform">
+      <textSource>
+      <![CDATA[function BeforePForm return boolean is
+begin
+  
+  return (TRUE);
+end;
+/*function BeforePForm return boolean is
+  v_cycle number(6);
+begin
+  select max(processing_cycle) 
+  into   v_cycle
+  from   pl_std_airport;
+  :p_cycle := v_cycle;
+  return (TRUE);
+end;
+*/]]>
+      </textSource>
+    </function>
+    <function name="beforereport">
+      <textSource>
+      <![CDATA[function BeforeReport return boolean is
+	v_selectable  varchar2(1);
+	v_apply_ind varchar2(1);	
+	v_fms_id    varchar2(30);
+	v_yes       varchar2(1);
+	cursor get_criteria_id is
+	select CRITERIA_ID, CRITERIA_DESCR from General_criteria;	
+	
+	cursor get_gen_criteria_value is
+		select value_descr
+		from navdb_general_criteria_value
+		where navdb_id = :p_navdbid
+		and criteria_id = 4; 
+begin
+  select fms_id into v_fms_id
+  from navdb
+  where navdb_id =:p_navdbid;
+  -- 
+  for rec in get_criteria_id loop
+  	begin
+  		select selectable_ind into v_selectable
+			--from   Format_General_Criteria fgc	Commented Imran 7751
+			From FMS_GENERAL_CRITERIA	fgc	--added Imran SCR 7751
+			where  Criteria_id = rec.CRITERIA_ID
+			and exists (select 1 from flight_management_system
+	 			          where fms_id = v_fms_id
+	 			          and fms_id   						 = fgc.fms_id);								--added Imran SCR 7751
+	 			          /* commented Imran SCR 7751 
+	   			        and binary_format_type   = fgc.binary_format_type
+	     			      and major_version_number = fgc.major_version_number
+	       			    and minor_version_num    = fgc.minor_version_num);	
+	       			    				7751 End						*/
+  	exception
+  		when no_data_found then
+  		exit;
+  	end;	
+		--
+		if v_selectable = 'Y' then
+			begin
+				select nvl(apply_ind,' ') into v_apply_ind
+				from navdb_general_criteria
+				where navdb_id = :p_navdbid
+				and criteria_id = REC.CRITERIA_ID;
+				if v_apply_ind = 'Y' then
+					if :CP_NONE_MESSAGE is null then
+						:CP_NONE_MESSAGE := REC.CRITERIA_DESCR;
+					else	
+					  :CP_NONE_MESSAGE := :CP_NONE_MESSAGE||chr(10)||REC.CRITERIA_DESCR;
+					end if;  
+					IF REC.CRITERIA_ID = 4 THEN
+						for rec1 in get_gen_criteria_value loop	
+							:CP_NONE_MESSAGE := :CP_NONE_MESSAGE||chr(10)||REC1.value_descr;
+						end loop;		
+					END IF;
+				end if;  
+			exception
+				when no_data_found then
+					v_apply_ind := '-';   -- '-': no record; ' ': has record with value blank.
+			end;	
+			--
+			if v_apply_ind in ('-',' ') then
+				begin	
+					select 'Y' into v_yes
+					--from Format_general_criteria fgc
+					From FMS_GENERAL_CRITERIA	fgc	--added Imran SCR 7751
+					where criteria_id = REC.CRITERIA_ID
+					and DEFAULT_IND = 'Y'
+					and exists (select 1 from flight_management_system
+			  	        	where fms_id = v_fms_id
+			  	        	and fms_id   						 = fgc.fms_id);								--added Imran SCR 7751
+			  	        	/* commented Imran SCR 7751 
+	 			  	      	and binary_format_type   = fgc.binary_format_type
+	   			  	    	and major_version_number = fgc.major_version_number
+	     			  	  	and minor_version_num    = fgc.minor_version_num);
+	     			  	  	7751 End						*/
+					if :CP_NONE_MESSAGE is null then
+						:CP_NONE_MESSAGE := REC.CRITERIA_DESCR;
+					else	
+					  :CP_NONE_MESSAGE := :CP_NONE_MESSAGE||chr(10)||REC.CRITERIA_DESCR;
+					end if;  
+				exception
+					when no_data_found then
+					null;
+				end;
+			end if;	
+		elsif v_selectable = 'N' then		
+			begin	
+				select 'Y' into v_yes
+				--from Format_general_criteria fgc	Commented Imran SCR 7751
+				From FMS_GENERAL_CRITERIA	fgc	--added Imran SCR 7751
+				where criteria_id = REC.CRITERIA_ID
+				and APPLY_IND = 'Y'
+				and exists (select 1 from flight_management_system
+	 		          	where fms_id = v_fms_id
+	 		          	and fms_id   						 = fgc.fms_id);								--added Imran SCR 7751
+	 		          	/* commented Imran SCR 7751 
+	   		        	and binary_format_type   = fgc.binary_format_type
+	    		      	and major_version_number = fgc.major_version_number
+	     			    	and minor_version_num    = fgc.minor_version_num);
+	     			    				7751 End						*/
+	     if :CP_NONE_MESSAGE is null then
+					:CP_NONE_MESSAGE := REC.CRITERIA_DESCR;
+			 else	
+				  :CP_NONE_MESSAGE := :CP_NONE_MESSAGE||chr(10)||REC.CRITERIA_DESCR;
+			 end if;  
+			exception
+				when no_data_found then
+				null;
+			end;
+		end if;	
+	end loop;
+	if :CP_NONE_MESSAGE is null then
+		:CP_NONE_MESSAGE := 'None Selected';
+	end if;	
+
+	select data_supplier
+  into   :cp_supplier
+  from   navdb
+  where navdb_id = :p_navdbid;
+  
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_g_supplemental_grpfr1formatt">
+      <textSource>
+      <![CDATA[function M_G_supplemental_GRPFR1FormatT return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_suppl_count = '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_dcc_incexcl_display1formattr">
+      <textSource>
+      <![CDATA[function F_dcc_incexcl_display1FormatTr return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_dcc_crit_desc1formattrigger">
+      <textSource>
+      <![CDATA[function F_dcc_crit_desc1FormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_dcc_nval > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_g_default_crit_children_grp1">
+      <textSource>
+      <![CDATA[function M_G_default_crit_children_GRP1 return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:include_exclude_ind != 'R')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_gencrit_message1formattrigge">
+      <textSource>
+      <![CDATA[function F_gencrit_message1FormatTrigge return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.   
+  if (:CS_ngencrit > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_1formattrigger">
+      <textSource>
+      <![CDATA[function M_1FormatTrigger return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_rnpformula" returnType="character">
+      <textSource>
+      <![CDATA[-- Begin Fix - SCR 5918.04 - Eswar KC - 14-May-2013
+FUNCTION CF_rnpFormula
+   RETURN VARCHAR2
+IS
+   l_nrnp       VARCHAR2 (25);
+   l_ndot       NUMBER;
+   l_nrnp_nav   NUMBER;
+BEGIN
+   SELECT rnp
+     INTO l_nrnp_nav
+     FROM navdb
+    WHERE navdb_id = :P_navdbid;
+
+   SELECT INSTR (l_nrnp_nav, '.') INTO l_ndot FROM DUAL;
+       
+
+   IF l_ndot = 0 AND l_nrnp_nav <> 0 
+   THEN
+      l_nrnp := l_nrnp_nav || '.0';
+   ELSIF l_ndot <>  0 AND l_nrnp_nav < 1 THEN
+      l_nrnp := '0' || l_nrnp_nav;
+   ELSE
+   	  l_nrnp := l_nrnp_nav;
+   END IF;
+   RETURN l_nrnp;
+
+ EXCEPTION
+   	WHEN OTHERS THEN
+   	 l_nrnp := 'None Selected';
+     RETURN (l_nrnp);
+END;
+-- End Fix - SCR 5918.04 - Eswar KC - 14-May-2013]]>
+      </textSource>
+    </function>
+    <function name="f_gcc_incexcl_display1formattr">
+      <textSource>
+      <![CDATA[function F_gcc_incexcl_display1FormatTr return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_gcc_crit_desc1formattrigger">
+      <textSource>
+      <![CDATA[function F_gcc_crit_desc1FormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_gcc_nval > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_g_geo_grand_children_grp1for">
+      <textSource>
+      <![CDATA[function M_G_geo_grand_children_GRP1For return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:gc_incexcl != 'R')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_geo_message1formattrigger">
+      <textSource>
+      <![CDATA[function F_geo_message1FormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_geo_count > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="r_g_g_geo_area1formattrigger">
+      <textSource>
+      <![CDATA[function R_G_g_geo_area1FormatTrigger return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_accc_incexcl_display1formatt">
+      <textSource>
+      <![CDATA[function F_accc_incexcl_display1FormatT return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_accc_crit_desc1formattrigger">
+      <textSource>
+      <![CDATA[function F_accc_crit_desc1FormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_accc_nval > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_g_area_grand_children_grpfr1">
+      <textSource>
+      <![CDATA[function M_G_area_grand_children_GRPFR1 return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:acc_incexcl != 'R')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_area_code_message1formattrig">
+      <textSource>
+      <![CDATA[function F_area_code_message1FormatTrig return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_area_count > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="r_g_area_code_grp1formattrigge">
+      <textSource>
+      <![CDATA[function R_G_area_code_GRP1FormatTrigge return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_iccc_incexcl_display1formatt">
+      <textSource>
+      <![CDATA[function F_iccc_incexcl_display1FormatT return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_iccc_crit_desc1formattrigger">
+      <textSource>
+      <![CDATA[function F_iccc_crit_desc1FormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_iccc_nval > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_g_area_grand_children_grpfr2">
+      <textSource>
+      <![CDATA[function M_G_area_grand_children_GRPFR2 return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:icc_incexcl != 'R')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_icao_code_message1formattrig">
+      <textSource>
+      <![CDATA[function F_icao_code_message1FormatTrig return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_icao_count > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="r_g_icao_code_grp1formattrigge">
+      <textSource>
+      <![CDATA[function R_G_icao_code_GRP1FormatTrigge return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_agcc_incexcl_display1formatt">
+      <textSource>
+      <![CDATA[function F_agcc_incexcl_display1FormatT return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_agcc_crit_desc1formattrigger">
+      <textSource>
+      <![CDATA[function F_agcc_crit_desc1FormatTrigger return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_agcc_nval > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_g_arpt_grand_children_grpfr1">
+      <textSource>
+      <![CDATA[function M_G_arpt_grand_children_GRPFR1 return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:agc_incexcl != 'R')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="f_arpt_grp_message1formattrigg">
+      <textSource>
+      <![CDATA[function F_arpt_grp_message1FormatTrigg return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_arpt_grp_count > '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="r_g_arpt_grp_grp1formattrigger">
+      <textSource>
+      <![CDATA[function R_G_arpt_grp_GRP1FormatTrigger return boolean is
+begin
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_g_airport_group_grpfr1format">
+      <textSource>
+      <![CDATA[function M_G_airport_group_GRPFR1Format return boolean is
+begin
+
+  -- Automatically Generated from Report Builder.
+  if (:CS_arpt_grp_count = '0')
+  then
+    return (FALSE);
+  end if;
+
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+  </programUnits>
+  <webSource>
+  <![CDATA[<%@ taglib uri="/WEB-INF/lib/reports_tld.jar" prefix="rw" %>
+<%@ page language="java" import="java.io.*" errorPage="/rwerror.jsp" session="false" %>
+<!--
+<rw:report id="report">
+<rw:objects id="objects">
+</rw:objects>
+-->
+
+<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN">
+
+<HTML>
+
+<HEAD>
+  <TITLE> Your Title </TITLE>
+  <rw:style id="pageStyle">
+  <LINK rel="stylesheet" href="css/rwbeige.css" type="text/css">
+  </rw:style>
+  <META http-equiv="Content-Type" content="text/html; charset=ISO-8859-1">
+</HEAD>
+
+<BODY bgColor="#ffffff" link="#000000" vLink="#000000">
+
+<TABLE border=0 cellPadding=0 cellSpacing=0 width="100%">
+  <TBODY>
+  <TR>
+    <TD bgColor="#ffffff" rowSpan=2 vAlign=middle width=188><IMG alt="" src="images/rwbeige_logo.gif" width="135" height="36"></TD>
+    <TD bgColor="#ffffff" height=40 vAlign=top><IMG alt="" height=1 src="images/stretch.gif" width=5></TD>
+    <TD align=right bgColor="#ffffff" vAlign=bottom>&nbsp;</TD>
+  </TR>
+  </TBODY>
+</TABLE>
+
+<TABLE bgColor="#ff0000" border=0 cellPadding=0 cellSpacing=0 width="100%">
+  <TBODY>
+  <TR>
+    <TD bgColor="#ff0000" class="OraColumnHeader">&nbsp;</TD>
+  </TR>
+  </TBODY>
+</TABLE>
+
+<TABLE border=0 cellPadding=0 cellSpacing=0 width="100%">
+  <TBODY>
+  <TR>
+    <TD bgColor="#ff0000" vAlign=top class="OraColumnHeader"><IMG alt="" border=0 height=17 src="images/topcurl.gif" width=30></TD>
+    <TD vAlign=top width="100%">
+      <TABLE border=0 cellPadding=0 cellSpacing=0 width="100%">
+        <TBODY>
+        <TR>
+          <TD bgColor="#000000" height=1><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+        </TR>
+        <TR>
+          <TD bgColor="#9a9c9a" height=1><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+        </TR>
+        <TR>
+          <TD bgColor="#b3b4b3" height=1><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+        </TR>
+        </TBODY>
+      </TABLE>
+    </TD>
+  </TR>
+  </TBODY>
+</TABLE>
+
+<TABLE width="100%" border="0" cellspacing="0" cellpadding="0">
+  <TR>
+    <TD width="29%" valign="top">
+      <TABLE width="77%" border="0" cellspacing="0" cellpadding="0">
+        <TR>
+          <TD width="10%" class="OraCellText"><IMG alt="" src="images/blue_d_arrow.gif" width="10" height="10"></TD>
+          <TD width="90%" class="OraCellText">Navigation goes here </TD>
+        </TR>
+        <TR>
+          <TD width="10%" class="OraCellText"><IMG alt="" src="images/blue_r_arrow.gif" width="10" height="10"></TD>
+          <TD width="90%" class="OraCellText">Navigation Item</TD>
+        </TR>
+      </TABLE>
+    </TD>
+    <TD width="71%">
+      <DIV align="center">
+      <rw:dataArea id="defaultLayout">
+
+            <!-- Report Wizard inserts report block here! -->
+
+      </rw:dataArea>
+      </DIV>
+    </TD>
+  </TR>
+</TABLE>
+
+<P>
+  <BR>
+</P>
+
+<TABLE border=0 cellPadding=0 cellSpacing=0 width="100%">
+  <TBODY>
+  <TR>
+    <TD bgColor="#000000" colSpan=2><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+  </TR>
+  <TR>
+    <TD bgColor="#ff0000" colSpan=2 class="OraColumnHeader"><IMG alt="" border=0 height=4 src="images/stretch.gif" width=1></TD>
+  </TR>
+  <TR>
+    <TD bgColor="#000000" colSpan=2><IMG alt="" border=0 height=1 src="images/stretch.gif" width=1></TD>
+  </TR>
+  <TR>
+    <TD bgColor="#ffffff">&nbsp;</TD>
+    <TD align=right bgColor="#ffffff">&nbsp;</TD>
+  </TR>
+  </TBODY>
+</TABLE>
+
+</BODY>
+
+</HTML>
+
+<!--
+</rw:report>
+-->
+<rw:style id="rwbeige182">
+<link rel="StyleSheet" type="text/css" href="css/rwbeige.css">
+</rw:style>
+<!-- Data Area Generated by Reports Developer -->
+<rw:dataArea id="MGlvrectypecodeGRPFR8">
+<rw:foreach id="RGlvrectypecode81" src="G_lv_rectypecode">
+<!-- Start GetGroupHeader/n --> <table class="OraTable">
+ <caption class="OraHeader">  <br>Lv Rectypecode <rw:field id="F_lv_rectypecode" src="lv_rectypecode" breakLevel="RGlvrectypecode81" breakValue="&nbsp;"> F_lv_rectypecode </rw:field><br>
+Lv Selbyid <rw:field id="F_lv_selbyid" src="lv_selbyid" breakLevel="RGlvrectypecode81" breakValue="&nbsp;"> F_lv_selbyid </rw:field><br>
+ </caption>
+<!-- End GetGroupHeader/n --> <!-- Header -->
+ <tr>
+  <th <rw:id id="HBlvlabel8" asArray="no"/> class="OraColumnHeader"> Lv Label </th>
+  <rw:foreach id="RGlvlabel81" src="G_lv_label">
+   <th <rw:headers id="HFlvlabel8" src="HBlvlabel8"/> class="OraColumnHeader"><rw:field id="Flvlabel8" src="lv_label" breakLevel="RGlvlabel81" breakValue="&nbsp;"> F_lv_label </rw:field></th>
+  </rw:foreach>
+ </tr>
+ <tr>
+  <th <rw:id id="HBlvseq8" asArray="no"/> class="OraRowHeader"> Lv Seq </th>
+  <rw:foreach id="RGlvlabel82" src="G_lv_label">
+   <th <rw:id id="HBlvvalue8" asArray="no"/> class="OraColumnHeader"> Lv Value </th>
+  </rw:foreach>
+ </tr>
+ <!-- Body -->
+ <rw:foreach id="RGlvseq83" src="G_lv_seq">
+  <tr>
+   <th <rw:id id="HFlvseq8" breakLevel="RGlvseq83" asArray="yes"/> class="OraRowHeader"><rw:field id="Flvseq8" src="lv_seq" breakLevel="RGlvseq83" breakValue="&nbsp;"> F_lv_seq </rw:field></th>
+   <rw:foreach id="RGlvlabel84" src="G_lv_label">
+    <td valign="top">
+     <table class="OraTable">
+      <rw:foreach id="RGlvvalue84" src="G_lv_value">
+       <tr>
+        <td <rw:headers id="HFlvvalue8" src="HBlvvalue8"/> class="OraCellText"><rw:field id="Flvvalue8" src="lv_value" nullValue="&nbsp;"> F_lv_value </rw:field></td>
+       </tr>
+      </rw:foreach>
+     </table>
+    </td>
+   </rw:foreach>
+  </tr>
+ </rw:foreach>
+ <tr>
+  <td class="OraCellText"> &nbsp; </td>
+  <rw:foreach id="RGlvlabel85" src="G_lv_label">
+   <td class="OraCellText"> &nbsp; </td>
+  </rw:foreach>
+ </tr>
+</table>
+</rw:foreach>
+<table class="OraTable" summary="">
+</table>
+</rw:dataArea> <!-- id="MGlvrectypecodeGRPFR8" -->
+<!-- End of Data Area Generated by Reports Developer -->
+]]>
+  </webSource>
+  <colorPalette>
+    <color index="190" displayName="TextColor" value="#336699"/>
+    <color index="191" displayName="TableHeading" value="#cccc99"/>
+    <color index="192" displayName="TableCell" value="#f7f7e7"/>
+    <color index="193" displayName="Totals" value="#ffffcc"/>
+  </colorPalette>
+  <reportPrivate defaultReportType="matrixBreak" versionFlags2="0"
+   templateName="rwbeige"/>
+  <reportWebSettings>
+  <![CDATA[#NULL#]]>
+  </reportWebSettings>
+</report>

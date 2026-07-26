@@ -184,7 +184,12 @@ label.burst-field input,label.burst-field textarea,label.burst-field select{ mar
 }
 .tab:hover{ color:var(--ink); }
 .tab.active{ color:var(--ink); border-bottom-color:var(--accent); }
-.tab-adv{ color:var(--ink-faint); }
+/* Advanced views stay HIDDEN until the "Advanced views" toggle adds
+   body.show-advanced (wireSimplifiedUI in app.js) — the default is the
+   simple four-tab view. */
+.tab-adv{ display:none; color:var(--ink-faint); }
+body.show-advanced .tab-adv{ display:inline-flex; }
+.tab-adv:hover{ color:var(--ink-2); }
 .tab-adv.active{ color:var(--ink); }
 .tab-dot{ display:none; }   /* rainbow dots removed */
 .tab-badge{

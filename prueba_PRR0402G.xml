@@ -1,0 +1,3093 @@
+<?xml version="1.0" encoding="WINDOWS-1252" ?>
+<report name="prr0402g" DTDVersion="9.0.2.0.10">
+  <xmlSettings xmlTag="PRR0402G" xmlPrologType="text">
+  <![CDATA[<?xml version="1.0"?>]]>
+  </xmlSettings>
+  <reportHtmlEscapes>
+    <beforeReportHtmlEscape>
+    <![CDATA[<html>
+<body bgcolor="#ffffff">
+]]>
+    </beforeReportHtmlEscape>
+    <beforePageHtmlEscape>
+    <![CDATA[#NULL#]]>
+    </beforePageHtmlEscape>
+    <afterPageHtmlEscape>
+    <![CDATA[<hr size=5 noshade>
+]]>
+    </afterPageHtmlEscape>
+    <beforeFormHtmlEscape>
+    <![CDATA[<html>
+<body bgcolor="#ffffff">
+<form method=post action="_action_">
+<input name="hidden_run_parameters" type=hidden value="_hidden_">
+<center>
+<p><table border=0 cellspacing=0 cellpadding=0>
+<tr>
+<td><input type=submit></td>
+<td width=15>
+<td><input type=reset></td>
+</tr>
+</table>
+<p><hr><p>
+]]>
+    </beforeFormHtmlEscape>
+    <pageNavigationHtmlEscape>
+    <![CDATA[<HTML>
+<TITLE>Oracle HTML Navigator</TITLE>
+<HEAD>
+<SCRIPT LANGUAGE = "JavaScript">
+
+var jump_index = 1			// Jump to this page
+var num_pages = &TotalPages			// Total number of pages
+var basefilename = "&file_name"		// Base file name
+var fileext = "&file_ext"		//File extension
+
+/* jumps to "new_page" */
+function new_page(form, new_page)
+{
+	form.reqpage.value = new_page;
+	parent.frames[0].location = basefilename + "_" + new_page + "."+fileext;
+}
+
+/* go back one page */
+function back(form)
+{
+	/* if we are not in first page */
+	if (jump_index > 1)
+	{
+		jump_index--;
+		new_page(form, jump_index);
+	}
+}
+
+/* go forward one page */
+function forward(form)
+{
+	/* if we are not in last page */
+	if (jump_index < num_pages)
+	{
+		jump_index++;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to first page */
+function first(form)
+{
+	if(jump_index != 1)
+	{
+		jump_index = 1;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to last page */
+function last(form)
+{
+	if(jump_index != num_pages)
+	{
+		jump_index = num_pages;
+		new_page(form, jump_index);
+	}
+}
+
+/* go to the user specified page number */
+function pagenum(form)
+{
+	/* sanity check */
+	if (form.reqpage.value < 1)
+	{
+		form.reqpage.value = 1;
+	}
+	if (form.reqpage.value > num_pages)
+	{
+		form.reqpage.value = num_pages;
+	}
+	jump_index = form.reqpage.value;
+	new_page(form, jump_index);
+}
+</SCRIPT>
+</HEAD>
+
+<BODY>
+<FORM NAME="ThisForm" onSubmit="pagenum(this); return false;">
+<center><table><tr>
+<td> <INPUT TYPE="button"  VALUE="<< " onClick="first(this.form)">
+<td> <INPUT TYPE="button"  VALUE=" < " onClick="back(this.form)">
+<td> <INPUT TYPE="button"  VALUE="Page:" onClick="pagenum(this.form)">
+<td> <INPUT NAME="reqpage" VALUE="1" SIZE=2>
+<td> <INPUT TYPE="button"  VALUE=" > " onClick="forward(this.form)">
+<td> <INPUT TYPE="button"  VALUE=" >>" onClick="last(this.form)">
+</table></center>
+</FORM></BODY>
+</HTML>
+]]>
+    </pageNavigationHtmlEscape>
+  </reportHtmlEscapes>
+  <data>
+    <userParameter name="pg_cod_empresa" datatype="character" width="5"
+     initialValue="1" label="Codigo Empresa" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="pg_cod_sistema" datatype="character" width="2"
+     precision="10" initialValue="PR" label="Codigo Sistema" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="pg_cod_idioma" datatype="character" width="4"
+     initialValue="ESPA" label="Idioma" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="pg_nom_reporte" datatype="character" width="8"
+     precision="10" initialValue="PACAMHIS"
+     validationTrigger="nomreportevalidtrigger" label="Nombre Reporte"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="pg_usuario" datatype="character" width="30"
+     precision="10" initialValue="GANZOATE" inputMask="NNN,NN0.NN"
+     label="Usuario" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="WHERE" datatype="character" width="800"
+     precision="10" initialValue="and cod_tipo_cambio like &apos;BAN%&apos;"
+     label="Clausula de Where" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="pg_cod_agencia" datatype="character" width="5"
+     initialValue="1101" label="Codigo Agencia" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="PG_Masc_fecha" datatype="character" precision="10"
+     initialValue="DD/MM/YYYY" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_cod_cliente" datatype="character" width="30"
+     precision="10" initialValue="35030" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="p_cod_moneda_usd" datatype="number" precision="10"
+     initialValue="2" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="p_fecha_hoy" datatype="date" precision="10"
+     initialValue="08/02/2001" inputMask="dd/mm/yyyy" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="p_nom_cliente" datatype="character" width="80"
+     precision="10" initialValue="MADEPA" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_linea" datatype="number" precision="10"
+     initialValue="122" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_sesion" datatype="character" precision="10"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_COD_CALIF" datatype="character" width="2"
+     precision="10" initialValue="1" defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_prevision" datatype="character" precision="10"
+     initialValue="0" inputMask="999,990.90" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="P_pre_con" datatype="character" precision="10"
+     initialValue="0" inputMask="999,990.90" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="P_MON_PROMEDIO" datatype="character" precision="10"
+     initialValue="0" defaultWidth="0" defaultHeight="0"/>
+    <systemParameter name="MODE" initialValue="Default"/>
+    <systemParameter name="ORIENTATION" initialValue="LANDSCAPE"/>
+    <systemParameter name="DESNAME" display="yes"/>
+    <systemParameter name="DESTYPE" display="yes"/>
+    <dataSource name="Q_General">
+      <select>
+      <![CDATA[select sysdate
+from dual;]]>
+      </select>
+      <displayInfo x="0.28125" y="0.30212" width="0.70837" height="0.28320"/>
+      <group name="G_General">
+        <displayInfo x="0.08130" y="1.08533" width="1.18958" height="2.31055"
+        />
+        <dataItem name="sysdate" datatype="date" oracleDatatype="date"
+         columnOrder="18" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="33" defaultLabel="Sysdate">
+          <dataDescriptor expression="sysdate" descriptiveExpression="SYSDATE"
+           order="1" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <formula name="CF_TitEmpresa" source="cf_titempresaformula"
+         datatype="character" width="80" defaultWidth="400000"
+         defaultHeight="10000" columnFlags="48" defaultLabel="Cf Titempresa"
+         breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_TitAgencia" source="cf_titagenciaformula"
+         datatype="character" width="80" defaultWidth="400000"
+         defaultHeight="10000" columnFlags="48" defaultLabel="Cf Titagencia"
+         breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_TitSistema" source="cf_titsistemaformula"
+         datatype="character" width="80" defaultWidth="400000"
+         defaultHeight="10000" columnFlags="48" defaultLabel="Cf Titsistema"
+         breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_TitReporte" source="cf_titreporteformula"
+         datatype="character" width="80" defaultWidth="400000"
+         defaultHeight="10000" columnFlags="48" defaultLabel="Cf Titreporte"
+         breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+        <formula name="CF_Tipocambio" source="cf_tipocambioformula"
+         datatype="number" width="18" precision="16" scale="2"
+         defaultWidth="0" defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_lineas">
+      <select>
+      <![CDATA[/* -- mocastro 25/03/2026 FSN1852 Unificacion de operaciones de creditos e1 e5 e10 e11 Query original comentada por cambio de Pr_operaciones_tmp a PR_ANTEC_CRED_GTT
+Select no_credito, num_tramite, fec_primer_desembolso f_apertura, f_vencimiento, mon_utilizar saldo_disp, f_paso_castigo,
+mon_saldo saldo_act, monto_desembolsado monto_credito, des_moneda, des_estado, des_tip_credito des_operacion, des_producto
+  From   Pr_operaciones_tmp
+  Where  sesion = :p_sesion
+        and cod_sucursal = 100
+*/
+-- mocastro 25/03/2026 FSN1852 Unificacion de operaciones de creditos e1 e5 e10 e11 Nueva query usando PR_ANTEC_CRED_GTT (sesion eliminada por GTT, cod_sucursal=100 -> TIPO_REGISTRO='LIN')
+Select NO_OPERACION no_credito, NUM_TRAMITE, FEC_INICIO fec_primer_desembolso, FEC_VENCIMIENTO f_vencimiento, SALDO_CONTINGENTE mon_utilizar, FEC_PROX_REVISION f_paso_castigo,
+SALDO_DIRECTO mon_saldo, MONTO_DESEMBOLSADO, DES_MONEDA, DES_ESTADO, DES_INSTRUMENTO des_tip_credito, DES_PRODUCTO
+  From   PR.PR_ANTEC_CRED_GTT
+  Where COD_EMPRESA = :pg_cod_empresa and TIPO_REGISTRO = 'LIN']]>
+      </select>
+      <displayInfo x="2.09375" y="0.22925" width="0.69995" height="0.19995"/>
+      <group name="G_lineas">
+        <displayInfo x="1.52917" y="0.83337" width="1.83533" height="2.82324"
+        />
+        <dataItem name="f_paso_castigo" datatype="date" oracleDatatype="date"
+         columnOrder="97" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="F Paso Castigo">
+          <dataDescriptor expression="f_paso_castigo"
+           descriptiveExpression="F_PASO_CASTIGO" order="6" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="num_tramite1" oracleDatatype="number" columnOrder="25"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Num Tramite">
+          <xmlSettings xmlTag="NUM_TRAMITE"/>
+          <dataDescriptor expression="num_tramite"
+           descriptiveExpression="NUM_TRAMITE" order="2"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="no_credito1" oracleDatatype="number" columnOrder="29"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="No Credito" breakOrder="none">
+          <xmlSettings xmlTag="NO_CREDITO"/>
+          <dataDescriptor expression="no_credito"
+           descriptiveExpression="NO_CREDITO" order="1"
+           oracleDatatype="number" width="22" precision="7"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="F_apertura" datatype="date" oracleDatatype="date"
+         columnOrder="30" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="F Apertura" breakOrder="none">
+          <dataDescriptor expression="fec_primer_desembolso"
+           descriptiveExpression="F_APERTURA" order="3" oracleDatatype="date"
+           width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="f_vencimiento1" datatype="date" oracleDatatype="date"
+         columnOrder="31" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="F Vencimiento" breakOrder="none">
+          <xmlSettings xmlTag="F_VENCIMIENTO"/>
+          <dataDescriptor expression="f_vencimiento"
+           descriptiveExpression="F_VENCIMIENTO" order="4"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="Monto_credito" oracleDatatype="number"
+         columnOrder="32" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="0" defaultLabel="Monto Credito"
+         breakOrder="none">
+          <dataDescriptor expression="monto_desembolsado"
+           descriptiveExpression="MONTO_CREDITO" order="8"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="saldo_disp" oracleDatatype="number" columnOrder="45"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="Saldo Disp" breakOrder="none">
+          <dataDescriptor expression="mon_utilizar"
+           descriptiveExpression="SALDO_DISP" order="5"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="saldo_act" oracleDatatype="number" columnOrder="46"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="Saldo Act" breakOrder="none">
+          <dataDescriptor expression="mon_saldo"
+           descriptiveExpression="SALDO_ACT" order="7" oracleDatatype="number"
+           width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_moneda1" datatype="vchar2" columnOrder="47"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Moneda" breakOrder="none">
+          <xmlSettings xmlTag="DES_MONEDA"/>
+          <dataDescriptor expression="des_moneda"
+           descriptiveExpression="DES_MONEDA" order="9" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_estado1" datatype="vchar2" columnOrder="48"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Estado" breakOrder="none">
+          <xmlSettings xmlTag="DES_ESTADO"/>
+          <dataDescriptor expression="des_estado"
+           descriptiveExpression="DES_ESTADO" order="10" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_operacion" datatype="vchar2" columnOrder="49"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Operacion" breakOrder="none">
+          <dataDescriptor expression="des_tip_credito"
+           descriptiveExpression="DES_OPERACION" order="11" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_producto1" datatype="vchar2" columnOrder="50"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Producto" breakOrder="none">
+          <xmlSettings xmlTag="DES_PRODUCTO"/>
+          <dataDescriptor expression="des_producto"
+           descriptiveExpression="DES_PRODUCTO" order="12" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <summary name="Cs_saldo_directo_l" source="saldo_dir2" function="sum"
+         width="20" precision="10" reset="G_lineas" compute="G_lineas"
+         defaultWidth="120000" defaultHeight="10000" columnFlags="8"
+         defaultLabel="Cs Saldo Directo L">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <summary name="Cs_saldo_cont_l" source="saldo_cont2" function="sum"
+         width="20" precision="10" reset="G_lineas" compute="G_lineas"
+         defaultWidth="120000" defaultHeight="10000" columnFlags="8"
+         defaultLabel="Cs Saldo Cont L">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </summary>
+        <formula name="CF_TRAMITE_MOD" source="tramite_modformula"
+         datatype="number" width="20" precision="10" defaultWidth="0"
+         defaultHeight="0" columnFlags="16" breakOrder="none">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000"
+           height="0.00000"/>
+        </formula>
+      </group>
+    </dataSource>
+    <dataSource name="Q_op_bl">
+      <select>
+      <![CDATA[
+/* -- mocastro 25/03/2026 FSN1852 Unificacion de operaciones de creditos e1 e5 e10 e11 Query original comentada por cambio de Pr_operaciones_tmp a PR_ANTEC_CRED_GTT
+Select cod_persona no_credito2, num_tramite num_tramite2, fec_primer_desembolso f_apertura2, f_vencimiento f_vencimiento2, mon_utilizar saldo_cont2,
+mon_saldo saldo_dir2, monto_desembolsado monto_credito2, des_moneda des_moneda2, des_estado des_estado2, des_tip_credito des_operacion2, des_producto des_producto2, numero_reprogramacion,
+f_ultimo_desembolso f_cuota
+  From   Pr_operaciones_tmp
+  Where  sesion = :p_sesion
+        and cod_sucursal = 200
+order by f_apertura2
+*/
+-- mocastro 25/03/2026 FSN1852 Unificacion de operaciones de creditos e1 e5 e10 e11 Nueva query usando PR_ANTEC_CRED_GTT (sesion eliminada por GTT, cod_sucursal=200 -> TIPO_REGISTRO='BL')
+Select NO_OPERACION no_credito2, NUM_TRAMITE num_tramite2, FEC_INICIO fec_primer_desembolso, FEC_VENCIMIENTO f_vencimiento2, SALDO_CONTINGENTE saldo_cont2,
+SALDO_DIRECTO saldo_dir2, MONTO_DESEMBOLSADO monto_credito2, DES_MONEDA des_moneda2, DES_ESTADO des_estado2, DES_INSTRUMENTO des_operacion2, DES_PRODUCTO des_producto2, NUM_TRAMITE_PADRE numero_reprogramacion,
+FEC_VTO_PROX_CUOTA f_cuota
+  From   PR.PR_ANTEC_CRED_GTT
+  Where COD_EMPRESA = :pg_cod_empresa and TIPO_REGISTRO = 'BL'
+order by fec_primer_desembolso
+
+]]>
+      </select>
+      <displayInfo x="4.01245" y="0.09387" width="1.56250" height="0.36450"/>
+      <group name="G_tramites_bl">
+        <displayInfo x="3.91675" y="0.74194" width="1.76038" height="2.48145"
+        />
+        <dataItem name="num_tramite2" oracleDatatype="number" columnOrder="34"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Num Tramite1">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.NUM_TRAMITE"
+           descriptiveExpression="NUM_TRAMITE2" order="2"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="no_credito2" datatype="vchar2" columnOrder="51"
+         width="15" defaultWidth="90000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="No Credito2" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.NO_OPERACION"
+           descriptiveExpression="NO_CREDITO2" order="1" width="15"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="f_apertura2" datatype="date" oracleDatatype="date"
+         columnOrder="52" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="F Apertura2" breakOrder="none">
+          <dataDescriptor
+           expression="PR_ANTEC_CRED_GTT.FEC_INICIO"
+           descriptiveExpression="F_APERTURA2" order="3" oracleDatatype="date"
+           width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="f_vencimiento2" datatype="date" oracleDatatype="date"
+         columnOrder="53" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="F Vencimiento2" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.FEC_VENCIMIENTO"
+           descriptiveExpression="F_VENCIMIENTO2" order="4"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="saldo_cont2" oracleDatatype="number" columnOrder="54"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="Saldo Disp2" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.SALDO_CONTINGENTE"
+           descriptiveExpression="SALDO_CONT2" order="5"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="saldo_dir2" oracleDatatype="number" columnOrder="55"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="Saldo Act2" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.SALDO_DIRECTO"
+           descriptiveExpression="SALDO_DIR2" order="6"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="monto_credito2" oracleDatatype="number"
+         columnOrder="56" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="0" defaultLabel="Monto Credito2"
+         breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.MONTO_DESEMBOLSADO"
+           descriptiveExpression="MONTO_CREDITO2" order="7"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_moneda2" datatype="vchar2" columnOrder="57"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Moneda2" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_MONEDA"
+           descriptiveExpression="DES_MONEDA2" order="8" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_estado2" datatype="vchar2" columnOrder="58"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Estado2" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_ESTADO"
+           descriptiveExpression="DES_ESTADO2" order="9" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_operacion2" datatype="vchar2" columnOrder="59"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Operacion2" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_INSTRUMENTO"
+           descriptiveExpression="DES_OPERACION2" order="10" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_producto2" datatype="vchar2" columnOrder="60"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Producto2" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_PRODUCTO"
+           descriptiveExpression="DES_PRODUCTO2" order="11" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="numero_reprogramacion" oracleDatatype="number"
+         columnOrder="82" width="22" defaultWidth="120000"
+         defaultHeight="10000" columnFlags="0"
+         defaultLabel="Numero Reprogramacion" breakOrder="none">
+          <dataDescriptor
+           expression="PR_ANTEC_CRED_GTT.NUM_TRAMITE_PADRE"
+           descriptiveExpression="NUMERO_REPROGRAMACION" order="12"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="f_cuota" datatype="date" oracleDatatype="date"
+         columnOrder="86" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="F Cuota" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.FEC_VTO_PROX_CUOTA"
+           descriptiveExpression="F_CUOTA" order="13" oracleDatatype="date"
+           width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      <filter type="plsql" plsqlFilter="g_tramites_blgroupfilter"
+       numberOfRecords="0"/>
+      </group>
+    </dataSource>
+    <dataSource name="Q_op_fl">
+      <select>
+      <![CDATA[/* -- mocastro 25/03/2026 FSN1852 Unificacion de operaciones de creditos e1 e5 e10 e11 Query original comentada por cambio de Pr_operaciones_tmp a PR_ANTEC_CRED_GTT
+Select cod_persona no_credito3, num_tramite num_tramite3, fec_primer_desembolso f_apertura3, f_vencimiento f_vencimiento3, mon_utilizar saldo_cont3,
+mon_saldo saldo_dir3, monto_desembolsado monto_credito3, des_moneda des_moneda3, des_estado des_estado3, des_tip_credito des_operacion3, des_producto des_producto3,
+f_ultimo_desembolso f_cuota_fl
+  From   Pr_operaciones_tmp
+  Where  sesion = :p_sesion
+        and cod_sucursal = 300
+order by f_apertura3
+*/
+-- mocastro 25/03/2026 FSN1852 Unificacion de operaciones de creditos e1 e5 e10 e11 Nueva query usando PR_ANTEC_CRED_GTT (sesion eliminada por GTT, cod_sucursal=300 -> TIPO_REGISTRO='FL')
+Select NO_OPERACION no_credito3, NUM_TRAMITE num_tramite3, FEC_INICIO fec_primer_desembolso, FEC_VENCIMIENTO f_vencimiento3, SALDO_CONTINGENTE saldo_cont3,
+SALDO_DIRECTO saldo_dir3, MONTO_DESEMBOLSADO monto_credito3, DES_MONEDA des_moneda3, DES_ESTADO des_estado3, DES_INSTRUMENTO des_operacion3, DES_PRODUCTO des_producto3,
+FEC_VTO_PROX_CUOTA f_cuota_fl
+  From   PR.PR_ANTEC_CRED_GTT
+  Where COD_EMPRESA = :pg_cod_empresa and TIPO_REGISTRO = 'FL'
+order by fec_primer_desembolso]]>
+      </select>
+      <displayInfo x="6.12500" y="0.13550" width="1.35413" height="0.30200"/>
+      <group name="G_tramites_fl">
+        <displayInfo x="6.06055" y="0.84583" width="1.64783" height="2.31055"
+        />
+        <dataItem name="num_tramite3" oracleDatatype="number" columnOrder="35"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Num Tramite2">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.NUM_TRAMITE"
+           descriptiveExpression="NUM_TRAMITE3" order="2"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="no_credito3" datatype="vchar2" columnOrder="61"
+         width="15" defaultWidth="90000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="No Credito3" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.NO_OPERACION"
+           descriptiveExpression="NO_CREDITO3" order="1" width="15"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="f_apertura3" datatype="date" oracleDatatype="date"
+         columnOrder="62" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="F Apertura3" breakOrder="none">
+          <dataDescriptor
+           expression="PR_ANTEC_CRED_GTT.FEC_INICIO"
+           descriptiveExpression="F_APERTURA3" order="3" oracleDatatype="date"
+           width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="f_vencimiento3" datatype="date" oracleDatatype="date"
+         columnOrder="63" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="F Vencimiento3" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.FEC_VENCIMIENTO"
+           descriptiveExpression="F_VENCIMIENTO3" order="4"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="saldo_cont3" oracleDatatype="number" columnOrder="64"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="Saldo Disp3" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.SALDO_CONTINGENTE"
+           descriptiveExpression="SALDO_CONT3" order="5"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="saldo_dir3" oracleDatatype="number" columnOrder="65"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="0"
+         defaultLabel="Saldo Act3" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.SALDO_DIRECTO"
+           descriptiveExpression="SALDO_DIR3" order="6"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="monto_credito3" oracleDatatype="number"
+         columnOrder="66" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="0" defaultLabel="Monto Credito3"
+         breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.MONTO_DESEMBOLSADO"
+           descriptiveExpression="MONTO_CREDITO3" order="7"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_moneda3" datatype="vchar2" columnOrder="67"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Moneda3" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_MONEDA"
+           descriptiveExpression="DES_MONEDA3" order="8" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_estado3" datatype="vchar2" columnOrder="68"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Estado3" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_ESTADO"
+           descriptiveExpression="DES_ESTADO3" order="9" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_operacion3" datatype="vchar2" columnOrder="69"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Operacion3" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_INSTRUMENTO"
+           descriptiveExpression="DES_OPERACION3" order="10" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_producto3" datatype="vchar2" columnOrder="70"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="Des Producto3" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_PRODUCTO"
+           descriptiveExpression="DES_PRODUCTO3" order="11" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="f_cuota_fl" datatype="date" oracleDatatype="date"
+         columnOrder="87" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="F Cuota1" breakOrder="none">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.FEC_VTO_PROX_CUOTA"
+           descriptiveExpression="F_CUOTA_FL" order="12" oracleDatatype="date"
+           width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      <filter type="plsql" plsqlFilter="g_tramites_flgroupfilter"
+       numberOfRecords="0"/>
+      </group>
+    </dataSource>
+    <dataSource name="Q_op_ind">
+      <select>
+      <![CDATA[
+/* -- mocastro 25/03/2026 FSN1852 Unificacion de operaciones de creditos e1 e5 e10 e11 Query original comentada por cambio de Pr_operaciones_tmp a PR_ANTEC_CRED_GTT
+Select cod_persona no_credito4, num_tramite num_tramite4, fec_primer_desembolso f_apertura4, f_vencimiento f_vencimiento4, mon_utilizar saldo_cont4,
+mon_saldo saldo_dir4, monto_desembolsado monto_credito4, des_moneda des_moneda4, des_estado des_estado4, des_tip_credito des_operacion4, des_producto des_producto4, 'x'
+  From   Pr_operaciones_tmp
+  Where  sesion = :p_sesion
+        and cod_sucursal = 400
+order by f_apertura4
+*/
+-- mocastro 25/03/2026 FSN1852 Unificacion de operaciones de creditos e1 e5 e10 e11 Nueva query usando PR_ANTEC_CRED_GTT (sesion eliminada por GTT, cod_sucursal=400 -> TIPO_REGISTRO='IND')
+Select NO_OPERACION no_credito4, NUM_TRAMITE num_tramite4, FEC_INICIO fec_primer_desembolso, FEC_VENCIMIENTO f_vencimiento4, SALDO_CONTINGENTE saldo_cont4,
+SALDO_DIRECTO saldo_dir4, MONTO_DESEMBOLSADO monto_credito4, DES_MONEDA des_moneda4, DES_ESTADO des_estado4, NOM_CLIENTE des_operacion4, DES_PRODUCTO des_producto4, 'x'
+  From   PR.PR_ANTEC_CRED_GTT
+  Where COD_EMPRESA = :pg_cod_empresa and TIPO_REGISTRO = 'IND'
+order by fec_primer_desembolso]]>
+      </select>
+      <displayInfo x="8.15625" y="0.10413" width="1.22913" height="0.29175"/>
+      <group name="G_indirecta">
+        <displayInfo x="8.10217" y="0.81445" width="1.51245" height="2.31055"
+        />
+        <dataItem name="num_tramite4" oracleDatatype="number" columnOrder="37"
+         width="22" defaultWidth="120000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Num Tramite3">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.NUM_TRAMITE"
+           descriptiveExpression="NUM_TRAMITE4" order="2"
+           oracleDatatype="number" width="22" precision="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="no_credito4" datatype="vchar2" columnOrder="72"
+         width="15" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="No Credito4">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.NO_OPERACION"
+           descriptiveExpression="NO_CREDITO4" order="1" width="15"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="f_apertura4" datatype="date" oracleDatatype="date"
+         columnOrder="73" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="F Apertura4">
+          <dataDescriptor
+           expression="PR_ANTEC_CRED_GTT.FEC_INICIO"
+           descriptiveExpression="F_APERTURA4" order="3" oracleDatatype="date"
+           width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="f_vencimiento4" datatype="date" oracleDatatype="date"
+         columnOrder="74" width="9" defaultWidth="90000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="F Vencimiento4">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.FEC_VENCIMIENTO"
+           descriptiveExpression="F_VENCIMIENTO4" order="4"
+           oracleDatatype="date" width="9"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="saldo_cont4" oracleDatatype="number" columnOrder="75"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Saldo Disp4">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.SALDO_CONTINGENTE"
+           descriptiveExpression="SALDO_CONT4" order="5"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="saldo_dir4" oracleDatatype="number" columnOrder="76"
+         width="22" defaultWidth="90000" defaultHeight="10000" columnFlags="1"
+         defaultLabel="Saldo Act4">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.SALDO_DIRECTO"
+           descriptiveExpression="SALDO_DIR4" order="6"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="monto_credito4" oracleDatatype="number"
+         columnOrder="77" width="22" defaultWidth="90000"
+         defaultHeight="10000" columnFlags="1" defaultLabel="Monto Credito4">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.MONTO_DESEMBOLSADO"
+           descriptiveExpression="MONTO_CREDITO4" order="7"
+           oracleDatatype="number" width="22" scale="2" precision="16"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_moneda4" datatype="vchar2" columnOrder="78"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Moneda4">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_MONEDA"
+           descriptiveExpression="DES_MONEDA4" order="8" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_estado4" datatype="vchar2" columnOrder="79"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Estado4">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_ESTADO"
+           descriptiveExpression="DES_ESTADO4" order="9" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_operacion4" datatype="vchar2" columnOrder="80"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Operacion4">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_INSTRUMENTO"
+           descriptiveExpression="DES_OPERACION4" order="10" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="des_producto4" datatype="vchar2" columnOrder="81"
+         width="60" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="Des Producto4">
+          <dataDescriptor expression="PR_ANTEC_CRED_GTT.DES_PRODUCTO"
+           descriptiveExpression="DES_PRODUCTO4" order="11" width="60"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="x" datatype="character" oracleDatatype="aFixedChar"
+         columnOrder="88" width="1" defaultWidth="10000" defaultHeight="10000"
+         columnFlags="1" defaultLabel="X">
+          <dataDescriptor expression="&apos;x&apos;"
+           descriptiveExpression="&apos;X&apos;" order="12" width="1"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      <filter type="plsql" plsqlFilter="g_indirectagroupfilter"
+       numberOfRecords="0"/>
+      </group>
+    </dataSource>
+    <summary name="CS_tot_cont_fl" source="saldo_cont3" function="sum"
+     width="20" precision="18" scale="2" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="6.29175" y="3.72986" width="1.25000" height="0.19995"/>
+    </summary>
+    <summary name="CS_tot_dir_ind" source="saldo_dir4" function="sum"
+     width="20" precision="18" scale="2" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="8.33313" y="3.26135" width="1.13538" height="0.19995"/>
+    </summary>
+    <summary name="CS_tot_cont_ind" source="saldo_cont4" function="sum"
+     width="20" precision="18" scale="2" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="8.34351" y="3.71948" width="1.10413" height="0.19995"/>
+    </summary>
+    <formula name="CF_total_directo" source="cf_total_directoformula"
+     datatype="number" width="20" precision="18" scale="2" defaultWidth="0"
+     defaultHeight="0" columnFlags="16" breakOrder="none">
+      <displayInfo x="0.12500" y="3.70825" width="1.17712" height="0.19995"/>
+    </formula>
+    <formula name="CF_total_contingente" source="cf_total_contingenteformula"
+     datatype="number" width="20" precision="18" scale="2" defaultWidth="0"
+     defaultHeight="0" columnFlags="16" breakOrder="none">
+      <displayInfo x="0.12500" y="4.08337" width="1.16663" height="0.19995"/>
+    </formula>
+    <summary name="CS_tot_dir_bl1" source="saldo_dir2" function="sum"
+     width="20" precision="18" scale="2" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="4.20837" y="3.58398" width="1.29163" height="0.19995"/>
+    </summary>
+    <summary name="CS_tot_cont_bl1" source="saldo_cont2" function="sum"
+     width="20" precision="18" scale="2" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8" valueIfNull="0">
+      <displayInfo x="4.20837" y="3.93811" width="1.26038" height="0.19995"/>
+    </summary>
+    <summary name="CS_tot_dir_fl" source="saldo_dir3" function="sum"
+     width="20" precision="18" scale="2" reset="report" compute="report"
+     defaultWidth="0" defaultHeight="0" columnFlags="8">
+      <displayInfo x="6.28125" y="3.28198" width="1.18750" height="0.19995"/>
+    </summary>
+    <formula name="Cf_calif" source="cf_califformula" datatype="character"
+     width="3" precision="10" defaultWidth="0" defaultHeight="0"
+     columnFlags="16" breakOrder="none">
+      <displayInfo x="0.15625" y="4.32288" width="0.79993" height="0.19995"/>
+    </formula>
+    <formula name="CF_id_cliente" source="cf_id_clienteformula"
+     datatype="character" width="100" precision="10" defaultWidth="0"
+     defaultHeight="0" columnFlags="16" breakOrder="none">
+      <displayInfo x="1.31238" y="4.08325" width="0.91675" height="0.20837"/>
+    </formula>
+    <placeholder name="CP_direccion" datatype="character" width="160"
+     precision="10" defaultWidth="0" defaultHeight="0" columnFlags="16">
+      <displayInfo x="1.30212" y="4.32312" width="0.93750" height="0.19995"/>
+    </placeholder>
+    <placeholder name="CP_telefono" datatype="character" width="20"
+     precision="10" defaultWidth="0" defaultHeight="0" columnFlags="16">
+      <displayInfo x="1.29163" y="4.56262" width="0.94800" height="0.19995"/>
+    </placeholder>
+    <placeholder name="CP_caedec" datatype="character" width="152"
+     precision="150" defaultWidth="0" defaultHeight="0" columnFlags="16">
+      <displayInfo x="2.26038" y="4.32300" width="1.11462" height="0.19995"/>
+    </placeholder>
+    <link parentGroup="G_lineas" parentColumn="num_tramite1"
+     childQuery="Q_op_bl" childColumn="numero_reprogramacion" condition="eq"
+     sqlClause="where"/>
+  </data>
+  <layout>
+    <rulers numberOfSnapPoints="4"/>
+  <section name="header" width="11.00000" height="8.50000">
+    <body width="11.00000" height="8.50000">
+      <location x="0.00000" y="0.00000"/>
+    </body>
+  </section>
+  <section name="trailer" width="11.00000" height="8.50000">
+    <body width="11.00000" height="8.50000">
+      <location x="0.00000" y="0.00000"/>
+    </body>
+  </section>
+  <section name="main" width="11.00000" height="8.50000">
+    <body width="10.95837" height="6.95300">
+      <location x="0.00000" y="1.48962"/>
+      <frame name="M_G_lineas_GRPFR">
+        <geometryInfo x="0.00000" y="0.01038" width="10.92188"
+         height="3.66040"/>
+        <generalLayout verticalElasticity="variable"/>
+        <repeatingFrame name="R_G_lineas" source="G_lineas"
+         printDirection="down" minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.01050" y="0.26001" width="10.91138"
+           height="1.47913"/>
+          <generalLayout verticalElasticity="variable"/>
+          <field name="F_no_credito" source="no_credito1" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="1.05737" y="0.30591" width="0.65698"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <text name="B_no_credito" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.01050" y="0.30591" width="0.72925"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Linea No.:]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_CF_Desc_Producto" source="des_producto1"
+           minWidowLines="1" spacing="0" alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="2.70190" y="0.30591" width="2.11462"
+             height="0.14587"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <text name="B_Monto_credito" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="2.57458" y="0.53418" width="0.94800"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Monto Linea :]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_CF_Mon_Operacion_USD" source="Monto_credito"
+           minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+           spacing="0" alignment="end">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="3.82251" y="0.51331" width="1.11218"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <field name="F_F_Vencimiento" source="f_vencimiento1"
+           minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+           alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="3.82251" y="0.72119" width="1.12012"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <text name="B_F_Vencimiento" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="2.57458" y="0.73694" width="1.31958"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Fec. Vencimiento :]]>
+              </string>
+            </textSegment>
+          </text>
+          <frame name="M_G_tramites_bl_GRPFR">
+            <geometryInfo x="0.03223" y="0.98389" width="10.48804"
+             height="0.42188"/>
+            <generalLayout verticalElasticity="variable"/>
+            <repeatingFrame name="R_G_tramites_bl" source="G_tramites_bl"
+             printDirection="down" minWidowRecords="1" columnMode="no">
+              <geometryInfo x="0.10889" y="1.16003" width="10.35083"
+               height="0.12500"/>
+              <generalLayout verticalElasticity="expand"/>
+              <field name="F_mon_operacion2" source="monto_credito2"
+               minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+               spacing="0" alignment="right">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="5.54688" y="1.17468" width="0.89709"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CF_desc_operacion2" source="des_operacion2"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="1.36853" y="1.17468" width="1.32288"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CF_des_estado2" source="des_estado2"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="4.52246" y="1.17468" width="0.63892"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CF_Des_moneda2" source="des_moneda2"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="5.22119" y="1.17468" width="0.28333"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CF_des_producto2" source="des_producto2"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="2.72839" y="1.17468" width="1.77087"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CF_no_credito2" source="no_credito2"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="0.76440" y="1.17468" width="0.54175"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CP_f_Apertura2" source="f_apertura2"
+               minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="6.47888" y="1.17468" width="0.58960"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CP_f_vencimiento2" source="f_vencimiento2"
+               minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="7.10620" y="1.17468" width="0.66675"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CF_saldo_cont_usd2" source="saldo_cont2"
+               minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+               spacing="0" alignment="end">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="9.49475" y="1.17468" width="0.96497"
+                 height="0.08337"/>
+              </field>
+              <field name="F_num_tramite2" source="num_tramite2"
+               minWidowLines="1" spacing="0" alignment="start">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="0.15369" y="1.17468" width="0.54175"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CF_saldo_dir_usd2" source="saldo_dir2"
+               minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+               spacing="0" alignment="end">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="8.52600" y="1.17468" width="0.92969"
+                 height="0.08337"/>
+              </field>
+              <field name="F_CP_f_vencimiento1" source="f_cuota"
+               minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+               alignment="start">
+                <font face="Courier New" size="6"/>
+                <geometryInfo x="7.81995" y="1.18091" width="0.66675"
+                 height="0.08337"/>
+              </field>
+            </repeatingFrame>
+            <frame name="M_G_tramites_bl_HDR">
+              <geometryInfo x="0.06201" y="0.99512" width="10.40820"
+               height="0.08337"/>
+              <advancedLayout printObjectOnPage="allPage"
+               basePrintingOn="enclosingObject"/>
+              <visualSettings fillPattern="transparent"
+               fillBackgroundColor="gray24" lineForegroundColor="darkgray"/>
+              <text name="B_mon_operacion" minWidowLines="1">
+                <textSettings justify="center" spacing="0"/>
+                <geometryInfo x="5.74878" y="0.99512" width="0.69910"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Monto Inicial]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CF_desc_operacion" minWidowLines="1">
+                <textSettings justify="center" spacing="0"/>
+                <geometryInfo x="1.36975" y="0.99512" width="1.31250"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Instrumento Cred.]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CF_des_estado2" minWidowLines="1">
+                <textSettings justify="center" spacing="0"/>
+                <geometryInfo x="4.52600" y="0.99512" width="0.56250"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Estado]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CF_Des_moneda2" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="5.21240" y="0.99512" width="0.36145"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Moneda]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CF_des_producto2" minWidowLines="1">
+                <textSettings justify="center" spacing="0"/>
+                <geometryInfo x="2.73438" y="0.99512" width="1.76563"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Producto]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CF_no_credito" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.78296" y="0.99512" width="0.54175"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[No.Credito]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CP_f_Apertura" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="6.45911" y="0.99512" width="0.66443"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Fec.Apertura]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CP_f_vencimiento" minWidowLines="1">
+                <textSettings justify="center" spacing="0"/>
+                <geometryInfo x="7.11108" y="0.99512" width="0.68054"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Fec.Vencto.]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CP_saldo_contingente" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="9.48169" y="0.99512" width="0.92908"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Saldo Contingente]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CP_saldo_directo" minWidowLines="1">
+                <textSettings justify="center" spacing="0"/>
+                <geometryInfo x="8.61597" y="0.99512" width="0.83972"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Saldo Directo]]>
+                  </string>
+                </textSegment>
+              </text>
+              <text name="B_CF_desc_operacion1" minWidowLines="1">
+                <textSettings spacing="0"/>
+                <geometryInfo x="0.13379" y="0.99512" width="0.60620"
+                 height="0.08337"/>
+                <textSegment>
+                  <font face="Courier New" size="6"/>
+                  <string>
+                  <![CDATA[Num.Tramite]]>
+                  </string>
+                </textSegment>
+              </text>
+            </frame>
+            <text name="B_CP_f_vencimiento3" minWidowLines="1">
+              <textSettings justify="center" spacing="0"/>
+              <geometryInfo x="7.82483" y="1.00134" width="0.68054"
+               height="0.08337"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Fec.Cuota]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+          <text name="B_CF_Desc_Producto" minWidowLines="1">
+            <textSettings justify="center" spacing="0"/>
+            <geometryInfo x="1.91895" y="0.30591" width="0.84375"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Producto :]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_Num_Tramite" source="num_tramite1" minWidowLines="1"
+           spacing="0" alignment="end">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="9.26404" y="0.30591" width="0.87598"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <field name="F_CF_Desc_Estado" source="des_estado1"
+           minWidowLines="1" spacing="0" alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="6.20630" y="0.30591" width="2.10815"
+             height="0.14587"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <field name="F_CF_Saldo_Actual_USD" source="saldo_act"
+           minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+           spacing="0" alignment="end">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="6.59167" y="0.52368" width="1.20520"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <field name="F_CF_Saldo_Disp_USD" source="saldo_disp"
+           minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+           spacing="0" alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="6.59082" y="0.70593" width="1.20569"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <text name="B_CF_Saldo_Actual_USD" minWidowLines="1">
+            <textSettings justify="center" spacing="0"/>
+            <geometryInfo x="5.21875" y="0.51843" width="1.33337"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Saldo Utilizado :]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_CF_Saldo_Disp_USD" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="5.26404" y="0.72668" width="1.32813"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Saldo Disponible :]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_CF_Desc_Moneda" source="des_moneda1"
+           minWidowLines="1" spacing="0" alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="1.05737" y="0.51843" width="1.22131"
+             height="0.14587"/>
+            <generalLayout verticalElasticity="expand"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <field name="F_F_apertura" source="F_apertura" minWidowLines="1"
+           formatMask="dd/mm/yyyy" spacing="0" alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="1.05737" y="0.72119" width="1.23425"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <text name="B_F_apertura" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.01050" y="0.72119" width="1.13794"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Fec. Apertura :]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_CF_Desc_Moneda" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.01050" y="0.51843" width="1.13855"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Moneda      :]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_CF_Desc_Estado" minWidowLines="1">
+            <textSettings justify="center" spacing="0"/>
+            <geometryInfo x="5.60803" y="0.30591" width="0.65295"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Estado :]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_Num_Tramite" minWidowLines="1">
+            <textSettings justify="center" spacing="0"/>
+            <geometryInfo x="8.38208" y="0.30591" width="0.66431"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Tr�mite :]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_CF_Saldo_Actual_USD1" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="8.38208" y="0.51843" width="0.80542"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Pr�x. Rev.:]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_Num_Tramite1" source="f_paso_castigo"
+           minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+           alignment="end">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="9.26453" y="0.51855" width="0.87598"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <field name="F_Num_Tramite5" source="CF_TRAMITE_MOD"
+           minWidowLines="1" spacing="0" alignment="end">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="9.26746" y="0.73730" width="0.87598"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+          </field>
+          <text name="B_CF_Saldo_Actual_USD2" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="8.36377" y="0.74231" width="0.91223"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Tram.Modif.:]]>
+              </string>
+            </textSegment>
+          </text>
+        </repeatingFrame>
+        <frame name="M_2">
+          <geometryInfo x="5.26038" y="1.79736" width="5.25781"
+           height="0.17188"/>
+          <advancedLayout printObjectOnPage="lastPage"
+           basePrintingOn="anchoringObject" formatTrigger="m_2formattrigger"/>
+          <field name="F_CF_tot_dir_bl1" source="CS_tot_dir_bl1"
+           minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+           spacing="0" alignment="right">
+            <font face="Courier New" size="6"/>
+            <geometryInfo x="8.54163" y="1.85974" width="0.91406"
+             height="0.08337"/>
+          </field>
+          <text name="B_no_credito1" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="5.71838" y="1.79736" width="1.84924"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"
+             formatTrigger="b_no_credito1formattrigger"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Total Deuda Bajo Linea :]]>
+              </string>
+            </textSegment>
+          </text>
+          <line name="B_12" arrow="none">
+            <geometryInfo x="8.60425" y="1.82813" width="1.87500"
+             height="0.00000"/>
+            <visualSettings linePattern="solid"/>
+            <points>
+              <point x="8.60425" y="1.82813"/>
+              <point x="10.47925" y="1.82813"/>
+            </points>
+          </line>
+          <field name="F_CF_tot_dir_bl2" source="CS_tot_cont_bl1"
+           minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+           spacing="0" alignment="right">
+            <font face="Courier New" size="6"/>
+            <geometryInfo x="9.50513" y="1.85974" width="0.95459"
+             height="0.08337"/>
+          </field>
+        </frame>
+        <frame name="M_6">
+          <geometryInfo x="0.05237" y="1.78638" width="3.05176"
+           height="0.19800"/>
+          <text name="B_6" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.07324" y="1.81763" width="2.30737"
+             height="0.15039"/>
+            <advancedLayout formatTrigger="b_6formattrigger"/>
+            <visualSettings fillPattern="transparent"
+             fillBackgroundColor="r25g88b88"/>
+            <textSegment>
+              <font face="Courier New" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Operaciones Fuera de Linea]]>
+              </string>
+            </textSegment>
+          </text>
+        </frame>
+        <frame name="M_G_tramites_fl_GRPFR1">
+          <geometryInfo x="0.03918" y="2.02612" width="10.47083"
+           height="0.43738"/>
+          <generalLayout verticalElasticity="variable"/>
+          <repeatingFrame name="R_G_tramites_fl1" source="G_tramites_fl"
+           printDirection="down" minWidowRecords="1" columnMode="no">
+            <geometryInfo x="0.11755" y="2.23181" width="10.34570"
+             height="0.15955"/>
+            <generalLayout verticalElasticity="expand"/>
+            <field name="F_mon_operacion3" source="monto_credito3"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="right">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="5.54688" y="2.24438" width="1.11780"
+               height="0.10010"/>
+            </field>
+            <field name="F_CF_des_estado3" source="des_estado3"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="4.60388" y="2.24438" width="0.58362"
+               height="0.10010"/>
+            </field>
+            <field name="F_CF_Des_moneda3" source="des_moneda3"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="5.28174" y="2.24438" width="0.18237"
+               height="0.10522"/>
+            </field>
+            <field name="F_CF_des_producto3" source="des_producto3"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="2.80029" y="2.24438" width="1.77002"
+               height="0.09485"/>
+            </field>
+            <field name="F_CF_no_credito3" source="no_credito3"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="0.85986" y="2.24438" width="0.54150"
+               height="0.08960"/>
+            </field>
+            <field name="F_CP_f_Apertura3" source="f_apertura3"
+             minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+             alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="6.74048" y="2.24438" width="0.58936"
+               height="0.09485"/>
+            </field>
+            <field name="F_CP_f_vencimiento3" source="f_vencimiento3"
+             minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+             alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="7.35718" y="2.24438" width="0.66638"
+               height="0.10010"/>
+            </field>
+            <field name="F_CF_saldo_cont_usd3" source="saldo_cont3"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="right">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="9.56763" y="2.24438" width="0.89563"
+               height="0.08447"/>
+            </field>
+            <field name="F_num_tramite3" source="num_tramite3"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="0.16235" y="2.24438" width="0.54138"
+               height="0.08447"/>
+            </field>
+            <field name="F_CF_saldo_dir_usd3" source="saldo_dir3"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="right">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="8.65625" y="2.24438" width="0.87866"
+               height="0.09485"/>
+            </field>
+            <field name="F_CF_desc_operacion3" source="des_operacion3"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="1.44702" y="2.24438" width="1.32227"
+               height="0.08960"/>
+            </field>
+            <field name="F_CP_f_vencimiento5" source="f_cuota_fl"
+             minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+             alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="8.03967" y="2.25061" width="0.59045"
+               height="0.09387"/>
+            </field>
+          </repeatingFrame>
+          <frame name="M_G_tramites_fl_HDR1">
+            <geometryInfo x="0.08093" y="2.08337" width="10.40308"
+             height="0.08850"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"
+             formatTrigger="m_g_tramites_fl_hdr1formattrig"/>
+            <visualSettings fillPattern="transparent"
+             fillBackgroundColor="gray24" lineForegroundColor="darkgray"/>
+            <text name="B_mon_operacion1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="5.95239" y="2.08337" width="0.74963"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Monto Inicial]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_desc_operacion3" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.70374" y="2.08337" width="0.89014"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Instrumento Cred.]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_des_estado1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="4.77869" y="2.08337" width="0.34827"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Estado]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_Des_moneda1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="5.22534" y="2.08337" width="0.36133"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Moneda]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_des_producto1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="3.40820" y="2.08337" width="0.66223"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Producto]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="cod_empresa1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.87964" y="2.08337" width="0.54138"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[No.Credito]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CP_f_Apertura1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="6.70386" y="2.08337" width="0.66406"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Fec.Apertura]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CP_f_vencimiento1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="7.42310" y="2.08337" width="0.60291"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Fec.Vencto.]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CP_saldo_contingente1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="9.55273" y="2.08337" width="0.92859"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Saldo Contingente]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CP_saldo_directo1" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="8.79614" y="2.08337" width="0.73877"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Saldo Directo]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_desc_operacion2" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.15271" y="2.08337" width="0.60583"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Num.Tramite]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+          <text name="B_CP_f_vencimiento4" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="8.04297" y="2.07922" width="0.60291"
+             height="0.08215"/>
+            <textSegment>
+              <font face="Courier New" size="6"/>
+              <string>
+              <![CDATA[Fec.Cuota]]>
+              </string>
+            </textSegment>
+          </text>
+        </frame>
+        <frame name="M_1">
+          <geometryInfo x="4.52075" y="2.54419" width="6.23950"
+           height="0.16150"/>
+          <advancedLayout formatTrigger="m_1formattrigger"/>
+          <text name="B_no_credito2" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="5.32813" y="2.55457" width="1.96887"
+             height="0.14587"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"
+             formatTrigger="b_no_credito2formattrigger"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Total Deuda Fuera de Linea]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_tot_cont_fl2" source="CS_tot_dir_fl"
+           minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+           spacing="0" alignment="right">
+            <font face="Courier New" size="6"/>
+            <geometryInfo x="8.66138" y="2.58142" width="0.87915"
+             height="0.11450"/>
+          </field>
+          <line name="B_11" arrow="none">
+            <geometryInfo x="8.66663" y="2.56641" width="1.84375"
+             height="0.00000"/>
+            <visualSettings linePattern="solid"/>
+            <points>
+              <point x="8.66663" y="2.56641"/>
+              <point x="10.51038" y="2.56641"/>
+            </points>
+          </line>
+          <field name="F_tot_cont_fl1" source="CS_tot_cont_fl"
+           minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+           spacing="0" alignment="right">
+            <font face="Courier New" size="6"/>
+            <geometryInfo x="9.57813" y="2.58142" width="0.88037"
+             height="0.11450"/>
+          </field>
+        </frame>
+        <frame name="M_7">
+          <geometryInfo x="0.06250" y="2.67651" width="1.80200"
+           height="0.25000"/>
+          <text name="B_7" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.09375" y="2.71826" width="1.40588"
+             height="0.15039"/>
+            <advancedLayout formatTrigger="b_7formattrigger"/>
+            <visualSettings fillPattern="transparent"
+             fillBackgroundColor="r25g88b88"/>
+            <textSegment>
+              <font face="Courier New" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Deuda Indirecta]]>
+              </string>
+            </textSegment>
+          </text>
+        </frame>
+        <frame name="M_G_tramites_indirectos">
+          <geometryInfo x="0.05493" y="2.98877" width="10.47083"
+           height="0.33899"/>
+          <generalLayout verticalElasticity="variable"/>
+          <repeatingFrame name="R_G_tramites_indir" source="G_indirecta"
+           printDirection="down" minWidowRecords="1" columnMode="no">
+            <geometryInfo x="0.13330" y="3.17810" width="10.34570"
+             height="0.10815"/>
+            <generalLayout verticalElasticity="expand"/>
+            <field name="F_mon_operacion4" source="monto_credito4"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="right">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="5.58325" y="3.19067" width="1.09717"
+               height="0.07227"/>
+            </field>
+            <field name="F_CF_des_estado4" source="des_estado4"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="4.61450" y="3.19067" width="0.60938"
+               height="0.07227"/>
+            </field>
+            <field name="F_CF_Des_moneda4" source="des_moneda4"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="5.29163" y="3.18555" width="0.24683"
+               height="0.07227"/>
+            </field>
+            <field name="F_CF_des_producto4" source="des_producto4"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="2.82129" y="3.19067" width="1.76196"
+               height="0.07227"/>
+            </field>
+            <field name="F_CF_no_credito4" source="no_credito4"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="0.87561" y="3.19067" width="0.54150"
+               height="0.07227"/>
+            </field>
+            <field name="F_CP_f_Apertura4" source="f_apertura4"
+             minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+             alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="6.75623" y="3.19067" width="0.58936"
+               height="0.07227"/>
+            </field>
+            <field name="F_CP_f_vencimiento4" source="f_vencimiento4"
+             minWidowLines="1" formatMask="dd/mm/yyyy" spacing="0"
+             alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="7.44373" y="3.19067" width="0.66638"
+               height="0.07227"/>
+            </field>
+            <field name="F_CF_saldo_cont_usd4" source="saldo_cont4"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="right">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="9.57288" y="3.18542" width="0.87244"
+               height="0.07227"/>
+            </field>
+            <field name="F_num_tramite4" source="num_tramite4"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="0.17810" y="3.19067" width="0.54138"
+               height="0.07227"/>
+            </field>
+            <field name="F_CF_saldo_dir_usd4" source="saldo_dir4"
+             minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+             spacing="0" alignment="right">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="8.63538" y="3.18542" width="0.90967"
+               height="0.07227"/>
+            </field>
+            <field name="F_CF_desc_operacion4" source="des_operacion4"
+             minWidowLines="1" spacing="0" alignment="start">
+              <font face="Courier New" size="6"/>
+              <geometryInfo x="1.45752" y="3.19067" width="1.32227"
+               height="0.07227"/>
+            </field>
+          </repeatingFrame>
+          <frame name="M_G_tramites_indir">
+            <geometryInfo x="0.09668" y="3.04602" width="10.40308"
+             height="0.07214"/>
+            <advancedLayout printObjectOnPage="allPage"
+             basePrintingOn="enclosingObject"
+             formatTrigger="m_g_tramites_indirformattrigge"/>
+            <visualSettings fillPattern="transparent"
+             fillBackgroundColor="gray24" lineForegroundColor="darkgray"/>
+            <text name="B_mon_operacion2" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="5.96814" y="3.04602" width="0.74963"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Monto Inicial]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_desc_operacion4" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="1.59448" y="3.04602" width="0.96277"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Nombre del Cliente]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_des_estado3" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="4.77881" y="3.04602" width="0.34827"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Estado]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_Des_moneda3" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="5.24988" y="3.04602" width="0.36133"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Moneda]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_des_producto3" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="3.42395" y="3.04602" width="0.66223"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Producto]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="cod_empresa2" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.89539" y="3.04602" width="0.54138"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[No.Credito]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CP_f_Apertura2" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="6.71960" y="3.04602" width="0.66406"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Fec.Apertura]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CP_f_vencimiento2" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="7.40234" y="3.04602" width="0.78931"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Fec.Vencimiento]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CP_saldo_contingente2" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="9.51672" y="3.04602" width="0.92859"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Saldo Contingente]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CP_saldo_directo2" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="8.80627" y="3.04602" width="0.73877"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Saldo Directo]]>
+                </string>
+              </textSegment>
+            </text>
+            <text name="B_CF_desc_operacion5" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="0.16846" y="3.04602" width="0.60583"
+               height="0.07214"/>
+              <textSegment>
+                <font face="Courier New" size="6"/>
+                <string>
+                <![CDATA[Num.Tramite]]>
+                </string>
+              </textSegment>
+            </text>
+          </frame>
+        </frame>
+        <frame name="M_5">
+          <geometryInfo x="0.02075" y="0.03638" width="2.35425"
+           height="0.20837"/>
+          <text name="B_5" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.06250" y="0.06763" width="1.94263"
+             height="0.15039"/>
+            <advancedLayout formatTrigger="b_5formattrigger"/>
+            <visualSettings fillPattern="transparent"
+             fillBackgroundColor="r25g88b88"/>
+            <textSegment>
+              <font face="Courier New" size="10" bold="yes"/>
+              <string>
+              <![CDATA[Operaciones Bajo Linea]]>
+              </string>
+            </textSegment>
+          </text>
+        </frame>
+      </frame>
+      <frame name="M_3">
+        <geometryInfo x="6.47388" y="3.70728" width="4.24487" height="0.17847"
+        />
+        <advancedLayout formatTrigger="m_3formattrigger"/>
+        <text name="B_no_credito3" minWidowLines="1">
+          <textSettings spacing="0"/>
+          <geometryInfo x="6.59497" y="3.73987" width="1.81299"
+           height="0.14587"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="enclosingObject"
+           formatTrigger="b_no_credito3formattrigger"/>
+          <textSegment>
+            <font face="Courier New" size="8" bold="yes"/>
+            <string>
+            <![CDATA[Total Deuda Indirecta]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_tot_cont_ind1" source="CS_tot_cont_ind"
+         minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+         spacing="0" alignment="right">
+          <font face="Courier New" size="6"/>
+          <geometryInfo x="9.58325" y="3.75391" width="0.88940"
+           height="0.11450"/>
+        </field>
+        <field name="F_tot_cont_ind2" source="CS_tot_dir_ind"
+         minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00"
+         spacing="0" alignment="right">
+          <font face="Courier New" size="6"/>
+          <geometryInfo x="8.63538" y="3.76160" width="0.89087"
+           height="0.11450"/>
+        </field>
+        <line name="B_9" arrow="none">
+          <geometryInfo x="8.69788" y="3.73853" width="1.78125"
+           height="0.00000"/>
+          <advancedLayout printObjectOnPage="allPage"
+           basePrintingOn="enclosingObject"/>
+          <visualSettings linePattern="solid"/>
+          <points>
+            <point x="8.69788" y="3.73853"/>
+            <point x="10.47913" y="3.73853"/>
+          </points>
+        </line>
+      </frame>
+      <text name="B_no_credito4" minWidowLines="1">
+        <textSettings spacing="0"/>
+        <geometryInfo x="5.37549" y="4.05249" width="1.48413" height="0.14587"
+        />
+        <advancedLayout printObjectOnPage="allPage"
+         basePrintingOn="enclosingObject"/>
+        <textSegment>
+          <font face="Courier New" size="8" bold="yes"/>
+          <string>
+          <![CDATA[Total Deuda Cliente]]>
+          </string>
+        </textSegment>
+      </text>
+      <line name="B_10" arrow="none">
+        <geometryInfo x="8.65625" y="4.02490" width="1.83325" height="0.00000"
+        />
+        <visualSettings linePattern="solid"/>
+        <points>
+          <point x="8.65625" y="4.02490"/>
+          <point x="10.48950" y="4.02490"/>
+        </points>
+      </line>
+      <field name="F_total_directo" source="CF_total_directo"
+       minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+       alignment="end">
+        <font face="Courier New" size="6" bold="yes"/>
+        <geometryInfo x="8.63013" y="4.05249" width="0.89612" height="0.14587"
+        />
+      </field>
+      <field name="F_total_contingente" source="CF_total_contingente"
+       minWidowLines="1" formatMask="LNNN,NNN,NNN,NNN,NNN,NN0.00" spacing="0"
+       alignment="end">
+        <font face="Courier New" size="6" bold="yes"/>
+        <geometryInfo x="9.58850" y="4.05249" width="0.88416" height="0.14575"
+        />
+      </field>
+    </body>
+    <margin>
+      <frame name="M_General_GRPFR">
+        <geometryInfo x="0.00061" y="0.00354" width="10.63257"
+         height="1.42346"/>
+        <generalLayout verticalElasticity="variable"/>
+        <repeatingFrame name="R_General" source="G_General"
+         printDirection="down" minWidowRecords="1" columnMode="no">
+          <geometryInfo x="0.00061" y="0.00354" width="10.63257"
+           height="1.40784"/>
+          <generalLayout verticalElasticity="expand"/>
+          <frame name="M_General_EXP3">
+            <geometryInfo x="0.00879" y="0.00354" width="5.73853"
+             height="0.16675"/>
+            <generalLayout verticalElasticity="expand"/>
+            <field name="F_CF_TitEmpresa" source="CF_TitEmpresa"
+             minWidowLines="1" spacing="0" alignment="left">
+              <font face="Courier New" size="8" bold="yes"
+               textColor="darkblue"/>
+              <geometryInfo x="0.00879" y="0.00354" width="5.73853"
+               height="0.16675"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+          </frame>
+          <frame name="M_General_EXP1">
+            <geometryInfo x="0.00061" y="0.17261" width="5.74939"
+             height="0.16675"/>
+            <generalLayout verticalElasticity="expand"/>
+            <field name="F_CF_TitAgencia1" source="CF_TitAgencia"
+             minWidowLines="1" spacing="0" alignment="left">
+              <font face="Courier New" size="8" bold="yes"
+               textColor="darkblue"/>
+              <geometryInfo x="0.00061" y="0.17261" width="5.74939"
+               height="0.16675"/>
+              <generalLayout verticalElasticity="expand"/>
+            </field>
+          </frame>
+          <field name="F_CF_TitReporte" source="CF_TitReporte"
+           minWidowLines="1" spacing="0" alignment="end">
+            <font face="Courier New" size="10" bold="yes" underline="yes"/>
+            <geometryInfo x="1.65955" y="0.51208" width="3.12170"
+             height="0.16675"/>
+          </field>
+          <field name="F_nomreporte" source="pg_nom_reporte" minWidowLines="1"
+           spacing="0" alignment="left">
+            <font face="Courier New" size="8" bold="yes" textColor="darkblue"
+            />
+            <geometryInfo x="0.00513" y="0.34143" width="1.29175"
+             height="0.16675"/>
+          </field>
+          <text name="B_16" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.11499" y="0.84070" width="0.76001"
+             height="0.11975"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Direcci�n:]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_P_Cod_Cliente" source="P_cod_cliente"
+           minWidowLines="1" spacing="0" alignment="start">
+            <font face="Courier New" size="10" bold="yes" underline="yes"/>
+            <geometryInfo x="4.81250" y="0.50793" width="0.48962"
+             height="0.16675"/>
+            <generalLayout horizontalElasticity="variable"/>
+          </field>
+          <field name="F_P_Nom_Cliente" source="p_nom_cliente"
+           minWidowLines="1" spacing="0" alignment="start">
+            <font face="Courier New" size="10" bold="yes" underline="yes"/>
+            <geometryInfo x="5.37500" y="0.50793" width="4.15222"
+             height="0.16675"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <text name="B_14" minWidowLines="1">
+            <textSettings justify="left" spacing="0"/>
+            <geometryInfo x="7.46387" y="0.82092" width="1.32349"
+             height="0.12500"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Prevision Directa:]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_13" minWidowLines="1">
+            <textSettings justify="left" spacing="0"/>
+            <geometryInfo x="7.46387" y="1.03308" width="1.32349"
+             height="0.11975"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Prev. Contingente:]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_19" minWidowLines="1">
+            <textSettings justify="left" spacing="0"/>
+            <geometryInfo x="7.35938" y="1.21448" width="1.42798"
+             height="0.11975"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Promedio en Cuenta:]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_prevision" source="P_prevision" minWidowLines="1"
+           formatMask="999,990.90" spacing="0" alignment="end">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="9.01196" y="0.79919" width="0.99475"
+             height="0.16675"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <field name="F_prev_con" source="P_pre_con" minWidowLines="1"
+           formatMask="999,990.90" spacing="0" alignment="end">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="9.01196" y="1.03308" width="0.99475"
+             height="0.11975"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <field name="F_6" source="P_MON_PROMEDIO" minWidowLines="1"
+           spacing="0" alignment="end">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="9.01208" y="1.21448" width="0.99475"
+             height="0.11975"/>
+          </field>
+          <text name="B_20" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="3.19873" y="0.69775" width="2.82727"
+             height="0.12500"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[ (Expresado en D�lares)(Tipo de cambio: ]]>
+              </string>
+            </textSegment>
+          </text>
+          <frame name="M_4">
+            <geometryInfo x="4.18542" y="0.83325" width="1.72913"
+             height="0.17712"/>
+            <text name="B_8" minWidowLines="1">
+              <textSettings spacing="0"/>
+              <geometryInfo x="4.34119" y="0.86255" width="0.94788"
+               height="0.14587"/>
+              <textSegment>
+                <font face="Courier New" size="8" bold="yes"/>
+                <string>
+                <![CDATA[Calificaci�n:]]>
+                </string>
+              </textSegment>
+            </text>
+            <field name="F_1" source="Cf_calif" minWidowLines="1" spacing="0"
+             alignment="center">
+              <font face="Courier New" size="8" bold="yes"/>
+              <geometryInfo x="5.28442" y="0.85571" width="0.60425"
+               height="0.12500"/>
+            </field>
+          </frame>
+          <field name="F_2" source="CF_id_cliente" minWidowLines="1"
+           spacing="0" alignment="end">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="5.26880" y="1.03308" width="1.40100"
+             height="0.11975"/>
+          </field>
+          <field name="F_5" source="CP_caedec" minWidowLines="1" spacing="0"
+           alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="0.74475" y="1.21448" width="5.18750"
+             height="0.11975"/>
+          </field>
+          <text name="B_15" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="4.27441" y="1.03308" width="1.02100"
+             height="0.11975"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[ Id. Cliente:]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_3" source="CP_direccion" minWidowLines="1"
+           spacing="0" alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="0.87500" y="0.84070" width="2.68750"
+             height="0.11975"/>
+          </field>
+          <text name="B_17" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.11694" y="1.03308" width="0.76001"
+             height="0.11975"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Tel�fono :]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_18" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="0.11377" y="1.21448" width="0.51123"
+             height="0.11975"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[Caedec:]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_4" source="CP_telefono" minWidowLines="1" spacing="0"
+           alignment="start">
+            <font face="Courier New" size="8"/>
+            <geometryInfo x="0.87695" y="1.03308" width="2.68750"
+             height="0.11975"/>
+          </field>
+          <field name="F_CF_Tipocambio" source="CF_Tipocambio"
+           minWidowLines="1" formatMask="NNN,NNN,NNN,NNN,NNN,NN0.00"
+           spacing="0" alignment="end">
+            <font face="Courier New" size="8" bold="yes"/>
+            <geometryInfo x="5.94275" y="0.69788" width="0.40625"
+             height="0.12500"/>
+          </field>
+          <text name="B_21" minWidowLines="1">
+            <textSettings spacing="0"/>
+            <geometryInfo x="6.28125" y="0.69788" width="0.14587"
+             height="0.12512"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"/>
+              <string>
+              <![CDATA[ ) ]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_22" minWidowLines="1">
+            <textSettings justify="end" spacing="0"/>
+            <geometryInfo x="8.85938" y="0.81250" width="0.11987"
+             height="0.15100"/>
+            <textSegment>
+              <font face="Courier New" size="8"/>
+              <string>
+              <![CDATA[$]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_23" minWidowLines="1">
+            <textSettings justify="end" spacing="0"/>
+            <geometryInfo x="8.88013" y="1.02600" width="0.10950"
+             height="0.13025"/>
+            <textSegment>
+              <font face="Courier New" size="8"/>
+              <string>
+              <![CDATA[$]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_24" minWidowLines="1">
+            <textSettings justify="end" spacing="0"/>
+            <geometryInfo x="8.89124" y="1.20679" width="0.10950"
+             height="0.13025"/>
+            <textSegment>
+              <font face="Courier New" size="8"/>
+              <string>
+              <![CDATA[$]]>
+              </string>
+            </textSegment>
+          </text>
+          <field name="F_CF_Fecha" source="sysdate" minWidowLines="1"
+           formatMask="DD-MM-YYYY HH24:MI" spacing="0" alignment="left">
+            <font face="Courier New" size="8" bold="yes" textColor="darkblue"
+            />
+            <geometryInfo x="9.39172" y="0.01416" width="1.23083"
+             height="0.16675"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <field name="F_CF_Usuario" source="pg_usuario" minWidowLines="1"
+           spacing="0" alignment="left">
+            <font face="Courier New" size="8" bold="yes" textColor="darkblue"
+            />
+            <geometryInfo x="9.40234" y="0.18066" width="1.23083"
+             height="0.16675"/>
+            <generalLayout verticalElasticity="expand"/>
+          </field>
+          <field name="F_CF_paginade" source="TotalPhysicalPages"
+           minWidowLines="1" spacing="single" alignment="left">
+            <font face="Courier New" size="8" bold="yes" textColor="darkblue"
+            />
+            <geometryInfo x="10.02783" y="0.34985" width="0.33337"
+             height="0.16675"/>
+            <generalLayout verticalElasticity="expand"/>
+            <pageNumbering header="yes" main="yes" trailer="yes" startAt="1"
+             incrementBy="1" resetAt="report"/>
+          </field>
+          <field name="F_CF_pagina" source="PageNumber" minWidowLines="1"
+           spacing="single" alignment="left">
+            <font face="Courier New" size="8" bold="yes" textColor="darkblue"
+            />
+            <geometryInfo x="9.40393" y="0.34985" width="0.33337"
+             height="0.16675"/>
+            <generalLayout verticalElasticity="expand"/>
+            <pageNumbering header="yes" main="yes" trailer="yes" startAt="1"
+             incrementBy="1" resetAt="report"/>
+          </field>
+          <text name="B_1" minWidowLines="1">
+            <textSettings justify="left" spacing="0"/>
+            <geometryInfo x="9.80396" y="0.35059" width="0.17505"
+             height="0.12500"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"
+               textColor="darkblue"/>
+              <string>
+              <![CDATA[DE]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_2" minWidowLines="1">
+            <textSettings justify="left" spacing="0"/>
+            <geometryInfo x="8.54443" y="0.01611" width="0.71375"
+             height="0.12500"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"
+               textColor="darkblue"/>
+              <string>
+              <![CDATA[FECHA   :]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_3" minWidowLines="1">
+            <textSettings justify="left" spacing="0"/>
+            <geometryInfo x="8.54443" y="0.19299" width="0.71375"
+             height="0.12500"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"
+               textColor="darkblue"/>
+              <string>
+              <![CDATA[USUARIO :]]>
+              </string>
+            </textSegment>
+          </text>
+          <text name="B_4" minWidowLines="1">
+            <textSettings justify="left" spacing="0"/>
+            <geometryInfo x="8.54443" y="0.36987" width="0.71375"
+             height="0.12500"/>
+            <textSegment>
+              <font face="Courier New" size="8" bold="yes"
+               textColor="darkblue"/>
+              <string>
+              <![CDATA[PAGINA  :]]>
+              </string>
+            </textSegment>
+          </text>
+        </repeatingFrame>
+      </frame>
+    </margin>
+  </section>
+  </layout>
+  <parameterForm pages="65536">
+    <rulers numberOfSnapPoints="4"/>
+  <text name="PB_1" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="1.53479" y="0.15979" width="0.95801" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Report Parameters]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_2" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="1.22754" y="0.49304" width="1.57263" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Enter values for the parameters]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_DESTYPE" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="0.24316" y="0.82629" width="0.44763" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Destype]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_DESNAME" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="0.24316" y="1.15955" width="0.51013" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Desname]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_CodEmpresa" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="0.24316" y="1.49280" width="0.84351" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Codigo Empresa]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_CodSistema" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="0.24316" y="1.82605" width="0.80176" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Codigo Sistema]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_CodIdioma" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="0.24316" y="2.15930" width="0.36426" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Idioma]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_NOMREPORTE" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="0.24316" y="2.49255" width="0.85388" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Nombre Reporte]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_USUARIO" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="0.24316" y="2.82581" width="0.41638" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Usuario]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_WHERE" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="0.24316" y="3.15906" width="0.97888" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Clausula de Where]]>
+      </string>
+    </textSegment>
+  </text>
+  <text name="PB_CODAGENCIA" pageNumber="65536" minWidowLines="1">
+    <textSettings spacing="single"/>
+    <geometryInfo x="0.24316" y="3.49231" width="0.82263" height="0.14929"/>
+    <visualSettings lineWidth="1"/>
+    <textSegment>
+      <font face="MS Sans Serif" size="8"/>
+      <string>
+      <![CDATA[Codigo Agencia]]>
+      </string>
+    </textSegment>
+  </text>
+  <field name="PF_DESTYPE" source="DESTYPE" pageNumber="1" minWidowLines="1"
+   spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="0.78430" width="2.00000" height="0.26428"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_DESNAME" source="DESNAME" pageNumber="1" minWidowLines="1"
+   spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="1.11755" width="2.00000" height="0.26428"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_CodEmpresa" source="pg_cod_empresa" pageNumber="1"
+   minWidowLines="1" spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="1.45081" width="2.00000" height="0.26428"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_CodSistema" source="pg_cod_sistema" pageNumber="1"
+   minWidowLines="1" spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="1.78406" width="2.00000" height="0.26428"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_CodIdioma" source="pg_cod_idioma" pageNumber="1"
+   minWidowLines="1" spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="2.11731" width="2.00000" height="0.26428"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_NOMREPORTE" source="pg_nom_reporte" pageNumber="1"
+   minWidowLines="1" spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="2.45056" width="2.00000" height="0.26428"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_USUARIO" source="pg_usuario" pageNumber="1"
+   minWidowLines="1" spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="2.78381" width="2.00000" height="0.26428"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_WHERE" source="WHERE" pageNumber="1" minWidowLines="1"
+   spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="3.11707" width="2.00000" height="0.26428"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  <field name="PF_CODAGENCIA" source="pg_cod_agencia" pageNumber="1"
+   minWidowLines="1" spacing="0">
+    <font size="0"/>
+    <geometryInfo x="1.50000" y="3.45032" width="2.00000" height="0.26428"/>
+    <visualSettings lineWidth="1" linePattern="solid"/>
+  </field>
+  </parameterForm>
+  <programUnits>
+    <function name="cf_titempresaformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_TITEMPRESAFormula return VARCHAR2 is
+
+   vTitEmpresa varchar2(80);
+   vTexto      varchar2(80);
+
+begin
+   select tit_reportes 
+   into   vTitEmpresa
+   from   empresa
+   where  cod_empresa = :pg_cOD_EMPRESA;
+
+   return  upper(vTitEmpresa);
+exception
+
+   when SRW.NO_DATA_FOUND then
+       
+      select texto
+      into   vTexto
+      from   mensajes_sistema
+      where  num_mensaje  = '000046'
+        and  cod_sistema  = 'PA'
+        and  cod_idioma   = :pg_coD_IDIOMA;
+
+        SRW.message(0, 'PA-000046 ' || vTexto);
+        raise SRW.program_abort;
+
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_titagenciaformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_TitAgenciaFormula return VARCHAR2 is
+
+   vTitAgencia varchar2(80);
+   vTexto      varchar2(80);
+
+begin
+
+   select descripcion
+   into   vTitAgencia
+   from   agencia
+   where  cod_empresa = :pg_COD_EMPRESA
+     and  cod_agencia = :pg_COD_AGENCIA;
+
+   return upper(vTitAgencia); 
+
+exception
+
+   when SRW.NO_DATA_FOUND then
+       
+      select texto
+      into   vTexto
+      from   mensajes_sistema
+      where  num_mensaje  = '000045'
+        and  cod_sistema  = 'PA'
+        and  cod_idioma   = :pg_COD_IDIOMA;
+
+        SRW.message(0, 'PA-000045 ' || vTexto);
+        raise SRW.program_abort;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_titsistemaformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_TitSistemaFormula return VARCHAR2 is
+   vTitSistema varchar2(80);
+   vTexto      varchar2(80);
+begin
+   select  titulo
+   into    vTitSistema
+   from    titulos_sistemas
+   where   cod_sistema = :pg_COD_SISTEMA
+     and   cod_idioma  = :pg_COD_IDIOMA;
+
+   return upper(vTitSistema);
+
+exception
+
+   when SRW.NO_DATA_FOUND then
+       
+      select texto
+      into   vTexto
+      from   mensajes_sistema
+      where  num_mensaje  = '000048'
+        and  cod_sistema  = 'PA'
+        and  cod_idioma   = :pg_COD_IDIOMA;
+
+        SRW.message(0, 'PA-000048 ' || vTexto);
+        raise SRW.program_abort;
+
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_titreporteformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_TitReporteFormula return VARCHAR2 is
+   vTitReporte varchar2(80);
+   vTexto      varchar2(80);
+
+begin
+   select titulo
+   into   vTitReporte
+   from   titulos_reportes
+   where  nom_reporte = :pg_NOM_REPORTE
+     and  cod_idioma  = :pg_COD_IDIOMA;
+
+   return vTitReporte;
+
+exception
+
+   when SRW.NO_DATA_FOUND then
+       
+      select texto
+      into   vTexto
+      from   mensajes_sistema
+      where  num_mensaje  = '000047'
+        and  cod_sistema  = 'PA'
+        and  cod_idioma   = :pg_COD_IDIOMA;
+
+        SRW.message(0, 'PA-000047 ' || vTexto);
+        raise SRW.program_abort;
+  
+end;]]>
+      </textSource>
+    </function>
+    <function name="nomreportevalidtrigger">
+      <textSource>
+      <![CDATA[function NOMREPORTEValidTrigger return boolean is
+begin
+  return (TRUE);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_total_directoformula" returnType="number">
+      <textSource>
+      <![CDATA[function CF_total_directoFormula return Number is
+  v_total_dir   number(18,2);
+begin
+ 
+  v_total_dir := nvl(:cs_tot_dir_bl1,0) + nvl(:cs_tot_dir_fl,0) + nvl(:cs_tot_dir_ind,0);
+  return v_total_dir;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_total_contingenteformula" returnType="number">
+      <textSource>
+      <![CDATA[function CF_total_contingenteFormula return Number is
+  v_total_ind   number(18,2);
+begin
+ 
+  v_total_ind := nvl(:cs_tot_cont_bl1,0) + nvl(:cs_tot_cont_fl,0) + nvl(:cs_tot_cont_ind,0);
+  return v_total_ind;
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_2formattrigger">
+      <textSource>
+      <![CDATA[function M_2FormatTrigger return boolean is
+begin
+  if nvl(:cs_tot_dir_bl1,0) > 0 or nvl(:cs_tot_cont_bl1,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_1formattrigger">
+      <textSource>
+      <![CDATA[function M_1FormatTrigger return boolean is
+begin
+  if :cs_tot_dir_fl > 0 or :cs_tot_cont_fl > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_3formattrigger">
+      <textSource>
+      <![CDATA[function M_3FormatTrigger return boolean is
+begin
+  if :cs_tot_dir_ind > 0 or :cs_tot_cont_ind > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="b_no_credito1formattrigger">
+      <textSource>
+      <![CDATA[function B_no_credito1FormatTrigger return boolean is
+begin
+  if nvl(:cs_tot_dir_bl1,0) > 0 or nvl(:cs_tot_cont_bl1,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="b_no_credito2formattrigger">
+      <textSource>
+      <![CDATA[function B_no_credito2FormatTrigger return boolean is
+begin
+  if :cs_tot_dir_fl > 0 or :cs_tot_cont_fl > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="b_no_credito3formattrigger">
+      <textSource>
+      <![CDATA[function B_no_credito3FormatTrigger return boolean is
+begin
+  if :cs_tot_dir_ind > 0 or :cs_tot_cont_ind > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="g_tramites_blgroupfilter">
+      <textSource>
+      <![CDATA[function G_tramites_blGroupFilter return boolean is
+begin
+  if :saldo_dir2 > 0 or :saldo_cont2 > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="g_tramites_flgroupfilter">
+      <textSource>
+      <![CDATA[function G_tramites_flGroupFilter return boolean is
+begin
+  if :saldo_dir3 > 0 or :saldo_cont3 > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="g_indirectagroupfilter">
+      <textSource>
+      <![CDATA[function G_indirectaGroupFilter return boolean is
+begin
+  if :saldo_dir4 > 0 or :saldo_cont4 > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_g_tramites_fl_hdr1formattrig">
+      <textSource>
+      <![CDATA[function M_G_tramites_fl_HDR1FormatTrig return boolean is
+begin
+  if nvl(:cs_tot_dir_fl,0) > 0 or nvl(:cs_tot_cont_fl,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="m_g_tramites_indirformattrigge">
+      <textSource>
+      <![CDATA[function M_G_tramites_indirFormatTrigge return boolean is
+begin
+  if nvl(:cs_tot_dir_ind,0) > 0 or nvl(:cs_tot_cont_ind,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="b_5formattrigger">
+      <textSource>
+      <![CDATA[function B_5FormatTrigger return boolean is
+begin
+  if nvl(:cs_tot_dir_bl1,0) > 0 or nvl(:cs_tot_cont_bl1,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="b_6formattrigger">
+      <textSource>
+      <![CDATA[function B_6FormatTrigger return boolean is
+begin
+  if nvl(:cs_tot_dir_fl,0) > 0 or nvl(:cs_tot_cont_fl,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="b_7formattrigger">
+      <textSource>
+      <![CDATA[function B_7FormatTrigger return boolean is
+begin
+  if nvl(:cs_tot_dir_ind,0) > 0 or nvl(:cs_tot_cont_ind,0) > 0 then
+    return (TRUE);
+  else
+    return (FALSE);
+  end if;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_califformula" returnType="character">
+      <textSource>
+      <![CDATA[function Cf_califFormula return Char is
+ v_calif varchar2(3);
+begin
+  --v_calif := pr_calif_automatica.Obt_Calif_X_Cliente('1',:p_cod_cliente);
+   BEGIN
+	  SELECT cod_calif
+	   into v_calif
+	  FROM PR_CALIF_X_CLIENTE a
+	  WHERE a.cod_empresa = :pg_cOD_EMPRESA
+	    and a.cod_persona = :p_cod_cliente
+		  AND a.fec_calif IN (SELECT  MAX(b.fec_calif)
+                            FROM PR_CALIF_X_CLIENTE b
+                     		    WHERE b.cod_empresa = :pg_cOD_EMPRESA
+                        		  AND b.cod_persona = a.cod_persona);
+  EXCEPTION
+  	WHEN NO_DATA_FOUND THEN
+  	  v_calif := 'A';
+  END;
+  
+  return(v_calif);
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_id_clienteformula" returnType="character">
+      <textSource>
+      <![CDATA[function CF_id_clienteFormula return Char 
+is
+   vl_identificacion varchar2(100);
+   vl_cod_direccion  dir_personas.cod_direccion%TYPE;
+begin
+begin
+	    select substr(descripcion,1,4) || ' ' ||  num_id, cod_direccion
+	      into vl_identificacion, vl_cod_direccion
+	      from personas_x_pr_tramite b, tipos_id a
+	     where b.cod_tipo_id = a.cod_tipo_id
+	       and b.cod_persona = :p_cod_cliente
+	       and b.num_tramite = ( select min(a.num_tramite)
+	                               from personas_x_pr_tramite a, pr_tramite b
+	                              where b.codigo_estado in ( 'P',pr_utl_estados.verif_estado_act_cast ( b.codigo_estado ))
+	                                and a.num_tramite = b.num_tramite
+	                                and a.cod_empresa = b.cod_empresa
+	                                and ind_titular   = 'S'
+	                                and cod_persona   = :p_cod_cliente
+	                                and a.cod_empresa = :pg_cod_empresa )
+	       and b.cod_empresa = :pg_cod_empresa;
+      exception
+   	     when no_data_found then
+   	        begin
+   	        begin
+	                select substr(descripcion,1,4) || ' ' ||  num_id
+	                  into vl_identificacion
+	                  from id_personas a, tipos_id b
+	                 where rownum      = 1
+	                   and a.cod_tipo_id = b.cod_tipo_id
+	                   and a.cod_persona = :p_cod_cliente;
+               end;
+               --
+               -- Obtiene la direccion
+               --
+               begin
+            	    select cod_direccion
+            	      into vl_cod_direccion
+            	      from dir_personas
+            	     where rownum      = 1
+            	       and cod_persona = :p_cod_cliente;
+				        exception
+				   	     when no_data_found then --vespejo 19/08/2010 se aumento el exception
+										:cp_direccion := 'Sin direcci�n'; --
+            	 end;
+            end;      	
+   end;
+   --
+   begin
+      select initcap(detalle)
+        into :cp_direccion
+        from dir_personas
+       where cod_direccion = vl_cod_direccion
+         and cod_persona   = :p_cod_cliente;
+      exception
+   	     when no_data_found then
+   	        :cp_direccion := 'Sin direcci�n';
+   	     when too_many_rows then
+   	        srw.message (0,'Muchas Direcciones');
+   end;
+   --
+   begin
+      select num_telefono
+        into :cp_telefono
+        from tel_personas
+       where rownum      = 1
+         and cod_persona = :p_cod_cliente;	
+      exception
+   	     when no_data_found then
+   	        :cp_telefono := 'Sin Telefono';
+   end;
+   --
+   begin
+      select initcap(descripcion)
+        into :cp_caedec
+        from cliente a, caedec b
+       where a.cod_actividad = cod_caedec
+         and a.cod_cliente = :p_cod_cliente
+         and a.cod_empresa = :pg_cod_empresa;	
+      exception
+   	     when no_data_found then
+   	        :cp_caedec := 'Sin CAEDEC';
+   	     when too_many_rows then
+   	        srw.message (0, 'Muchos Caedec');
+   end;
+   --
+   return (vl_identificacion );
+end;]]>
+      </textSource>
+    </function>
+    <function name="tramite_modformula" returnType="number">
+      <textSource>
+      <![CDATA[function TRAMITE_MODFormula return Number is
+   v_tramite number(10);
+begin
+    begin
+	/*	select max(a.num_tramite)
+		  into v_tramite
+	  	from pr_tramite a
+		 where a.num_tramite_modif  = :num_tramite1
+	   	 and a.cod_empresa = :pg_cod_empresa
+		   and a.num_tramite in (select b.num_tramite 
+		                           from pr_tramite b
+		                          where b.cod_empresa = :pg_cod_empresa
+		                            and b.ind_modificacion = 'S'
+		                            and b.cod_tip_operacion = 122
+		                            and b.codigo_estado = 'M');*/
+--healvarez--06/05/2025
+		  select max(a.num_tramite)
+          into v_tramite
+          from pr_tramite a
+         where a.num_tramite_modif  = :num_tramite1
+            and a.cod_empresa = :pg_cod_empresa
+           and a.num_tramite in (select b.num_tramite 
+                                   from pr_tramite b
+                                  where b.cod_empresa = :pg_cod_empresa
+                                    and b.ind_modificacion = 'S'
+                                    and b.cod_tip_operacion = 122
+                                    and b.codigo_estado = 'M') and f_aprobacion=
+  (select max(a.f_aprobacion)
+          --into v_tramite
+          from pr_tramite a
+         where a.num_tramite_modif  = :num_tramite1
+            and a.cod_empresa = :pg_cod_empresa
+           and a.num_tramite in (select b.num_tramite 
+                                   from pr_tramite b
+                                  where b.cod_empresa = :pg_cod_empresa
+                                    and b.ind_modificacion = 'S'
+                                    and b.cod_tip_operacion = 122
+                                    and b.codigo_estado = 'M')
+                                    );
+                                    		                            
+    exception
+        when no_data_found then
+          v_tramite := null;
+    end;
+    return v_tramite;
+end;]]>
+      </textSource>
+    </function>
+    <function name="cf_tipocambioformula" returnType="number">
+      <textSource>
+      <![CDATA[function CF_TipocambioFormula return Number is
+   v_tipcamb number(16,2);
+   v_mensaje varchar2(100);
+begin
+    begin
+		    Cg_Utl.Obtiene_TC_Conta(1, :sysdate, v_tipcamb, v_mensaje);
+    exception
+        when others then
+          v_tipcamb := null;
+    end;
+    return v_tipcamb;
+end;]]>
+      </textSource>
+    </function>
+  </programUnits>
+  <webSource>
+  <![CDATA[<%@ taglib uri="/WEB-INF/lib/reports_tld.jar" prefix="rw" %> 
+<%@ page language="java" import="java.io.*" errorPage="/rwerror.jsp" session="false" %>
+<%@ page contentType="text/html;charset=ISO-8859-1" %>
+<!--
+<rw:report id="report"> 
+<rw:objects id="objects">
+</rw:objects>
+-->
+
+<html>
+
+<head>
+<meta name="GENERATOR" content="Oracle 11gR1 Reports Developer"/>
+<title> Your Title </title>
+
+<rw:style id="yourStyle">
+   <!-- Report Wizard inserts style link clause here -->
+</rw:style>
+
+</head>
+
+
+<body>
+
+<rw:dataArea id="yourDataArea">
+   <!-- Report Wizard inserts the default jsp here -->
+</rw:dataArea>
+
+
+
+</body>
+</html>
+
+<!--
+</rw:report> 
+-->
+]]>
+  </webSource>
+  <colorPalette>
+    <color index="42" displayName="gray80" value="#323232"/>
+    <color index="43" displayName="gray76" value="#3c3c3c"/>
+    <color index="44" displayName="gray72" value="#464646"/>
+    <color index="45" displayName="gray68" value="#505050"/>
+    <color index="80" displayName="gray64" value="#5a5a5a"/>
+    <color index="81" displayName="gray60" value="#646464"/>
+    <color index="82" displayName="gray56" value="#6e6e6e"/>
+    <color index="83" displayName="gray52" value="#787878"/>
+    <color index="118" displayName="gray48" value="#828282"/>
+    <color index="119" displayName="gray44" value="#8c8c8c"/>
+    <color index="120" displayName="gray40" value="#969696"/>
+    <color index="121" displayName="gray36" value="#a0a0a0"/>
+    <color index="156" displayName="gray32" value="#aaaaaa"/>
+    <color index="157" displayName="gray28" value="#b4b4b4"/>
+    <color index="158" displayName="gray24" value="#bebebe"/>
+    <color index="159" displayName="gray20" value="#c8c8c8"/>
+    <color index="194" displayName="gray16" value="#d2d2d2"/>
+    <color index="195" displayName="gray12" value="#dcdcdc"/>
+    <color index="196" displayName="gray8" value="#e6e6e6"/>
+    <color index="197" displayName="gray4" value="#f0f0f0"/>
+  </colorPalette>
+  <reportPrivate defaultReportType="masterDetail" versionFlags2="0"
+   charPromptMustSplit="0" charPromptMaySplit="0" minFieldResizeRate="0"
+   minFontPoints="0" templateName=""/>
+  <reportWebSettings>
+  <![CDATA[#NULL#]]>
+  </reportWebSettings>
+</report>

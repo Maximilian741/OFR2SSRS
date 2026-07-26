@@ -350,6 +350,14 @@ def classify_files(files: List[Tuple[str, bytes]]) -> Dict[str, Any]:
         # --- Text/markdown -----------------------------------------------
         if ext in _DOC_EXTS:
             txt = _decode_text(blob)
+            # CONTENT beats extension: operators routinely export queries as
+            # .txt. A text artifact that reads as SQL is a SQL artifact —
+            # bucketing it as docs made a SQL-only bundle error out with
+            # "no convertible artifacts" (production verified).
+            if _SQL_STARTERS.match((txt or "").lstrip()):
+                sql_files.append((filename, txt))
+                _note(base, "sql", 0.9, "text artifact containing SQL")
+                continue
             docs.append((filename, txt))
             _note(base, "docs", 0.85, f"{len(txt.splitlines())} lines")
             continue
@@ -531,6 +539,37 @@ def convert_bundle(files: List[Tuple[str, bytes]], target_db: str = "oracle") ->
         except Exception as e:
             rdl_xml = ""
             report.warnings.append(f"RDL generation error: {e}")
+        # The synthetic path gets the SAME post-generation gates convert()
+        # applies — the least-verified artifact class must not skip the most
+        # verification (a blank/PLACEHOLDER build previously shipped with no
+        # verdict at all). Never let a gate failure sink the build.
+        preflight = None
+        fidelity_report = None
+        if rdl_xml:
+            try:
+                from .validators.preflight import preflight_audit
+                preflight = preflight_audit(rdl_xml, target_db=target_db)
+                from .validators.layout_audit import audit_layout
+                _lf = audit_layout(rdl_xml)
+                if _lf:
+                    _issues = list(preflight.get("issues", []))
+                    for _i in _lf:
+                        _issues.append({"severity": "AMBER",
+                                        "rule": _i.get("rule", ""),
+                                        "message": _i.get("message", "")})
+                    preflight["issues"] = _issues
+                    _sev = {"BLOCKER": 3, "RED": 2, "AMBER": 1}
+                    _w = max((_sev.get(i.get("severity"), 0) for i in _issues),
+                             default=0)
+                    preflight["verdict"] = {3: "BLOCKER", 2: "RED", 1: "AMBER",
+                                            0: "READY"}[_w]
+            except Exception:  # noqa: BLE001
+                pass
+            try:
+                from .fidelity import build_fidelity_report
+                fidelity_report = build_fidelity_report(report, rdl_xml)
+            except Exception:  # noqa: BLE001
+                pass
         return {
             "report": report.to_dict(),
             "rdl_xml": rdl_xml,
@@ -539,6 +578,8 @@ def convert_bundle(files: List[Tuple[str, bytes]], target_db: str = "oracle") ->
             "ingest_report": ingest,
             "artifacts_enriched": applied,
             "target_db": target_db,
+            "preflight": preflight,
+            "fidelity_report": fidelity_report,
         }
 
     # Path 3: nothing convertible. If the bundle contained an .rdf binary,

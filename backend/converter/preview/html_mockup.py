@@ -790,6 +790,16 @@ def detect_report_kind(report):
     if _has_color_signal(report):
         return "tabular_details"
 
+    # 6. A LAYOUT-LESS report (synthetic build from bare SQL — no Oracle
+    # layout at all) with a real multi-column query is a data LISTING, not a
+    # one-record-per-page certificate: route it to the tabular grid so both
+    # views render rows instead of blank label:value cards (production
+    # verified on a SQL-only bundle).
+    if not (getattr(report, "layout", None) or []):
+        for _q in (getattr(report, "queries", None) or []):
+            if len(getattr(_q, "items", None) or []) >= 3:
+                return "tabular_details"
+
     return "certificate"
 
 
