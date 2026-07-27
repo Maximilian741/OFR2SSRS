@@ -188,11 +188,27 @@ upload.
 
 ## CanGrow policy
 
-Every value textbox in the per-record body and tabular detail cells emits
-`<CanGrow>true</CanGrow>`. This is mandatory for free-text fields
-(comments, descriptions, addresses) that wrap onto multiple lines. SSRS
-auto-grows the row height to fit; pagination stays correct because row
-heights are computed from the rendered content, not declared up front.
+**Tabular detail cells** emit `<CanGrow>true</CanGrow>`. This is mandatory
+for free-text columns (comments, descriptions, addresses) that wrap onto
+multiple lines: SSRS grows the row to fit and pagination stays correct
+because row heights are computed from rendered content, not declared up
+front.
+
+**Per-record (positioned) bodies are different, and deliberately so.** In
+an absolutely-positioned Oracle layout, a box that grows *pushes every
+sibling below it*. On a tightly budgeted per-record page, a fraction of an
+inch of cascade spills each record onto a second page — measured against
+the real ReportViewer engine. Oracle's fixed-position layouts guarantee the
+declared box fits its content, so a fixed box is both safe and faithful.
+
+The exception is narrow and evidence-based: a field whose source declares
+`verticalElasticity="expand"` or `"variable"` **and** has nothing below it
+in its frame (no field or child frame overlapping its column below its
+bottom edge) grows freely — the growth extends into empty space and can't
+cascade. Everything else stays fixed, and a clipped constant label is
+instead widened in place by an AFM-metric post-pass
+(`_widen_clipped_constant_labels`), which never wraps a line Oracle drew on
+one.
 
 ## Adding a new report as a test case
 
@@ -218,8 +234,18 @@ name-agnostic and synthetic.
   equivalent (closest is dynamic SQL via expressions). The common
   **`&P_CRITERIA` "criteria builder" idiom is reconstructed** into real,
   `NULL`-safe, parameter-bound `WHERE` predicates, so filter prompts actually
-  filter. Other free-form lexicals are left in place, flagged by the
-  validator, and documented in the deploy checklist for manual conversion.
+  filter. Every other lexical is neutralized **position-aware** — an
+  operand slot gets a `NULL` fill so the statement still parses, an
+  identifier fragment does not (that would still be invalid SQL) — and the
+  preflight verdict states the actual consequence per lexical: invalid SQL,
+  runs unfiltered, returns zero rows, or one value degrades. Reimplementing
+  the dynamic filter stays a human step; being told *which* loss you have
+  is the guarantee.
+- **Charts.** Detected Oracle charts (`<rw:graph>` / `<chart>`) are built as
+  real SSRS `<Chart>` elements — column type, category group, `Sum()` of the
+  declared plot value, source title as caption. Chart *styling* (palette,
+  3-D, axis formatting) is not reproduced; adjust in Report Builder. A chart
+  whose columns don't resolve to one dataset is reported, not faked.
 - **PL/SQL package function bodies.** Call sites are rewritten and stubs
   are shipped, but the body of each `dbo.fn_*` UDF has to be ported by
   hand. The audit trail flags every call so nothing is missed.

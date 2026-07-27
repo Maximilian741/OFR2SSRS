@@ -725,7 +725,13 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
         "VerticalAlign":  {"Default", "Top", "Middle", "Bottom"},
         "TextDecoration": {"Default", "Underline", "Overline", "LineThrough", "None"},
         "FontStyle":      {"Default", "Normal", "Italic"},
-        "Direction":      {"LTR", "RTL"},
+        # NB: RDL has TWO distinct <Direction> elements — Style/Direction is
+        # TEXT direction (LTR/RTL) while SortExpression/Direction is SORT
+        # order (Ascending/Descending). Both are schema-valid, so the union
+        # is checked here and the context-sensitive case is handled below.
+        # (A context-blind LTR/RTL-only rule raised a FALSE BLOCKER on a
+        # report that validates against Microsoft's own XSD.)
+        "Direction":      {"LTR", "RTL", "Ascending", "Descending"},
         "WritingMode":    {"Horizontal", "Vertical", "Rotate270"},
         "BreakLocation":  {"Start", "End", "StartAndEnd", "Between", "EndOfGroup"},
         "KeepWithGroup":  {"None", "Before", "After"},

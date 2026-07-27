@@ -5,7 +5,7 @@ Drag an Oracle Reports artifact in, get a deployable SSRS RDL out.
 Oracle Reports is desupported. Oracle2SSRS converts your reports to SSRS in
 minutes — and **proves** the output instead of promising it:
 
-- **620 automated tests**, including renders through **Microsoft's own
+- **698 automated tests**, including renders through **Microsoft's own
   ReportViewer engine** (the same RDL processing code SSRS runs) with the
   produced PDFs measured for page cadence, blank pages, and geometry.
 - **Generated RDL validated** against Microsoft's official RDL 2008 XSD
@@ -304,6 +304,8 @@ translate SQL and PL/SQL formula logic, generate the RDL, render previews,
 validate, and build the deploy checklist and burst pack. Every module reads
 or writes the same dataclass.
 
+New here? Start with the **[deployment run guide](docs/RUN_GUIDE.md)** —
+install, convert, read the verdict banner, and deploy to a Report Server.
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the module-by-module
 breakdown and [docs/API.md](docs/API.md) for the HTTP endpoint reference.
 
@@ -314,7 +316,7 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
-The suite is 620 tests. It validates generated RDL against Microsoft's RDL
+The suite is 698 tests. It validates generated RDL against Microsoft's RDL
 2008 XSD and, when the ReportViewer runtime is present, renders RDLs through
 Microsoft's engine and measures the resulting PDFs.
 

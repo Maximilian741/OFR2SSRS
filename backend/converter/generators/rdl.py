@@ -1022,7 +1022,8 @@ def _format_trigger_hidden_map(report) -> dict:
             if not nm or not (getattr(t, "body", "") or "").strip():
                 continue
             try:
-                h = translate_format_trigger(t.body)
+                h = translate_format_trigger(
+                    t.body, _strict_trigger_resolve(report))
             except Exception:  # noqa: BLE001
                 h = None
             if h:
@@ -1031,6 +1032,99 @@ def _format_trigger_hidden_map(report) -> dict:
         m = {}
     report._ft_hidden_map = m
     return m
+
+
+def _apply_region_aware_trigger_props(root, report) -> None:
+    """Apply format-trigger Hidden/Style to ``data-ft``-tagged textboxes,
+    ONLY when the textbox sits inside a data region AND every Fields! ref
+    in the translated expression exists (exact case) in THAT region's
+    dataset — the fire-140 lesson: blind application published case/scope
+    errors on letter reports. Always strips the data-ft tags (they are not
+    schema-valid RDL)."""
+    hmap = _format_trigger_hidden_map(report)
+    smap = _format_trigger_style_map(report)
+    ds_decl: dict = {}
+    for ds in root.iter(_q("DataSet")):
+        ds_decl[ds.get("Name") or ""] = {
+            (f.get("Name") or "") for f in ds.iter(_q("Field"))}
+
+    def _refs_ok(expr, cur_ds):
+        refs = re.findall(r"Fields!([A-Za-z0-9_]+)", expr or "")
+        flds = ds_decl.get(cur_ds or "", set())
+        return all(r in flds for r in refs)
+
+    def walk(el, cur_ds):
+        if el.tag == _q("Tablix"):
+            cur_ds = el.findtext(_q("DataSetName")) or cur_ds
+        for child in list(el):
+            walk(child, cur_ds)
+        if el.tag == _q("Textbox") and "data-ft" in el.attrib:
+            ft = (el.attrib.pop("data-ft") or "").strip().lower()
+            if not ft or not cur_ds:
+                return
+            h = hmap.get(ft)
+            if h is not None and _refs_ok(h, cur_ds):
+                if el.find(_q("Visibility")) is None:
+                    _sub(_sub(el, "Visibility"), "Hidden", h)
+                return
+            st = smap.get(ft)
+            if st is not None and _refs_ok(st[0], cur_ds):
+                # Engine rule: a style expression's bare Fields! ref on a
+                # textbox whose VALUE is a First/Last aggregate becomes a
+                # nested aggregate ("cannot be specified as nested
+                # aggregates") — skip those cells.
+                _val = next((v.text or "" for v in el.iter(_q("Value"))
+                             if (v.text or "").startswith("=")), "")
+                if not re.search(r"\b(First|Last|Previous)\s*\(", _val):
+                    _apply_format_trigger_style_direct(el, st)
+
+    walk(root, None)
+
+
+def _apply_format_trigger_style_direct(tb, entry) -> None:
+    """Apply a (cond_vb, styles) entry to a textbox's TextRun/Box styles
+    (the region-aware pass already validated the refs)."""
+    cond, styles = entry
+    for prop, val in styles.items():
+        targets = ([tb.find(_q("Style"))] if prop == "BackgroundColor"
+                   else [tr.find(_q("Style")) for tr in tb.iter(_q("TextRun"))])
+        for st in targets:
+            if st is None:
+                continue
+            cur = st.find(_q(prop))
+            dflt = (cur.text if cur is not None and (cur.text or "")
+                    and not (cur.text or "").startswith("=")
+                    else _FT_STYLE_DEFAULTS.get(prop, "Normal"))
+            if cur is None:
+                cur = _sub(st, prop)
+            cur.text = f'=IIf({cond}, "{val}", "{dflt}")'
+            _reorder_style_children(st)
+
+
+def _strict_trigger_resolve(report):
+    """Resolver for trigger-body names: declared parameters and dataset
+    columns ONLY, in their DECLARED casing (SSRS refs are case-sensitive;
+    a body's :complnt_stat casing published as-is broke 9 corpus reports
+    the moment the expression host returned). Unknown names raise -> the
+    trigger translation DECLINES and the object keeps today's behavior."""
+    pmap = {}
+    for p in (getattr(report, "parameters", None) or []):
+        if getattr(p, "name", ""):
+            pmap.setdefault(p.name.upper(), p.name)
+    cmap = {}
+    for q in (getattr(report, "queries", None) or []):
+        for it in (getattr(q, "items", None) or []):
+            if getattr(it, "name", ""):
+                cmap.setdefault(it.name.upper(), it.name)
+
+    def resolve(name):
+        u = (name or "").upper()
+        if u in pmap:
+            return f"Parameters!{pmap[u]}.Value"
+        if u in cmap:
+            return f"Fields!{cmap[u]}.Value"
+        raise KeyError(name)
+    return resolve
 
 
 def _format_trigger_style_map(report) -> dict:
@@ -1048,7 +1142,8 @@ def _format_trigger_style_map(report) -> dict:
             if not nm or not (getattr(t, "body", "") or "").strip():
                 continue
             try:
-                r = translate_format_trigger_style(t.body)
+                r = translate_format_trigger_style(
+                    t.body, _strict_trigger_resolve(report))
             except Exception:  # noqa: BLE001
                 r = None
             if r:
@@ -1396,6 +1491,10 @@ def _formula_dataset_columns(report: ParsedReport) -> List[str]:
             continue
         body = (getattr(f, "plsql_body", "") or "").strip().lower()
         if body.startswith("oracle <summary"):
+            continue
+        # A cursor formula already translated to a REAL correlated-subquery
+        # column computes from its owning dataset -- no NULL stub.
+        if getattr(f, "wired_as_column", False):
             continue
         seen.add(name.upper())
         names.append(name)
@@ -2167,7 +2266,7 @@ def _find_group_for_query(report: ParsedReport, query_name: str) -> Optional[Lay
     return None
 
 
-def _column_captions(report, columns):
+def _column_captions_geo(report, columns):
     """Map a flat-table column source -> its REAL Oracle column-header label text
     (e.g. PERM_NAME -> "Permit", CF_TYPE_OPERATION -> "Type of Operation") so the
     table reads like the report instead of humanized field names. The header band
@@ -2218,6 +2317,26 @@ def _column_captions(report, columns):
                 caps[col.upper()] = heads[rank][1]
     return caps
 
+
+
+def _column_captions(report, columns):
+    """Geometry captions first; authored ITEM labels (web-source
+    rw:dataArea headers, doc-derived labels) fill any column the layout
+    geometry couldn't caption — layout-less web sources get their real
+    authored headers instead of humanized field names."""
+    geo = _column_captions_geo(report, columns) or {}
+    item_caps = {}
+    for q in (getattr(report, "queries", None) or []):
+        for it in (getattr(q, "items", None) or []):
+            lbl = (getattr(it, "label", "") or "").strip()
+            if getattr(it, "name", "") and lbl:
+                item_caps.setdefault(it.name.upper(), lbl)
+    out = dict(geo)
+    for c in columns:
+        cu = c.upper()
+        if cu not in out and cu in item_caps:
+            out[cu] = item_caps[cu]
+    return out
 
 def _is_neutral_dark(c):
     """True for a near-neutral DARK gray (r~=g~=b, low luminance) -- an Oracle
@@ -2456,9 +2575,7 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
         # (bold-the-subtotal-row etc. — wild-corpus dominant pattern).
         _ftn = col_ft.get(col.upper())
         if _ftn:
-            _cell_tb = contents[-1]
-            if not _apply_format_trigger_hidden(_cell_tb, report, _ftn):
-                _apply_format_trigger_style(_cell_tb, report, _ftn)
+            contents[-1].set("data-ft", _ftn)
 
     # Report-level <summary> grand totals -> a static FOOTER total row, so a
     # flat report's "Total: N" line actually renders (the summary tokens
@@ -3582,6 +3699,58 @@ def _oracle_number_to_net(m: str, fill_mode: bool = False) -> str:
     return fmt
 
 
+def _wrap_inline_masked_date_refs(root, report) -> None:
+    """Wrap ``Fields!X.Value`` (or ``First(Fields!X.Value, "DS")``) with
+    ``Format(..., "<net>")`` wherever X carries a DATE formatMask and the
+    ref sits inside a CONCATENATION expression — the <Format> style can't
+    reach an inlined date, so it rendered the raw ToString. Refs already
+    inside a Format( stay untouched; non-date masks are ignored (numeric
+    inlines rarely concatenate, and Format on a string is a no-op)."""
+    masks = {}
+    try:
+        from ..fidelity import _walk_fields
+        _flds = list(_walk_fields(getattr(report, "layout", None)))
+    except Exception:  # noqa: BLE001
+        _flds = []
+    for f in _flds:
+        mask = (getattr(f, "format_mask", "") or "").upper()
+        src = (getattr(f, "source", "") or "").strip()
+        if not mask or not src:
+            continue
+        if not any(tok in mask for tok in ("DD", "RRRR", "YYYY", "MON", "YY")):
+            continue
+        net = _oracle_mask_to_net(mask)
+        if net:
+            masks[_safe(src).upper()] = net
+    if not masks:
+        return
+    pat = re.compile(
+        r'(First\(Fields!([A-Za-z0-9_]+)\.Value,\s*"[^"]+"\)'
+        r'|Fields!([A-Za-z0-9_]+)\.Value)')
+    for v in root.iter(_q("Value")):
+        t = v.text or ""
+        if not t.startswith("=") or "&" not in t or "Fields!" not in t:
+            continue
+        out = []
+        last = 0
+        changed = False
+        for m in pat.finditer(t):
+            nm = (m.group(2) or m.group(3) or "").upper()
+            net = masks.get(nm)
+            pre = t[max(0, m.start() - 14):m.start()]
+            if net and "Format(" not in pre:
+                out.append(t[last:m.start()])
+                out.append(f'Format({m.group(1)}, "{net}")')
+                changed = True
+            else:
+                out.append(t[last:m.start()])
+                out.append(m.group(1))
+            last = m.end()
+        if changed:
+            out.append(t[last:])
+            v.text = "".join(out)
+
+
 def _oracle_mask_to_net(mask: str) -> str:
     """Translate an Oracle Reports formatMask to a .NET (SSRS) format string.
     Returns "" when empty or unrecognized (caller then emits no <Format>).
@@ -4056,14 +4225,20 @@ def _scope_body_direct_field_refs(root, report) -> None:
     guard for future shapes the archetype renderers haven't met yet."""
     regions = {_q("Tablix"), _q("List"), _q("Matrix"), _q("Chart"),
                _q("CustomReportItem")}
-    val_tag = _q("Value")
+    # Hidden (conditional print) and style-expression elements carry
+    # Fields! refs too (format-trigger translations) — the same scope rule
+    # applies to them outside a region (engine-verified: 6 letter reports
+    # failed publish on unscoped Hidden/IIf-style refs).
+    scopable = {_q("Value"), _q("Hidden"), _q("FontWeight"), _q("FontStyle"),
+                _q("FontFamily"), _q("FontSize"), _q("Color"),
+                _q("BackgroundColor")}
 
     def walk(el, in_region):
         here = in_region or (el.tag in regions)
         for child in el:
-            if child.tag == val_tag and not here:
+            if child.tag in scopable and not here:
                 t = child.text or ""
-                if t and "Fields!" in t:
+                if t.startswith("=") and "Fields!" in t:
                     child.text = _wrap_unscoped_aggregates(
                         t, report, in_tablix_scope=False)
             walk(child, here)
@@ -5751,6 +5926,42 @@ def _build_nested_group_tablix(report, main):
             # No geometry -> stack evenly (the original behavior).
             ncol = max(1, len(dflds))
             col_w = round(7.5 / ncol, 3)
+            # AUTHORED captions without geometry (web-source rw:dataArea
+            # headers carried as item labels): synthesize the column-header
+            # row the layout couldn't provide.
+            _icaps = [(getattr(it, "label", "") or "").strip()
+                      for it in dflds]
+            if any(_icaps):
+                hh = 0.24
+                hrow = _sub(rows, "TablixRow")
+                _sub(hrow, "Height", f"{hh:.2f}in")
+                hc = _sub(_sub(hrow, "TablixCells"), "TablixCell")
+                hcont = _sub(hc, "CellContents")
+                hrect = _sub(hcont, "Rectangle")
+                hrect.set("Name", "ND_ColHdrI")
+                hs_ = _sub(hrect, "Style")
+                _sub(hs_, "BackgroundColor", "#ffffff")
+                _hb = _sub(hs_, "BottomBorder")
+                _sub(_hb, "Style", "Solid")
+                _sub(_hb, "Color", RULE)
+                _sub(_hb, "Width", "0.75pt")
+                hri = _sub(hrect, "ReportItems")
+                for ci, it in enumerate(dflds):
+                    cap = _icaps[ci] or \
+                        (it.name or "").replace("_", " ").title()
+                    _build_textbox(hri, f"Tb_NDHdrI_{ci}", cap, bold=True,
+                                   font_size="9pt", bg="#ffffff", fg=INK,
+                                   text_align="Left",
+                                   vertical_align="Middle",
+                                   border_color="#ffffff", padding="2pt",
+                                   can_grow=False)
+                    _tb = hri[-1]
+                    _sub(_tb, "Top", "0in")
+                    _sub(_tb, "Left", f"{ci * col_w:.2f}in")
+                    _sub(_tb, "Width", f"{max(0.4, col_w - 0.02):.2f}in")
+                    _sub(_tb, "Height", f"{hh:.2f}in")
+                row_specs.append(("colhdr", last, hh))
+                detail_has_header = True
             drow = _sub(rows, "TablixRow"); _sub(drow, "Height", f"{det_h:.2f}in")
             dc = _sub(_sub(drow, "TablixCells"), "TablixCell")
             dcont = _sub(dc, "CellContents")
@@ -8044,7 +8255,7 @@ def _emit_field_textbox(
         # label's natural single-line width, into provably free space only --
         # is applied later by _widen_clipped_constant_labels (AFM-metric
         # post-pass over the finished tree).
-        can_grow=False,
+        can_grow=bool(getattr(lf, "_cangrow_safe", False)),
         drillthrough=_drillthrough_for(report, lf),
         segments_spec=seg_spec,
     )
@@ -8057,9 +8268,13 @@ def _emit_field_textbox(
     # reduces to a boolean becomes a REAL <Hidden> expression (Oracle
     # RETURN FALSE = suppress -> Hidden true). Conditional STYLING
     # triggers (bold-the-subtotal pattern) become IIf() style exprs.
+    # Region-aware trigger application: TAG the textbox; the
+    # _apply_region_aware_trigger_props post-pass applies Hidden/Style only
+    # when every ref resolves in the ENCLOSING region's dataset (fire-140
+    # lesson: blind application broke 5 letters on case/scope).
     _ft = getattr(lf, "format_trigger", "")
-    if not _apply_format_trigger_hidden(tb, report, _ft):
-        _apply_format_trigger_style(tb, report, _ft)
+    if _ft:
+        tb.set("data-ft", _ft)
     return (True, rel_top + place_h)
 
 
@@ -8125,14 +8340,15 @@ def _emit_frame_rect(
     # dropped, and a frame merely named M_TERMS / M_VENDOR never matches.
     _gname = getattr(group, "name", "") or ""
     _ft_name = getattr(group, "format_trigger", "") or ""
-    _ft_hidden = (_format_trigger_hidden_map(report).get(
-        _ft_name.strip().lower()) if _ft_name else None)
-    if (_ft_name and not _ft_hidden
+    # Frame-level <Hidden> emission was REVERTED (engine-verified): frames
+    # emit into varied containment contexts (letters place them body-direct
+    # inside per-record wrappers) where bare Fields! refs in Visibility
+    # violate the outside-a-region scope rules on 6 corpus reports. The
+    # conditional-ERROR drop below stays; field-level trigger Hidden/Style
+    # (inside data regions) remains active.
+    _ft_hidden = None
+    if (_ft_name
             and re.search(r"(?i)(^|_)err(or)?($|_)", _gname)):
-        # Untranslatable conditional-ERROR frame: keep the drop (emitting it
-        # unconditionally would stack the error paragraph on the happy
-        # path). A TRANSLATED trigger instead emits the frame with a real
-        # <Hidden> expression below — Oracle's conditional print, honored.
         return parent_y
     gx = float(getattr(group, "x", 0.0) or 0.0)
     gy = float(getattr(group, "y", 0.0) or 0.0)
@@ -8177,8 +8393,37 @@ def _emit_frame_rect(
     inner = _sub(rect, "ReportItems")
 
     max_y_used = 0.0
+    # ELASTIC fields (verticalElasticity expand/variable) may CanGrow, but
+    # ONLY when nothing sits below them in this frame (fields or child
+    # frames) — growth then extends into free space instead of cascading
+    # pushes that spill tightly-budgeted pages (layout-auditor calibrated:
+    # a blind CanGrow toggle was rejected; this is the overlap-safe subset).
+    _below_objs = [(float(getattr(o, "x", 0) or 0),
+                    float(getattr(o, "y", 0) or 0),
+                    float(getattr(o, "width", 0) or 0))
+                   for o in list(group.fields or [])
+                   + list(getattr(group, "children", None) or [])]
+
+    def _nothing_below(lf):
+        fx0 = float(getattr(lf, "x", 0) or 0)
+        fx1 = fx0 + float(getattr(lf, "width", 0) or 0)
+        fb = (float(getattr(lf, "y", 0) or 0)
+              + float(getattr(lf, "height", 0) or 0))
+        for ox, oy, ow in _below_objs:
+            if oy >= fb - 0.02 and ox < fx1 and ox + max(ow, 0.01) > fx0 \
+                    and (ox, oy, ow) != (fx0, float(getattr(lf, "y", 0) or 0),
+                                         float(getattr(lf, "width", 0) or 0)):
+                return False
+        return True
+
     # Render this group's own fields first.
     for lf in (group.fields or []):
+        _el = (getattr(lf, "vertical_elasticity", "") or "").lower()
+        try:
+            lf._cangrow_safe = _el in ("expand", "variable") \
+                and _nothing_below(lf)
+        except Exception:  # noqa: BLE001
+            pass
         nm = f"{name_prefix}_Tb_{counter[0]}"
         counter[0] += 1
         ok, by = _emit_field_textbox(
@@ -12030,6 +12275,98 @@ def _clamp_body_height_to_page(root) -> None:
     bh_el.text = f"{target:.2f}in"
 
 
+def _label_literal_of(text: str):
+    """The displayable label text of a Value, when it IS a label: either a
+    plain literal or a PURE constant-string VB expression (='...') with no
+    concatenation — the form the generators emit for static labels.
+    Returns (display_text, is_expression) or None for data expressions."""
+    t = text or ""
+    if not t.strip():
+        return None
+    if not t.startswith("="):
+        return t, False
+    m = re.fullmatch(r'="((?:[^"]|"")*)"', t.strip())
+    if m:
+        return m.group(1).replace('""', '"'), True
+    return None
+
+
+def collect_overridable_labels(rdl_xml: str) -> list:
+    """Inventory of every PLAIN-LITERAL textbox in the RDL — the generic
+    label-override surface (report/band/cover/hyperlink titles, bundle
+    titles a bare-SQL source can't know). Expression-valued textboxes are
+    excluded (data, not labels). Each entry: {name, text, region}."""
+    try:
+        root = ET.fromstring(rdl_xml)
+    except Exception:  # noqa: BLE001
+        return []
+    out = []
+    _seen = set()
+    for region, holder in (("page_header", root.find(".//" + _q("PageHeader"))),
+                           ("body", root.find(".//" + _q("Body"))),
+                           ("page_footer", root.find(".//" + _q("PageFooter")))):
+        if holder is None:
+            continue
+        for tb in holder.iter(_q("Textbox")):
+            nm = tb.get("Name") or ""
+            if not nm or nm in _seen:
+                continue
+            vals = list(tb.iter(_q("Value")))
+            if len(vals) != 1:
+                continue
+            lit = _label_literal_of(vals[0].text or "")
+            if lit is not None:
+                _seen.add(nm)
+                out.append({"name": nm, "text": lit[0], "region": region})
+    return out
+
+
+def apply_label_overrides(rdl_xml: str, overrides: dict) -> tuple:
+    """Apply {textbox_name_or_'title': new_text} to the RDL's literal
+    labels. The special key 'title' resolves to the first title-named
+    literal textbox, else the first page-header literal. Returns
+    (new_rdl_xml, applied: [(name, old, new), ...]). Only plain literals
+    are ever overridden — a data expression is never clobbered."""
+    if not overrides:
+        return rdl_xml, []
+    try:
+        root = ET.fromstring(rdl_xml)
+    except Exception:  # noqa: BLE001
+        return rdl_xml, []
+    lits = {}
+    order = []
+    for tb in root.iter(_q("Textbox")):
+        nm = tb.get("Name") or ""
+        vals = list(tb.iter(_q("Value")))
+        if nm and len(vals) == 1:
+            lit = _label_literal_of(vals[0].text or "")
+            if lit is not None:
+                lits[nm] = (vals[0], lit[0], lit[1])
+                order.append(nm)
+    applied = []
+    for key, new in overrides.items():
+        if new is None or not str(new).strip():
+            continue
+        tgt = key
+        if key == "title" and key not in lits:
+            tgt = next((n for n in order if re.search(r"(?i)title", n)),
+                       order[0] if order else "")
+        ent = lits.get(tgt)
+        if ent is None:
+            continue
+        v, old, is_expr = ent
+        new_s = str(new)
+        if old != new_s:
+            # Preserve the original form: expression labels stay ="..."
+            v.text = ('="' + new_s.replace('"', '""') + '"'
+                      if is_expr else new_s)
+            applied.append((tgt, old, new_s))
+    if not applied:
+        return rdl_xml, []
+    return ('<?xml version="1.0" encoding="utf-8"?>\n'
+            + ET.tostring(root, encoding="unicode")), applied
+
+
 def _append_charts(root, report) -> None:
     """Emit each detected Oracle chart (<rw:graph>/<chart>) as a REAL SSRS
     Chart — column chart, category group on the chart's category column,
@@ -12115,6 +12452,21 @@ def _append_charts(root, report) -> None:
         body_h_el.text = f"{y + 0.10:.2f}in"
 
 
+def _repair_nested_first_aggregates(root) -> None:
+    """``=Sum(Val(First(x, "DS_REPORT_FORMULAS")))`` is an illegal nested
+    aggregate ("First ... cannot be specified as nested aggregates" —
+    engine-verified the moment the expression host returned). The formula
+    dataset is SINGLE-ROW, so the outer aggregate is a no-op: rewrite to
+    ``=Val(First(...))``. Generic — applies to any Value with this shape."""
+    rx = re.compile(
+        r'^=\s*(?:Sum|Count|Min|Max|Avg)\(\s*Val\(\s*'
+        r'(First\(.*\))\s*\)\s*\)\s*$', re.S)
+    for v in root.iter(_q("Value")):
+        m = rx.match(v.text or "")
+        if m:
+            v.text = "=Val(" + m.group(1) + ")"
+
+
 def _reconcile_tablix_widths(root) -> None:
     """Every Tablix's declared <Width> must equal the SUM of its column
     widths (its true static width). A stale source-geometry width (81in on
@@ -12158,21 +12510,29 @@ def _canonicalize_field_ref_case(root) -> None:
         nm = f.get("Name") or ""
         if nm:
             declared.setdefault(nm.upper(), set()).add(nm)
-    if not declared:
+    # Parameters are equally case-sensitive ("Letters in the names of
+    # parameters must use the correct case") — PL/SQL trigger bodies carry
+    # their own casing for :P_X binds, so canonicalize those refs too.
+    pdecl: dict = {}
+    for rp in root.iter(_q("ReportParameter")):
+        nm = rp.get("Name") or ""
+        if nm:
+            pdecl.setdefault(nm.upper(), set()).add(nm)
+    if not declared and not pdecl:
         return
-    pat = re.compile(r"Fields!([A-Za-z_][A-Za-z0-9_]*)")
+    pat = re.compile(r"(Fields|Parameters)!([A-Za-z_][A-Za-z0-9_]*)")
 
     def _fix(txt):
         def rep(m):
-            nm = m.group(1)
-            cands = declared.get(nm.upper())
+            kind, nm = m.group(1), m.group(2)
+            cands = (declared if kind == "Fields" else pdecl).get(nm.upper())
             if cands and nm not in cands and len(cands) == 1:
-                return "Fields!" + next(iter(cands))
+                return kind + "!" + next(iter(cands))
             return m.group(0)
         return pat.sub(rep, txt)
 
     for el in root.iter():
-        if el.text and "Fields!" in el.text:
+        if el.text and ("Fields!" in el.text or "Parameters!" in el.text):
             el.text = _fix(el.text)
 
 
@@ -12230,6 +12590,10 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # raw fields by secondary builders), THEN (2) scope any remaining
     # body-direct Fields! refs. Order matters: repairs first so the scoper
     # only sees genuinely-in-scope refs.
+    # Region-aware trigger Hidden/Style application (validates every ref
+    # against the ENCLOSING region's dataset; strips the data-ft tags).
+    # Before the repair/scope passes so its expressions get the same nets.
+    _apply_region_aware_trigger_props(root, report)
     _repair_dangling_field_refs(root, report)
     _repair_misscoped_field_refs(root)
     _scope_body_direct_field_refs(root, report)
@@ -12250,6 +12614,11 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # Fidelity: stamp <Format> onto field values that carried an Oracle
     # formatMask, so currency / dates / thousands render like the original.
     _apply_field_formats(root, report)
+    # A masked DATE field inlined into a CONCATENATION ("Date:" & Fields!D)
+    # can't be formatted by the <Format> style — it renders the raw
+    # .NET ToString ("6/8/2026 12:00:00 AM" where the truth prints
+    # "06/08/2026"). Wrap those refs in Format(..., "<net>") in place.
+    _wrap_inline_masked_date_refs(root, report)
     # Trim trailing-blank-page slack: body + header + footer + margins must fit
     # the page height (see _clamp_body_height_to_page). Last, after every builder
     # has set its body height.
@@ -12262,6 +12631,9 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # Declared Tablix widths must match their column sums (see the stale
     # static Height class) — applied to EVERY exit path, not one branch.
     _reconcile_tablix_widths(root)
+    # Illegal nested First-in-aggregate totals over the single-row formula
+    # dataset — drop the no-op outer aggregate.
+    _repair_nested_first_aggregates(root)
     # Detected Oracle charts become real SSRS Charts stacked below the body
     # (before the height clamp so page math sees them)... appended here,
     # after width reconciliation, and before dead-dataset pruning so a

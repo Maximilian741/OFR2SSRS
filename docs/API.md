@@ -78,11 +78,17 @@ Convert a single uploaded Oracle Reports artifact.
 | Field | Type | Required | Notes                                       |
 |-------|------|----------|---------------------------------------------|
 | file  | file | yes      | A `.xml` or `.rdf` Oracle Reports artifact. |
+| label_overrides | JSON string | no | `{"<textbox name>"\|"title": "new text"}`. Replaces generated **literal labels** only — data expressions are never touched. The available names ship back in every payload as `overridable_labels`. |
 
 **Curl**
 
 ```bash
 curl -X POST -F "file=@samples/oracle/SAMPLE_INSPECTION.xml" \
+     http://127.0.0.1:5057/api/convert
+
+# with a label override
+curl -X POST -F "file=@samples/oracle/SAMPLE_INSPECTION.xml" \
+     -F 'label_overrides={"title":"Quarterly Contacts List"}' \
      http://127.0.0.1:5057/api/convert
 ```
 
@@ -373,12 +379,25 @@ The shape returned by every successful `/api/convert*` call:
   "mockup_html":         "<!doctype html>...",
   "validation_issues":   [ ValidationIssue, ... ],
   "deployment_checklist":[ ChecklistItem,    ... ],
+  "preflight":           { "verdict": "READY|AMBER|RED|BLOCKER",
+                           "issues": [ { "severity", "rule", "message" } ] },
+  "fidelity_report":     { "score": 1.0, "summary": "...",
+                           "categories": { ... }, "needs_attention": [ ... ] },
+  "overridable_labels":  [ { "name": "Tb_PageTitle",
+                             "text": "Grant Status",
+                             "region": "page_header" }, ... ],
   "bursting":            { ... },
   "subreports":          { ... },
   "audit_trail":         [ AuditEntry, ... ],
   "ai_prompts":          [ ... ]
 }
 ```
+
+`preflight.verdict` is the deployment gate; `fidelity_report.score` is
+`1.0` when nothing was silently dropped, and
+`fidelity_report.categories.layout_fields.display_coverage` is the
+stricter "how much of the layout actually displays" ratio. See the
+[run guide](RUN_GUIDE.md) for what each verdict and rule means.
 
 ### `validation_issues[]` — `ValidationIssue`
 

@@ -189,7 +189,9 @@ def _classify_source_artifact(parsed) -> Optional[Dict[str, str]]:
 def convert(xml_bytes: bytes, target_db: str = "oracle",
             images: Optional[Dict[str, Any]] = None,
             extra_param_names: Optional[Iterable[str]] = None,
-            deep_verify: bool = False) -> Dict[str, Any]:
+            deep_verify: bool = False,
+            label_overrides: Optional[Dict[str, str]] = None
+            ) -> Dict[str, Any]:
     """End-to-end conversion. Returns a dict ready to ship to the frontend.
 
     Parameters
@@ -230,6 +232,46 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
                if parsed.warnings else ""))
     if images:
         _merge_user_images(parsed, images)
+
+    # CURSOR FORMULAS -> REAL COLUMNS: a single-fetch CF_ cursor keyed on
+    # current-row binds translates to a scalar correlated subquery appended
+    # to its owning query (wrapped as SELECT O.*, (...) AS CF_X FROM (orig)
+    # O — the alias makes outer correlation unambiguous). The formula then
+    # COMPUTES from the real dataset instead of shipping a NULL stub.
+    try:
+        import re as _re
+        from .translators.plsql_formula import cursor_formula_to_subquery
+        from .models import DataItem as _DI
+        _pn = [p.name for p in (parsed.parameters or []) if p.name]
+        _byq: Dict[int, Any] = {}
+        for _f in (parsed.formulas or []):
+            if getattr(_f, "agg_function", "") or \
+                    getattr(_f, "wired_as_column", False):
+                continue
+            _b = getattr(_f, "plsql_body", "") or ""
+            if "cursor" not in _b.lower() or not (_f.name or "").strip():
+                continue
+            for _q in (parsed.queries or []):
+                _cols = [it.name for it in (_q.items or []) if it.name]
+                _sub = cursor_formula_to_subquery(_b, _cols, _pn)
+                if _sub and "O." in _sub:
+                    _byq.setdefault(id(_q), (_q, []))[1].append((_f, _sub))
+                    break
+        for _q, _pairs in _byq.values():
+            _sels = ",\n  ".join(
+                f"{s} AS {_re.sub(r'[^A-Za-z0-9_]', '_', f.name)}"
+                for f, s in _pairs)
+            _q.sql = ("SELECT O.*,\n  " + _sels + "\nFROM (\n"
+                      + (_q.sql or "").rstrip().rstrip(";") + "\n) O")
+            for _f, _s in _pairs:
+                _q.items.append(_DI(name=_f.name))
+                _f.wired_as_column = True
+            _q.add_warning(
+                f"{len(_pairs)} cursor formula(s) translated to correlated "
+                f"subquery columns (first-fetch semantics preserved via "
+                f"KEEP DENSE_RANK FIRST).")
+    except Exception:  # noqa: BLE001 -- cursor wiring must never sink convert
+        pass
 
     # Drill-through TARGET parameters the caller (e.g. a parent report linking
     # to this one as a sub-report) forwards. Declare each as a HIDDEN parameter
@@ -482,12 +524,33 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
             fidelity_report.setdefault("needs_attention", []).append(
                 _unsupported_note)
 
+    # GENERIC LABEL OVERRIDES: any literal label the generator produced
+    # (report/band titles, cover-hyperlink text, bundle titles a bare-SQL
+    # source can't know) is overridable by textbox name — or 'title'. The
+    # inventory ships in the result so any UI can offer a generic editor;
+    # nothing here is scenario-specific.
+    overridable_labels = []
+    try:
+        from .generators.rdl import (collect_overridable_labels,
+                                     apply_label_overrides)
+        if label_overrides:
+            rdl_xml, _applied = apply_label_overrides(rdl_xml,
+                                                      label_overrides)
+            for _nm, _old, _new in _applied:
+                if _old and mockup_html:
+                    mockup_html = mockup_html.replace(
+                        f">{_old}<", f">{_new}<")
+        overridable_labels = collect_overridable_labels(rdl_xml)
+    except Exception:  # noqa: BLE001
+        pass
+
     return {
         "report": parsed.to_dict(),
         "rdl_xml": rdl_xml,
         "conversion_error": conversion_error,
         "oracle_xml": parsed.raw_xml,
         "mockup_html": mockup_html,
+        "overridable_labels": overridable_labels,
         "mockup_backend_html": mockup_backend_html,
         "validation_issues": validation_issues,
         "rdl_issues": rdl_issues,

@@ -7,7 +7,10 @@
 console.log("[Oracle2SSRS] app.js loaded at", new Date().toLocaleTimeString());
 
 // ----- State -----
-const state = { data: null, activeTab: "mockup" };
+const state = { data: null, activeTab: "mockup",
+                // Last source + label overrides, so "Apply labels"
+                // re-runs the SAME artifact through the real pipeline.
+                lastFile: null, lastBundle: null, labelOverrides: {} };
 
 // ----- DOM helpers -----
 const $  = (sel, root) => (root || document).querySelector(sel);
@@ -222,6 +225,72 @@ function appendDeployFields(fd) {
   const dsp = getSharedDsPath(); if (dsp) fd.append("shared_ds_path", dsp);
   const rsu = getReportServerUrl(); if (rsu) fd.append("report_server_url", rsu);
   const gal = getGenerateAllLabel(); if (gal) fd.append("generate_all_label", gal);
+  if (state.labelOverrides && Object.keys(state.labelOverrides).length) {
+    fd.append("label_overrides", JSON.stringify(state.labelOverrides));
+  }
+}
+
+// ----- Report labels (generic override facility) -----
+// The converter inventories every LITERAL label it emitted in
+// data.overridable_labels ({name, text, region}). Some wording exists only
+// in the source system (a title for a report built from bare SQL, an
+// operator's name for a link), so we let the user supply it rather than
+// invent it. Data expressions are never overridable — only labels.
+const _LABEL_REGION_TITLES = {
+  page_header: "Page header",
+  body: "Body",
+  page_footer: "Page footer",
+};
+
+function renderLabelOverrides(data) {
+  const section = document.getElementById("label-overrides-section");
+  const list = document.getElementById("label-override-list");
+  if (!section || !list) return;
+  const labels = (data && data.overridable_labels) || [];
+  if (!labels.length) { section.hidden = true; list.innerHTML = ""; return; }
+  section.hidden = false;
+  list.innerHTML = "";
+  const byRegion = {};
+  labels.forEach(l => { (byRegion[l.region] = byRegion[l.region] || []).push(l); });
+  Object.keys(byRegion).forEach(region => {
+    const h = document.createElement("div");
+    h.className = "muted-note conn-note";
+    h.style.margin = "8px 0 4px";
+    h.innerHTML = "<b>" + (_LABEL_REGION_TITLES[region] || region) + "</b>";
+    list.appendChild(h);
+    byRegion[region].forEach(l => {
+      const inp = document.createElement("input");
+      inp.type = "text";
+      inp.className = "conn-input";
+      inp.dataset.labelName = l.name;
+      inp.placeholder = l.text;
+      inp.title = l.name;
+      inp.value = (state.labelOverrides && state.labelOverrides[l.name]) || "";
+      inp.style.marginBottom = "6px";
+      list.appendChild(inp);
+    });
+  });
+}
+
+// Collect the edited labels and re-convert the SAME source through the
+// normal pipeline, so every pane (mockup, RDL, verdict, fidelity) refreshes
+// from one authoritative conversion rather than a patched copy.
+async function applyLabelOverrides() {
+  const list = document.getElementById("label-override-list");
+  if (!list) return;
+  const next = {};
+  list.querySelectorAll("input[data-label-name]").forEach(inp => {
+    const v = (inp.value || "").trim();
+    if (v) next[inp.dataset.labelName] = v;
+  });
+  state.labelOverrides = next;
+  if (state.lastBundle && state.lastBundle.length) {
+    await uploadBundle(state.lastBundle);
+  } else if (state.lastFile) {
+    await uploadFile(state.lastFile);
+  } else {
+    toast("Convert a report first, then edit its labels", "err");
+  }
 }
 
 // ----- Report images (seals / logos / watermarks) -----
@@ -345,6 +414,7 @@ function getTargetDb() {
 // ----- API calls -----
 async function uploadFile(file) {
   setStatus("Converting…", "busy");
+  state.lastFile = file; state.lastBundle = null;
   const fd = new FormData();
   fd.append("file", file);
   appendDeployFields(fd);
@@ -363,6 +433,7 @@ async function uploadFile(file) {
 
 async function uploadBundle(list) {
   setStatus("Ingesting " + list.length + " file(s)…", "busy");
+  state.lastBundle = list; state.lastFile = null;
   const fd = new FormData();
   list.forEach(f => fd.append("files", f, f._relPath || f.name));
   appendDeployFields(fd);
@@ -472,6 +543,7 @@ function onConverted(data) {
   if ($("#empty-state")) $("#empty-state").hidden = true;
   renderSummary(data);
   renderImageSlots(data);
+  renderLabelOverrides(data);
   if (data.ingest_report) renderIngestSummary(data.ingest_report);
   renderCrossValidation(data);
   renderEnrichmentBanner(data);
@@ -511,11 +583,21 @@ function renderSummary(data) {
   const frow = $("#sum-fidelity-row");
   const fval = $("#sum-fidelity");
   if (fval && fid && typeof fid.score === "number") {
-    const pct = Math.round(fid.score * 100);
+    // Same honesty rule as the fidelity card: the headline is the WORST of
+    // binding coverage and layout-display coverage, and it never reads
+    // "full" while the deployment verdict is unhappy.
+    const _lf = (fid.categories || {}).layout_fields || {};
+    const _disp = (typeof _lf.display_coverage === "number")
+      ? _lf.display_coverage : 1;
+    const _verdict = (data.preflight || {}).verdict;
+    const _blocked = _verdict === "BLOCKER" || _verdict === "RED";
+    const _headline = Math.min(fid.score, _disp);
+    const pct = Math.round(_headline * 100);
     fval.textContent = pct + "%";
     if (frow) {
       frow.classList.remove("fidelity-full", "fidelity-partial");
-      frow.classList.add(fid.score >= 1 ? "fidelity-full" : "fidelity-partial");
+      frow.classList.add((_headline >= 1 && !_blocked)
+        ? "fidelity-full" : "fidelity-partial");
       if (fid.summary) frow.title = fid.summary;
     }
   } else if (fval) {
@@ -1060,11 +1142,21 @@ function setBadge(id, n) {
 // Conversion-fidelity headline card: what the converter preserved from the
 // source vs what still needs manual wiring. The honest counterpart to the
 // upload-safety preflight -- nothing is silently dropped.
-function renderFidelityCard(host, fid) {
+function renderFidelityCard(host, fid, verdict) {
   if (!fid || typeof fid.score !== "number") return;
   const cats = fid.categories || {};
-  const pct = Math.round(fid.score * 100);
-  const full = fid.score >= 1;
+  const lf = cats.layout_fields || {};
+  // HONESTY: the binding score alone must never be presented as "1:1".
+  // It measures whether source columns/parameters reached the RDL — NOT
+  // whether the report LOOKS like the Oracle original. A report can bind
+  // every column and still lay out wrong. So the headline is the WORST of
+  // the measured axes, and the claim is downgraded whenever the deployment
+  // verdict is unhappy or part of the layout never displays.
+  const disp = (typeof lf.display_coverage === "number") ? lf.display_coverage : 1;
+  const blocked = verdict === "BLOCKER" || verdict === "RED";
+  const headline = Math.min(fid.score, disp);
+  const pct = Math.round(headline * 100);
+  const full = headline >= 1 && !blocked;
   const section = document.createElement("section");
   section.className = "extras-section extras-compact fidelity-card " +
     (full ? "fidelity-full" : "fidelity-partial");
@@ -1077,16 +1169,39 @@ function renderFidelityCard(host, fid) {
   if (C.formulas && C.formulas.total) stat.push(["Formulas (need wiring)", String(C.formulas.total)]);
   if (C.summaries) stat.push(["Summary aggregates", String(C.summaries.aggregates_in_rdl || 0)]);
 
+  if (typeof lf.display_coverage === "number") {
+    stat.push(["Layout displayed", Math.round(disp * 100) + "%"]);
+  }
+
+  let blurb;
+  if (blocked) {
+    blurb = "<b>Not deployable as-is.</b> The pre-flight verdict is " +
+      escapeHtml(verdict) + " &mdash; fix those findings before trusting " +
+      "this output, whatever this score says.";
+  } else if (disp < 1) {
+    blurb = "<b>Structurally complete, but not visually verified.</b> " +
+      Math.round((1 - disp) * 100) + "% of the columns Oracle placed on the " +
+      "page are not displayed by any expression in the RDL &mdash; the " +
+      "report will run, but it will not look like the original.";
+  } else if (full) {
+    blurb = "Every source column and parameter is bound, and every column " +
+      "Oracle placed on the page is displayed.";
+  } else {
+    blurb = "Some source columns or parameters are not bound in the RDL " +
+      "(see below).";
+  }
+
   let html =
     "<h3>Conversion fidelity " +
       "<span class='fidelity-score'>" + pct + "%</span></h3>" +
     "<div class='fidelity-bar'><span style='width:" + pct + "%'></span></div>" +
-    "<p class='fidelity-blurb'>" +
-      (full
-        ? "Faithful 1:1 copy &mdash; every source column and parameter is preserved in the RDL."
-        : "Some source columns or parameters are not bound in the RDL (see below).") +
-      " <span class='fidelity-note'>Score = columns + parameters preserved. " +
-      "Formula bodies and any items listed below still need manual wiring at deploy time.</span>" +
+    "<p class='fidelity-blurb'>" + blurb +
+      " <span class='fidelity-note'>This score measures <b>structural</b> " +
+      "coverage: source columns and parameters bound, and layout columns " +
+      "actually displayed. It does <b>not</b> compare the output against a " +
+      "picture of the original report &mdash; the converter never sees one. " +
+      "Always open the mockup and check it against a known-good run before " +
+      "you deploy.</span>" +
     "</p>";
 
   html += "<div class='fidelity-stats'>";
@@ -1113,7 +1228,8 @@ function renderExtrasTab(data) {
   host.innerHTML = "";
 
   // Headline card: Conversion fidelity (source -> RDL coverage self-check)
-  renderFidelityCard(host, data.fidelity_report);
+  renderFidelityCard(host, data.fidelity_report,
+                     (data.preflight || {}).verdict);
 
   // Compact card: Bursting / DDS summary
   const burst = (data && data.bursting) || {};
@@ -2054,6 +2170,8 @@ function wireEverything() {
   if (clearBtn) clearBtn.addEventListener("click", clearRecent);
   const subAddBtn = document.getElementById("subreport-add-manual");
   if (subAddBtn) subAddBtn.addEventListener("click", subAddManual);
+  const lblApply = document.getElementById("label-override-apply");
+  if (lblApply) lblApply.addEventListener("click", applyLabelOverrides);
   initSharedDsPath();
   initReportServerUrl();
   initGenerateAllLabel();

@@ -1366,6 +1366,50 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
             f"{len(charts)} chart/graph object(s) detected -- not auto-built "
             "(recreate as an SSRS Chart in Report Builder)")
 
+    # WEB-SOURCE (.jsp) reports keep their authored layout as an
+    # <rw:dataArea> HTML table, not a paper <layout> — previously the
+    # labeled column headers ("Employee Id", "Emp Name", ...) were dropped
+    # and the auto-built tablix used humanised field names. Each header
+    # <th <rw:id id="HB<COLUMN><row>"/>>Caption</th> encodes its column;
+    # match by alnum-normalized name and carry the caption as the item
+    # LABEL (wild-corpus: the official Oracle tutorial web sources).
+    if not layout and _full_source and "rw:dataArea" in _full_source:
+        def _norm(s):
+            return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+        _by_norm: dict = {}
+
+        def _add_item(it):
+            if getattr(it, "name", ""):
+                _by_norm.setdefault(_norm(it.name), []).append(it)
+        for q in queries:
+            for it in (q.items or []):
+                _add_item(it)
+            # The group TREE holds its own DataItem copies (parsed per
+            # <group>); the builders read those — label every copy.
+            stack = list(getattr(q, "groups", None) or [])
+            while stack:
+                g = stack.pop()
+                for it in (getattr(g, "items", None) or []):
+                    _add_item(it)
+                stack.extend(getattr(g, "children", None) or [])
+        n_cap = 0
+        for th in re.finditer(
+                r'<th\s+<rw:id\s+id="HB([A-Za-z_][A-Za-z0-9_]*?)\d*"'
+                r'[^>]*/>[^>]*>(.*?)</th>', _full_source, re.S | re.I):
+            col, cap = th.group(1), th.group(2)
+            cap = re.sub(r"<[^>]+>", "", cap)
+            cap = re.sub(r"\s+", " ", cap).replace("&nbsp;", "").strip()
+            its = _by_norm.get(_norm(col)) or []
+            for it in its:
+                if cap:
+                    it.label = cap
+            if its and cap:
+                n_cap += 1
+        if n_cap:
+            warnings.append(
+                f"web-source layout: {n_cap} authored column caption(s) "
+                f"carried from the rw:dataArea table headers")
+
     return ParsedReport(
         name=name,
         dtd_version=dtd_version,

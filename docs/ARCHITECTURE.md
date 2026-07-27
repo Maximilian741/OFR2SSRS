@@ -218,6 +218,37 @@ the SQL translator rewrites each call site to the matching `dbo.fn_*`.
   step uses to point the shared-data-source reference at the user's real
   server path or, optionally, embed a connection string.
 
+#### Publish-safety post-passes
+
+`generate_rdl` finishes by running an ordered chain of whole-tree passes.
+Each one exists because the **real ReportViewer engine** rejected (or
+mis-rendered) output that was otherwise schema-valid — the XSD accepts
+several documents the engine will not publish:
+
+| Pass | What it guarantees |
+|---|---|
+| `_apply_region_aware_trigger_props` | Oracle format triggers become real `<Hidden>` / conditional `<Style>` expressions, applied **only** where every `Fields!` reference resolves — exact case — in the enclosing data region's dataset. Untranslatable triggers are left alone rather than guessed at. |
+| `_repair_dangling_field_refs` / `_repair_misscoped_field_refs` / `_scope_body_direct_field_refs` | Every field reference resolves, and references outside a data region carry a dataset scope. Covers `Value`, `Hidden`, and style expressions alike. |
+| `_canonicalize_field_ref_case` | `Fields!` / `Parameters!` references are rewritten to their declared casing. SSRS resolves both case-sensitively; PL/SQL bodies and layout sources routinely disagree with the dataset. |
+| `_ensure_summary_totals_emitted` / `_ensure_group_subtotals_emitted` | Declared Oracle `<summary>` totals get an emission site (group footer, else a report-scoped aggregate). |
+| `_apply_field_formats` / `_wrap_inline_masked_date_refs` | Oracle `formatMask` becomes a `<Format>`; a masked date **inlined into a concatenation** — where `<Format>` cannot reach — is wrapped in `Format(..., "<net mask>")`. |
+| `_repair_nested_first_aggregates` | Rewrites the illegal `Sum(Val(First(x, "DS")))` shape (the engine forbids `First` nested inside an outer aggregate). |
+| `_reconcile_tablix_widths` | Each Tablix's declared `<Width>` equals its column sum. Stale declared sizes break page math and can make the engine paint over items placed below. |
+| `_append_charts` | Each detected Oracle chart (`<rw:graph>` / `<chart>`) becomes a real SSRS `<Chart>` — category group, `Sum()` of the plot value, source title as caption. Charts whose columns don't resolve stay unbuilt and are reported honestly. |
+| `_clamp_body_height_to_page` / `_prune_dead_datasets` | Trailing blank pages are trimmed; datasets nothing references are removed (they would otherwise execute their SQL on every render). |
+
+* **Label overrides.** `collect_overridable_labels()` inventories every
+  literal label in the finished RDL; `apply_label_overrides()` replaces
+  them by textbox name (or the `"title"` shorthand). Data expressions are
+  never touched. Display text a source genuinely cannot carry — a title
+  for a report assembled from bare SQL — is supplied this way instead of
+  being invented.
+* **Cursor formulas.** A single-fetch `CF_` cursor keyed on current-row
+  binds is translated by `cursor_formula_to_subquery()` into a scalar
+  correlated subquery appended to its owning query, so the formula
+  computes from real data instead of shipping a NULL stub. Loops,
+  multi-cursor bodies, and unknown binds decline conservatively.
+
 ### 3.7 `backend/converter/preview/html_mockup.py`
 
 * Public API: `render_mockup(report, mode="frontend") -> str`
@@ -253,6 +284,36 @@ Three independent validators, all returning issues in the shape
 * `preflight.py` — `preflight_audit(rdl_xml)` runs a final RDL audit
   immediately before download, catching anything the per-stage validators
   missed (orphan field refs, empty required containers, stray bind syntax).
+  It returns a **verdict** — `READY` / `AMBER` / `RED` / `BLOCKER` — which
+  the UI shows as a banner and the batch assessment tabulates.
+
+  The verdict exists to make the *silent* failures loud. Rule families
+  worth knowing (all documented for operators in
+  [`RUN_GUIDE.md`](RUN_GUIDE.md)):
+
+  * `source.unsupported_kind` — the file isn't an Oracle Reports
+    definition at all (a bursting/distribution spec, a JasperReports
+    design, a Forms module). Classified, not half-converted.
+  * `rdl.hollow_body` / `rdl.placeholder_dataset.*` — the output would
+    render blank because layout binding or column extraction failed. A
+    conversion that produces nothing must never read as READY.
+  * `sql.lexical_*` — a runtime lexical was neutralized, classified by
+    its **grammatical position**, because the consequences differ:
+    `identifier` / `tablesource` leave invalid SQL (BLOCKER),
+    `where_dropped` runs the query unfiltered (RED — returns every row,
+    errors nowhere), `nevermatch` can never match (RED — returns zero
+    rows), `operand_null` degrades one value (AMBER). Issues dedupe per
+    (class, lexical) with an occurrence count.
+  * `rdl.linked_detail_not_rendered.*` — a linked child query is bound to
+    no region. AMBER: auxiliary children are a legitimate Oracle pattern,
+    but a dropped detail section must still be visible.
+
+* `layout_audit.py` — a data-independent geometry auditor that flags
+  clipping and overflow risk before any data is bound; its findings merge
+  into the preflight issue list as AMBER.
+* `fidelity.py` — scores source→RDL coverage (see 3.18) and is the other
+  half of the honesty contract: the verdict says "can this deploy?", the
+  fidelity report says "did anything quietly go missing?"
 
 Beyond these runtime validators, the test suite validates generated RDL
 against **Microsoft's own RDL 2008 XSD** (`ReportDefinition_2008.xsd`,
@@ -562,12 +623,20 @@ is extended by adding a function, not by editing existing modules.
 
 ## 12. Known limitations
 
-* **Lexical references (`&LEX_FOO`).** Oracle's lexical-reference feature
-  splices arbitrary text into the SQL at runtime. There is no general SSRS
-  equivalent (closest is dynamic SQL via expressions). The translator
-  leaves them in place, the validator flags them as errors, and the
-  deployment checklist documents how to convert them to RDL expressions
-  manually.
+* **Lexical references (`&LEX_FOO`).** Oracle splices arbitrary text into
+  the SQL at run time; there is no general SSRS equivalent (closest is
+  dynamic SQL via expressions). We neutralize each one so the statement
+  stays *runnable* — position-aware, so an operand slot gets `NULL` while
+  an identifier fragment does not — and classify the consequence in the
+  preflight verdict (see 3.9). Reimplementing the dynamic filter is still
+  a human step; what the converter guarantees is that you are told which
+  kind of loss you have, not that the loss is invisible.
+* **PL/SQL beyond the supported subsets.** Formula translation covers
+  expression bodies, single-fetch cursor formulas, and boolean/styling
+  format triggers. Loop-accumulator formulas (string aggregation),
+  side-effecting bodies that write several `:CP_` placeholders, and
+  cross-query cursor walks decline conservatively and ship as honest
+  stubs rather than guesses.
 * **Pixel-precise layout.** Oracle Reports stores layout in inches with
   per-frame anchors and complex spacing rules. We translate position,
   font weight, and font size, but final layout polish in Report Builder

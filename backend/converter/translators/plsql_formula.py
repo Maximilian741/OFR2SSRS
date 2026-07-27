@@ -932,3 +932,98 @@ def translate_format_trigger_style(body: str,
     if not r.get("ok") or not r.get("vb"):
         return None
     return (r["vb"], styles)
+
+
+def cursor_formula_to_subquery(body: str, outer_cols, param_names
+                               ) -> Optional[str]:
+    """Translate a SINGLE-FETCH cursor formula (the dominant Oracle CF_
+    pattern: CURSOR c IS SELECT ...; OPEN c; FETCH c INTO rec; RETURN ...)
+    into a scalar correlated subquery against the wrapper alias ``O``:
+
+        (SELECT MAX(<expr>) [KEEP (DENSE_RANK FIRST ORDER BY <order>)]
+           FROM <from> WHERE <where, :col -> O.col>)
+
+    ``MAX(...) KEEP (DENSE_RANK FIRST ...)`` reproduces first-row-by-order
+    at correlation depth 1 (a nested ROWNUM=1 subquery cannot see O).
+    Conservative: multi-column cursors decline unless RETURN names the
+    column; LOOP/concat bodies decline (kept as honest NULL stubs)."""
+    src = _strip_comments(body or "")
+    if re.search(r"(?i)\b(LOOP|WHILE|FOR\s+\w+\s+IN)\b", src):
+        return None
+    m = re.search(r"(?is)\bCURSOR\s+(\w+)\s+IS\s+(SELECT\b.*?);", src)
+    if not m:
+        return None
+    if len(re.findall(r"(?i)\bCURSOR\b", src)) != 1:
+        return None
+    sel = m.group(2).strip()
+    if not re.search(r"(?i)\bFETCH\b", src):
+        return None
+    # Split the cursor SELECT: list / FROM / WHERE / ORDER BY (top level).
+    ms = re.match(r"(?is)SELECT\s+(.*?)\s+FROM\s+(.*)$", sel)
+    if not ms:
+        return None
+    sel_list, rest = ms.group(1), ms.group(2)
+    mo = re.search(r"(?is)\bORDER\s+BY\s+(.*)$", rest)
+    order = mo.group(1).strip().rstrip(";") if mo else ""
+    if mo:
+        rest = rest[:mo.start()].strip()
+    # Multiple select items? Need RETURN rec.<col> to pick one; otherwise
+    # decline. (Top-level comma split.)
+    depth = 0
+    items = []
+    cur = []
+    for ch in sel_list:
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        if ch == "," and depth == 0:
+            items.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    items.append("".join(cur))
+    expr = items[0].strip()
+    if len(items) > 1:
+        mr = re.search(r"(?is)\bRETURN\s+\w+\.(\w+)", src)
+        if not mr:
+            return None
+        want = mr.group(1).upper()
+        pick = None
+        for it in items:
+            it = it.strip()
+            alias = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*$", it)
+            base = re.search(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*$",
+                             it.split(".")[-1])
+            if (alias and alias.group(1).upper() == want) or \
+                    (base and base.group(1).upper() == want):
+                pick = it
+                break
+        if pick is None:
+            return None
+        expr = pick
+    # Strip a trailing alias from the picked expression (invalid inside MAX).
+    expr = re.sub(r"\s+[A-Za-z_][A-Za-z0-9_]*\s*$",
+                  "", expr) if re.search(
+        r"(?:\)|'|[A-Za-z0-9_])\s+[A-Za-z_][A-Za-z0-9_]*\s*$", expr) \
+        and not re.search(r"(?i)\b(END|NULL)\s*$", expr) else expr
+    # Rewrite :BIND -> O.BIND when BIND is an outer column; parameter binds
+    # stay binds; any OTHER bind (unknown local) -> decline.
+    ocols = {c.upper() for c in (outer_cols or [])}
+    pnames = {p.upper() for p in (param_names or [])}
+    bad = []
+
+    def _bind(mm):
+        nm = mm.group(1)
+        if nm.upper() in ocols:
+            return f"O.{nm}"
+        if nm.upper() in pnames:
+            return mm.group(0)
+        bad.append(nm)
+        return mm.group(0)
+    rest2 = re.sub(r":([A-Za-z_][A-Za-z0-9_]*)", _bind, rest)
+    if bad:
+        return None
+    agg = (f"MAX({expr}) KEEP (DENSE_RANK FIRST ORDER BY {order})"
+           if order else f"MAX({expr})")
+    return f"(SELECT {agg}\n   FROM {rest2})"

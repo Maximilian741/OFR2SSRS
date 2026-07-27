@@ -272,9 +272,22 @@ def api_convert():
         return jsonify({"error": "no file uploaded"}), 400
     try:
         target_db = _resolve_target_db(request)
+        # Generic label overrides: {'<textbox name>'|'title': new_text}.
+        # The available labels ship back as data['overridable_labels'].
+        _lo = None
+        _lo_raw = request.form.get("label_overrides")
+        if _lo_raw:
+            try:
+                import json as _json
+                _cand = _json.loads(_lo_raw)
+                if isinstance(_cand, dict):
+                    _lo = {str(k): str(v) for k, v in _cand.items()
+                           if v is not None}
+            except Exception:  # noqa: BLE001
+                _lo = None
         data = convert(f.read(), target_db=target_db,
                        images=_IMAGE_STORE.get(_sid()) or None,
-                       deep_verify=True)
+                       deep_verify=True, label_overrides=_lo)
         # Apply deployment data source settings (embedded connection string
         # per-request, or the session's shared data source path) so the RDL
         # binds to the right data source AT UPLOAD -- no manual repointing.

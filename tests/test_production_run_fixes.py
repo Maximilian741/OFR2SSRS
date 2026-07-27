@@ -674,14 +674,23 @@ def test_format_trigger_hidden_translation():
         "end if; return (TRUE); end;") is None
 
     from converter.generators.rdl import _format_trigger_hidden_map
-    from converter.models import ParsedReport, TriggerCode
+    from converter.models import (ParsedReport, TriggerCode, DataQuery,
+                                  DataItem)
     rep = ParsedReport(name="R", dtd_version="9")
+    q = DataQuery(name="Q_1")
+    q.items = [DataItem(name="ST")]
+    rep.queries.append(q)
     rep.triggers.append(TriggerCode(
         name="F_HideVoid",
         body="begin IF :st = 'V' THEN RETURN FALSE; END IF; "
              "RETURN TRUE; end;"))
+    rep.triggers.append(TriggerCode(
+        name="F_Unknown",
+        body="begin IF :nope = 1 THEN RETURN FALSE; END IF; "
+             "RETURN TRUE; end;"))
     m = _format_trigger_hidden_map(rep)
-    assert m == {"f_hidevoid": '=((Fields!st.Value = "V"))'}
+    # strict resolver: DECLARED casing used; unknown names DECLINE.
+    assert m == {"f_hidevoid": '=((Fields!ST.Value = "V"))'}
 
 
 def test_conditional_style_trigger_translation():
@@ -709,8 +718,12 @@ def test_conditional_style_trigger_translation():
     import xml.etree.ElementTree as _ET
     from converter.generators.rdl import (_apply_format_trigger_style,
                                           _reorder_style_children)
-    from converter.models import ParsedReport, TriggerCode
+    from converter.models import (ParsedReport, TriggerCode, DataQuery,
+                                  DataItem)
     rep = ParsedReport(name="R", dtd_version="9")
+    _q2 = DataQuery(name="Q_1")
+    _q2.items = [DataItem(name="P")]
+    rep.queries.append(_q2)
     rep.triggers.append(TriggerCode(
         name="FT_S", body="begin if (:P = 'T') then "
         "srw.set_font_weight(SRW.BOLD_WEIGHT); end if; return (true); end;"))
@@ -789,3 +802,252 @@ def test_linked_detail_honesty_and_report_level_summaries():
         .get("summaries", {})
     assert sc.get("declared", 0) >= 1
     assert "Tb_GrandTotal" in x or "Sum(Fields!V.Value" in x
+
+
+def test_label_override_facility_generic():
+    """Fire 137 (user-flagged): ANY generated literal label is overridable
+    by textbox name (plus the 'title' alias) — plain literals AND pure
+    constant-string expression labels (='...'); data expressions are never
+    clobbered; the inventory ships in convert() output and the /api/convert
+    endpoint passes overrides through."""
+    import io
+    import json as _json
+    from converter.generators.rdl import (collect_overridable_labels,
+                                          apply_label_overrides)
+
+    rdl = ('<?xml version="1.0"?><Report xmlns="http://schemas.microsoft.'
+           'com/sqlserver/reporting/2008/01/reportdefinition"><Body>'
+           '<ReportItems>'
+           '<Textbox Name="Tb_Title"><Paragraphs><Paragraph><TextRuns>'
+           '<TextRun><Value>="My Report"</Value></TextRun></TextRuns>'
+           '</Paragraph></Paragraphs></Textbox>'
+           '<Textbox Name="Tb_Data"><Paragraphs><Paragraph><TextRuns>'
+           '<TextRun><Value>=Fields!X.Value</Value></TextRun></TextRuns>'
+           '</Paragraph></Paragraphs></Textbox>'
+           '</ReportItems><Height>1in</Height></Body></Report>')
+    inv = collect_overridable_labels(rdl)
+    assert [e["name"] for e in inv] == ["Tb_Title"]
+    assert inv[0]["text"] == "My Report"
+    out, applied = apply_label_overrides(rdl, {"title": 'New "T"'})
+    assert applied and applied[0][0] == "Tb_Title"
+    assert '="New ""T"""' in out
+    out2, applied2 = apply_label_overrides(rdl, {"Tb_Data": "nope"})
+    assert not applied2, "data expressions must never be clobbered"
+
+    from app import app
+    xml = (b'<?xml version="1.0"?><report name="T" DTDVersion="9.0.2.0.10">'
+           b'<data><dataSource name="Q_1"><select><![CDATA[select a, b, c '
+           b'from t]]></select></dataSource></data></report>')
+    c = app.test_client()
+    r = c.post("/api/convert", data={
+        "file": (io.BytesIO(xml), "r.xml"),
+        "label_overrides": _json.dumps({"title": "HTTP-OVR"}),
+    }, content_type="multipart/form-data")
+    j = r.get_json()
+    assert r.status_code == 200
+    assert "overridable_labels" in j
+
+
+def test_web_source_captions_carried_and_rendered():
+    """Fire 138 (hunt round 3): a .jsp web-source report's authored
+    rw:dataArea table headers become item LABELS (every DataItem copy incl.
+    the group tree) and the geometry-less nested-detail path synthesizes a
+    column-header row from them (with the matching hierarchy member)."""
+    from converter import convert
+    from converter.parsers.oracle_xml import parse_oracle_xml
+
+    xml = (b'<?xml version="1.0"?><report name="WS" DTDVersion="9.0.2.0.10">'
+           b'<data><dataSource name="Q_1"><select><![CDATA[select m, a, b '
+           b'from t]]></select><group name="G_M">'
+           b'<dataItem name="m" datatype="vchar2"/>'
+           b'<group name="G_D"><dataItem name="A" datatype="number"/>'
+           b'<dataItem name="B" datatype="vchar2"/></group></group>'
+           b'</dataSource></data></report>\n'
+           b'<rw:dataArea xmlns:rw="http://x"><table><thead><tr>'
+           b'<th <rw:id id="HBA92" asArray="no"/> class="h"> Alpha Count '
+           b'</th><th <rw:id id="HBB92" asArray="no"/> class="h"> Beta Name '
+           b'</th></tr></thead></table></rw:dataArea>')
+    rep = parse_oracle_xml(xml)
+    labs = {i.name: i.label for q in rep.queries
+            for g in q.groups for i in g.items}
+    # group-tree copies labeled too (walk nested)
+    def _all(gs):
+        for g in gs:
+            for i in g.items:
+                yield i
+            yield from _all(g.children)
+    labs = {i.name: i.label for q in rep.queries for i in _all(q.groups)}
+    assert labs.get("A") == "Alpha Count" and labs.get("B") == "Beta Name"
+    x = convert(xml)["rdl_xml"]
+    assert "Alpha Count" in x and "Beta Name" in x
+
+
+def test_inline_masked_dates_and_safe_elastic_cangrow():
+    """Fire 139: (1) a DATE-masked field inlined into a concatenation gets
+    Format(..., net-mask) wrapped in place (the <Format> style can't reach
+    it — raw ToString rendered '6/8/2026 12:00:00 AM'); (2) elastic fields
+    (verticalElasticity expand/variable) CanGrow ONLY when nothing sits
+    below them in their frame (auditor-calibrated overlap-safe subset)."""
+    import re as _re
+    from converter import convert
+
+    xml = (b'<?xml version="1.0"?><report name="DT" DTDVersion="9.0.2.0.10">'
+           b'<data><dataSource name="Q_1"><select><![CDATA[select d, note, x '
+           b'from t]]></select><group name="G_1">'
+           b'<dataItem name="D" datatype="date"/>'
+           b'<dataItem name="NOTE" datatype="vchar2"/>'
+           b'<dataItem name="X" datatype="vchar2"/></group></dataSource>'
+           b'</data><layout><section name="main">'
+           b'<body width="8.5" height="11.0">'
+           b'<repeatingFrame name="R_1" source="G_1">'
+           b'<geometryInfo x="0" y="0" width="8" height="3"/>'
+           b'<text name="T_D"><geometryInfo x="0" y="0.2" width="4" '
+           b'height="0.25"/><textSegment><font face="arial" size="10"/>'
+           b'<string><![CDATA[Date: &<D>]]></string></textSegment></text>'
+           b'<field name="F_D" source="D" formatMask="MM/DD/YYYY">'
+           b'<geometryInfo x="5" y="0.2" width="1.5" height="0.25"/></field>'
+           b'<field name="F_X" source="X">'
+           b'<geometryInfo x="0" y="0.6" width="3" height="0.25"/></field>'
+           b'<field name="F_NOTE" source="NOTE">'
+           b'<generalLayout verticalElasticity="expand"/>'
+           b'<geometryInfo x="0" y="1.0" width="7.5" height="0.5"/></field>'
+           b'</repeatingFrame></body></section></layout></report>')
+    x = convert(xml)["rdl_xml"]
+    m = _re.search(r'<Value>="Date: " ?&amp; ?([^<]+)</Value>', x)
+    if m:
+        assert "Format(" in m.group(1) and "MM/dd/yyyy" in m.group(1), m.group(1)
+    # NOTE is elastic + bottom-most -> CanGrow; X has NOTE below -> fixed.
+    note_tb = _re.search(r'<Textbox Name="[^"]*"[^>]*>(?:(?!</Textbox>).)*?'
+                         r'Fields!NOTE(?:(?!</Textbox>).)*?</Textbox>', x, _re.S)
+    assert note_tb and "<CanGrow>true</CanGrow>" in note_tb.group(0)
+
+
+def test_cursor_formula_translates_to_correlated_subquery():
+    """Fire 140: a SINGLE-FETCH cursor formula keyed on current-row binds
+    becomes a scalar correlated subquery on the wrapper alias O (first-
+    fetch-by-order via MAX KEEP DENSE_RANK FIRST); loop/concat bodies
+    decline; wired formulas leave the NULL-stub dataset."""
+    from converter.translators.plsql_formula import (
+        cursor_formula_to_subquery)
+    from converter import convert
+
+    body = ("function CF_P return Char is CURSOR C IS SELECT L.PHN "
+            "FROM V L WHERE L.ORG_ID = :ORG_ID ORDER BY L.DC DESC; "
+            "R C%ROWTYPE; begin OPEN C; FETCH C INTO R; RETURN R.PHN; end;")
+    sub = cursor_formula_to_subquery(body, ["ORG_ID"], [])
+    assert sub and "MAX(L.PHN) KEEP (DENSE_RANK FIRST" in sub
+    assert "O.ORG_ID" in sub
+    assert cursor_formula_to_subquery(
+        "begin FOR r IN c LOOP x := x || r.a; END LOOP; RETURN x; end;",
+        ["A"], []) is None
+
+    xml = (b'<?xml version="1.0"?><report name="CU" DTDVersion="9.0.2.0.10">'
+           b'<data><dataSource name="Q_1"><select><![CDATA[select org_id, nm '
+           b'from t]]></select><group name="G_1">'
+           b'<dataItem name="ORG_ID" datatype="number"/>'
+           b'<dataItem name="NM" datatype="vchar2"/>'
+           b'<formula name="CF_PHONE" source="cf_phoneformula" '
+           b'datatype="character" width="50"/></group></dataSource>'
+           b'</data><programUnits><function name="CF_PHONEFormula">'
+           b'<textSource><![CDATA[function CF_PHONEFormula return Char is '
+           b'CURSOR C IS SELECT L.PHN FROM V L WHERE L.ORG_ID = :ORG_ID '
+           b'ORDER BY L.DC DESC; R C%ROWTYPE; begin OPEN C; FETCH C INTO R; '
+           b'RETURN R.PHN; end;]]></textSource></function></programUnits>'
+           b'</report>')
+    out = convert(xml)
+    x = out["rdl_xml"]
+    sql = x[x.index("<CommandText>"):x.index("</CommandText>")]
+    assert "SELECT O.*" in sql and "O.ORG_ID" in sql
+    assert "AS CF_PHONE" in sql
+
+
+def test_region_aware_trigger_application_and_nested_first_repair():
+    """Fire 141: trigger Hidden/Style applies via the region-aware
+    post-pass (data-ft tags; refs validated against the ENCLOSING region's
+    dataset, exact case; tags always stripped) — and the illegal
+    Sum(Val(First(x,"DS"))) nested aggregate rewrites to Val(First(...))
+    (single-row formula dataset makes the outer aggregate a no-op)."""
+    import xml.etree.ElementTree as _ET
+    from converter.generators.rdl import (_repair_nested_first_aggregates,
+                                          _q as _qq)
+
+    r = _ET.fromstring(
+        '<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting/'
+        '2008/01/reportdefinition"><Body><V><Value>=Sum(Val(First('
+        'Fields!CF_X.Value, "DS_REPORT_FORMULAS")))</Value></V></Body>'
+        '</Report>')
+    _repair_nested_first_aggregates(r)
+    x = _ET.tostring(r, encoding="unicode")
+    assert '=Val(First(Fields!CF_X.Value, "DS_REPORT_FORMULAS"))' in x
+    assert "Sum(" not in x
+
+    from converter import convert
+    xml = (b'<?xml version="1.0"?><report name="TR" DTDVersion="9.0.2.0.10">'
+           b'<data><dataSource name="Q_1"><select><![CDATA[select st, v '
+           b'from t]]></select><group name="G_1">'
+           b'<dataItem name="ST" datatype="vchar2"/>'
+           b'<dataItem name="V" datatype="number"/></group></dataSource>'
+           b'</data><programUnits><function name="FT_Hide">'
+           b'<textSource><![CDATA[function FT_Hide return boolean is begin '
+           b'IF :st = \'X\' THEN RETURN FALSE; END IF; RETURN TRUE; end;'
+           b']]></textSource></function></programUnits>'
+           b'<layout><section name="main"><body width="8.5" height="11.0">'
+           b'<repeatingFrame name="R_1" source="G_1">'
+           b'<geometryInfo x="0" y="0.5" width="8" height="0.3"/>'
+           b'<field name="F_S" source="ST" formatTrigger="FT_Hide">'
+           b'<geometryInfo x="0" y="0.5" width="2" height="0.25"/></field>'
+           b'<field name="F_V" source="V">'
+           b'<geometryInfo x="3" y="0.5" width="2" height="0.25"/></field>'
+           b'</repeatingFrame></body></section></layout></report>')
+    x2 = convert(xml)["rdl_xml"]
+    assert "data-ft" not in x2, "tags must always strip"
+    if "<Hidden>=" in x2:
+        assert 'Fields!ST.Value = "X"' in x2
+
+
+def test_label_override_ui_contract():
+    """Fire 144: the sidebar UI contract — the template carries the label
+    section + Apply button, app.js renders/applies/ships the overrides in
+    the FormData field the backend reads, and the round-trip lands in BOTH
+    the RDL and the mockup. Browser-verified; locked here so a frontend
+    refactor can't silently break the wiring."""
+    import io
+    import json as _json
+    from pathlib import Path
+    from app import app
+
+    root = Path(__file__).resolve().parent.parent
+    html = (root / "frontend" / "templates" / "index.html").read_text(
+        encoding="utf-8")
+    assert 'id="label-overrides-section"' in html
+    assert 'id="label-override-list"' in html
+    assert 'id="label-override-apply"' in html
+
+    js = (root / "frontend" / "static" / "js" / "app.js").read_text(
+        encoding="utf-8")
+    assert "function renderLabelOverrides(" in js
+    assert "function applyLabelOverrides(" in js
+    assert 'fd.append("label_overrides"' in js, "must ship the API field"
+    assert "renderLabelOverrides(data)" in js, "must render on convert"
+    assert 'getElementById("label-override-apply")' in js, "Apply must wire"
+    # Re-convert path must reuse the stored source, not a patched copy.
+    assert "state.lastFile" in js and "state.lastBundle" in js
+
+    xml = (root / "samples" / "oracle" / "SAMPLE_INSPECTION.xml").read_bytes()
+    c = app.test_client()
+    r1 = c.post("/api/convert", data={"file": (io.BytesIO(xml), "s.xml")},
+                content_type="multipart/form-data")
+    j1 = r1.get_json()
+    inv = j1.get("overridable_labels") or []
+    assert inv, "inventory must ship for the UI to render"
+    shared = next((l for l in inv
+                   if ">" + l["text"] + "<" in (j1.get("mockup_html") or "")),
+                  None)
+    if shared:
+        r2 = c.post("/api/convert", data={
+            "file": (io.BytesIO(xml), "s.xml"),
+            "label_overrides": _json.dumps({shared["name"]: "GUARDED LABEL"}),
+        }, content_type="multipart/form-data")
+        j2 = r2.get_json()
+        assert "GUARDED LABEL" in j2["rdl_xml"]
+        assert "GUARDED LABEL" in j2["mockup_html"]

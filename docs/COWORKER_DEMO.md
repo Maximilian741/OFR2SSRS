@@ -217,7 +217,7 @@ Mention these in passing:
 * **Verified, not asserted.** The generated RDL is validated against
   Microsoft's own RDL 2008 XSD, and render-verified through Microsoft's
   ReportViewer engine (`tools/renderlab`) — it renders to a real PDF that
-  we measure for page count and blank pages. The test suite is **620
+  we measure for page count and blank pages. The test suite is **698
   passed, 19 skipped**.
 * It is **offline by default**. No SaaS, no telemetry, no API keys
   required. Optional Claude assist is opt-in via `.env`.

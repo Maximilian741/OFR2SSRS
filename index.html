@@ -935,7 +935,7 @@ footer {
         <div style="font-size:13px; color:var(--slate-500); margin-top:6px;">report names hardcoded<br/>in the conversion engine</div>
       </div>
       <div>
-        <div style="font-size:36px; font-weight:800; color:var(--navy); letter-spacing:-0.02em; line-height:1;">620</div>
+        <div style="font-size:36px; font-weight:800; color:var(--navy); letter-spacing:-0.02em; line-height:1;">698</div>
         <div style="font-size:13px; color:var(--slate-500); margin-top:6px;">automated tests,<br/>all green</div>
       </div>
       <div>
@@ -1057,6 +1057,26 @@ footer {
         <span class="feature-tag">Key feature</span>
         <h3>Filters That Actually Filter</h3>
         <p>Oracle builds its <code>WHERE</code> clause from lexical text parameters SSRS can't express, so naive conversions run unfiltered. Oracle2SSRS reconstructs the criteria-builder pattern into real, <code>NULL</code>-safe, parameter-bound predicates: pick a value and it filters, leave it blank and it returns every row.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" aria-hidden="true">📊</div>
+        <h3>Charts &amp; Cross-Tabs</h3>
+        <p>Oracle graphs become real SSRS <code>&lt;Chart&gt;</code> elements — category group, aggregated series, original title. Cross-tab matrices rebuild as true two-axis Tablix pivots with margin totals, driven by the report's own declared summary metadata rather than guesswork.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" aria-hidden="true">🎨</div>
+        <h3>Conditional Formatting</h3>
+        <p>Oracle format triggers carry the report's business rules — hide this row, bold that subtotal. Their PL/SQL is compiled into real SSRS visibility and style expressions, applied only where every field reference provably resolves in its region's dataset.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" aria-hidden="true">✍️</div>
+        <h3>Label Overrides</h3>
+        <p>Some display text lives in people's heads, not the export — a title for a report assembled from bare SQL. Every generated label is inventoried and overridable by name, so you supply the wording instead of the converter inventing it.</p>
+      </div>
+      <div class="feature-card">
+        <div class="feature-icon" aria-hidden="true">🚦</div>
+        <h3>Verdicts You Can Trust</h3>
+        <p>Every conversion ends in a verdict — <strong>READY</strong>, <strong>AMBER</strong>, <strong>RED</strong>, or <strong>BLOCKER</strong> — plus a fidelity score that names anything dropped. A query that would silently return every row is called out as loudly as one that won't publish.</p>
       </div>
     </div>
   </div>

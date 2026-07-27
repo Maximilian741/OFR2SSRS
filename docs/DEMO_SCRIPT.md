@@ -104,4 +104,4 @@
 - `samples/oracle/SAMPLE_INSPECTION.xml` — the bundled (synthetic) Oracle
   source artifact.
 - `python -m pytest -q` — runs the full test suite (parametrized,
-  name-agnostic fixtures): **620 passed, 19 skipped**.
+  name-agnostic fixtures): **698 passed, 17 skipped**.
