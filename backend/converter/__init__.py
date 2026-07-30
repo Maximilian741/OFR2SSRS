@@ -314,7 +314,7 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
         mockup_backend_html = _fallback_preview(parsed, f"{type(e).__name__}: {e}")
 
     # Validation: T-SQL static + RDL structural
-    validation_issues = validate_report(parsed)
+    validation_issues = validate_report(parsed, target_db=target_db)
     rdl_issues = []
     try:
         rdl_issues = validate_rdl(rdl_xml, target_db=target_db)

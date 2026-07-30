@@ -1,217 +1,238 @@
 /* =========================================================
-   Oracle2SSRS — Take-a-tour walkthrough (rebuild)
-   Robust step transitions: each step verifies success before
-   advancing. Step 2 was skipping because state was scoped
-   inside app.js and unreachable. We now poll for *visible*
-   DOM signals instead.
+   Oracle2SSRS — guided tour ("How this tool works")
+   A step-by-step wizard that converts a sample and walks
+   every view, explaining what each one is FOR in plain
+   words. No framework; safe to load on any page state.
    ========================================================= */
 (function () {
   "use strict";
-  if (window.__o2sTourLoaded) return;
-  window.__o2sTourLoaded = true;
 
   function $(s) { return document.querySelector(s); }
   function $$(s) { return Array.from(document.querySelectorAll(s)); }
 
+  // ---------- styles ----------
   function ensureStyles() {
-    if (document.getElementById("o2s-tour-style")) return;
-    const s = document.createElement("style");
-    s.id = "o2s-tour-style";
-    s.textContent = `
-      #o2s-demo-tour-btn {
-        position: fixed; bottom: 22px; right: 22px;
-        background: linear-gradient(135deg,#b87dff,#5fc7ff);
-        color:#fff; border:0; padding:11px 18px; border-radius:24px;
-        font-weight:700; font-size:13px; letter-spacing:0.04em;
-        cursor:pointer; z-index:99999;
-        box-shadow:0 6px 20px rgba(184,125,255,0.45);
-        font-family:inherit;
-      }
-      #o2s-demo-tour-btn:hover { filter:brightness(1.1); transform:translateY(-1px); }
-      .demo-highlight { box-shadow: 0 0 0 3px #ffd166, 0 0 18px rgba(255,209,102,0.6) !important; transition: box-shadow 200ms; position: relative; z-index: 9000; }
-      .demo-tooltip {
-        position: absolute; z-index: 99998;
-        background: #050314; color: #fff;
-        border: 1px solid #b87dff;
-        padding: 12px 14px; border-radius: 10px;
-        font-size: 12.5px; font-family: inherit;
-        max-width: 280px; line-height: 1.45;
-        box-shadow: 0 10px 30px rgba(0,0,0,0.5);
-      }
-      .demo-tooltip .tt-title { font-weight:700; font-size:13px; margin-bottom:4px; color:#d8c7ff; }
-      .demo-tooltip .tt-meta  { font-size:10.5px; color:#9aa0c2; margin-top:6px; letter-spacing:0.12em; text-transform:uppercase; }
-      .demo-tooltip .tt-next  {
-        margin-top:10px; padding:5px 12px; border-radius:6px; cursor:pointer;
-        background:#b87dff; color:#fff; border:0; font-weight:700; font-size:11px;
-        font-family: inherit;
-      }
-      .demo-tooltip .tt-next:hover { filter: brightness(1.1); }
-    `;
-    document.head.appendChild(s);
+    if ($("#demo-tour-styles")) return;
+    const st = document.createElement("style");
+    st.id = "demo-tour-styles";
+    st.textContent = [
+      ".demo-highlight{outline:3px solid #f6a821; outline-offset:3px;",
+      "  border-radius:6px; transition:outline .15s;}",
+      ".demo-tooltip{position:fixed; z-index:99999; max-width:400px;",
+      "  background:#1d2733; color:#f2f6fa; border:1px solid #3d4c5e;",
+      "  border-radius:10px; padding:14px 16px; font-size:13.5px;",
+      "  line-height:1.55; box-shadow:0 12px 40px rgba(0,0,0,.45);}",
+      ".demo-tooltip h4{margin:0 0 6px; font-size:14px; color:#ffd479;}",
+      ".demo-tooltip .demo-step-n{opacity:.65; font-weight:normal;}",
+      ".demo-tooltip .demo-btns{margin-top:12px; display:flex; gap:8px;",
+      "  justify-content:flex-end;}",
+      ".demo-tooltip button{border:0; border-radius:6px; padding:6px 14px;",
+      "  font-size:12.5px; cursor:pointer;}",
+      ".demo-tooltip .demo-next{background:#f6a821; color:#1d2733;",
+      "  font-weight:bold;}",
+      ".demo-tooltip .demo-skip{background:transparent; color:#9fb0c1;}",
+    ].join("\n");
+    document.head.appendChild(st);
   }
 
-  function makeButton() {
-    if (document.getElementById("o2s-demo-tour-btn")) return;
-    const btn = document.createElement("button");
-    btn.id = "o2s-demo-tour-btn";
-    btn.textContent = "Take a tour";
-    btn.addEventListener("click", () => {
-      btn.disabled = true;
-      btn.style.opacity = "0.5";
-      runTour().finally(() => { btn.remove(); });
-    });
-    document.body.appendChild(btn);
+  // ---------- tour plumbing ----------
+  let _hl = null;
+  function highlight(node) {
+    if (_hl) _hl.classList.remove("demo-highlight");
+    _hl = node || null;
+    if (_hl) _hl.classList.add("demo-highlight");
   }
 
-  // Wait until predicate() returns truthy or timeout. Returns true/false.
-  function waitFor(predicate, timeoutMs = 8000, intervalMs = 100) {
+  function waitFor(predicate, timeoutMs, intervalMs) {
+    timeoutMs = timeoutMs || 8000;
+    intervalMs = intervalMs || 120;
     return new Promise(resolve => {
       const t0 = Date.now();
-      function check() {
-        try {
-          if (predicate()) { resolve(true); return; }
-        } catch (e) { /* ignore */ }
-        if (Date.now() - t0 > timeoutMs) { resolve(false); return; }
+      (function check() {
+        let ok = false;
+        try { ok = !!predicate(); } catch (e) { /* keep polling */ }
+        if (ok) return resolve(true);
+        if (Date.now() - t0 > timeoutMs) return resolve(false);
         setTimeout(check, intervalMs);
-      }
-      check();
+      })();
     });
   }
 
-  function showTooltip(target, title, message, position) {
-    const old = document.querySelector(".demo-tooltip");
-    if (old) old.remove();
-
-    const rect = target.getBoundingClientRect();
-    const tip = document.createElement("div");
-    tip.className = "demo-tooltip";
-    tip.innerHTML =
-      '<div class="tt-title">' + title + '</div>' +
-      '<div>' + message + '</div>' +
-      '<div class="tt-meta">click to continue</div>';
-
-    document.body.appendChild(tip);
-
-    const tipRect = tip.getBoundingClientRect();
-    let top = window.scrollY + rect.bottom + 12;
-    let left = window.scrollX + rect.left;
-    // Keep tooltip in viewport
-    if (left + tipRect.width > window.innerWidth - 16) {
-      left = window.innerWidth - tipRect.width - 16;
-    }
-    if (top + tipRect.height > window.scrollY + window.innerHeight - 16) {
-      top = window.scrollY + rect.top - tipRect.height - 12;
-    }
-    tip.style.top  = top  + "px";
-    tip.style.left = left + "px";
-
+  // Shows a tooltip near `target`; resolves "next" or "skip".
+  function step(target, stepNo, total, title, html) {
     return new Promise(resolve => {
-      tip.addEventListener("click", () => { tip.remove(); resolve(); });
-      // safety timeout — auto-advance after 12s if user doesn't click
-      setTimeout(() => { if (tip.parentNode) { tip.remove(); resolve(); } }, 12000);
+      document.querySelectorAll(".demo-tooltip").forEach(n => n.remove());
+      highlight(target);
+      if (target && target.scrollIntoView) {
+        target.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+      const tip = document.createElement("div");
+      tip.className = "demo-tooltip";
+      tip.innerHTML =
+        "<h4><span class='demo-step-n'>" + stepNo + "/" + total + "</span> " +
+        title + "</h4><div>" + html + "</div>" +
+        "<div class='demo-btns'>" +
+        "<button class='demo-skip' type='button'>End tour</button>" +
+        "<button class='demo-next' type='button'>Next →</button></div>";
+      document.body.appendChild(tip);
+      // position: below-right of target, clamped to viewport
+      const r = target ? target.getBoundingClientRect()
+                       : { left: 40, bottom: 40, top: 40 };
+      const w = Math.min(400, window.innerWidth - 32);
+      let x = Math.min(Math.max(12, r.left), window.innerWidth - w - 12);
+      let y = r.bottom + 12;
+      if (y + 220 > window.innerHeight) y = Math.max(12, r.top - 240);
+      tip.style.left = x + "px";
+      tip.style.top = y + "px";
+      tip.querySelector(".demo-next").addEventListener("click",
+        () => resolve("next"));
+      tip.querySelector(".demo-skip").addEventListener("click",
+        () => resolve("skip"));
     });
   }
 
-  function highlight(node) {
-    document.querySelectorAll(".demo-highlight").forEach(n => n.classList.remove("demo-highlight"));
-    if (node) node.classList.add("demo-highlight");
+  function cleanup() {
+    highlight(null);
+    document.querySelectorAll(".demo-tooltip").forEach(n => n.remove());
   }
 
+  function clickTab(name) {
+    const t = $('.tab[data-tab="' + name + '"]');
+    if (t) t.click();
+    return t;
+  }
+
+  // ---------- the tour ----------
   async function runTour() {
-    const dropZone = $("#drop-zone");
-    if (!dropZone) { return; }
+    const total = 13;
+    let n = 0;
+    const next = async (target, title, html) => {
+      n += 1;
+      const r = await step(target, n, total, title, html);
+      if (r === "skip") throw { tourEnded: true };
+    };
 
-    // --- Step 1: introduce drop zone ---
-    highlight(dropZone);
-    dropZone.scrollIntoView({behavior: "smooth", block: "center"});
-    await showTooltip(dropZone, "1. Drop your Oracle XML here",
-      "This zone accepts a single XML file or a whole folder of artifacts. " +
-      "We'll click a sample for you next so you can see the rest.");
+    try {
+      await next($("#drop-zone"), "Drop an Oracle report here",
+        "This tool converts <b>Oracle Reports XML</b> into a ready-to-deploy " +
+        "<b>SSRS report (.rdl)</b>. Drag a single XML export here — or a " +
+        "whole folder of artifacts (XML + images + related files). " +
+        "Nothing leaves this machine: conversion runs locally.");
 
-    // --- Step 2: click a sample chip — robust version ---
-    // We don't depend on a specific filename anymore; we click whatever
-    // chip is actually present, and we wait for the conversion's visible
-    // signal: #summary-section becoming visible AND the mockup being filled.
-    const chips = $$("#samples-list .sample-chip");
-    if (!chips.length) {
-      console.warn("[Tour] no sample chips found — skipping step 2");
-    } else {
-      const chip = chips[0];
-      highlight(chip);
-      chip.scrollIntoView({behavior: "smooth", block: "center"});
-      await showTooltip(chip, "2. Loading a sample for you",
-        "Clicking <b>" + (chip.textContent.trim() || "this sample") + "</b> now. " +
-        "The conversion takes about a second.");
+      // Convert a sample so every later view has real content.
+      const chips = $$("#samples-list .sample-chip");
+      if (chips.length && !window.state?.data) {
+        await next(chips[0], "We'll convert a sample now",
+          "Clicking <b>" + (chips[0].textContent.trim() || "a sample") +
+          "</b> so you can see every view populated. A real conversion " +
+          "takes about a second.");
+        let fired = false;
+        document.addEventListener("o2s:converted", () => { fired = true; },
+          { once: true });
+        try { chips[0].click(); } catch (e) { /* tolerated */ }
+        await waitFor(() => fired ||
+          ($("#mockup-host") && $("#mockup-host").children.length > 0), 12000);
+      } else {
+        n += 1; // keep numbering stable when data already present
+      }
 
-      // Listen for the explicit "conversion done" event app.js dispatches.
-      // This is the authoritative signal; DOM-shape polling is a fallback
-      // in case the mockup rework changes #mockup-host children again.
-      let convertedEventFired = false;
-      const onConvertedEvt = () => { convertedEventFired = true; };
-      document.addEventListener("o2s:converted", onConvertedEvt, { once: true });
+      await next($("#summary-section") || $("#sidebar"),
+        "The honesty panel — read this first",
+        "The sidebar shows what was found (queries, parameters, formulas) " +
+        "plus two <b>honesty signals</b>:<br>• the <b>verdict banner</b> — " +
+        "READY / AMBER / RED / BLOCKER, with the exact reasons;<br>• the " +
+        "<b>fidelity score</b> — 1.00 means no column, parameter or layout " +
+        "field was silently lost.<br>This tool tells you when something " +
+        "will NOT work — before you deploy it.");
 
-      try { chip.click(); } catch (e) { console.warn("[Tour] chip click failed", e); }
+      await next(clickTab("mockup"), "HTML Mockup — what the report looks like",
+        "A pixel-faithful preview filled with sample data. The " +
+        "<b>Frontend/Backend toggle</b> switches between the filled-in view " +
+        "and the skeleton (labels + bindings). Conditional formatting, " +
+        "seals/logos, letters, invoices — even <b>in-report action " +
+        "buttons</b> (like a mass-email <i>Send Emails</i> button) render " +
+        "here exactly as Oracle printed them.");
 
-      // Wait for ANY of these to become true (whichever is fastest):
-      //   - o2s:converted custom event fired (authoritative)
-      //   - #summary-section visible (sidebar populated)
-      //   - #mockup-host has content
-      //   - status pill says "Converted"
-      const got = await waitFor(() => {
-        if (convertedEventFired) return true;
-        const summary = $("#summary-section");
-        const mockup  = $("#mockup-host");
-        const pill    = $("#status-pill");
-        const summaryVisible = summary && !summary.hidden;
-        const mockupHas      = mockup && mockup.children.length > 0;
-        const pillOk         = pill && /converted|ok/i.test(pill.textContent);
-        return summaryVisible || mockupHas || pillOk;
-      }, 10000, 150);
-      document.removeEventListener("o2s:converted", onConvertedEvt);
+      await next(clickTab("rdl"), "RDL XML — the actual deliverable",
+        "The generated SSRS report definition. This is what you deploy. " +
+        "Very large documents show the first chunk here for speed — the " +
+        "<b>download always carries the complete file</b>. You rarely need " +
+        "to read this; it's here for transparency and diffing.");
 
-      if (!got) {
-        console.warn("[Tour] conversion did not finish in 10s — proceeding anyway");
+      await next(clickTab("side"), "Side-by-side — audit the translation",
+        "Oracle source XML on the left, generated RDL on the right. Use it " +
+        "to answer <i>“where did this field/query end up?”</i> — search " +
+        "both panes for a column name and compare. This is your audit " +
+        "trail when someone asks how a value got there.");
+
+      await next(clickTab("live"), "Live data — test queries before deploy",
+        "Runs the report's REAL queries against your database (enter a " +
+        "connection string in the sidebar first). Fill in parameter values " +
+        "and click <b>Run query</b> — you see exactly the rows SSRS will " +
+        "see. Use this to prove the SQL works <i>before</i> touching the " +
+        "report server.");
+
+      await next(clickTab("validate"), "Validation — every issue, explained",
+        "The full pre-flight audit behind the verdict banner: dropped " +
+        "filters, runtime SQL splices, image bindings, schema rules. Each " +
+        "finding says what it means <i>at run time</i> and what to do. " +
+        "BLOCKER = will not work; RED = wrong output; AMBER = check this; " +
+        "READY = deploy it.");
+
+      await next(clickTab("deploy"), "Deployment — the go-live checklist",
+        "Step-by-step deployment: where the shared data source goes, how " +
+        "to upload, why you should <b>not</b> click Refresh Fields, and " +
+        "the download buttons. Set the <b>shared data source path</b> and " +
+        "<b>report server URL</b> in the sidebar and they are baked into " +
+        "every file you download.");
+
+      await next(clickTab("extras"), "Extras — fidelity report & AI prompts",
+        "The full fidelity breakdown (what mapped, what needs attention), " +
+        "an audit trail of conversion decisions, and ready-made AI prompts " +
+        "if you want a second opinion on any query or expression from " +
+        "your own AI tooling.");
+
+      await next(clickTab("burst"), "Bursting — one report, many recipients",
+        "For reports that go out as per-recipient letters/invoices: this " +
+        "tab generates the per-recipient pack and shows how to wire " +
+        "email distribution through SSRS subscriptions with your service " +
+        "account. This is the SSRS-native equivalent of Oracle's " +
+        "<i>distribute=YES</i>.");
+
+      await next(clickTab("subreports"), "Sub-reports — linked child reports",
+        "When a report links to child reports (envelopes, detail pages), " +
+        "they're detected automatically and listed here. Drop the child's " +
+        "XML and it converts through the same pipeline — drill-through " +
+        "links in the parent then point at the child on your server.");
+
+      await next($("#adv-views-toggle") || $(".tab[data-tab='mockup']"),
+        "That's the whole flow",
+        "<b>Drop → read the verdict → preview → download → deploy.</b> " +
+        "Advanced views stay hidden until you need them (the toggle above " +
+        "the tabs). Verdicts are honest: if this tool says READY, it has " +
+        "checked the report compiles, binds and renders — and if it says " +
+        "RED, it tells you exactly why.");
+    } catch (e) {
+      if (!e || !e.tourEnded) throw e;
+    } finally {
+      cleanup();
+      clickTab("mockup");
+      if (typeof window.toast === "function") {
+        window.toast("Tour ended — the app is yours.", "ok");
       }
     }
+  }
 
-    // --- Step 3: HTML mockup ---
-    const tabMockup = $('.tab[data-tab="mockup"]');
-    if (tabMockup) {
-      tabMockup.click();
-      await new Promise(r => setTimeout(r, 200));
-      highlight(tabMockup);
-      await showTooltip(tabMockup, "3. The HTML preview",
-        "This is what your converted SSRS report will look like. " +
-        "If it's a permit, you see a license layout. If it's a letter, " +
-        "you see a letter layout. The converter detects shape automatically.");
-    }
-
-    // --- Step 4: download CTA ---
-    const cta = $("#cta-download-rdl") || $("#download-rdl");
-    if (cta) {
-      highlight(cta);
-      cta.scrollIntoView({behavior: "smooth", block: "center"});
-      await showTooltip(cta, "4. Get the .rdl",
-        "Click here to download the SSRS-ready file. " +
-        "Drop it into Report Builder, point it at your SQL Server, and deploy.");
-    }
-
-    // --- Step 5: bursting tab (NEW) ---
-    const tabBurst = $('.tab[data-tab="burst"]');
-    if (tabBurst) {
-      tabBurst.click();
-      await new Promise(r => setTimeout(r, 200));
-      highlight(tabBurst);
-      await showTooltip(tabBurst, "5. Bursting / Email distribution",
-        "If your report goes out as letters to multiple recipients, this tab " +
-        "tells you exactly how to wire it up via your service-account email.");
-    }
-
-    // --- Done ---
-    highlight(null);
-    document.querySelectorAll(".demo-tooltip").forEach(n => n.remove());
-    if (typeof window.toast === "function") {
-      window.toast("Tour complete — happy converting!", "ok");
+  // ---------- entry points ----------
+  function makeButton() {
+    // The "How this tool works" button in the topbar starts the tour.
+    const host = $("#how-it-works-btn") || $("#tour-btn");
+    if (host && !host._tourWired) {
+      host._tourWired = true;
+      host.addEventListener("click", (e) => {
+        e.preventDefault();
+        runTour();
+      });
     }
   }
 
@@ -224,26 +245,7 @@
   } else {
     init();
   }
-})();
-If your report goes out as letters to multiple recipients, this tab " +
-        "tells you exactly how to wire it up via your service-account email.");
-    }
 
-    // --- Done ---
-    highlight(null);
-    document.querySelectorAll(".demo-tooltip").forEach(n => n.remove());
-    if (typeof window.toast === "function") {
-      window.toast("Tour complete — happy converting!", "ok");
-    }
-  }
-
-  function init() {
-    ensureStyles();
-    makeButton();
-  }
-  if (document.readyState === "loading") {
-    document.addEventListener("DOMContentLoaded", init);
-  } else {
-    init();
-  }
+  // Expose for the empty-state hero's inline button, if present.
+  window.o2sRunTour = runTour;
 })();

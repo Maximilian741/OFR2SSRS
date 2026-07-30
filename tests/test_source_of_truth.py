@@ -155,9 +155,24 @@ def test_datetime_binds_to_date_wrapped(case_name, src_path, exp_path):
     rdl = convert(src_path.read_bytes())["rdl_xml"]
     date_params = [n for n, t in _extract_param_blocks(rdl).items()
                    if t == "DateTime"]
-    if not date_params:
-        pytest.skip(f"[{case_name}] no DateTime params")
     joined = "\n".join(_extract_command_texts(rdl))
+    if not date_params:
+        # COMPLEMENTARY INVARIANT (production-verified): a parameter bound
+        # inside TO_DATE(...) must be declared String. SSRS types the
+        # outgoing bind from the parameter's DataType, so a DateTime
+        # declaration reaches Oracle as a DATE and TO_DATE(DATE,'YYYY-MM-DD')
+        # throws ORA-01861. No DateTime params is the CORRECT end state here
+        # — assert the reason rather than skipping into a blind spot.
+        types = _extract_param_blocks(rdl)
+        wrapped = {m.group(1) for m in
+                   re.finditer(r"TO_DATE\(\s*:([A-Za-z_][A-Za-z0-9_]*)",
+                               joined)}
+        bad = sorted(n for n in wrapped
+                     if types.get(n) not in (None, "String"))
+        assert not bad, (
+            f"[{case_name}] TO_DATE-bound params must be String, got: {bad}")
+        pytest.skip(f"[{case_name}] no DateTime params (TO_DATE binds are "
+                    f"String, as required)")
     bare = []
     for n in date_params:
         for m in re.finditer(r":" + re.escape(n) + r"\b", joined):

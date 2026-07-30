@@ -54,6 +54,36 @@ function toast(msg, kind) {
   toast._t = setTimeout(() => { t.hidden = true; }, 3000);
 }
 
+// ----- Syntax highlighting (targeted + size-guarded) -----
+// Prism.highlightAll() re-tokenizes EVERY code block in the document. A
+// real-world report produces a multi-megabyte RDL, and highlightAll on
+// every tab switch froze the main thread for seconds per click (measured:
+// 3 MB of XML = ~1.6 s for ONE block, and the document holds three copies
+// — the RDL tab plus both side-by-side panes). To the user that reads as
+// "switching tabs doesn't load the page". So:
+//   * highlight ONLY the blocks inside the panel being shown,
+//   * remember what was highlighted so re-visiting a tab is free,
+//   * and above a size cap leave the block as plain text — instant, and
+//     a 3 MB wall of XML gains nothing from coloring.
+// Above this, skip syntax colors: a highlighted block is tens of thousands
+// of <span>s, and un-hiding that tree costs ~270 ms of layout PER SWITCH
+// even display-capped (measured). A plain text node lays out in tens of ms,
+// and coloring adds little to machine-generated XML at that size anyway.
+const PRISM_MAX_CHARS = 100000;
+function highlightPanel(panel) {
+  if (!window.Prism || !panel) return;
+  panel.querySelectorAll('code[class*="language-"]').forEach(code => {
+    const txt = code.textContent || "";
+    const stamp = txt.length + ":" + (state._convSeq || 0);
+    if (code._hlStamp === stamp) return;   // this exact content already done
+    code._hlStamp = stamp;
+    if (txt.length > PRISM_MAX_CHARS) return;  // too big: plain text
+    try { Prism.highlightElement(code); } catch (e) {
+      console.error("[Oracle2SSRS] highlight failed:", e);
+    }
+  });
+}
+
 // ----- Tabs -----
 function activateTab(name) {
   state.activeTab = name;
@@ -68,8 +98,15 @@ function activateTab(name) {
   });
   const empty = $("#empty-state");
   if (empty) empty.hidden = hasData;
-  // Re-highlight Prism content if any in the active panel
-  if (window.Prism) Prism.highlightAll();
+  // With no conversion yet, a tab click shows only the empty-state hero —
+  // SAY so, or the tabs read as broken (user-reported twice).
+  if (!hasData && activateTab._userClicked) {
+    toast("Convert a report first — drop an Oracle XML or click a sample.",
+          "warn");
+  }
+  activateTab._userClicked = false;
+  // Highlight only what just became visible (see highlightPanel).
+  highlightPanel($("#tab-" + name));
   // Always reset tab-panels scroll to top so new content is visible
   const panels = $(".tab-panels");
   if (panels) panels.scrollTop = 0;
@@ -153,6 +190,9 @@ function _appHowtoHTML() {
     '<p class="howto-lead">Turn an Oracle Reports export into a deployable SSRS report in four steps. ' +
       'Two optional add-ons &mdash; <b>sub-reports</b> (drill-through links) and <b>bursting</b> (one report &rarr; ' +
       'many emails) &mdash; are explained below.</p>' +
+    '<p><button id="howto-tour-start" class="btn btn-primary" type="button">' +
+      '&#9654; Start the guided tour</button> &nbsp;<span class="muted-note">' +
+      'converts a sample and walks you through every view, step by step</span></p>' +
 
     '<div class="howto-section">' +
       '<div class="howto-h">The basic flow</div>' +
@@ -200,7 +240,27 @@ function _appHowtoHTML() {
 
     '<div class="burst-callout"><b>A worked example &mdash; a Permit report:</b> the permit report lists every permittee. ' +
       'Each permit has a link to <b>that permittee&rsquo;s envelope</b> (an Envelope sub-report), and a &ldquo;generate all&rdquo; ' +
-      'link produces <b>every envelope in the same order as the permits</b> &mdash; so the two stacks match for mailing.</div>'
+      'link produces <b>every envelope in the same order as the permits</b> &mdash; so the two stacks match for mailing.</div>' +
+
+    '<div class="howto-section">' +
+      '<div class="howto-h">What each view is for</div>' +
+      '<table class="howto-views"><tbody>' +
+      '<tr><td><b>HTML Mockup</b></td><td>A pixel-faithful preview with sample data. The Frontend/Backend toggle switches between the filled-in look and the label/binding skeleton. This is your &ldquo;does it look right?&rdquo; check.</td></tr>' +
+      '<tr><td><b>RDL XML</b></td><td>The generated SSRS definition &mdash; the file you deploy. Shown for transparency; large documents preview the first chunk, downloads are always complete.</td></tr>' +
+      '<tr><td><b>Side-by-side</b></td><td>Oracle source on the left, generated RDL on the right. Answers &ldquo;where did this column/query end up?&rdquo; &mdash; your audit trail.</td></tr>' +
+      '<tr><td><b>Live data</b></td><td>Runs the report&rsquo;s real queries against your database (connection string in the sidebar). Prove the SQL returns the right rows <i>before</i> deploying.</td></tr>' +
+      '<tr><td><b>Validation</b></td><td>The full pre-flight audit behind the verdict banner. Every finding says what happens at run time and what to do about it. BLOCKER = won&rsquo;t work; RED = wrong output; AMBER = check; READY = deploy.</td></tr>' +
+      '<tr><td><b>Deployment</b></td><td>The go-live checklist: shared data source path, upload steps, why you skip Refresh Fields, and the download buttons.</td></tr>' +
+      '<tr><td><b>Extras</b></td><td>The fidelity scorecard (nothing silently lost), the conversion audit trail, and copy-paste AI prompts for second opinions.</td></tr>' +
+      '<tr><td><b>Bursting</b></td><td>One run &rarr; one PDF per recipient, emailed automatically (SSRS subscriptions). The SSRS-native replacement for Oracle&rsquo;s <code>distribute=YES</code>.</td></tr>' +
+      '<tr><td><b>Sub-reports</b></td><td>Detected child reports (envelopes, detail pages). Drop the child&rsquo;s XML to convert it; parent drill-through links then work on your server.</td></tr>' +
+      '</tbody></table>' +
+    '</div>' +
+
+    '<div class="howto-section">' +
+      '<div class="howto-h">What it can handle</div>' +
+      '<p>Tabular listings, grouped/master-detail reports, per-record letters and invoices, certificates and permits with seals/logos, matrix (cross-tab) grids, charts, multi-section packets, non-UTF-8 sources (Greek, Spanish&hellip;), <b>conditional formatting</b> (bold/colour rules), <b>in-report action buttons</b> (e.g. a mass-email &ldquo;Send Emails&rdquo; button &mdash; rendered 1:1 with its real computed URL), and <b>runtime SQL criteria</b> (Oracle lexicals become live parameter splices, so filter prompts actually filter). Every conversion is checked three ways &mdash; schema rules, real VB compilation of every expression, and honesty verdicts &mdash; and the tool says so plainly when something needs a human.</p>' +
+    '</div>'
   );
 }
 
@@ -211,7 +271,15 @@ function initHowto() {
   const closeBtn = document.getElementById("howto-close");
   const backdrop = document.getElementById("howto-backdrop");
   if (!modal || !body || !openBtn) return;
-  const open = () => { body.innerHTML = _appHowtoHTML(); modal.hidden = false; };
+  const open = () => {
+    body.innerHTML = _appHowtoHTML();
+    modal.hidden = false;
+    const tourBtn = document.getElementById("howto-tour-start");
+    if (tourBtn) tourBtn.addEventListener("click", () => {
+      modal.hidden = true;
+      if (typeof window.o2sRunTour === "function") window.o2sRunTour();
+    });
+  };
   const close = () => { modal.hidden = true; };
   openBtn.addEventListener("click", open);
   if (closeBtn) closeBtn.addEventListener("click", close);
@@ -539,30 +607,30 @@ function onConverted(data) {
     console.error("[Oracle2SSRS] o2s:converted dispatch failed:", e);
   }
   state.data = data;
+  state._convSeq = (state._convSeq || 0) + 1;   // invalidates highlight cache
   setStatus("Converted", "ok");
   if ($("#empty-state")) $("#empty-state").hidden = true;
-  renderSummary(data);
-  renderImageSlots(data);
-  renderLabelOverrides(data);
-  if (data.ingest_report) renderIngestSummary(data.ingest_report);
-  renderCrossValidation(data);
-  renderEnrichmentBanner(data);
-  renderMockupTab(data);
-  renderRdlTab(data);
-  renderSideBySideTab(data);
-  renderLiveTab(data);
-  renderValidationTab(data);
-  renderDeploymentTab(data);
-  renderExtrasTab(data);
-  renderBurstingTab(data);
-  renderSubreports(data);
-  renderWarnings(data);
-  renderPreflight(data);
-  renderDeployStatus(data);
-  if (window.Prism) Prism.highlightAll();
-  showMockupCTA();
-  pushRecent(data);
-  // Show whatever tab was active
+  // Each renderer is isolated: onConverted used to be one straight-line
+  // call sequence, so a single renderer throwing on an unusual report shape
+  // aborted EVERYTHING after it — the sidebar filled in but every tab panel
+  // stayed empty and activateTab never ran, i.e. "tabs don't load". One bad
+  // card must never blank the whole app; log it loudly and keep going.
+  [renderSummary, renderImageSlots, renderLabelOverrides,
+   (d) => { if (d.ingest_report) renderIngestSummary(d.ingest_report); },
+   renderCrossValidation, renderEnrichmentBanner, renderMockupTab,
+   renderRdlTab, renderSideBySideTab, renderLiveTab, renderValidationTab,
+   renderDeploymentTab, renderExtrasTab, renderBurstingTab, renderSubreports,
+   renderWarnings, renderPreflight, renderDeployStatus,
+   showMockupCTA, pushRecent,
+  ].forEach(fn => {
+    try { fn(data); }
+    catch (e) {
+      console.error("[Oracle2SSRS] renderer failed (continuing):",
+                    fn.name || "(anonymous)", e);
+    }
+  });
+  // Show whatever tab was active (this also highlights just that panel;
+  // the old Prism.highlightAll() here re-tokenized every block at once).
   activateTab(state.activeTab);
 }
 
@@ -773,18 +841,41 @@ if (document.readyState === "loading") {
   _wireMockupToggle();
 }
 
+// ----- Code pane text (display-capped) -----
+// Even with highlighting skipped, un-hiding a panel makes the browser
+// LINE-BREAK the whole code block from scratch — a multi-megabyte RDL in
+// one <pre> is ~1.6 s of frozen layout per tab switch (measured), twice
+// that for the side-by-side pair. Nobody reads 3 MB of XML in a pane; cap
+// what's DISPLAYED and say so honestly. Downloads always carry the full
+// file — this touches only the on-screen copy.
+// 120 KB ≈ 2,500 XML lines on screen — far more than anyone scrolls, and
+// small enough that the highlighted span tree re-lays-out in tens of ms.
+// (At 300 KB the highlighted block still cost ~0.6–1 s per tab switch.)
+const CODE_DISPLAY_MAX = 120000;
+function setCodeText(codeEl, fullText) {
+  if (!codeEl) return;
+  const txt = fullText || "";
+  if (txt.length <= CODE_DISPLAY_MAX) {
+    codeEl.textContent = txt;
+    return;
+  }
+  codeEl.textContent =
+    "<!-- Oracle2SSRS: large document — showing the first " +
+    CODE_DISPLAY_MAX.toLocaleString() + " of " + txt.length.toLocaleString() +
+    " characters. The download/deploy files are always complete. -->\n" +
+    txt.slice(0, CODE_DISPLAY_MAX) +
+    "\n<!-- … truncated for display — use Download for the full file … -->";
+}
+
 // ----- Tab 2: RDL XML -----
 function renderRdlTab(data) {
-  const code = $("#rdl-code");
-  if (code) code.textContent = data.rdl_xml || "";
+  setCodeText($("#rdl-code"), data.rdl_xml || "");
 }
 
 // ----- Tab 3: Side-by-side -----
 function renderSideBySideTab(data) {
-  const lc = $("#oracle-code");
-  const rc = $("#rdl-code-2");
-  if (lc) lc.textContent = data.oracle_xml || "";
-  if (rc) rc.textContent = data.rdl_xml || "";
+  setCodeText($("#oracle-code"), data.oracle_xml || "");
+  setCodeText($("#rdl-code-2"), data.rdl_xml || "");
 }
 
 // ----- Tab 4: Live data -----
@@ -1839,7 +1930,9 @@ function _subWireCards(host) {
       window.location.href = "/api/subreport/" + encodeURIComponent(child) + "/download";
     });
   });
-  if (window.Prism) Prism.highlightAll();
+  // Only this tab's blocks — highlightAll() would re-tokenize the multi-MB
+  // RDL/side-by-side blocks too (seconds of frozen UI on real reports).
+  highlightPanel(host);
 }
 
 // ---- Shared upload + build flow (used by sidebar slots and tab cards) ----
@@ -2025,11 +2118,18 @@ function renderRecentList() {
 function wireEverything() {
   console.log("[Oracle2SSRS] wiring DOM event listeners");
 
+  // Sample chips ("Try a sample" in the sidebar): one click converts the
+  // bundled synthetic sample through the REAL pipeline.
+  $$("#samples-list .sample-chip").forEach(c => {
+    c.addEventListener("click", () => runSample(c.dataset.sample, c));
+  });
+
   // Tabs
   $$(".tab").forEach(t => {
     t.addEventListener("click", (e) => {
       e.preventDefault();
       console.log("[Oracle2SSRS] tab clicked:", t.dataset.tab);
+      activateTab._userClicked = true;   // enables the no-data hint toast
       activateTab(t.dataset.tab);
     });
   });

@@ -904,6 +904,144 @@ def _empty_query_placeholder(query) -> str:
     )
 
 
+def _literal_lexical_predicates(plsql: str) -> dict:
+    """Reconstruct lexical WHERE filters that a trigger assigns as PLAIN
+    STRING LITERALS — the other half of Oracle's criteria idiom, and the
+    dominant remaining cause of "query runs UNFILTERED" findings.
+
+    The shape (wild + production verified) is a branch per prompt combo::
+
+        IF :P_START IS NOT NULL AND :P_END IS NULL THEN
+           :P_LEX := 'AND col >= :P_START';
+        IF :P_START IS NULL AND :P_END IS NOT NULL THEN
+           :P_LEX := 'AND col <= :P_END';
+        IF both NOT NULL THEN
+           :P_LEX := 'AND col >= :P_START AND col <= :P_END';
+
+    Every branch predicate is guarded by exactly the bind it tests, so the
+    UNION of the single-bind branches, each made NULL-safe, reproduces
+    EVERY branch in one static query:
+
+        AND (:P_START IS NULL OR col >= :P_START)
+        AND (:P_END   IS NULL OR col <= :P_END)
+
+    Empty prompt -> that conjunct passes -> same rows Oracle returned.
+    Multi-bind branches are skipped precisely because they are the
+    conjunction of the single-bind ones we already emit.
+
+    Conservative by construction: a lexical is only reconstructed when
+    EVERY assignment to it is a plain literal (any ``||`` composition hands
+    the lexical back to the caller's honest placeholder), and only
+    predicate-shaped fragments carrying exactly one bind are used."""
+    out: dict = {}
+    if not plsql or ":=" not in plsql:
+        return out
+    assigns: dict = {}
+    composed: set = set()
+    for m in re.finditer(
+            r"(?is):([A-Za-z_][A-Za-z0-9_]*)\s*:=\s*([^;]{0,600});", plsql):
+        lex, rhs = m.group(1).upper(), m.group(2).strip()
+        lit = re.fullmatch(r"'((?:''|[^'])*)'", rhs)
+        if lit:
+            assigns.setdefault(lex, []).append(
+                lit.group(1).replace("''", "'"))
+        else:
+            composed.add(lex)
+    for lex, frags in assigns.items():
+        if lex in composed:
+            continue                      # mixed/accumulated -> not ours
+        preds, seen = [], set()
+        for frag in frags:
+            f = frag.strip()
+            if not re.match(r"(?i)^(AND|OR)\b", f):
+                continue                  # not a WHERE fragment
+            body = re.sub(r"(?i)^(AND|OR)\s+", "", f).strip()
+            binds = re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", body)
+            if len(set(binds)) != 1:
+                continue                  # 0 binds = constant; >1 = conjunction
+            key = (binds[0].upper(), re.sub(r"\s+", " ", body).lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            preds.append(f"AND (:{binds[0]} IS NULL OR {body})")
+        if preds:
+            out[lex] = "\n\t" + "\n\t".join(preds)
+    return out
+
+
+
+def _inline_local_accumulators(plsql: str) -> str:
+    """Rewrite ``:P_LEX := :P_LEX || vLocal ;`` into the local's own last
+    assigned expression, so criteria reached through a LOCAL variable are
+    visible to the builder scan.
+
+    Oracle reports routinely stage a fragment before appending it::
+
+        vCriteria := F_Criteria_Number_Bind( ... ) ;
+        :P_Criteria_FY := :P_Criteria_FY || vCriteria ;
+
+    Sequential, last-assignment-wins — which matches PL/SQL execution for
+    the straight-line staging idiom this targets."""
+    if ":=" not in (plsql or ""):
+        return plsql or ""
+    # NOTE — two attempts to make multi-append lexicals resolve were tried
+    # and BOTH MEASURED WORSE than doing nothing; do not re-try without new
+    # evidence:
+    #   1. Stripping every `FUNCTION ... END;` block first (theory: builder
+    #      definitions pollute the local table). CATASTROPHIC — the call
+    #      sites live inside the trigger's own `function AfterPForm ...
+    #      end;`, so it removes everything. Dropped filters 19 -> 29.
+    #   2. Stripping only F_Criteria* builder bodies (pvColumn/pvBind
+    #      params). Still net worse: 19 -> 20, and the target filter STILL
+    #      did not resolve — so pollution was not the cause.
+    # The residual gap UNDER-reports (a duplicate append is deduped by the
+    # caller) rather than emitting a wrong predicate, which is the safe
+    # direction to be incomplete in.
+    out, last = [], {}
+    for stmt in re.split(r";", plsql):
+        m = re.match(r"(?is)\s*:?([A-Za-z_][A-Za-z0-9_]*)\s*:=\s*(.+)$", stmt)
+        if m:
+            tgt, rhs = m.group(1), m.group(2).strip()
+            acc = re.match(r"(?is)^:?" + re.escape(tgt) + r"\s*\|\|\s*"
+                           r"([A-Za-z_][A-Za-z0-9_]*)\s*$", rhs)
+            # NEAREST PRECEDING assignment wins. NB an adjacency-only rule
+            # was tried and measured WORSE (it resolved fewer filters), so
+            # this stays. Known limit: the same local name is also assigned
+            # inside the builder FUNCTION BODIES, so a lexical appended
+            # more than once can resolve every append to the first staged
+            # fragment. That UNDER-reports (a duplicate is deduped by the
+            # caller) rather than emitting a wrong predicate, so it is a
+            # safe incompleteness, not a correctness bug.
+            if acc and acc.group(1) in last:
+                stmt = f" :{tgt} := :{tgt} || {last[acc.group(1)]} "
+            elif not rhs.lower().startswith((":" + tgt.lower(), tgt.lower())):
+                last[tgt] = rhs
+        out.append(stmt)
+    return ";".join(out)
+
+
+def _col_of(tok: str, _consts: dict):
+    """The COLUMN EXPRESSION a criteria-builder argument denotes: a bare
+    cv-constant, or a literal wrapper around one. ``REPLACE(cvX, 'S.',
+    'S2.')`` retargets the same builder at a second table alias — a pure
+    string transform, so it is evaluated rather than declined."""
+    tok = (tok or "").strip()
+    if _consts.get(tok):
+        return _consts[tok]
+    rp = re.match(r"(?is)REPLACE\s*\(\s*(\w+)\s*,\s*'([^']*)'\s*,"
+                  r"\s*'([^']*)'\s*\)$", tok)
+    if rp and _consts.get(rp.group(1)):
+        return _consts[rp.group(1)].replace(rp.group(2), rp.group(3))
+    return None
+
+
+def _cv_tok(tok: str):
+    """The underlying cv-constant NAME inside any wrapper (for the
+    resolve/shared gates)."""
+    m0 = re.match(r"(?is)REPLACE\s*\(\s*(\w+)", (tok or "").strip())
+    return m0.group(1) if m0 else (tok or "").strip()
+
+
 def _reconstruct_lexical_criteria(report) -> dict:
     """Reconstruct Oracle ``&P_CRITERIA_X`` lexical filters into REAL, NULL-safe,
     parameter-bound SQL predicates so a declared filter parameter (e.g. a Renewal
@@ -933,8 +1071,16 @@ def _reconstruct_lexical_criteria(report) -> dict:
         raw = raw.decode("utf-8", "replace")
     blobs.append(raw)
     plsql = _html.unescape("\n".join(b for b in blobs if b))
+    # Literal-assignment lexicals (the `:P_LEX := 'AND col >= :P_BIND'`
+    # branch idiom) are reconstructed first and independently — they don't
+    # need the F_Criteria/cv-constant vocabulary at all. The cv-constant
+    # reconstruction below is more specific, so it OVERRIDES on collision.
+    # Criteria staged through a LOCAL before being appended to the lexical
+    # are inlined first, so the builder scan below sees the real call.
+    plsql = _inline_local_accumulators(plsql)
+    literal_map = _literal_lexical_predicates(plsql)
     if "F_Criteria" not in plsql and "P_Criteria" not in plsql:
-        return {}
+        return literal_map
     # cv* CONSTANT column expressions (single-quoted literal; '' -> ')
     consts = {}
     for m in re.finditer(
@@ -968,6 +1114,40 @@ def _reconstruct_lexical_criteria(report) -> dict:
         for _cv in _cvs:
             _cv_lexcount[_cv] = _cv_lexcount.get(_cv, 0) + 1
     shared_cvs = {cv for cv, n in _cv_lexcount.items() if n > 1}
+
+    # REFINEMENT (production corpus): "shared" was a PROXY for the real
+    # hazard — injecting a predicate whose column belongs to a SIBLING
+    # query (ORA-00904). We can now test that hazard DIRECTLY, from the
+    # SQL alone: find the query each lexical is spliced into, and accept a
+    # cv-constant when its leading table alias actually appears in THAT
+    # query's FROM clause. A verified alias is proof the column resolves,
+    # so sharing is irrelevant. Only unverifiable ones fall back to the
+    # blunt shared-name gate.
+    _lex_query_sql: dict = {}
+    for _q in (getattr(report, "queries", None) or []):
+        _qsql = getattr(_q, "sql", "") or ""
+        for _lm in re.finditer(r"&([A-Za-z_][A-Za-z0-9_]*)", _qsql):
+            _lex_query_sql.setdefault(_lm.group(1).upper(), []).append(_qsql)
+
+    def _from_clause(sql: str) -> str:
+        m = re.search(r"(?is)\bFROM\b(.*?)(?:\bWHERE\b|\bGROUP\s+BY\b|"
+                      r"\bORDER\s+BY\b|\bCONNECT\s+BY\b|$)", sql or "")
+        return m.group(1) if m else ""
+
+    def _cv_resolves_in(lex: str, cv: str) -> bool:
+        """True when the cv-constant's table alias is present in the FROM
+        clause of every query this lexical is spliced into."""
+        col = (consts.get(cv) or "").strip()
+        am = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\.", col)
+        if not am:
+            return False                     # no alias to verify
+        alias = am.group(1)
+        sqls = _lex_query_sql.get(lex.upper()) or []
+        if not sqls:
+            return False                     # never spliced -> can't verify
+        return all(re.search(r"(?i)(?:^|[\s,(])" + re.escape(alias)
+                             + r"(?:\s|,|$)", _from_clause(s))
+                   for s in sqls)
     for lex in lexnames:
         preds, seen = [], set()
         def _add(p, key):
@@ -976,17 +1156,113 @@ def _reconstruct_lexical_criteria(report) -> dict:
         for am in re.finditer(r":" + lex + r"\s*:=\s*:" + lex + r"\s*\|\|\s*(.*?);",
                               plsql, re.S | re.I):
             rhs = am.group(1)
-            mb = re.search(r"F_Criteria_Varchar2_Bind\s*\(\s*pvColumn_1\s*=>\s*(\w+)"
-                           r"\s*,\s*pvBind_Variable\s*=>\s*'(\w+)'", rhs, re.I)
-            if mb and consts.get(mb.group(1)):
-                if mb.group(1) not in shared_cvs:
-                    _add(f"(:{mb.group(2)} IS NULL OR {consts[mb.group(1)]} = "
-                         f"UPPER(TRIM(:{mb.group(2)})))", mb.group(2).upper())
+            # UNIFIED Varchar2/Number criteria builders. Read from the real
+            # function bodies in the corpus, all variants collapse to one
+            # predicate each:
+            #   F_Criteria_Varchar2[_Bind|_Value](col1 [,col2], 'P_X')
+            #     runtime: LIKE UPPER(TRIM(:P)) when the typed value holds a
+            #     % or _ wildcard, else = UPPER(TRIM(:P)). LIKE with no
+            #     metacharacters IS equality, so ONE LIKE predicate
+            #     reproduces BOTH branches exactly. (_Value inlines an
+            #     escaped literal instead of binding; we bind, which is
+            #     equivalent and safer.)
+            #   F_Criteria_Number[_Bind|_Value](col1 [,col2], 'P_X') -> = :P
+            # pvColumn_2 (when not NULL) is an alternate column: match
+            # either.
+            # RANGE-FORM signature: F_Criteria_X(pvColumn => cvC,
+            # pvBind_Variable_1 => 'P_A', pvBind_Variable_2 => 'P_B', ...).
+            # Its body (read from the source) is NOT a plain open range:
+            #   both binds -> col >= :A AND col <= :B
+            #   only A     -> col = :A          (equality, not >=)
+            #   only B     -> col = :B
+            #   neither    -> no predicate
+            # So the faithful static form enumerates the four states rather
+            # than assuming a range — an open-range shortcut would widen
+            # single-value searches into "everything from that value on".
+            mr = re.search(
+                r"F_Criteria_(?:Varchar2|Number|Date)?\w*\s*\(\s*"
+                r"pvColumn\s*=>\s*(.+?)\s*,\s*"
+                r"pvBind_Variable_1\s*=>\s*'(\w+)'\s*,\s*"
+                r"pvBind_Variable_2\s*=>\s*(?:'(\w+)'|NULL)", rhs, re.I | re.S)
+            if mr:
+                _c = _col_of(mr.group(1), consts)
+                _cv = _cv_tok(mr.group(1))
+                if _c and (_cv_resolves_in(lex, _cv) or _cv not in shared_cvs):
+                    _a, _b = mr.group(2), mr.group(3)
+                    if _b:
+                        _add(
+                            f"((:{_a} IS NULL AND :{_b} IS NULL)"
+                            f" OR (:{_a} IS NOT NULL AND :{_b} IS NOT NULL"
+                            f" AND {_c} >= :{_a} AND {_c} <= :{_b})"
+                            f" OR (:{_a} IS NOT NULL AND :{_b} IS NULL"
+                            f" AND {_c} = :{_a})"
+                            f" OR (:{_a} IS NULL AND :{_b} IS NOT NULL"
+                            f" AND {_c} = :{_b}))",
+                            f"{_a.upper()}|{_b.upper()}")
+                    else:
+                        _add(f"(:{_a} IS NULL OR {_c} = :{_a})", _a.upper())
+                continue
+            mv = re.search(
+                r"F_Criteria_(Varchar2|Number)(?:_Bind|_Value)?\s*\(\s*"
+                r"pvColumn_1\s*=>\s*(.+?)\s*"
+                r"(?:,\s*pvColumn_2\s*=>\s*(.+?)\s*)?"
+                r",\s*pvBind_Variable\s*=>\s*'(\w+)'", rhs, re.I | re.S)
+            if mv:
+                _kind, _t1, _t2, _bind = (mv.group(1).lower(), mv.group(2),
+                                          mv.group(3), mv.group(4))
+                _cols, _cvs, _ok = [], [], True
+                for _t in (_t1, _t2):
+                    if not _t or _t.strip().upper() == "NULL":
+                        continue
+                    _c = _col_of(_t, consts)
+                    if not _c:
+                        _ok = False
+                        break
+                    _cols.append(_c)
+                    _cvs.append(_cv_tok(_t))
+                if _ok and _cols and all(
+                        (_cv_resolves_in(lex, c) or c not in shared_cvs)
+                        for c in _cvs):
+                    if _kind == "number":
+                        _parts = [f"{c} = :{_bind}" for c in _cols]
+                    else:
+                        _parts = [f"{c} LIKE UPPER(TRIM(:{_bind}))"
+                                  for c in _cols]
+                    _body = (" OR ".join(_parts) if len(_parts) > 1
+                             else _parts[0])
+                    _body = f"({_body})" if len(_parts) > 1 else _body
+                    _add(f"(:{_bind} IS NULL OR {_body})", _bind.upper())
+                continue
+            # F_Criteria_Date_Bind(colA, colB, 'P_X') — the EFFECTIVE-DATING
+            # idiom. Its body builds, only when the bind is non-null:
+            #   AND (NVL(colA, :P_X) <= :P_X AND NVL(colB, :P_X) >= :P_X)
+            # i.e. "the prompted date falls inside the row's [start, end]
+            # window, treating a NULL endpoint as open". The static
+            # NULL-safe equivalent wraps that in the usual bind guard.
+            # Column-expression WRAPPERS are honoured too: a call site may
+            # pass REPLACE(cvX, 'S.', 'S2.') to retarget the same builder
+            # at a second alias — that is a literal transform we can just
+            # evaluate.
+
+
+            md = re.search(
+                r"F_Criteria_Date_Bind\s*\(\s*pvColumn_1\s*=>\s*([^,]+?)"
+                r"\s*,\s*pvColumn_2\s*=>\s*([^,]+?)"
+                r"\s*,\s*pvBind_Variable\s*=>\s*'(\w+)'", rhs, re.I | re.S)
+            if md:
+                _c1, _c2 = _col_of(md.group(1), consts), _col_of(md.group(2), consts)
+                if _c1 and _c2:
+                    _cv1, _cv2 = _cv_tok(md.group(1)), _cv_tok(md.group(2))
+                    if all((_cv_resolves_in(lex, c) or c not in shared_cvs)
+                           for c in (_cv1, _cv2)):
+                        _b = md.group(3)
+                        _add(f"(:{_b} IS NULL OR (NVL({_c1}, :{_b}) <= :{_b} "
+                             f"AND NVL({_c2}, :{_b}) >= :{_b}))", _b.upper())
                 continue
             mn = re.search(r"F_Criteria_Number_Bind\s*\(\s*pvColumn_1\s*=>\s*(\w+)"
                            r"\s*,\s*pvBind_Variable\s*=>\s*'(\w+)'", rhs, re.I)
             if mn and consts.get(mn.group(1)):
-                if mn.group(1) not in shared_cvs:
+                if (_cv_resolves_in(lex, mn.group(1)) or mn.group(1) not in shared_cvs):
                     _add(f"(:{mn.group(2)} IS NULL OR {consts[mn.group(1)]} = :{mn.group(2)})",
                          mn.group(2).upper())
                 continue
@@ -995,12 +1271,18 @@ def _reconstruct_lexical_criteria(report) -> dict:
                            rhs, re.S | re.I)
             if mc and (consts.get(mc.group(1)) or consts.get(mc.group(3))):
                 _cvdt = mc.group(1) if consts.get(mc.group(1)) else mc.group(3)
-                if _cvdt not in shared_cvs:
+                if (_cv_resolves_in(lex, _cvdt) or _cvdt not in shared_cvs):
                     col = consts.get(mc.group(1)) or consts.get(mc.group(3))
                     _add(f"(:{mc.group(2)} IS NULL OR {col} >= :{mc.group(2)})", mc.group(2).upper())
                     _add(f"(:{mc.group(4)} IS NULL OR {col} <= :{mc.group(4)})", mc.group(4).upper())
         if preds:
             out[lex] = "\n\tAND " + "\n\tAND ".join(preds)
+    # The two idioms are COMPLEMENTARY, not competing: a report can build
+    # some lexicals from cv-constants and assign others as plain literals.
+    # Fill in wherever the cv path produced nothing (it stays authoritative
+    # on collision, being the more specific reconstruction).
+    for _lx, _frag in literal_map.items():
+        out.setdefault(_lx, _frag)
     return out
 
 
@@ -1053,11 +1335,41 @@ def _apply_region_aware_trigger_props(root, report) -> None:
         flds = ds_decl.get(cur_ds or "", set())
         return all(r in flds for r in refs)
 
+    def _val_is_aggregate(el):
+        # Engine rule: a style expression's bare Fields! ref on a textbox
+        # whose VALUE is a First/Last aggregate becomes a nested aggregate
+        # ("cannot be specified as nested aggregates").
+        _val = next((v.text or "" for v in el.iter(_q("Value"))
+                     if (v.text or "").startswith("=")), "")
+        return bool(re.search(r"\b(First|Last|Previous)\s*\(", _val))
+
     def walk(el, cur_ds):
         if el.tag == _q("Tablix"):
             cur_ds = el.findtext(_q("DataSetName")) or cur_ds
         for child in list(el):
             walk(child, cur_ds)
+        # Declarative <conditionalFormat> — same region/case gate as the
+        # trigger path. The bold/colour/fill it carries exists ONLY in the
+        # declarative block (the paired PL/SQL trigger returns just a
+        # boolean), so this is the only route by which it can survive.
+        if el.tag == _q("Textbox"):
+            _cf, _wrap = None, None
+            if "data-cf" in el.attrib:
+                try:
+                    _idx = int(el.attrib.pop("data-cf"))
+                except (TypeError, ValueError):
+                    _idx = -1
+                if _idx >= 0 and not _val_is_aggregate(el):
+                    _cf = _cf_style_entries(report, _idx)
+            else:
+                _m = _cf_entries_for_textbox(report, el)
+                if _m:
+                    _cf, _wrap = _cf_translate(report, _m[0]), _m[1]
+            if _cf and cur_ds:
+                _ok = [(_cf_wrap_agg(c, _wrap), s) for c, s in _cf
+                       if _refs_ok(c, cur_ds)]
+                if _ok:
+                    _apply_conditional_format(el, _ok)
         if el.tag == _q("Textbox") and "data-ft" in el.attrib:
             ft = (el.attrib.pop("data-ft") or "").strip().lower()
             if not ft or not cur_ds:
@@ -1098,6 +1410,161 @@ def _apply_format_trigger_style_direct(tb, entry) -> None:
             if cur is None:
                 cur = _sub(st, prop)
             cur.text = f'=IIf({cond}, "{val}", "{dflt}")'
+            _reorder_style_children(st)
+
+
+def _cf_by_source(report) -> dict:
+    """``{SOURCE_COLUMN_UPPER: conditional_format_entries}`` over every
+    layout field in the report.
+
+    Why this exists as well as the ``data-cf`` tag: LayoutFields reach the
+    RDL through at least four different textbox builders (positioned frame,
+    grouped card tablix, matrix tablix, page/summary emitters), and tagging
+    each one is a standing invitation to miss the fifth. Keying off the
+    column the textbox actually DISPLAYS covers every builder uniformly, so
+    a new layout archetype inherits conditional formatting for free."""
+    m = getattr(report, "_cf_src_map", None)
+    if m is not None:
+        return m
+    m = {}
+
+    def walk(groups):
+        for g in (groups or []):
+            for lf in (getattr(g, "fields", None) or []):
+                cf = getattr(lf, "conditional_formats", None)
+                src = (getattr(lf, "source", "") or "").strip().upper()
+                if cf and src and src not in m:
+                    m[src] = cf
+            walk(getattr(g, "children", None) or [])
+
+    try:
+        walk(getattr(report, "layout", None) or [])
+    except Exception:  # noqa: BLE001
+        m = {}
+    report._cf_src_map = m
+    return m
+
+
+# Row-picking aggregates: the cell shows ONE row's value, so a row-level
+# format exception still means what Oracle meant. True numeric aggregates
+# (Sum/Avg/Count/...) are deliberately excluded — a per-row condition on a
+# summed cell has no faithful reading, so those cells stay unformatted.
+_CF_SCOPE_AGGS = ("First", "Last", "Previous")
+
+
+def _cf_entries_for_textbox(report, tb):
+    """``(entries, wrap_agg)`` for a textbox with no ``data-cf`` tag, matched
+    by the single column its value expression displays. ``None`` when the box
+    displays nothing a field-level format exception was written against.
+
+    ``wrap_agg`` is set when the value is an aggregate such as
+    ``=First(Fields!X.Value)``. The style expression must then use the SAME
+    aggregate: a bare ``Fields!`` ref inside a style on an aggregate-valued
+    cell is what SSRS rejects as "cannot be specified as nested aggregates".
+    """
+    val = next((v.text or "" for v in tb.iter(_q("Value"))
+                if (v.text or "").startswith("=")), "")
+    if not val:
+        return None
+    refs = re.findall(r"Fields!([A-Za-z0-9_]+)\.Value", val)
+    if len(refs) != 1:
+        return None
+    stripped = re.sub(r"\s+", "", val)
+    wrap = None
+    if stripped != f"=Fields!{refs[0]}.Value":
+        for agg in _CF_SCOPE_AGGS:
+            if stripped == f"={agg}(Fields!{refs[0]}.Value)":
+                wrap = agg
+                break
+        if wrap is None:
+            return None
+    entries = _cf_by_source(report).get(refs[0].upper())
+    return (entries, wrap) if entries else None
+
+
+def _cf_wrap_agg(cond: str, agg: str) -> str:
+    """Wrap every ``Fields!X.Value`` in a condition with ``agg(...)`` so the
+    style expression sits in the same aggregate scope as the cell's value."""
+    if not agg:
+        return cond
+    return re.sub(r"Fields!([A-Za-z0-9_]+)\.Value",
+                  lambda m: f"{agg}(Fields!{m.group(1)}.Value)", cond)
+
+
+def _cf_register(report, entries) -> int:
+    """Stash a field's declarative conditional-format entries on the report
+    and return their index, so the textbox can carry a ``data-cf`` tag the
+    post-pass resolves. (Unlike format triggers there is no name to key on
+    — the payload lives on the layout element itself.)"""
+    reg = getattr(report, "_cf_registry", None)
+    if reg is None:
+        reg = report._cf_registry = []
+    reg.append(entries)
+    return len(reg) - 1
+
+
+def _cf_translate(report, entries):
+    """Translated ``[(cond_vb, {prop: value})]`` for a field's format
+    exceptions, cached per entry-list. Untranslatable exceptions are dropped
+    by the translator (it declines rather than guesses)."""
+    if not entries:
+        return []
+    cache = getattr(report, "_cf_translated", None)
+    if cache is None:
+        cache = report._cf_translated = {}
+    key = id(entries)
+    if key in cache:
+        return cache[key]
+    try:
+        from ..translators.format_exception import translate_conditional_format
+        out = translate_conditional_format(
+            entries, _strict_trigger_resolve(report))
+    except Exception:  # noqa: BLE001 — formatting must never break a report
+        out = []
+    cache[key] = out
+    return out
+
+
+def _cf_style_entries(report, idx):
+    """Translated entries for registry slot ``idx`` (the ``data-cf`` path)."""
+    reg = getattr(report, "_cf_registry", None) or []
+    if not (0 <= idx < len(reg)):
+        return []
+    return _cf_translate(report, reg[idx])
+
+
+def _apply_conditional_format(tb, entries) -> None:
+    """Apply declarative format exceptions to a textbox as nested IIfs.
+
+    Oracle evaluates exceptions in document order and the FIRST match wins,
+    so the IIfs nest in that same order with the textbox's existing (base)
+    value as the final else. A property whose conditional value equals the
+    base is skipped — that would emit IIf(c, "x", "x")."""
+    # property -> [(cond, value), ...] in document order
+    per_prop: dict = {}
+    for cond, styles in entries:
+        for prop, val in styles.items():
+            per_prop.setdefault(prop, []).append((cond, val))
+
+    for prop, branches in per_prop.items():
+        targets = ([tb.find(_q("Style"))] if prop == "BackgroundColor"
+                   else [tr.find(_q("Style")) for tr in tb.iter(_q("TextRun"))])
+        for st in targets:
+            if st is None:
+                continue
+            cur = st.find(_q(prop))
+            base = (cur.text if cur is not None and (cur.text or "")
+                    and not (cur.text or "").startswith("=")
+                    else _FT_STYLE_DEFAULTS.get(prop, "Normal"))
+            use = [(c, v) for c, v in branches if v != base]
+            if not use:
+                continue
+            inner = f'"{base}"'
+            for cond, val in reversed(use):
+                inner = f'IIf({cond}, "{val}", {inner})'
+            if cur is None:
+                cur = _sub(st, prop)
+            cur.text = "=" + inner
             _reorder_style_children(st)
 
 
@@ -1271,6 +1738,84 @@ def _lexical_slot_token(src: str, start: int, end: int) -> str:
     return ""
 
 
+def _lexical_splice_expression(pre_text: str, resolved_map: dict,
+                               declared_params: Iterable[str]) -> Optional[str]:
+    """Build an EXPRESSION CommandText that splices unresolved runtime
+    lexicals live, or None when nothing is spliceable.
+
+    Oracle lexicals are raw TEXT substitution into the SQL at run time.
+    SSRS's native equivalent is an expression-valued CommandText — the query
+    string is built from Parameters! values with exactly the same semantics
+    (including the substitute-anything power the Oracle report already had;
+    the report's own users already held it there). This retires the three
+    classes the NULL-stub approach had to flag: never-match operands,
+    NULL-degraded expressions, and whole-FROM table sources.
+
+    Rules:
+      * fragments the reconstruction passes already PROVED into real
+        parameter-bound predicates stay authoritative (resolved_map);
+      * an unresolved ``&NAME`` splices as ``CStr(Parameters!NAME.Value &
+        "")`` ONLY when NAME is a declared parameter — VB turns a Nothing
+        value into "", exactly Oracle's NULL-lexical behavior;
+      * an unresolved ``&NAME`` that is NOT a declared parameter keeps the
+        honest stub (there is no runtime value to splice);
+      * SQL line structure is preserved with vbCrLf atoms — a raw newline
+        inside a VB literal does not compile (BC30648), and collapsing
+        newlines would splice following SQL into any ``--`` comment.
+    """
+    canon = {}
+    for p in declared_params or []:
+        nm = (p or "").strip()
+        if nm:
+            canon.setdefault(nm.upper(), nm)
+
+    spliced = False
+
+    def _lit_atoms(chunk: str):
+        out = []
+        pending = False
+        for i, ln in enumerate(chunk.split("\n")):
+            s = ln.rstrip()
+            if i > 0:
+                pending = True
+            if s.strip():
+                if pending:
+                    out.append("vbCrLf")
+                pending = False
+                out.append('"' + s.replace('"', '""') + '"')
+        if pending:
+            out.append("vbCrLf")
+        return out
+
+    atoms: list = []
+    pos = 0
+    text = pre_text.rstrip().rstrip(";").rstrip()
+    for m in re.finditer(r"&([A-Z_][A-Z0-9_]*)", text, flags=re.IGNORECASE):
+        nm = m.group(1)
+        frag = resolved_map.get(nm.upper())
+        lit = text[pos:m.start()]
+        if frag is not None:
+            # proven reconstruction: static SQL text, part of the literal
+            atoms.extend(_lit_atoms(lit + frag))
+        elif nm.upper() in canon:
+            atoms.extend(_lit_atoms(lit))
+            atoms.append(
+                f'CStr(Parameters!{_safe(canon[nm.upper()])}.Value & "")')
+            spliced = True
+        else:
+            _comment = (f"/* lexical ref &{nm} -- reimplement as dynamic "
+                        f"WHERE/SELECT at deploy time */")
+            _tok = _lexical_slot_token(text, m.start(), m.end())
+            atoms.extend(_lit_atoms(
+                lit + ((_tok + _comment) if _tok else _comment)))
+        pos = m.end()
+    if not spliced:
+        return None
+    atoms.extend(_lit_atoms(text[pos:]))
+    atoms = [a for a in atoms if a]
+    return "=" + " & ".join(atoms) if atoms else None
+
+
 def _build_dataset(query: DataQuery, declared_params: Iterable[str],
                    target_db: str = "oracle",
                    param_types: Optional[dict] = None,
@@ -1326,12 +1871,14 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         # prompts actually FILTER). Anything else stays a harmless comment.
         _cmap = criteria_map or {}
         _lex_src = cmd_text  # neighbor lookups read the pre-substitution text
+        _unresolved: list = []
 
         def _lex_sub(m):
             nm = m.group(1)
             frag = _cmap.get(nm.upper())
             if frag is not None:
                 return frag
+            _unresolved.append(nm)
             comment = (f"/* lexical ref &{nm} -- reimplement as dynamic "
                        f"WHERE/SELECT at deploy time */")
             # Emit a NULL token before the comment ONLY when the ref fills a
@@ -1374,6 +1921,29 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         item_names = [it.name for it in (query.items or [])]
         if item_names:
             cmd_text = _alias_select_items(cmd_text, item_names)
+        # EXPRESSION-CommandText fallback: when an unresolved lexical names a
+        # DECLARED parameter, splice it live instead of stubbing it. SSRS
+        # CommandText accepts an expression, which is the native equivalent
+        # of Oracle's lexical text-substitution — the never-match /
+        # NULL-degraded / invalid-FROM outcomes of stubbing disappear and
+        # the parameter actually drives the SQL at run time, exactly as it
+        # did in Oracle. Proven reconstructions (criteria_map) stay
+        # authoritative; only the leftovers splice. The pre-substitution
+        # text goes through the SAME static passes (semicolon strip,
+        # TO_DATE bind wrapping, select aliasing) before splicing so both
+        # forms carry identical SQL.
+        _declared_up = {(p or "").strip().upper()
+                        for p in (declared_params or [])}
+        if any(nm.upper() in _declared_up for nm in _unresolved):
+            _pre = re.sub(r"[;\s]+$", "", _lex_src)
+            if param_types:
+                _pre = _make_ssrs_oracle_compatible(_pre, param_types)
+            if item_names:
+                _pre = _alias_select_items(_pre, item_names)
+            _expr = _lexical_splice_expression(
+                _pre, _cmap, declared_params)
+            if _expr:
+                cmd_text = _expr
         _sub(q_el, "CommandText", cmd_text)
 
         # Oracle bind vars look like :P_FOO. Declare each one referenced in
@@ -1448,6 +2018,14 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
 
     # <Fields>
     fields = _sub(ds, "Fields")
+    # Field names must be UNIQUE within a DataSet or the RDL is invalid.
+    # _safe() maps every non-ASCII character to "_", so two names that are
+    # distinct in the source language can collapse to the SAME ASCII string
+    # (wild-corpus: a Greek report produced two identical
+    # DECODE_WORK_INS_SECTOR________ fields = BLOCKER). De-duplicate with a
+    # numeric suffix; the DataField keeps the ORIGINAL name, so the binding
+    # to the result-set column is unaffected.
+    _used_field_names: set = set()
     for item in query.items or []:
         # Wild-corpus net: a <dataItem> with no usable name (Oracle's own
         # docs ship one with the name attribute missing) must be SKIPPED —
@@ -1457,7 +2035,23 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         if not nm:
             continue
         f = _sub(fields, "Field")
-        f.set("Name", _safe(nm) or "Field1")
+        _fname = _safe(nm) or "Field1"
+        # SSRS requires CLS-compliant field names, and engine-verified on a
+        # Greek report that means the name must contain at least one
+        # LETTER: a name made entirely of non-ASCII characters sanitizes to
+        # underscores ("___"), and Oracle's uniquifier suffix only makes it
+        # "___1" — still rejected ("Field names must be CLS-compliant
+        # identifiers"). A digit does not rescue it. Fall back to a
+        # positional name; DataField keeps the original so binding works.
+        if not re.search(r"[A-Za-z]", _fname):
+            _fname = f"Col{len(_used_field_names) + 1}"
+        if _fname in _used_field_names:
+            _n = 2
+            while f"{_fname}_{_n}" in _used_field_names:
+                _n += 1
+            _fname = f"{_fname}_{_n}"
+        _used_field_names.add(_fname)
+        f.set("Name", _fname)
         _sub(f, "DataField", nm)
         _rdsub(f, "TypeName", _ssrs_field_type(item))
     if len(fields) == 0:
@@ -2009,6 +2603,16 @@ def _column_names_for_main(report: ParsedReport, main: DataQuery) -> List[str]:
     return list(DEFAULT_COLUMNS)
 
 
+def _emit_hyperlink(run, expr):
+    """Emit <ActionInfo><Actions><Action><Hyperlink> on a TextRun (between
+    <Value> and <Style>, per the RDL TextRun order). ``expr`` is the URL
+    expression (=...) — used for in-report action buttons whose Oracle
+    hyperlink is a computed URL rather than a sub-report drill-through."""
+    ai = _sub(run, "ActionInfo")
+    act = _sub(_sub(ai, "Actions"), "Action")
+    _sub(act, "Hyperlink", expr)
+
+
 def _emit_drillthrough(run, dt):
     """Emit <ActionInfo><Actions><Action><Drillthrough> on a TextRun, placed
     BETWEEN <Value> and <Style> (the RDL TextRun element order). ``dt`` =
@@ -2049,6 +2653,189 @@ def _extract_url_params(report, formula_names_upper):
             seen.add(up)
             out.append((pm, src))
     return out
+
+
+def _all_plsql_text(report) -> str:
+    """Every PL/SQL body the artifact carries, concatenated. Program-unit
+    functions and report triggers both land in report.triggers."""
+    parts = []
+    for t in (getattr(report, "triggers", None) or []):
+        b = getattr(t, "body", "") or ""
+        if b.strip():
+            parts.append(b)
+    return "\n".join(parts)
+
+
+_GET_PARAM_CALL = re.compile(
+    r"F_Get_Param\s*\(\s*"
+    r"pvBind_Variable\s*=>\s*'(\w+)'\s*"
+    r"(?:,\s*pvValue\s*=>\s*'((?:[^']|'')*)'\s*)?\)", re.I | re.S)
+
+
+def _translate_url_builder(report, token):
+    """Translate the Oracle *action-URL builder* idiom into a VB expression,
+    or None to decline.
+
+    The idiom (an in-report button that re-invokes the report server, e.g.
+    with ``&distribute=YES`` to mass-email the recipients): a placeholder
+    assignment that concatenates string literals, ``:parameter`` refs, and
+    calls to a local ``F_Get_Param`` helper whose recognized body appends
+    ``'&NAME=' || url_escape(value)`` only when the value is non-null,
+    collected via a local accumulator::
+
+        vParams := vParams || F_Get_Param(pvBind_Variable => 'P_X') ...
+        :CP_URL_EMAIL := TRIM(:P_Report_Server) || '?...' || vParams ;
+
+    Translation rules (DECLINES on anything outside them — a wrong URL that
+    silently emails the wrong thing is far worse than an inert button):
+
+      * only ``:NAME`` refs to DECLARED PARAMETERS resolve (a column ref has
+        no single value on a cover page);
+      * ``F_Get_Param(pvBind_Variable => 'X')`` becomes the same null-guard:
+        ``IIf(param is empty, "", "&X=" & EscapeDataString(param))`` — and is
+        trusted ONLY when a local F_Get_Param function with the recognized
+        null-guarded ``'&' || name || '='`` body exists in this artifact;
+      * the two-arg literal form emits its fragment with the same guard on
+        the literal;
+      * a local accumulator resolves from its textually-PRECEDING
+        assignments (``v := expr`` resets, ``v := v || expr`` appends; an
+        uninitialized local is Oracle NULL = empty string).
+    """
+    tok = (token or "").strip().lstrip("&")
+    if not tok:
+        return None
+    blob = _all_plsql_text(report)
+    if not blob:
+        return None
+
+    # The helper must exist with the recognized semantics.
+    helper_ok = re.search(
+        r"FUNCTION\s+F_Get_Param\s*\(.*?pvBind_Variable.*?"
+        r"IS\s+NOT\s+NULL.*?'&'.*?END\s+F_Get_Param", blob, re.I | re.S)
+
+    ms = list(re.finditer(r":" + re.escape(tok) + r"\s*:=\s*(.+?);",
+                          blob, re.I | re.S))
+    if not ms:
+        return None
+    if len(ms) > 1:
+        # Assigned in more than one place (e.g. exclusive IF/ELSIF branches
+        # per correspondence type) — which branch runs depends on runtime
+        # state we can't see. Guessing risks a URL that DOES something
+        # wrong; decline.
+        return None
+    m = ms[0]
+    rhs = m.group(1)
+    pos_limit = m.start()
+
+    params = {(getattr(p, "name", "") or "").upper(): p.name
+              for p in (getattr(report, "parameters", None) or [])
+              if getattr(p, "name", "")}
+
+    def _p_expr(name):
+        canon = params.get(name.upper())
+        if not canon:
+            return None
+        return f"Parameters!{_safe(canon)}.Value"
+
+    def _esc(v):
+        # System.Uri.EscapeDataString is callable from report expressions;
+        # proven by rendering through the real engine in expression mode.
+        return f"System.Uri.EscapeDataString(CStr({v} & \"\"))"
+
+    def _get_param_vb(name, literal=None):
+        if literal is not None:
+            lit = literal.replace("''", "'")
+            if not lit:
+                return '""'
+            return ('"&' + name + '=" & ' +
+                    _esc('"' + lit.replace('"', '""') + '"'))
+        pv = _p_expr(name)
+        if pv is None:
+            raise ValueError(f"F_Get_Param target {name!r} is not a "
+                             f"declared parameter")
+        return (f'IIf(IsNothing({pv}) OrElse CStr({pv} & "") = "", "", '
+                f'"&{name}=" & {_esc(pv)})')
+
+    def _translate_concat(expr, depth=0):
+        """|| -concat of literals / :params / TRIM(:param) / F_Get_Param
+        calls / local accumulators -> list of VB atoms. Raises to decline."""
+        if depth > 4:
+            raise ValueError("accumulator nesting too deep")
+        atoms = []
+        # split on || at top level (no parens tracking needed beyond
+        # F_Get_Param calls, which we excise first)
+        holes = {}
+
+        def _stash(mm):
+            key = f"\x00{len(holes)}\x00"
+            holes[key] = mm
+            return key
+        expr2 = _GET_PARAM_CALL.sub(lambda mm: _stash(mm), expr)
+        if "(" in re.sub(r"TRIM\s*\(\s*:\w+\s*\)", "", expr2, flags=re.I):
+            # any residual call/paren structure we don't model
+            raise ValueError("unrecognized construct in URL concat")
+        for part in expr2.split("||"):
+            part = part.strip()
+            if not part:
+                raise ValueError("empty concat operand")
+            if part.startswith("\x00"):
+                mm = holes[part]
+                if not helper_ok:
+                    raise ValueError("F_Get_Param helper body not recognized")
+                atoms.append(_get_param_vb(mm.group(1), mm.group(2)))
+                continue
+            lm = re.fullmatch(r"'((?:[^']|'')*)'", part)
+            if lm:
+                atoms.append('"' + lm.group(1).replace("''", "'")
+                             .replace('"', '""') + '"')
+                continue
+            pm = re.fullmatch(r"(?:TRIM\s*\(\s*)?:(\w+)\s*\)?", part, re.I)
+            if pm:
+                pv = _p_expr(pm.group(1))
+                if pv is None:
+                    raise ValueError(f":{pm.group(1)} is not a declared "
+                                     f"parameter")
+                atoms.append(f'Trim(CStr({pv} & ""))')
+                continue
+            vm = re.fullmatch(r"[A-Za-z_]\w*", part)
+            if vm:
+                atoms.extend(_resolve_local(vm.group(0), depth + 1))
+                continue
+            raise ValueError(f"unrecognized operand {part[:40]!r}")
+        return atoms
+
+    def _resolve_local(var, depth):
+        """Accumulator value at pos_limit: replay its preceding
+        assignments in textual order."""
+        acc = None
+        for am in re.finditer(
+                r"(?<![\w:])" + re.escape(var) + r"\s*:=\s*(.+?);",
+                blob[:pos_limit], re.I | re.S):
+            rhs_l = am.group(1).strip()
+            selfref = re.match(
+                re.escape(var) + r"\s*\|\|\s*(.+)", rhs_l, re.I | re.S)
+            if selfref:
+                tail = _translate_concat(selfref.group(1), depth)
+                acc = (acc or []) + tail
+            else:
+                acc = _translate_concat(rhs_l, depth)
+        if acc is None:
+            raise ValueError(f"local {var!r} has no preceding assignment")
+        return acc
+
+    try:
+        atoms = _translate_concat(rhs)
+    except ValueError:
+        return None
+    if not atoms:
+        return None
+    return "=" + " & ".join(atoms)
+
+
+def _hyperlink_action_expr(report, token):
+    """SSRS <Hyperlink> expression for an Oracle webSettings hyperlink
+    token, or None. Only provably-computable URLs are emitted."""
+    return _translate_url_builder(report, token)
 
 
 def _drillthrough_for(report, lf):
@@ -2135,6 +2922,7 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
                    underline: bool = False,
                    writing_mode: Optional[str] = None,
                    drillthrough: Optional[dict] = None,
+                   hyperlink_expr: Optional[str] = None,
                    segments_spec: Optional[list] = None) -> ET.Element:
     """Emit a styled Textbox.
 
@@ -2181,6 +2969,8 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
         _sub(run, "Value", value)
         if drillthrough:
             _emit_drillthrough(run, drillthrough)
+        elif hyperlink_expr:
+            _emit_hyperlink(run, hyperlink_expr)
         style = _sub(run, "Style")
         _sub(style, "FontSize", font_size)
         if font_family:
@@ -2521,6 +3311,7 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     col_align = {}
     col_font = {}
     col_ft = {}
+    col_cf = {}
     try:
         for _y, _x, _d, lf in _layout_fields_in_order(report):
             src = (getattr(lf, "source", "") or "").upper()
@@ -2547,6 +3338,9 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
                 )
             if src and src not in col_ft and getattr(lf, "format_trigger", ""):
                 col_ft[src] = lf.format_trigger
+            if src and src not in col_cf and getattr(
+                    lf, "conditional_formats", None):
+                col_cf[src] = lf.conditional_formats
     except Exception:  # noqa: BLE001 -- links must never break the table
         col_dt = {}
     for col in columns:
@@ -2576,6 +3370,9 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
         _ftn = col_ft.get(col.upper())
         if _ftn:
             contents[-1].set("data-ft", _ftn)
+        _cfn = col_cf.get(col.upper())
+        if _cfn:
+            contents[-1].set("data-cf", str(_cf_register(report, _cfn)))
 
     # Report-level <summary> grand totals -> a static FOOTER total row, so a
     # flat report's "Total: N" line actually renders (the summary tokens
@@ -7541,6 +8338,34 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
         label_field = sorted(left_texts, key=lambda t: t[0])[0][1] if left_texts else None
         value_field = sorted(fld_items, key=lambda t: t[0])[0][1] if fld_items else None
 
+        # In-report ACTION BUTTON rows: a text carrying an Oracle hyperlink
+        # is a click surface (the "Send Emails" distribution idiom — a
+        # rounded-rect face plus a blue underlined text, both hyperlinked to
+        # a computed URL). These are NOT label/value data; the pairing logic
+        # below silently dropped them from the cover.
+        _linked = [f for _x, f in texts
+                   if (getattr(f, "hyperlink", "") or "").strip()
+                   and _drillthrough_for(report, f) is None]
+        if _linked and value_field is None:
+            for _lf in _linked:
+                pairs.append(("__action__", (_lf.text or "").strip(), _lf))
+            for _x, f in texts:
+                if f not in _linked and (f.text or "").strip():
+                    pairs.append(("__fulltext__",
+                                  _cover_text_value(f.text or "", report), f))
+            continue
+
+        # Full-width INSTRUCTION prose: a left-column text with nothing to
+        # pair against (no field, no right text). The Oracle cover prints
+        # these (usage warnings, "IT CANNOT BE REVERSED!" etc.); dropping
+        # them loses real content the ground-truth first page shows.
+        if (label_field is not None and value_field is None
+                and not right_texts and len(texts) == 1):
+            pairs.append(("__fulltext__",
+                          _cover_text_value(label_field.text or "", report),
+                          label_field))
+            continue
+
         # Continuation-text row: text only, positioned in the VALUE column
         # (x >= threshold), no label text on the left. Append to the
         # previous pair's value as a line break. e.g. the "*The sort order
@@ -7640,7 +8465,88 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
 
     # Layout-driven label:value rows.
     lbl_idx = 0
+    # Button faces: rects in the header section carrying a hyperlink token.
+    # An action text whose token matches one of these gets the drawn-button
+    # look (border + fill) the Oracle output prints.
+    _face_tokens = set()
+    try:
+        for g in [header_section] + list(getattr(header_section, "children",
+                                                 None) or []):
+            for f in (getattr(g, "fields", None) or []):
+                if (getattr(f, "kind", "") == "rect"
+                        and (getattr(f, "hyperlink", "") or "").strip()):
+                    _face_tokens.add(f.hyperlink.strip().upper().lstrip("&"))
+            for c in (getattr(g, "children", None) or []):
+                for f in (getattr(c, "fields", None) or []):
+                    if (getattr(f, "kind", "") == "rect"
+                            and (getattr(f, "hyperlink", "") or "").strip()):
+                        _face_tokens.add(
+                            f.hyperlink.strip().upper().lstrip("&"))
+    except Exception:  # noqa: BLE001
+        _face_tokens = set()
+
     for label_txt, value_expr, value_field in pairs:
+        if label_txt == "__action__":
+            # In-report action button ("Send Emails" distribution idiom).
+            # Faithful rendering + a REAL SSRS Hyperlink action carrying the
+            # URL the source computes — emitted ONLY when the URL builder
+            # translates provably (see _translate_url_builder); otherwise the
+            # button still renders 1:1 but stays inert, and the warning
+            # explains what it did in Oracle.
+            _lf = value_field
+            _token = (getattr(_lf, "hyperlink", "") or "").strip()
+            _url = _hyperlink_action_expr(report, _token)
+            _btn = _token.upper().lstrip("&") in _face_tokens
+            _build_textbox(
+                ri, f"LcCov_Act_{lbl_idx}", value_expr or "",
+                bold=bool(getattr(_lf, "bold", True)),
+                font_size=f"{int(getattr(_lf, 'font_size', 0) or 12)}pt",
+                fg="#0b5cad", underline=True,
+                text_align="Center", vertical_align="Middle",
+                border_color="#8a8a8a" if _btn else "#ffffff",
+                bg="#efefef" if _btn else None,
+                padding="3pt", can_grow=True,
+                hyperlink_expr=_url,
+            )
+            atb = ri[-1]
+            _w = min(3.6, max(1.2, float(getattr(_lf, "width", 0) or 1.6)
+                              + 0.4))
+            _sub(atb, "Top", f"{y:.2f}in"); _sub(atb, "Left", "0.40in")
+            _sub(atb, "Width", f"{_w:.2f}in"); _sub(atb, "Height", "0.34in")
+            if _url is None:
+                try:
+                    report.warnings.append(
+                        f"Cover button {(value_expr or '').strip()!r}: its "
+                        f"Oracle hyperlink ({_token}) is computed by PL/SQL "
+                        f"this converter could not prove into a URL, so the "
+                        f"button renders but is not clickable. If it "
+                        f"triggered report-server distribution (mass "
+                        f"email), the SSRS-native equivalent is a "
+                        f"subscription or this tool's Bursting output.")
+                except Exception:  # noqa: BLE001
+                    pass
+            lbl_idx += 1
+            y += 0.44
+            continue
+        if label_txt == "__fulltext__":
+            # Full-width instruction prose (usage warnings the real cover
+            # prints). Keep the source's weight/colour.
+            _lf = value_field
+            _fg = (getattr(_lf, "color", "") or "").strip() or INK
+            _build_textbox(
+                ri, f"LcCov_Note_{lbl_idx}", value_expr or "",
+                bold=bool(getattr(_lf, "bold", False)),
+                font_size=f"{int(getattr(_lf, 'font_size', 0) or 10)}pt",
+                fg=_fg, text_align="Left", vertical_align="Top",
+                border_color="#ffffff", padding="2pt", can_grow=True,
+            )
+            ntb = ri[-1]
+            _sub(ntb, "Top", f"{y:.2f}in"); _sub(ntb, "Left", "0.40in")
+            _sub(ntb, "Width", "6.10in"); _sub(ntb, "Height", "0.30in")
+            _nlines = max(1, (value_expr or "").count("vbCrLf") + 1)
+            lbl_idx += 1
+            y += 0.30 * min(_nlines, 6)
+            continue
         # Sub-report link surface? (field carries an Oracle hyperlink, OR
         # the field's source IS a link's URL-builder formula). Make the
         # textbox a real SSRS Drillthrough + style it like a link --
@@ -8275,6 +9181,12 @@ def _emit_field_textbox(
     _ft = getattr(lf, "format_trigger", "")
     if _ft:
         tb.set("data-ft", _ft)
+    # Declarative conditional formatting travels separately from the trigger:
+    # Reports Builder keeps the CONDITION in both places but the FORMAT
+    # (bold / colour / fill) only here.
+    _cf = getattr(lf, "conditional_formats", None)
+    if _cf:
+        tb.set("data-cf", str(_cf_register(report, _cf)))
     return (True, rel_top + place_h)
 
 
@@ -8489,6 +9401,21 @@ _PAGE_MARGIN_IN = 0.5          # top == bottom
 # 0.25in also matches the source report's own page margins.
 _PAGE_HMARGIN_IN = 0.25        # left == right
 _PAGE_FOOTER_HEIGHT_IN = 0.6
+
+# Vertical safety slack when sizing a per-record page (letter / certificate /
+# invoice packets). This is the EXACT vertical analogue of the horizontal rule
+# above: when the body's needs merely EQUAL the available height, SSRS spills
+# an empty page after every record.
+#
+# Measured, not guessed. Auditing every per-record report in the corpus showed
+# them ALL sitting at precisely the old 0.20in — the slack constant WAS the
+# margin, so the budget was razor-thin family-wide and one report (an invoice
+# packet) tipped over into a blank page after every record, while another was
+# already NEGATIVE at -0.04in. Sweeping PageHeight on the failing report put
+# the true threshold between +0.34in and +0.39in of slack. 0.60in clears the
+# measured requirement with real headroom, and costs only a slightly taller
+# sheet on pages whose height is already content-derived and non-standard.
+_PER_RECORD_SLACK_IN = 0.60
 
 
 def _name_derived_title(report):
@@ -11283,7 +12210,9 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
             _sub(run_tb, "Height", "0.20in")
             _build_textbox(
                 ph_items, "Tb_PageNum",
-                '="Page " & Globals!PageNumber & " of " & Globals!TotalPages',
+                (_source_page_number_expr(report)
+                 or '="Page " & Globals!PageNumber & " of "'
+                    ' & Globals!TotalPages'),
                 font_size="9pt", fg="#444444",
                 text_align="Right", vertical_align="Middle",
                 border_color="#ffffff", padding="2pt",
@@ -11313,7 +12242,9 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
         pf_items = _sub(pf, "ReportItems")
         _build_textbox(
             pf_items, "Tb_FootPageNum",
-            '="Page " & Globals!PageNumber & " of " & Globals!TotalPages',
+            (_source_page_number_expr(report)
+             or '="Page " & Globals!PageNumber & " of "'
+                ' & Globals!TotalPages'),
             font_size="9pt", fg="#444444",
             text_align="Center", vertical_align="Middle",
             border_color="#ffffff", padding="2pt",
@@ -11634,7 +12565,7 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         chrome = (2 * _PAGE_MARGIN_IN
                   + _page_header_height(report)
                   + _PAGE_FOOTER_HEIGHT_IN)
-        page_height = max(11.0, req + chrome + 0.2)
+        page_height = max(11.0, req + chrome + _PER_RECORD_SLACK_IN)
         root.append(body)
         _report_w = float(body.attrib.pop("data-body-width-in", "7.5"))
         _sub(root, "Width", f"{_report_w}in")
@@ -11664,7 +12595,7 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         chrome = (2 * _PAGE_MARGIN_IN
                   + _page_header_height(report)
                   + _PAGE_FOOTER_HEIGHT_IN)
-        page_height = max(11.0, req + chrome + 0.2)
+        page_height = max(11.0, req + chrome + _PER_RECORD_SLACK_IN)
     elif kind == "tabular_details":
         # Multi-section dashboard (several independent tables down one page,
         # each bound to a different query) -> stack one Tablix per section so
@@ -12275,6 +13206,168 @@ def _clamp_body_height_to_page(root) -> None:
     bh_el.text = f"{target:.2f}in"
 
 
+def _source_page_number_expr(report):
+    """The report's OWN page-number wording, as an SSRS expression, or
+    None. Oracle reports carry it as boilerplate holding the page builtins
+    — e.g. ``&<PageNumber> από &<TotalPages>``. Emitting a hardcoded
+    English "Page X of Y" instead injects a foreign language into a report
+    that is not in English (wild-corpus: a Greek pension report lost its
+    Σελίδα wording). Structural, language-agnostic: we look for the page
+    BUILTINS, not for any particular words."""
+    best = None
+
+    def walk(g):
+        nonlocal best
+        for f in (getattr(g, "fields", None) or []):
+            t = (getattr(f, "text", "") or "").strip()
+            if not t or best is not None:
+                continue
+            if re.search(r"(?i)&<\s*pagenumber\s*>", t):
+                best = t
+        for c in (getattr(g, "children", None) or []):
+            walk(c)
+    for lg in (getattr(report, "layout", None) or []):
+        walk(lg)
+    if not best:
+        return None
+    # Build the VB concatenation directly: the page BUILTINS use Oracle's
+    # angle-token form, which the general &TOKEN resolver leaves alone.
+    _BUILTIN = {
+        "pagenumber": "Globals!PageNumber",
+        "physicalpagenumber": "Globals!PageNumber",
+        "logicalpagenumber": "Globals!PageNumber",
+        "totalpages": "Globals!TotalPages",
+        "totalphysicalpages": "Globals!TotalPages",
+        "totallogicalpages": "Globals!TotalPages",
+        "currentdate": "Globals!ExecutionTime",
+    }
+    def _lit_atoms(lit: str) -> List[str]:
+        """Literal chunk -> VB atoms. A RAW newline inside a VB string
+        literal is not merely swallowed, it does not COMPILE ("BC30648:
+        String constants must end with a double quote"), and the engine
+        surfaces that only as a generic processing error that kills the
+        whole report. These page-number boilerplates routinely carry a
+        multi-line footer block after the builtins, so newlines must become
+        explicit vbCrLf atoms — same rule as _chunk_atoms."""
+        out: List[str] = []
+        lines = lit.split("\n")
+        pending = False
+        for i, ln in enumerate(lines):
+            s = ln.strip()
+            # Token-adjacent single spaces on the SAME line are meaningful:
+            # "Page " & PageNumber must not become "Page" & PageNumber.
+            if s:
+                if i == 0 and ln[:1].isspace():
+                    s = " " + s
+                if i == len(lines) - 1 and ln[-1:].isspace():
+                    s = s + " "
+            if i > 0:
+                pending = True
+            if s:
+                if pending:
+                    out.append("vbCrLf")
+                pending = False
+                out.append('"' + s.replace('"', '""') + '"')
+        if pending:
+            out.append("vbCrLf")
+        return out
+
+    parts, pos, saw = [], 0, False
+    for m in re.finditer(r"&<\s*([A-Za-z_]+)\s*>", best):
+        g = _BUILTIN.get(m.group(1).lower())
+        if g is None:
+            return None                      # unknown token -> don't guess
+        parts.extend(_lit_atoms(best[pos:m.start()]))
+        parts.append(g)
+        pos = m.end()
+        saw = True
+    if not saw:
+        return None
+    parts.extend(_lit_atoms(best[pos:]))
+    if not parts:
+        return None
+    return "=" + " & ".join(parts)
+
+
+def _repair_multiline_string_literals(root) -> None:
+    """Rewrite raw newlines inside VB string literals as ``vbCrLf`` atoms.
+
+    A literal newline inside a VB string constant does not compile —
+    ``BC30648: String constants must end with a double quote`` — and the
+    report engine surfaces that only as the generic "An error occurred
+    during local report processing", killing the WHOLE report. Worse, the
+    unterminated literal corrupts parsing of the following expression too,
+    so one bad boilerplate reports as several failures.
+
+    Oracle text boilerplate is pretty-printed CDATA and routinely spans
+    lines, so several independent builders can produce this. Fixing it as a
+    post-pass over every emitted expression covers all of them, including
+    builders added later. Matches _chunk_atoms' semantics: indentation is
+    stripped, runs of blank lines collapse to one break, and
+    token-adjacent spaces at a chunk's edges are preserved.
+    """
+    def repair(expr: str) -> str:
+        out, i, n = [], 0, len(expr)
+        changed = False
+        while i < n:
+            ch = expr[i]
+            if ch != '"':
+                out.append(ch)
+                i += 1
+                continue
+            # consume one string literal, tracking "" as an escaped quote
+            j, buf = i + 1, []
+            while j < n:
+                if expr[j] == '"':
+                    if j + 1 < n and expr[j + 1] == '"':
+                        buf.append('""')
+                        j += 2
+                        continue
+                    break
+                buf.append(expr[j])
+                j += 1
+            body = "".join(buf)
+            if j >= n:                     # unterminated in the SOURCE: leave
+                out.append(expr[i:])
+                i = n
+                break
+            if "\n" not in body:
+                out.append('"' + body + '"')
+            else:
+                changed = True
+                lines = body.split("\n")
+                atoms, pending = [], False
+                for k, ln in enumerate(lines):
+                    s = ln.strip()
+                    if s:
+                        if k == 0 and ln[:1].isspace():
+                            s = " " + s
+                        if k == len(lines) - 1 and ln[-1:].isspace():
+                            s = s + " "
+                    if k > 0:
+                        pending = True
+                    if s:
+                        if pending:
+                            atoms.append("vbCrLf")
+                        pending = False
+                        atoms.append('"' + s + '"')
+                if pending:
+                    atoms.append("vbCrLf")
+                out.append(" & ".join(atoms) if atoms else '""')
+            i = j + 1
+        return "".join(out) if changed else expr
+
+    for el in root.iter():
+        if not isinstance(el.tag, str) or not el.tag.endswith("}Value"):
+            continue
+        t = el.text or ""
+        if not t.startswith("=") or "\n" not in t:
+            continue
+        fixed = repair(t)
+        if fixed != t:
+            el.text = fixed
+
+
 def _label_literal_of(text: str):
     """The displayable label text of a Value, when it IS a label: either a
     plain literal or a PURE constant-string VB expression (='...') with no
@@ -12467,6 +13560,181 @@ def _repair_nested_first_aggregates(root) -> None:
             v.text = "=Val(" + m.group(1) + ")"
 
 
+def _string_type_todate_params(root) -> None:
+    """A report parameter bound inside ``TO_DATE(:P, 'YYYY-MM-DD')`` must be
+    declared **String**, not DateTime.
+
+    Why (production-verified on a real SSRS + Oracle deployment): SSRS types
+    the outgoing query parameter from the REPORT PARAMETER's declared
+    DataType, not from the QueryParameter's value expression. So even though
+    we hand it ``Format(CDate(...), "yyyy-MM-dd")`` — a string — a DateTime
+    declaration makes SSRS coerce it back and the provider binds a DATE.
+    Oracle then implicitly re-renders that DATE with NLS_DATE_FORMAT
+    (usually DD-MON-RR) before matching it against our 'YYYY-MM-DD' mask,
+    and throws ORA-01861 "literal does not match format string".
+
+    Declaring String makes the value arrive as text that TO_DATE parses
+    exactly as written. The cost is the SSRS date picker on those prompts,
+    which is why the prompt gains an explicit format hint. Only parameters
+    ACTUALLY wrapped in TO_DATE are changed."""
+    cmds = " ".join((ct.text or "") for ct in root.iter(_q("CommandText")))
+    if "TO_DATE(:" not in cmds:
+        return
+    wrapped = {m.group(1).upper() for m in
+               re.finditer(r"TO_DATE\(\s*:([A-Za-z_][A-Za-z0-9_]*)", cmds)}
+    if not wrapped:
+        return
+    for rp in root.iter(_q("ReportParameter")):
+        nm = (rp.get("Name") or "").upper()
+        if nm not in wrapped:
+            continue
+        dt = rp.find(_q("DataType"))
+        if dt is None or (dt.text or "") != "DateTime":
+            continue
+        dt.text = "String"
+        pr = rp.find(_q("Prompt"))
+        if pr is not None and "YYYY-MM-DD" not in (pr.text or ""):
+            pr.text = (pr.text or "").rstrip() + " (YYYY-MM-DD)"
+
+
+_REPORT_ITEM_TAGS = ("Tablix", "Textbox", "Rectangle", "Image", "Subreport",
+                     "Chart", "List", "Line", "CustomReportItem")
+
+
+def _dedupe_report_item_names(root) -> None:
+    """Report item ``Name`` must be unique across the WHOLE report.
+
+    The engine refuses the definition outright — "More than one report item
+    in the report has the name 'X'. Report item names must be unique within
+    a report" — as a DefinitionInvalidException, so ONE collision kills the
+    entire report. Several builders set constant names (``Tablix_Main``,
+    ``Hdr_<col>``, ...), which is fine until a report drives the same
+    builder more than once: a multi-query report emitted ``Tablix_Main``
+    16 times.
+
+    The FIRST occurrence keeps its name and later ones get a numeric
+    suffix, so any name-based reference still resolves where it used to.
+    Nothing in the generator emits ``ReportItems!`` or ``ToggleItem``
+    today, but keeping first-wins means adding one later stays safe."""
+    seen: set = set()
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        if el.tag.split("}")[-1] not in _REPORT_ITEM_TAGS:
+            continue
+        nm = el.get("Name")
+        if not nm:
+            continue
+        if nm not in seen:
+            seen.add(nm)
+            continue
+        n = 2
+        while f"{nm}_{n}" in seen:
+            n += 1
+        new = f"{nm}_{n}"
+        el.set("Name", new)
+        seen.add(new)
+
+
+def _dedupe_group_names(root) -> None:
+    """Dataset, data-region and GROUPING names share ONE namespace and must
+    be unique report-wide, or the engine rejects the definition ("More than
+    one dataset, data region, or grouping in the report has the name 'X'").
+
+    A multi-query report drives the tablix builder once per query, so
+    ``OuterGroup`` / ``Detail`` appeared 16 times on one report.
+
+    Renaming a group is NOT a pure relabel: aggregate scopes reference
+    groups BY NAME (``Sum(Fields!X.Value, "OuterGroup")``), and the corpus
+    carries 1,718 such refs. So each rename rewrites the scope literals
+    inside THAT region's subtree only — retargeting an aggregate to another
+    region's group would silently change the number it prints."""
+    seen: set = set()
+    for ds in root.iter(_q("DataSet")):
+        if ds.get("Name"):
+            seen.add(ds.get("Name"))
+    regions = []
+    for el in root.iter():
+        if not isinstance(el.tag, str):
+            continue
+        tag = el.tag.split("}")[-1]
+        if tag in ("Tablix", "Chart", "List", "CustomReportItem"):
+            if el.get("Name"):
+                seen.add(el.get("Name"))
+            regions.append(el)
+
+    for region in regions:
+        for grp in region.iter(_q("Group")):
+            nm = grp.get("Name")
+            if not nm:
+                continue
+            if nm not in seen:
+                seen.add(nm)
+                continue
+            n = 2
+            while f"{nm}_{n}" in seen:
+                n += 1
+            new = f"{nm}_{n}"
+            grp.set("Name", new)
+            seen.add(new)
+            # Retarget aggregate scopes inside THIS region only.
+            pat = re.compile(r'(,\s*)"' + re.escape(nm) + r'"(\s*\))')
+            for node in region.iter():
+                if not isinstance(node.tag, str):
+                    continue
+                if node.tag.split("}")[-1] not in ("Value", "Hidden",
+                                                   "GroupExpression"):
+                    continue
+                t = node.text or ""
+                if t.startswith("=") and f'"{nm}"' in t:
+                    node.text = pat.sub(r'\1"' + new + r'"\2', t)
+
+
+def _repair_out_of_scope_group_expressions(root) -> int:
+    """Drop ``<GroupExpression>``s that reference a field the region's
+    dataset does not declare.
+
+    The engine treats this as fatal for the WHOLE report: "The Group
+    expression for the grouping 'X' refers to the field 'Y'. Report item
+    expressions can only refer to fields within the current dataset scope."
+    It arises on many-query reports where the group column is picked from a
+    different query than the region ends up bound to.
+
+    There is no way to know which in-scope column was meant, so guessing one
+    would silently regroup the data. Instead the expression collapses to a
+    CONSTANT: the group yields exactly one instance, so every row still
+    prints under a single header — a visible, explainable loss rather than a
+    report that will not open at all.
+
+    It must be a constant and NOT simply removed: an expression-less
+    ``<Group>`` is precisely how RDL denotes the DETAIL member, and the
+    engine then rejects "the grouping 'X' has a detail member with inner
+    members. Detail members can only contain static inner members." Keeping
+    a constant expression keeps it a dynamic member. Returns the number
+    collapsed so the caller can surface it."""
+    ds_fields: dict = {}
+    for ds in root.iter(_q("DataSet")):
+        ds_fields[ds.get("Name") or ""] = {
+            f.get("Name") for f in ds.iter(_q("Field"))}
+
+    dropped = 0
+    for region in root.iter():
+        if not isinstance(region.tag, str):
+            continue
+        if region.tag.split("}")[-1] not in ("Tablix", "Chart", "List"):
+            continue
+        flds = ds_fields.get(region.findtext(_q("DataSetName")) or "", set())
+        for grp in region.iter(_q("Group")):
+            for ges in grp.findall(_q("GroupExpressions")):
+                for ge in ges.findall(_q("GroupExpression")):
+                    refs = re.findall(r"Fields!([A-Za-z0-9_]+)\.Value",
+                                      ge.text or "")
+                    if refs and not all(r in flds for r in refs):
+                        ge.text = "=1"
+                        dropped += 1
+    return dropped
+
+
 def _reconcile_tablix_widths(root) -> None:
     """Every Tablix's declared <Width> must equal the SUM of its column
     widths (its true static width). A stale source-geometry width (81in on
@@ -12594,6 +13862,9 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # against the ENCLOSING region's dataset; strips the data-ft tags).
     # Before the repair/scope passes so its expressions get the same nets.
     _apply_region_aware_trigger_props(root, report)
+    # Raw newlines inside VB string literals do not COMPILE and take the
+    # whole report down with a generic engine error. Net over every builder.
+    _repair_multiline_string_literals(root)
     _repair_dangling_field_refs(root, report)
     _repair_misscoped_field_refs(root)
     _scope_body_direct_field_refs(root, report)
@@ -12634,6 +13905,9 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # Illegal nested First-in-aggregate totals over the single-row formula
     # dataset — drop the no-op outer aggregate.
     _repair_nested_first_aggregates(root)
+    # TO_DATE-bound parameters must be String or Oracle throws ORA-01861
+    # at run time (production-verified).
+    _string_type_todate_params(root)
     # Detected Oracle charts become real SSRS Charts stacked below the body
     # (before the height clamp so page math sees them)... appended here,
     # after width reconciliation, and before dead-dataset pruning so a
@@ -12642,6 +13916,23 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # Datasets nothing references would still execute their SQL on every
     # render — prune them (after every net, so late-added refs are respected).
     _prune_dead_datasets(root)
+    # LAST: report item names must be globally unique or the engine rejects
+    # the whole definition. Runs after every pass that can add items.
+    _dedupe_report_item_names(root)
+    # Same rule, second namespace: datasets + data regions + groupings.
+    # After the item pass, so region renames are already settled.
+    _dedupe_group_names(root)
+    # A group expression out of its region's dataset scope is fatal to the
+    # WHOLE report; degrade the grouping instead of losing the report.
+    _og = _repair_out_of_scope_group_expressions(root)
+    if _og:
+        try:
+            report.warnings.append(
+                f"{_og} grouping expression(s) referenced a column outside "
+                f"the data region's query and were dropped — those sections "
+                f"render as a single group instead of one per value.")
+        except Exception:  # noqa: BLE001
+            pass
     try:
         ET.indent(root, space="  ")
     except AttributeError:

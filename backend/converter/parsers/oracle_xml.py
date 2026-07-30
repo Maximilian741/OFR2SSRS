@@ -722,6 +722,38 @@ def _parse_visual_settings(el):
     }
 
 
+def _parse_conditional_formats(el) -> List[dict]:
+    """Extract <generalLayout><conditionalFormat><formatException> entries.
+
+    Returned in DOCUMENT ORDER because Oracle applies the first matching
+    exception. Each entry keeps BOTH the ``label`` (Oracle's own rendering
+    of the whole condition) and the ``<cond>`` attributes; the label is the
+    richer of the two -- the corpus has labels referencing two or three
+    columns where only a single <cond> element survives serialisation.
+    """
+    gl = _find(el, "generalLayout")
+    if gl is None:
+        return []
+
+    def _attrs(node) -> dict:
+        if node is None:
+            return {}
+        return {(k.split("}", 1)[1] if isinstance(k, str) and "}" in k else k):
+                (v.strip() if isinstance(v, str) else v)
+                for k, v in node.attrib.items()}
+
+    out: List[dict] = []
+    for cf in _findall(gl, "conditionalFormat"):
+        for fe in _findall(cf, "formatException"):
+            out.append({
+                "label": _attr(fe, "label"),
+                "cond": _attrs(_find(fe, "cond")),
+                "font": _attrs(_find(fe, "font")),
+                "visual": _attrs(_find(fe, "formatVisualSettings")),
+            })
+    return out
+
+
 def _format_trigger_of(el) -> str:
     direct = _attr(el, "formatTrigger")
     if direct:
@@ -792,7 +824,12 @@ def _layout_field_from_element(el) -> LayoutField:
             style = _attr(first_font, "style").lower()
             italic = style == "italic" or _attr(first_font, "italic").lower() == "yes"
             underline = _attr(first_font, "underline").lower() == "yes"
-            color = _attr(first_font, "color") or _attr(first_font, "foreground")
+            # Real exports write the ink as textColor (an Oracle token such
+            # as "r0g50b0"); resolve it to CSS so coloured instruction prose
+            # keeps its colour downstream.
+            color = (_attr(first_font, "color")
+                     or _attr(first_font, "foreground")
+                     or resolve_color(_attr(first_font, "textColor")))
         # Only keep segments when they actually MIX styles (else uniform path is
         # simpler + unchanged). "Mix" = any segment differs in bold/size/italic.
         _b0 = segments[0]["bold"] if segments else False
@@ -886,6 +923,7 @@ def _layout_field_from_element(el) -> LayoutField:
         segments=segments,
         vertical_elasticity=vertical_elasticity,
         line_pattern=vs_attrs.get("line_pattern", ""),
+        conditional_formats=_parse_conditional_formats(el),
     )
 
 
@@ -982,13 +1020,17 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                 warnings.append(f"failed to parse layout field: {exc}")
             _walk_layout_node(child, current_group, groups_by_name, root_groups,
                               warnings, embedded_images)
-        elif tag in ("rectangle", "box", "line"):
-            # A DRAWN graphic: a bordered box around a panel, or a horizontal /
-            # vertical rule. Oracle stores these as <rectangle>/<line> objects
-            # (with <visualSettings lineWidth>), separate from text/fields. They
-            # carry no data but are STRUCTURAL -- the emissions-summary SPT box, a
-            # section's heavy underline rules, etc. -- so capture them as
-            # positional layout fields with a border for the renderer to draw.
+        elif tag in ("rectangle", "roundedRectangle", "box", "line"):
+            # A DRAWN graphic: a bordered box around a panel, a horizontal /
+            # vertical rule, or a BUTTON FACE. Oracle stores these as
+            # <rectangle>/<roundedRectangle>/<line> objects (with
+            # <visualSettings lineWidth>), separate from text/fields. Most are
+            # purely structural, but a <roundedRectangle> carrying
+            # <webSettings hyperlink="&CP_URL_X"> is the drawn FACE of an
+            # in-report action button (the Oracle "click this to distribute"
+            # idiom: a rounded box + a blue underlined text, both hyperlinked)
+            # -- so the hyperlink must be captured here too, not just on
+            # fields/texts.
             try:
                 name = _attr(child, "name")
                 geom = _find(child, "geometryInfo")
@@ -996,6 +1038,9 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                 _vs = _find(child, "visualSettings")
                 _bw = _float_attr(_vs, "lineWidth") if _vs is not None else 0.0
                 vs_attrs = _parse_visual_settings(child)
+                _ws = _find(child, "webSettings")
+                _hl = (_attr(_ws, "hyperlink").lstrip("&").strip()
+                       if _ws is not None else "")
                 lf = LayoutField(
                     name=name,
                     kind="line" if tag == "line" else "rect",
@@ -1008,6 +1053,7 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                                   or vs_attrs["line_color"] or "#000000"),
                     background_color=vs_attrs["background_color"],
                     fill_pattern=vs_attrs["fill_pattern"],
+                    hyperlink=_hl,
                 )
                 target = current_group
                 if target is None:

@@ -51,6 +51,18 @@
       </div>
     </section>
 
+    {% if samples %}
+    <section class="side-section" id="samples-section">
+      <div class="side-heading">Try a sample</div>
+      <div id="samples-list" class="samples-list">
+        {% for s in samples %}
+        <button class="sample-chip" data-sample="{{ s }}" type="button"
+          title="Convert {{ s }}">{{ s | replace('.xml','') | replace('_', ' ') | title }}</button>
+        {% endfor %}
+      </div>
+    </section>
+    {% endif %}
+
     <section class="side-section" id="subreport-section" hidden>
       <div class="side-heading side-heading-row">
         <span>Sub-reports</span>

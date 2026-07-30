@@ -390,10 +390,51 @@ def validate_tsql(sql: str, scope: str = "query") -> List[Dict[str, Any]]:
     return issues
 
 
-def validate_report(report) -> List[Dict[str, Any]]:
+# Rules whose whole premise is "this must become T-SQL". When the report
+# TARGETS ORACLE the emitted SQL stays Oracle on purpose, so these are not
+# defects — they are portability notes. Reporting them as errors made the
+# tool cry wolf (104 phantom "errors" across one real corpus), which is
+# corrosive: a user who learns the errors are noise stops reading the ones
+# that matter.
+_TSQL_ONLY_RULES = {
+    "oracle.outer_join_hint",
+    "oracle.rownum",
+    "oracle.nvl",
+    "oracle.decode",
+    "oracle.sysdate",
+    "oracle.dual",
+    "oracle.to_date",
+    "oracle.to_char",
+    "oracle.connect_by",
+    "report.empty_tsql",
+}
+
+
+def _demote_dialect_issues(issues: List[Dict[str, Any]],
+                           target_db: str) -> List[Dict[str, Any]]:
+    """On an Oracle target, downgrade T-SQL-only findings to informational
+    portability notes and say why, instead of flagging valid Oracle SQL as
+    an error."""
+    if (target_db or "oracle").lower() != "oracle":
+        return issues
+    for i in issues:
+        if i.get("rule") in _TSQL_ONLY_RULES:
+            i["severity"] = "info"
+            i["message"] = (
+                (i.get("message") or "").rstrip()
+                + " (Informational: this report targets ORACLE, where the "
+                  "original syntax is valid and intentionally preserved. It "
+                  "would need rewriting only if you retarget to SQL Server.)")
+    return issues
+
+
+def validate_report(report, target_db: str = "oracle") -> List[Dict[str, Any]]:
     """Validate every dataset SQL on the report plus do a few report-level
     cross-checks (params referenced but not declared, etc.). `report` is a
-    ParsedReport (we don't import it, just duck-type)."""
+    ParsedReport (we don't import it, just duck-type).
+
+    ``target_db`` gates dialect rules: an Oracle-targeted report keeps its
+    Oracle SQL by design, so T-SQL-only findings are informational."""
     issues: List[Dict[str, Any]] = []
 
     declared_params = {p.name.upper() for p in getattr(report, "parameters", []) if getattr(p, "name", None)}
@@ -468,7 +509,7 @@ def validate_report(report) -> List[Dict[str, Any]]:
                 "excerpt":  "",
             })
 
-    return issues
+    return _demote_dialect_issues(issues, target_db)
 
 
 __all__ = ["validate_tsql", "validate_report"]

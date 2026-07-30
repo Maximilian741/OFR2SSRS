@@ -1482,12 +1482,32 @@ def _render_rich_header_page(report, items, pairs, page_label):
             continue
         if _is_param_form_note(t):
             continue
-        notes.append((y, x, t))
-    notes.sort()
-    for _y, _x, t in notes[:4]:
+        notes.append((y, x, t, _f))
+    notes.sort(key=lambda n: (n[0], n[1]))
+    # No arbitrary count cap: the real Oracle cover prints every one of
+    # these (a distribution cover carries ~9 instruction lines + buttons;
+    # a [:4] cap silently dropped the buttons below the fold).
+    for _y, _x, t, _f in notes:
+        _hl = (getattr(_f, "hyperlink", "") or "").strip()
+        if _hl:
+            # In-report ACTION BUTTON (the Oracle "Send Emails" idiom: a
+            # rounded-rect face + blue underlined text, both hyperlinked).
+            # Render the button look 1:1; the mockup never navigates.
+            entries.append((_y, _x,
+                '<div style="margin:10px 0;"><span style="display:inline-block;'
+                ' padding:6px 16px; border:1px solid #8a8a8a;'
+                ' border-radius:6px; background:#efefef;">'
+                '<span style="color:#0b46c4; text-decoration:underline;'
+                ' font-weight:bold; font-size:15px;">'
+                + _esc(_resolve_tokens(t, 0)) + '</span></span></div>'))
+            continue
+        # Instruction prose keeps its source ink/weight (the real cover's
+        # usage warnings are bold coloured text, not fine print).
+        _fg = (getattr(_f, "color", "") or "").strip() or _TAB_INK_SOFT
+        _wt = "bold" if getattr(_f, "bold", False) else "normal"
         entries.append((_y, _x,
-            '<div style="margin:6px 0 0; color:' + _TAB_INK_SOFT + '; '
-            'font-size:12px; font-style:italic;">'
+            '<div style="margin:6px 0 0; color:' + _esc(_fg) + '; '
+            'font-size:12px; font-weight:' + _wt + '; white-space:pre-line;">'
             + _esc(_resolve_tokens(t, 0)) + '</div>'))
 
     entries.sort(key=lambda e: (e[0], e[1]))

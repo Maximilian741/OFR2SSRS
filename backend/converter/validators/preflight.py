@@ -211,11 +211,39 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
     _lex_seen: dict = {}
     for ct in find_all(tree, "CommandText"):
         sql = ct.text or ""
+        # EXPRESSION CommandText with live Parameters! splices: the runtime
+        # lexical was preserved 1:1 (SSRS builds the SQL from the parameter
+        # exactly as Oracle spliced it). Not a dropped filter — but say
+        # what it is: the parameter value enters the SQL as text, the same
+        # power the Oracle report's users already had.
+        if sql.lstrip().startswith("=") and "CStr(Parameters!" in sql:
+            _spliced_names = sorted(set(re.findall(
+                r"CStr\(Parameters!(\w+)\.Value", sql)))
+            issues.append((
+                "AMBER",
+                "sql.lexical_spliced." + ",".join(_spliced_names[:4]),
+                f"Runtime SQL splice preserved 1:1: this dataset's query is "
+                f"built at run time from parameter(s) "
+                f"{', '.join(_spliced_names[:6])} — the same lexical "
+                f"substitution the Oracle report performed. The value is "
+                f"inserted as SQL text (not a bind), so it carries the same "
+                f"substitute-anything power the Oracle version already gave "
+                f"its users.",
+            ))
+            continue
         for m in re.finditer(
                 r"(NULL\s*)?/\*\s*lexical ref &(\w+)[^*]*\*/(\s*\.)?", sql):
             name = m.group(2)
             head = sql[:m.start()]
-            j = len(head.rstrip()) - 1
+            # The preceding CODE character decides the grammatical position,
+            # so SQL comments must be stripped first. Oracle authors write
+            # prose there, and an English sentence ending in a period made
+            # the next lexical look like an identifier fragment
+            # (`SCHEMA.&P_TABLE`) — a FALSE BLOCKER on a lexical that was
+            # really in plain WHERE position:
+            #   ... IS NULL) --No review question exists. &P_Site_Criteria
+            head = re.sub(r"/\*.*?\*/", " ", head, flags=re.S)
+            head = re.sub(r"--[^\n]*", " ", head)
             prev = head.rstrip()[-1:] if head.strip() else ""
             null_filled = bool(m.group(1))
             if prev == "." or m.group(3):
@@ -291,6 +319,26 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
             f"{len(_real_fields)} field(s) exist across its datasets — every "
             f"page renders static/empty. The layout-to-dataset binding "
             f"failed and must be repaired before this report is usable.",
+        ))
+
+    # A report with NO content item anywhere prints blank pages, whatever
+    # its datasets look like. This is strictly stronger than the
+    # hollow_body rule above, which needs extractable dataset fields to
+    # fire and therefore misses a source that declares queries but no
+    # <layout> at all — that converted to a Tablix + Rectangle holding zero
+    # textboxes and still reported RED at fidelity 1.00. "Renders nothing"
+    # must never read as anything but a blocker.
+    _content = 0
+    for _tag in ("Textbox", "Image", "Subreport", "Chart"):
+        _content += len(find_all(tree, _tag))
+    if _content == 0:
+        issues.append((
+            "BLOCKER",
+            "rdl.no_content_items",
+            "The generated report contains no textboxes, images, subreports "
+            "or charts — every page renders blank. Usually the source "
+            "declares queries but no layout objects, so there is nothing to "
+            "place; this report cannot be used as converted.",
         ))
 
     valid_image_source = {"External", "Embedded", "Database"}

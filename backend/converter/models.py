@@ -253,6 +253,16 @@ class LayoutField:
     # Used to decide whether stacked multi-font segments should collapse into one
     # TextRun (fixed boxes) vs. be left to flow+grow (growable full-width prose).
     vertical_elasticity: str = ""
+    # Oracle <generalLayout><conditionalFormat><formatException>: declarative
+    # conditional formatting, in DOCUMENT ORDER (Oracle applies the first
+    # matching exception). Each entry:
+    #   {"label": str,            # Oracle's own rendering of the condition
+    #    "cond": {...},           # the <cond> attrs (lossy; label is richer)
+    #    "font": {...},           # <font> attrs to apply when it matches
+    #    "visual": {...}}         # <formatVisualSettings> attrs likewise
+    # The bold/colour/fill lives ONLY here -- the paired format-trigger PL/SQL
+    # returns just TRUE/FALSE, so the trigger path can never recover it.
+    conditional_formats: list = field(default_factory=list)
 
 
 # LayoutGroup.kind values:

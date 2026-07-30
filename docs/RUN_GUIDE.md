@@ -52,11 +52,37 @@ machine.
    The converter also accepts `.jsp` Reports Web Sources, raw `.sql`
    files, `.docx` walkthroughs, and mixed folders of artifacts.
 2. **Drag the file(s) into the app** (or POST to `/api/convert` — see
-   `docs/API.md`).
-3. Review the four-pane preview: HTML mockup, generated RDL, bursting
-   detection, and sub-report (drill-through) children.
+   `docs/API.md`). No source at hand? Click a **Try a sample** chip in the
+   sidebar — two synthetic reports ship with the app, including
+   `SAMPLE_FEE_NOTICE`, which shows off an in-report **action button**,
+   **conditional formatting**, and a **live runtime SQL splice** in one go.
+3. Review the views (section 3a) — start with the HTML mockup.
 4. **Read the verdict banner** (section 4) before downloading.
 5. Download the `.rdl` and deploy (section 8).
+
+> First time in the app? Click **ⓘ How it works** (top right) →
+> **Start the guided tour**. It converts a sample and walks every view
+> with an explanation of what each one is for.
+
+---
+
+## 3a. What each view is for
+
+| View | What it shows | When you use it |
+|------|----------------|-----------------|
+| **HTML Mockup** | Pixel-faithful preview with sample data; Frontend/Backend toggle switches between the filled-in look and the label/binding skeleton. | The "does it look right?" check. Conditional formatting, seals, letters and in-report action buttons all render here. |
+| **RDL XML** | The generated SSRS definition — the file you deploy. Very large documents preview the first chunk; downloads always carry the complete file. | Transparency, diffing, and copy-pasting fragments. |
+| **Side-by-side** | Oracle source XML next to the generated RDL. | Auditing: "where did this column / query / label end up?" |
+| **Live data** | Runs the report's real queries against your database (connection string in the sidebar); parameter inputs + row grid. | Prove the SQL returns the right rows *before* the report server is involved. |
+| **Validation** | The full pre-flight audit behind the verdict banner; every finding says what happens at run time and what to do. | Triage before deployment. BLOCKER = won't work, RED = wrong output, AMBER = check, READY = deploy. |
+| **Deployment** | The go-live checklist: shared data source, upload steps, why you skip Refresh Fields, download buttons. | Every deployment, until it's muscle memory. |
+| **Extras** | Fidelity scorecard (nothing silently lost), conversion audit trail, copy-paste AI prompts. | Deep dives and second opinions. |
+| **Bursting** | Per-recipient split + email distribution wiring (SSRS subscriptions) — the SSRS-native replacement for Oracle's `distribute=YES`. | Letter/invoice runs that go out to many recipients. |
+| **Sub-reports** | Auto-detected child reports (envelopes, detail pages) with a dropzone to convert each through the same pipeline. | Reports whose rows drill through to another report. |
+
+Advanced views are hidden behind **Show advanced views** until you need
+them — the three tabs shown by default (Mockup, RDL, Bursting) cover the
+common flow.
 
 ---
 

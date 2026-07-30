@@ -1,0 +1,165 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic showcase: action button + conditional format + live splice -->
+<report name="SAMPLE_FEE_NOTICE" DTDVersion="9.0.2.0.10">
+  <data>
+    <userParameter name="P_Report_Server" datatype="character"/>
+    <userParameter name="P_Report" datatype="character"/>
+    <userParameter name="P_Email_XML" datatype="character"/>
+    <userParameter name="P_Notice_Year" datatype="character"/>
+    <userParameter name="P_Extra_Where" datatype="character"/>
+    <dataSource name="Q_Notices">
+      <select><![CDATA[select org_name, contact_email, notice_no,
+       fee_amount, balance_due, due_date
+from fee_notices
+where notice_year = :P_Notice_Year &P_Extra_Where
+order by org_name ;]]></select>
+      <group name="G_Notice">
+        <dataItem name="ORG_NAME" datatype="vchar2" columnFlags="1"/>
+        <dataItem name="CONTACT_EMAIL" datatype="vchar2" columnFlags="1"/>
+        <dataItem name="NOTICE_NO" datatype="vchar2" columnFlags="1"/>
+        <dataItem name="FEE_AMOUNT" datatype="number" columnFlags="1"/>
+        <dataItem name="BALANCE_DUE" datatype="number" columnFlags="1"/>
+        <dataItem name="DUE_DATE" datatype="date" columnFlags="1"/>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+  <section name="header" width="8.5" height="11">
+    <frame name="H_Cover">
+      <geometryInfo x="0" y="0" width="8.0" height="8.0"/>
+      <text name="B_Rpt_Lbl">
+        <geometryInfo x="0.30" y="0.60" width="1.40" height="0.25"/>
+        <textSegment><font face="Arial" size="10" bold="yes"/>
+          <string><![CDATA[Report:]]></string></textSegment>
+      </text>
+      <field name="F_Rpt" source="NOTICE_NO">
+        <geometryInfo x="2.00" y="0.60" width="3.00" height="0.25"/>
+      </field>
+      <text name="B_Year_Lbl">
+        <geometryInfo x="0.30" y="1.00" width="1.40" height="0.25"/>
+        <textSegment><font face="Arial" size="10" bold="yes"/>
+          <string><![CDATA[Notice Year:]]></string></textSegment>
+      </text>
+      <field name="F_Year" source="ORG_NAME">
+        <geometryInfo x="2.00" y="1.00" width="3.00" height="0.25"/>
+      </field>
+      <text name="B_Instr">
+        <geometryInfo x="0.30" y="1.80" width="7.40" height="0.60"/>
+        <textSegment><font face="Arial" size="12" bold="yes" textColor="r0g50b0"/>
+          <string><![CDATA[Verify recipients and notice contents before sending.
+IT CANNOT BE REVERSED!]]></string></textSegment>
+      </text>
+      <roundedRectangle name="R_Send_Btn">
+        <webSettings hyperlink="&amp;CP_URL_SEND"><![CDATA[#NULL#]]></webSettings>
+        <geometryInfo x="0.30" y="2.60" width="1.65" height="0.45"/>
+        <visualSettings fillPattern="transparent" linePattern="solid"
+         lineForegroundColor="gray48"/>
+      </roundedRectangle>
+      <text name="B_Send">
+        <webSettings hyperlink="&amp;CP_URL_SEND"><![CDATA[#NULL#]]></webSettings>
+        <geometryInfo x="0.30" y="2.65" width="1.65" height="0.35"/>
+        <textSegment><font face="Arial" size="18" bold="yes" underline="yes"
+          textColor="blue"/>
+          <string><![CDATA[Send Emails]]></string></textSegment>
+      </text>
+    </frame>
+  </section>
+  <section name="main" width="8.5" height="11">
+    <frame name="M_Notice">
+      <geometryInfo x="0" y="0" width="8.0" height="9.5"/>
+      <repeatingFrame name="R_G_Notice" source="G_Notice" printDirection="down">
+        <geometryInfo x="0.25" y="0.30" width="7.60" height="4.60"/>
+        <generalLayout verticalElasticity="fixed"/>
+        <text name="B_Title">
+          <textSettings justify="center"/>
+          <geometryInfo x="0.25" y="0.30" width="7.60" height="0.35"/>
+          <textSegment><font face="Arial" size="16" bold="yes"/>
+            <string><![CDATA[ANNUAL REGISTRATION FEE NOTICE]]></string></textSegment>
+        </text>
+        <text name="B_Org_L">
+          <geometryInfo x="0.45" y="1.00" width="1.60" height="0.25"/>
+          <textSegment><font face="Arial" size="11" bold="yes"/>
+            <string><![CDATA[Organization:]]></string></textSegment>
+        </text>
+        <field name="F_ORG" source="ORG_NAME" alignment="start">
+          <font face="Arial" size="11"/>
+          <geometryInfo x="2.20" y="1.00" width="4.80" height="0.25"/>
+        </field>
+        <text name="B_Notice_L">
+          <geometryInfo x="0.45" y="1.40" width="1.60" height="0.25"/>
+          <textSegment><font face="Arial" size="11" bold="yes"/>
+            <string><![CDATA[Notice No:]]></string></textSegment>
+        </text>
+        <field name="F_NOTICE" source="NOTICE_NO" alignment="start">
+          <font face="Arial" size="11"/>
+          <geometryInfo x="2.20" y="1.40" width="2.60" height="0.25"/>
+        </field>
+        <text name="B_Fee_L">
+          <geometryInfo x="0.45" y="1.80" width="1.60" height="0.25"/>
+          <textSegment><font face="Arial" size="11" bold="yes"/>
+            <string><![CDATA[Annual Fee:]]></string></textSegment>
+        </text>
+        <field name="F_FEE" source="FEE_AMOUNT" alignment="start">
+          <font face="Arial" size="11"/>
+          <geometryInfo x="2.20" y="1.80" width="1.60" height="0.25"/>
+        </field>
+        <text name="B_Bal_L">
+          <geometryInfo x="0.45" y="2.20" width="1.60" height="0.25"/>
+          <textSegment><font face="Arial" size="11" bold="yes"/>
+            <string><![CDATA[Balance Due:]]></string></textSegment>
+        </text>
+        <field name="F_BAL" source="BALANCE_DUE" alignment="start">
+          <font face="Arial" size="11"/>
+          <geometryInfo x="2.20" y="2.20" width="1.60" height="0.25"/>
+          <generalLayout>
+            <conditionalFormat>
+              <formatException label="(:BALANCE_DUE &gt;= '1')">
+                <font face="Arial" size="11" bold="yes" textColor="red"/>
+              <cond name="first" column="BALANCE_DUE" exception="4"
+               lowValue="1" conjunction="1"/>
+              </formatException>
+            </conditionalFormat>
+          </generalLayout>
+        </field>
+        <text name="B_Due_L">
+          <geometryInfo x="0.45" y="2.60" width="1.60" height="0.25"/>
+          <textSegment><font face="Arial" size="11" bold="yes"/>
+            <string><![CDATA[Due Date:]]></string></textSegment>
+        </text>
+        <field name="F_DUE" source="DUE_DATE" alignment="start">
+          <font face="Arial" size="11"/>
+          <geometryInfo x="2.20" y="2.60" width="1.60" height="0.25"/>
+        </field>
+        <text name="B_Foot">
+          <geometryInfo x="0.45" y="3.40" width="7.10" height="0.60"/>
+          <generalLayout verticalElasticity="expand"/>
+          <textSegment><font face="Arial" size="10"/>
+            <string><![CDATA[Payment is due within 30 days of the date above. Questions about this notice may be directed to the fee program office.]]></string></textSegment>
+        </text>
+      </repeatingFrame>
+    </frame>
+  </section>
+  </layout>
+  <programUnits>
+    <function name="beforerep">
+      <textSource><![CDATA[function BeforeReport return boolean is
+  vParams VARCHAR2(1000);
+  FUNCTION F_Get_Param(pvBind_Variable IN VARCHAR2) RETURN VARCHAR2 IS
+    vValue VARCHAR2(4000);
+  BEGIN
+    vValue := SRW.Get_Value(pvBind_Variable);
+    IF vValue IS NOT NULL THEN
+      RETURN('&' || pvBind_Variable || '=' || vValue);
+    ELSE RETURN(NULL); END IF;
+  END F_Get_Param;
+begin
+  vParams := vParams || F_Get_Param(pvBind_Variable => 'P_Notice_Year');
+  :CP_URL_SEND := TRIM(:P_Report_Server) || '?agency'
+    || '&destype=cache' || '&report=' || :P_Report || '.rep'
+    || '&distribute=YES' || '&destination=' || :P_Email_XML
+    || vParams;
+  return (TRUE);
+end;]]></textSource>
+    </function>
+  </programUnits>
+</report>

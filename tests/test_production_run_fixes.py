@@ -596,6 +596,541 @@ def test_unsupported_source_never_hollow_ready():
     assert (out.get("fidelity_report") or {}).get("score") == 0.0
 
 
+def _resolve_fields(name):
+    return f"Fields!{name}.Value"
+
+
+def test_declarative_conditional_format_becomes_style_expression():
+    """Oracle keeps conditional formatting in TWO places and they carry
+    DIFFERENT information: the <advancedLayout formatTrigger> PL/SQL returns
+    only TRUE/FALSE (visibility), while the bold / colour / fill lives ONLY
+    in <generalLayout><conditionalFormat>. The trigger path can therefore
+    never recover the formatting — a wild-corpus survey found 544 such
+    blocks over 31 reports, all dropped."""
+    from converter.translators.format_exception import (
+        translate_conditional_format)
+
+    out = translate_conditional_format([{
+        "label": "(:AMOUNT IS NULL)",
+        "cond": {"column": "AMOUNT", "exception": "11"},
+        "font": {"bold": "yes", "textColor": "red"},
+        "visual": {"fillPattern": "solid", "fillForegroundColor": "yellow"},
+    }], _resolve_fields)
+    assert len(out) == 1
+    cond, styles = out[0]
+    assert cond == "IsNothing(Fields!AMOUNT.Value)"
+    assert styles["FontWeight"] == "Bold"
+    assert styles["Color"] == "#FF0000"
+    assert styles["BackgroundColor"] == "#FFFF00"
+
+
+def test_format_exception_label_beats_lossy_cond_element():
+    """Each <formatException> carries exactly one <cond>, but 206 of the
+    corpus's 712 labels reference TWO OR THREE columns — Oracle drops the
+    extra terms when it serialises. The label is the complete condition, so
+    it must be the source of truth."""
+    from converter.translators.format_exception import (
+        translate_condition_label)
+
+    vb = translate_condition_label(
+        "((:A IS NOT NULL) or (:B IS NOT NULL))", _resolve_fields)
+    assert vb is not None
+    assert "Fields!A.Value" in vb and "Fields!B.Value" in vb
+    assert " Or " in vb
+
+
+def test_format_exception_declines_rather_than_guesses():
+    """Codes 2/3/4 appear in the corpus but only ever with free-text labels,
+    so nothing proves their operator. A free-text label whose code is
+    unproven must produce NOTHING — inventing an operator would silently
+    paint the wrong rows. Same for an unresolvable column."""
+    from converter.translators.format_exception import (
+        translate_condition_label, translate_conditional_format)
+
+    assert translate_condition_label("BACKGROUND", _resolve_fields) is None
+
+    def _strict(name):
+        raise KeyError(name)
+
+    assert translate_condition_label("(:X IS NULL)", _strict) is None
+    # free-text label + unproven code -> no entry at all
+    assert translate_conditional_format([{
+        "label": "dcc_crit_desc",
+        "cond": {"column": "C", "exception": "3", "lowValue": "7"},
+        "font": {"bold": "yes"}, "visual": {},
+    }], _resolve_fields) == []
+
+
+def test_format_exception_operand_fallback_is_refused():
+    """`lowValue` is not reliably a literal: the corpus has
+    column="CS_suppl_count" exception="1" lowValue="ac_area_code" — a row
+    COUNT compared against what reads as another column's NAME. Nothing in
+    the file distinguishes the two, so operand-bearing <cond> fallback must
+    refuse. The operand-FREE codes carry no such ambiguity and still work."""
+    from converter.translators.format_exception import translate_cond_element
+
+    assert translate_cond_element(
+        {"column": "CNT", "exception": "1", "lowValue": "other_col"},
+        _resolve_fields) is None
+    assert translate_cond_element(
+        {"column": "CNT", "exception": "11"}, _resolve_fields
+    ) == "IsNothing(Fields!CNT.Value)"
+
+
+def test_format_exception_huge_numeric_bound_still_compiles():
+    """Oracle criteria builders emit sentinel bounds like
+    BETWEEN '0' and '99999999999999999999' (20 digits) to mean "no limit".
+    As a bare VB literal that is BC30036: Overflow at JIT time, which the
+    engine reports only as a generic processing error — taking the WHOLE
+    report down. Anything past 15 significant digits goes through Val()."""
+    from converter.translators.format_exception import (
+        translate_condition_label)
+
+    vb = translate_condition_label(
+        "(:QTY BETWEEN '0' and '99999999999999999999')", _resolve_fields)
+    assert vb is not None
+    assert 'Val("99999999999999999999")' in vb
+    assert ">= 0" in vb          # small bounds stay readable literals
+    # a comfortably small bound is NOT wrapped
+    small = translate_condition_label("(:QTY < '100')", _resolve_fields)
+    assert "Val(\"100\")" not in small and "< 100" in small
+
+
+def test_conditional_format_matches_cell_aggregate_scope():
+    """A bare Fields! ref in a STYLE expression on a cell whose value is
+    =First(Fields!X.Value) is rejected by the engine as "cannot be specified
+    as nested aggregates". The condition must use the same aggregate."""
+    from converter.generators.rdl import _cf_wrap_agg
+
+    got = _cf_wrap_agg("IsNothing(Fields!A.Value)", "First")
+    assert got == "IsNothing(First(Fields!A.Value))"
+    assert _cf_wrap_agg("IsNothing(Fields!A.Value)", None) == \
+        "IsNothing(Fields!A.Value)"
+
+
+def test_raw_newline_never_survives_inside_a_vb_string_literal():
+    """A literal newline inside a VB string constant does not COMPILE
+    (BC30648) and the engine surfaces that only as a generic processing
+    error — and the unterminated literal corrupts the NEXT expression too,
+    so one bad boilerplate reports as several failures. Oracle text is
+    pretty-printed CDATA spanning lines, and several builders can emit it,
+    so the repair is a post-pass over every expression."""
+    import xml.etree.ElementTree as _ET
+    from converter.generators.rdl import _repair_multiline_string_literals
+
+    NS = "http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition"
+    root = _ET.Element(f"{{{NS}}}Report")
+    v = _ET.SubElement(root, f"{{{NS}}}Value")
+    v.text = '="Line one\n          Line two " & Fields!X.Value'
+    _repair_multiline_string_literals(root)
+    assert "\n" not in v.text, "raw newline left inside a string literal"
+    assert "vbCrLf" in v.text
+    # the token-adjacent trailing space must survive the repair
+    assert '"Line two "' in v.text
+    # an expression with no literal newline is left untouched
+    v2 = _ET.SubElement(root, f"{{{NS}}}Value")
+    v2.text = '="a" & Fields!Y.Value'
+    _repair_multiline_string_literals(root)
+    assert v2.text == '="a" & Fields!Y.Value'
+
+
+def _mk(tag, ns="http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition",
+        **attrs):
+    import xml.etree.ElementTree as _ET
+    el = _ET.Element(f"{{{ns}}}{tag}")
+    for k, v in attrs.items():
+        el.set(k, v)
+    return el
+
+
+def test_report_item_names_are_globally_unique():
+    """RDL report item names must be unique across the WHOLE report; the
+    engine rejects the definition outright ("More than one report item in
+    the report has the name 'X'"), so ONE collision kills the report. Several
+    builders set constant names, and a many-query report drove the tablix
+    builder 16 times. First occurrence keeps its name."""
+    from converter.generators.rdl import _dedupe_report_item_names
+
+    root = _mk("Report")
+    for _ in range(3):
+        root.append(_mk("Tablix", Name="Tablix_Main"))
+    root.append(_mk("Textbox", Name="Tablix_Main"))
+    _dedupe_report_item_names(root)
+    names = [e.get("Name") for e in root]
+    assert names[0] == "Tablix_Main", "first occurrence must keep its name"
+    assert len(set(names)) == len(names), f"still duplicated: {names}"
+
+
+def test_group_rename_retargets_aggregate_scopes():
+    """Datasets, data regions and GROUPINGS share one namespace and must be
+    unique. But renaming a group is not a pure relabel — aggregate scopes
+    reference groups BY NAME, so the scope literals inside that region must
+    be retargeted or the aggregate silently prints another group's number."""
+    from converter.generators.rdl import _dedupe_group_names
+
+    NS = "http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition"
+    root = _mk("Report")
+    for i in range(2):
+        tx = _mk("Tablix", Name=f"T{i}")
+        grp = _mk("Group", Name="OuterGroup")
+        tx.append(grp)
+        val = _mk("Value")
+        val.text = '=Sum(Fields!AMT.Value, "OuterGroup")'
+        tx.append(val)
+        root.append(tx)
+    _dedupe_group_names(root)
+
+    groups = [g.get("Name") for g in root.iter(f"{{{NS}}}Group")]
+    assert len(set(groups)) == 2, f"group names still collide: {groups}"
+    vals = [v.text for v in root.iter(f"{{{NS}}}Value")]
+    # first region untouched; second retargeted to its own renamed group
+    assert vals[0] == '=Sum(Fields!AMT.Value, "OuterGroup")'
+    assert vals[1] == f'=Sum(Fields!AMT.Value, "{groups[1]}")'
+
+
+def test_out_of_scope_group_expression_collapses_to_constant():
+    """A group expression naming a column the region's dataset lacks is
+    fatal to the WHOLE report. It must collapse to a CONSTANT, not be
+    removed: an expression-less <Group> is exactly how RDL denotes the
+    DETAIL member, and the engine then rejects "the grouping 'X' has a
+    detail member with inner members". In-scope expressions stay untouched."""
+    from converter.generators.rdl import (
+        _repair_out_of_scope_group_expressions)
+
+    NS = "http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition"
+    root = _mk("Report")
+    ds = _mk("DataSet", Name="Q_1")
+    flds = _mk("Fields")
+    flds.append(_mk("Field", Name="IN_SCOPE"))
+    ds.append(flds)
+    root.append(ds)
+
+    tx = _mk("Tablix")
+    dsn = _mk("DataSetName")
+    dsn.text = "Q_1"
+    tx.append(dsn)
+    grp = _mk("Group", Name="G")
+    ges = _mk("GroupExpressions")
+    bad = _mk("GroupExpression")
+    bad.text = "=Fields!ELSEWHERE.Value"
+    good = _mk("GroupExpression")
+    good.text = "=Fields!IN_SCOPE.Value"
+    ges.append(bad)
+    ges.append(good)
+    grp.append(ges)
+    tx.append(grp)
+    root.append(tx)
+
+    n = _repair_out_of_scope_group_expressions(root)
+    assert n == 1
+    assert bad.text == "=1", "out-of-scope expression must become a constant"
+    assert good.text == "=Fields!IN_SCOPE.Value", "in-scope must be untouched"
+    # the <GroupExpressions> container must survive (detail-member trap)
+    assert grp.find(f"{{{NS}}}GroupExpressions") is not None
+
+
+def test_report_that_renders_nothing_is_a_blocker():
+    """A source that declares queries but NO layout objects, whose SELECT *
+    yields no inferable columns either, converted to a Tablix + Rectangle
+    holding zero textboxes — and reported RED at fidelity 1.00, i.e. "looks
+    fine" for a report whose every page is blank. The existing hollow_body
+    rule needs extractable dataset fields to fire, so it misses this shape.
+    Zero content items anywhere must be a BLOCKER.
+
+    The complementary case matters just as much: when columns ARE inferable
+    the converter synthesizes a layout, and that must stay usable."""
+    import json as _json
+    from converter import convert
+
+    def _src(sel1, sel2):
+        return (
+            '<?xml version="1.0"?><report name="X" DTDVersion="9.0.2.0.0">'
+            '<data><dataSource name="Q_1" defaultGroupName="G_A"><select>'
+            f'<![CDATA[{sel1}]]></select></dataSource>'
+            '<dataSource name="Q_2" defaultGroupName="G_B"><select>'
+            f'<![CDATA[{sel2}]]></select></dataSource>'
+            '<link name="L_1" parentGroup="G_A" parentColumn="ID" '
+            'childQuery="Q_2" childColumn="ID" condition="eq" '
+            'sqlClause="where"/></data></report>').encode()
+
+    blank = convert(_src("select * from t1", "select * from t2"))
+    assert blank["preflight"]["verdict"] == "BLOCKER", (
+        "a report that renders nothing must never pass as usable")
+    assert "no_content_items" in _json.dumps(blank["preflight"])
+    assert "<Textbox" not in blank["rdl_xml"]
+
+    named = convert(_src("select id, a from t1", "select id, b from t2"))
+    assert "no_content_items" not in _json.dumps(named["preflight"]), (
+        "must not fire when a layout was successfully synthesized")
+
+
+def test_per_record_page_budget_has_real_headroom():
+    """Every per-record report in the corpus sat at EXACTLY the page-sizing
+    slack constant (the slack WAS the whole margin), and one invoice packet
+    tipped over into a blank page after every record; a PageHeight sweep on
+    it put the true threshold at ~+0.35in over the old 0.20in. The constant
+    must stay comfortably above that measured requirement, and the sizing
+    formula must consume it."""
+    from converter import convert
+    from converter.generators.rdl import _PER_RECORD_SLACK_IN
+
+    assert _PER_RECORD_SLACK_IN >= 0.5, (
+        f"per-record slack {_PER_RECORD_SLACK_IN} is under the measured "
+        f"blank-page threshold (~0.35in) plus headroom")
+
+    # Synthetic per-record letter: one query, per-record fields placed on a
+    # positioned body tall enough that the page must grow past 11in.
+    fields = "".join(
+        f'<field name="F_{i}" source="C{i}"><geometryInfo x="0.5" '
+        f'y="{0.5 + i * 1.4:.2f}" width="4" height="1.2"/></field>'
+        for i in range(8))
+    xml = (f'<?xml version="1.0"?><report name="LTR" DTDVersion="9.0.2.0.10">'
+           f'<data><dataSource name="Q_1"><select><![CDATA[select '
+           f'{", ".join(f"c{i}" for i in range(8))}, rid from t]]></select>'
+           f'</dataSource></data><layout><section name="main">'
+           f'<repeatingFrame name="R_1" source="Q_1" printDirection="down">'
+           f'<geometryInfo x="0.2" y="0.2" width="7" height="11.7"/>'
+           f'{fields}</repeatingFrame></section></layout></report>').encode()
+    rdl = convert(xml)["rdl_xml"]
+    import re as _re
+    m_page = _re.search(r"<PageHeight>([\d.]+)in</PageHeight>", rdl)
+    if m_page is None:
+        import pytest as _pytest
+        _pytest.skip("fixture did not route to the per-record archetype")
+    ph = float(m_page.group(1))
+    if abs(ph - 11.0) < 0.01:
+        import pytest as _pytest
+        _pytest.skip("fixture fit an 11in page; budget rule not exercised")
+    rows = [float(x) for x in _re.findall(
+        r"<TablixRow>\s*<Height>([\d.]+)in</Height>", rdl)]
+    hdr = sum(float(x) for x in _re.findall(
+        r"<PageHeader>.*?<Height>([\d.]+)in</Height>", rdl, _re.S)[:1])
+    ftr = sum(float(x) for x in _re.findall(
+        r"<PageFooter>.*?<Height>([\d.]+)in</Height>", rdl, _re.S)[:1])
+    margins = sum(float(x) for x in _re.findall(
+        r"<(?:Top|Bottom)Margin>([\d.]+)in", rdl))
+    avail = ph - margins - hdr - ftr
+    assert rows, "per-record report emitted no tablix rows"
+    assert avail - max(rows) >= 0.5 - 1e-6, (
+        f"per-record budget too tight: avail {avail:.2f} vs tallest row "
+        f"{max(rows):.2f} — this is the blank-page-after-every-record class")
+
+
+_ACTION_BUTTON_XML = (
+    '<?xml version="1.0"?><report name="PARENT_RPT" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<userParameter name="P_Report_Server" datatype="character"/>'
+    '<userParameter name="P_Report" datatype="character"/>'
+    '<userParameter name="P_Email_XML" datatype="character"/>'
+    '<userParameter name="P_Year" datatype="character"/>'
+    '<userParameter name="P_Child" datatype="character" '
+    'initialValue="CHILD_ENVELOPE"/>'
+    '<dataSource name="Q_1"><select><![CDATA[select org_nm, email_ad '
+    'from orgs]]></select></dataSource></data>'
+    '<layout><section name="header">'
+    '<frame name="H_1"><geometryInfo x="0" y="0" width="8" height="7"/>'
+    '<text name="B_RPT_LBL"><geometryInfo x="0.25" y="1.0" width="1.5" '
+    'height="0.25"/><textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[Report:]]></string></textSegment></text>'
+    '<field name="F_RPT" source="ORG_NM"><geometryInfo x="2.0" y="1.0" '
+    'width="3.0" height="0.25"/></field>'
+    '<text name="B_YR_LBL"><geometryInfo x="0.25" y="1.4" width="1.5" '
+    'height="0.25"/><textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[Report Year:]]></string></textSegment></text>'
+    '<field name="F_YR" source="EMAIL_AD"><geometryInfo x="2.0" y="1.4" '
+    'width="3.0" height="0.25"/></field>'
+    '<text name="B_NOTE"><geometryInfo x="0.25" y="4.1" width="7.7" '
+    'height="0.4"/><textSegment><font face="Arial" size="12" bold="yes" '
+    'textColor="red"/><string><![CDATA[IT CANNOT BE REVERSED!]]></string>'
+    '</textSegment></text>'
+    '<roundedRectangle name="R_BTN"><webSettings '
+    'hyperlink="&amp;CP_URL_SEND"><![CDATA[#NULL#]]></webSettings>'
+    '<geometryInfo x="0.25" y="5.0" width="1.6" height="0.45"/>'
+    '</roundedRectangle>'
+    '<text name="B_SEND"><webSettings hyperlink="&amp;CP_URL_SEND">'
+    '<![CDATA[#NULL#]]></webSettings>'
+    '<geometryInfo x="0.25" y="5.05" width="1.6" height="0.35"/>'
+    '<textSegment><font face="Arial" size="18" bold="yes" underline="yes" '
+    'textColor="blue"/><string><![CDATA[Send Emails]]></string>'
+    '</textSegment></text>'
+    '</frame></section>'
+    '<section name="main"><frame name="M_1">'
+    '<geometryInfo x="0" y="0" width="8" height="3"/>'
+    '<field name="F_ORG" source="ORG_NM"><geometryInfo x="0.3" y="0.4" '
+    'width="4" height="0.25"/></field></frame></section></layout>'
+    '<programUnits><function name="beforerep"><textSource><![CDATA['
+    'function BeforeReport return boolean is\n'
+    '  vParams VARCHAR2(1000);\n'
+    '  FUNCTION F_Get_Param(pvBind_Variable IN VARCHAR2) RETURN VARCHAR2 IS\n'
+    '    vValue VARCHAR2(4000);\n'
+    '  BEGIN\n'
+    "    vValue := SRW.Get_Value(pvBind_Variable);\n"
+    "    IF vValue IS NOT NULL THEN\n"
+    "      RETURN('&' || pvBind_Variable || '=' || vValue);\n"
+    "    ELSE RETURN(NULL); END IF;\n"
+    '  END F_Get_Param;\n'
+    'begin\n'
+    "  vParams := vParams || F_Get_Param(pvBind_Variable => 'P_Year');\n"
+    "  :CP_URL_SEND := TRIM(:P_Report_Server) || '?x' \n"
+    "    || '&destype=cache' || '&report=' || :P_Report || '.rep'\n"
+    "    || '&distribute=YES' || '&destination=' || :P_Email_XML\n"
+    "    || vParams;\n"
+    '  return (TRUE);\n'
+    'end;]]></textSource></function></programUnits></report>'
+).encode()
+
+
+def test_url_builder_translates_distribution_button():
+    """The in-report 'Send Emails' idiom: a rounded-rect + hyperlinked text
+    whose URL a report trigger builds by concatenating :parameters and
+    null-guarded F_Get_Param fragments (re-invoking the report server with
+    distribute=YES to mass-email the recipients). The URL must translate to
+    a real VB expression — parameters resolved, guards preserved, appends
+    replayed in textual order."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.generators.rdl import _hyperlink_action_expr
+
+    rep = parse_oracle_xml(_ACTION_BUTTON_XML)
+    vb = _hyperlink_action_expr(rep, "CP_URL_SEND")
+    assert vb is not None and vb.startswith("=")
+    # SSRS refs are case-sensitive: the expression must use the DECLARED
+    # parameter casing, not the (arbitrary) casing at the PL/SQL call site.
+    assert "Parameters!P_Report_Server.Value" in vb
+    assert '"&distribute=YES"' in vb
+    assert "IIf(IsNothing(Parameters!P_Year.Value)" in vb
+    assert '"&P_Year="' in vb
+
+
+def test_url_builder_declines_ambiguity():
+    """A wrong URL that silently DOES something (this one mass-emails) is
+    far worse than an inert button — every unprovable case must decline:
+    a bind that is not a declared parameter, and a token assigned in more
+    than one branch (which branch runs depends on runtime state)."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.generators.rdl import _hyperlink_action_expr
+
+    # non-parameter bind
+    bad = _ACTION_BUTTON_XML.replace(b":P_Email_XML", b":SOME_COLUMN")
+    assert _hyperlink_action_expr(
+        parse_oracle_xml(bad), "CP_URL_SEND") is None
+    # two assignments to the same token (exclusive branches)
+    dup = _ACTION_BUTTON_XML.replace(
+        b"  return (TRUE);",
+        b"  :CP_URL_SEND := 'other';\n  return (TRUE);")
+    assert _hyperlink_action_expr(
+        parse_oracle_xml(dup), "CP_URL_SEND") is None
+
+
+def test_action_button_renders_in_both_views_with_hyperlink():
+    """The button must survive to BOTH outputs 1:1: the RDL cover carries a
+    button-styled textbox with a real <Action><Hyperlink>, and the mockup
+    renders the button face — neither existed before (the cover pairing
+    logic dropped unpaired hyperlink texts entirely)."""
+    from converter import convert
+
+    out = convert(_ACTION_BUTTON_XML)
+    rdl, mock = out["rdl_xml"], out["mockup_html"]
+    assert "Send Emails" in rdl
+    assert "<Hyperlink>=" in rdl and "distribute=YES" in rdl
+    assert "IT CANNOT BE REVERSED!" in rdl, "instruction prose dropped"
+    # The mockup must show the button too. (Which COVER STYLE the mockup
+    # dispatcher picks depends on how rich the header is — the full
+    # instruction-block rendering is exercised by the rich-cover path on
+    # real artifacts; this minimal fixture guards the button's presence.)
+    assert "Send Emails" in mock
+
+
+def test_distribution_url_is_never_a_subreport_link():
+    """detect_subreport_links once claimed a distribution URL for an
+    unrelated child (its body lives in a TRIGGER, so the lookup came back
+    empty and the child-name fallback fired) — which wired the mass-email
+    button as a drill-through to the ENVELOPE report. distribute= URLs and
+    self-report dynamic targets are actions, never links; a dynamic
+    '&report=' || :BIND target IS a link when the bind's initialValue names
+    the child."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.subreports import detect_subreport_links
+
+    rep = parse_oracle_xml(_ACTION_BUTTON_XML)
+    for ln in detect_subreport_links(rep):
+        assert "CP_URL_SEND" not in (ln.get("url_formula") or ""), (
+            "distribution URL misclassified as a sub-report link")
+
+    # the P_ENVELOPE pattern: dynamic report= bound to a param whose
+    # initialValue names the child -> a REAL link to that child
+    linked = _ACTION_BUTTON_XML.replace(
+        b"|| '&distribute=YES' || '&destination=' || :P_Email_XML\n",
+        b"|| '&x=y'\n").replace(
+        b"|| :P_Report || '.rep'", b"|| :P_Child")
+    rep2 = parse_oracle_xml(linked)
+    kids = {ln.get("child_name") for ln in detect_subreport_links(rep2)}
+    assert "CHILD_ENVELOPE" in kids
+
+
+_SPLICE_XML = (
+    '<?xml version="1.0"?><report name="SPLICE_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<userParameter name="P_Dias" datatype="character"/>'
+    '<dataSource name="Q_1"><select><![CDATA[select col_a, col_b\n'
+    'from t_rows\n'
+    'where col_b in (&P_Dias)\n'
+    'and col_a like &P_UNDECLARED ;]]></select></dataSource>'
+    '</data>'
+    '<layout><section name="main"><groupLeft name="M_t"><group>'
+    '<field name="F1" source="COL_A"/><field name="F2" source="COL_B"/>'
+    '</group></groupLeft></section></layout></report>'
+).encode()
+
+
+def test_unresolved_declared_lexical_becomes_live_splice():
+    """A runtime lexical the reconstruction passes can't prove used to be
+    NULL-stubbed — an IN operand that can NEVER match (zero rows), an
+    invalid FROM, a NULL-degraded expression. SSRS CommandText accepts an
+    EXPRESSION, the native equivalent of Oracle's lexical substitution:
+    when the lexical names a DECLARED parameter, the query must be emitted
+    as ="..." & CStr(Parameters!X.Value & "") & "..." so the parameter
+    actually drives the SQL at run time, exactly as in Oracle."""
+    import json as _json
+    import re
+    from converter import convert
+
+    out = convert(_SPLICE_XML)
+    rdl = out["rdl_xml"]
+    m = re.search(r"<CommandText>(.*?)</CommandText>", rdl, re.S)
+    assert m, "no CommandText emitted"
+    ct = m.group(1)
+    assert ct.lstrip().startswith("="), "expected EXPRESSION CommandText"
+    # declared lexical -> live splice, in declared casing
+    assert 'CStr(Parameters!P_Dias.Value &amp; "")' in ct
+    # undeclared lexical -> keeps the honest stub comment (no value exists)
+    assert "lexical ref &amp;P_UNDECLARED" in ct
+    # raw newlines never survive inside VB literals (BC30648)
+    inner = ct.replace("&amp;", "&")
+    for lit in re.findall(r'"(?:[^"]|"")*"', inner):
+        assert "\n" not in lit, "raw newline inside a VB string literal"
+    assert "vbCrLf" in inner, "SQL line structure must be preserved"
+    # the trailing semicolon must be stripped in the expression form too
+    assert ";" not in re.sub(r"/\*.*?\*/", "", inner)
+    # preflight: reclassified as a preserved splice, not a dropped filter
+    blob = _json.dumps(out["preflight"])
+    assert "lexical_spliced" in blob
+    assert "lexical_nevermatch" not in blob
+    assert out["preflight"]["verdict"] != "RED"
+
+
+def test_splice_leaves_lexical_free_queries_untouched():
+    """A report with NO unresolved declared lexicals keeps plain static
+    CommandText — the expression form is a fallback, never the default."""
+    import re
+    from converter import convert
+
+    plain = _SPLICE_XML.replace(b"in (&P_Dias)", b"in ('A')")
+    rdl = convert(plain)["rdl_xml"]
+    m = re.search(r"<CommandText>(.*?)</CommandText>", rdl, re.S)
+    assert m and not m.group(1).lstrip().startswith("="), (
+        "static SQL must stay static")
+
+
 def test_geometryless_groupleft_routes_tabular():
     """The minimal DTD-1.0 grammar (<groupLeft><field/> with no geometry
     anywhere) is a group-left TABULAR listing — the card path stacked every
@@ -1051,3 +1586,394 @@ def test_label_override_ui_contract():
         j2 = r2.get_json()
         assert "GUARDED LABEL" in j2["rdl_xml"]
         assert "GUARDED LABEL" in j2["mockup_html"]
+
+
+def test_todate_bound_params_are_string_not_datetime():
+    """Fire 145 — PRODUCTION-REPORTED by the deploying operator: reports
+    failed on the real SSRS+Oracle server until date parameters were
+    manually retyped from DateTime to String.
+
+    Root cause: SSRS types the outgoing query bind from the REPORT
+    PARAMETER's DataType, not from the QueryParameter value expression. So
+    Format(CDate(...), "yyyy-MM-dd") is coerced back to a DateTime, the
+    provider binds a DATE, and Oracle re-renders it with NLS_DATE_FORMAT
+    (DD-MON-RR) before matching our 'YYYY-MM-DD' mask -> ORA-01861
+    "literal does not match format string".
+
+    A param wrapped in TO_DATE(...) must therefore be String, with the
+    expected format stated in the prompt. Params NOT so wrapped keep
+    DateTime (and their date picker)."""
+    import re as _re
+    from converter import convert
+
+    xml = (b'<?xml version="1.0"?><report name="DT" DTDVersion="9.0.2.0.10">'
+           b'<data>'
+           b'<userParameter name="P_START" datatype="date" precision="10"'
+           b' inputMask="mm/dd/yyyy" defaultWidth="0" defaultHeight="0"/>'
+           b'<userParameter name="P_PLAIN" datatype="date" precision="10"'
+           b' inputMask="mm/dd/yyyy" defaultWidth="0" defaultHeight="0"/>'
+           b'<dataSource name="Q_1"><select><![CDATA[SELECT a FROM t '
+           b'WHERE (:P_START IS NULL OR d >= :P_START)]]></select>'
+           b'<group name="G_1"><dataItem name="A" datatype="vchar2"/>'
+           b'</group></dataSource></data></report>')
+    x = convert(xml)["rdl_xml"]
+
+    cmds = " ".join(_re.findall(r"<CommandText>(.*?)</CommandText>", x, _re.S))
+    wrapped = {m.group(1).upper() for m in
+               _re.finditer(r"TO_DATE\(\s*:([A-Za-z_][A-Za-z0-9_]*)", cmds)}
+    assert "P_START" in wrapped, "date bind should be TO_DATE-wrapped"
+
+    types = {m.group(1): m.group(2) for m in _re.finditer(
+        r'<ReportParameter Name="([^"]+)">(?:(?!</ReportParameter>).)*?'
+        r"<DataType>([^<]+)</DataType>", x, _re.S)}
+    assert types.get("P_START") == "String", (
+        "TO_DATE-bound param must be String or Oracle throws ORA-01861; "
+        f"got {types.get('P_START')}")
+
+    # The prompt must tell the user the expected format, since declaring
+    # String removes the SSRS date picker.
+    blk = _re.search(r'<ReportParameter Name="P_START">(.*?)</ReportParameter>',
+                     x, _re.S).group(1)
+    assert "YYYY-MM-DD" in blk
+
+    # Unwrapped date params are left alone (they keep their picker).
+    assert types.get("P_PLAIN") in ("DateTime", None)
+
+
+def test_non_ascii_column_names_stay_unique():
+    """Fire 147 (hunt round 4, Greek pension report): _safe() maps every
+    non-ASCII char to '_', so two names that are distinct in the source
+    language can collapse to the SAME ASCII field name — duplicate
+    <Field Name> in one DataSet is invalid RDL (a real BLOCKER). Names must
+    de-duplicate while DataField keeps the ORIGINAL column name, so the
+    binding to the result-set column still works."""
+    import re as _re
+    import xml.etree.ElementTree as _ET
+    from collections import Counter
+    from converter.generators.rdl import _build_dataset
+    from converter.models import DataQuery, DataItem
+
+    q = DataQuery(name="Q_1")
+    q.sql = "SELECT a, b, c FROM t"
+    q.items = [DataItem(name="COL_Ι_ΣΤΟ_Π"),
+               DataItem(name="COL_Ι_ΣΤΟΝ_"),
+               DataItem(name="PLAIN")]
+    ds = _build_dataset(q, [], target_db="oracle")
+    x = _ET.tostring(ds, encoding="unicode")
+    names = _re.findall(r'<(?:\w+:)?Field Name="([^"]+)"', x)
+    assert len(names) == 3, names
+    dups = [n for n, k in Counter(names).items() if k > 1]
+    assert not dups, f"duplicate field names invalidate the RDL: {dups}"
+    assert "COL_Ι_ΣΤΟ_Π" in x
+    assert "COL_Ι_ΣΤΟΝ_" in x
+
+
+def test_oracle_target_does_not_report_tsql_dialect_errors():
+    """Fire 147: on an ORACLE target the emitted SQL stays Oracle by
+    design, so T-SQL-only findings ((+) outer joins, ROWNUM) are
+    portability notes, not errors. Flagging them as errors produced 104
+    phantom 'errors' across one real corpus — noise that trains a user to
+    ignore the findings that actually matter."""
+    from converter.validators.tsql_check import validate_report
+    from converter.models import ParsedReport, DataQuery
+
+    rep = ParsedReport(name="R", dtd_version="9")
+    q = DataQuery(name="Q_1")
+    q.tsql = "SELECT a FROM t, u WHERE t.id = u.id (+) AND ROWNUM < 10"
+    rep.queries.append(q)
+
+    ora = validate_report(rep, target_db="oracle")
+    assert not [i for i in ora if i.get("severity") == "error"], (
+        "Oracle-target report must not report Oracle syntax as an error")
+    assert any(i.get("rule") == "oracle.outer_join_hint" for i in ora), (
+        "the finding must still be REPORTED, just informationally")
+    assert any("targets ORACLE" in (i.get("message") or "") for i in ora)
+
+    mssql = validate_report(rep, target_db="sqlserver")
+    assert [i for i in mssql if i.get("severity") == "error"], (
+        "SQL Server target must still flag unrewritten Oracle syntax")
+
+
+def test_literal_lexical_branches_become_null_safe_predicates():
+    """Fire 148 — the dominant 'query runs UNFILTERED' cause. Oracle
+    builds a lexical WHERE fragment with one branch per prompt combination:
+
+        IF :P_START IS NOT NULL AND :P_END IS NULL THEN
+           :P_LEX := 'AND col >= :P_START';
+        IF :P_START IS NULL AND :P_END IS NOT NULL THEN
+           :P_LEX := 'AND col <= :P_END';
+        IF both THEN :P_LEX := 'AND col >= :P_START AND col <= :P_END';
+
+    Each branch predicate is guarded by exactly the bind it tests, so the
+    UNION of the single-bind branches — each made NULL-safe — reproduces
+    EVERY branch in one static query. Multi-bind branches are skipped
+    because they are the conjunction of the single-bind ones."""
+    from converter.generators.rdl import _literal_lexical_predicates
+
+    plsql = (
+        "IF :P_START IS NOT NULL AND :P_END IS NULL THEN "
+        "  :P_LEX := 'AND c.DT >= :P_START' ; "
+        "END IF; "
+        "IF :P_START IS NULL AND :P_END IS NOT NULL THEN "
+        "  :P_LEX := 'AND c.DT <= :P_END' ; "
+        "END IF; "
+        "IF :P_START IS NOT NULL AND :P_END IS NOT NULL THEN "
+        "  :P_LEX := 'AND c.DT >= :P_START AND c.DT <= :P_END' ; "
+        "END IF;")
+    out = _literal_lexical_predicates(plsql)
+    frag = out.get("P_LEX")
+    assert frag, "the branch idiom must reconstruct"
+    assert "(:P_START IS NULL OR c.DT >= :P_START)" in frag
+    assert "(:P_END IS NULL OR c.DT <= :P_END)" in frag
+    # The two-bind branch must NOT add a third predicate.
+    assert frag.count("IS NULL OR") == 2, frag
+
+    # An ACCUMULATED lexical (||) is not ours — leave it to the
+    # cv-constant path / honest placeholder rather than guessing.
+    assert "P_ACC" not in _literal_lexical_predicates(
+        "  :P_ACC := :P_ACC || ' AND x = :P_Y' ; ")
+    # A non-predicate literal (no AND/OR, no bind) is ignored.
+    assert "P_ORD" not in _literal_lexical_predicates(
+        "  :P_ORD := 'ORDER BY 1' ; ")
+
+
+def test_effective_dating_criteria_builder_reconstructs():
+    """Fire 149: F_Criteria_Date_Bind(colA, colB, 'P_X') is Oracle's
+    EFFECTIVE-DATING criteria builder — its body emits, only when the bind
+    is non-null::
+
+        AND (NVL(colA, :P_X) <= :P_X AND NVL(colB, :P_X) >= :P_X)
+
+    ("the prompted date falls inside the row's window, a NULL endpoint
+    being open"). The static equivalent wraps it in the usual bind guard.
+    A REPLACE(cvX,'S.','S2.') column wrapper is a literal transform and is
+    evaluated rather than declined."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.generators.rdl import _reconstruct_lexical_criteria
+
+    xml = (
+        '<?xml version="1.0"?><report name="EFF" DTDVersion="9.0.2.0.10">'
+        '<data><dataSource name="Q_1"><select><![CDATA[SELECT a FROM '
+        'Site_Affiliation SA WHERE 1=1 &P_Criteria_Contact]]></select>'
+        '<group name="G_1"><dataItem name="A" datatype="vchar2"/></group>'
+        '</dataSource></data><programUnits><function name="bp">'
+        '<textSource><![CDATA['
+        "cvSA_START_DT CONSTANT VARCHAR2(30) := 'SA.Start_Dt';\n"
+        "cvSA_END_DT CONSTANT VARCHAR2(30) := 'SA.End_Dt';\n"
+        ":P_Criteria_Contact := :P_Criteria_Contact || "
+        "F_Criteria_Date_Bind( pvColumn_1 => cvSA_START_DT, "
+        "pvColumn_2 => cvSA_END_DT, pvBind_Variable => 'P_Letter_Dt');\n"
+        ']]></textSource></function></programUnits></report>').encode()
+    cm = _reconstruct_lexical_criteria(parse_oracle_xml(xml))
+    frag = cm.get("P_CRITERIA_CONTACT", "")
+    assert "(:P_Letter_Dt IS NULL OR" in frag, frag
+    assert "NVL(SA.Start_Dt, :P_Letter_Dt) <= :P_Letter_Dt" in frag
+    assert "NVL(SA.End_Dt, :P_Letter_Dt) >= :P_Letter_Dt" in frag
+
+
+def test_criteria_builder_family_is_unified_and_wildcard_faithful():
+    """Fire 150: ONE handler now covers every Varchar2/Number criteria
+    builder — plain, ``_Bind`` and ``_Value``.
+
+    Read from the real function bodies: the Varchar2 builders emit
+    ``LIKE UPPER(TRIM(:P))`` when the typed value contains a % or _
+    wildcard and ``= UPPER(TRIM(:P))`` otherwise. A single LIKE predicate
+    reproduces BOTH branches, because LIKE without metacharacters IS
+    equality — so emitting ``=`` (as the old handler did) silently broke
+    wildcard searches. ``_Value`` variants inline an escaped literal at
+    runtime; binding is equivalent and safer. ``pvColumn_2`` is an
+    alternate column: match either."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.generators.rdl import _reconstruct_lexical_criteria
+
+    def _cm(call: str):
+        xml = (
+            '<?xml version="1.0"?><report name="C" DTDVersion="9.0.2.0.10">'
+            '<data><dataSource name="Q_1"><select><![CDATA[SELECT a FROM '
+            'Permit P WHERE 1=1 &P_Criteria_X]]></select><group name="G_1">'
+            '<dataItem name="A" datatype="vchar2"/></group></dataSource>'
+            '</data><programUnits><function name="bp"><textSource><![CDATA['
+            "cvPERM CONSTANT VARCHAR2(30) := 'P.Perm_Name';\n"
+            "cvALT CONSTANT VARCHAR2(30) := 'P.Alt_Name';\n"
+            ":P_Criteria_X := :P_Criteria_X || " + call + ";\n"
+            ']]></textSource></function></programUnits></report>').encode()
+        return _reconstruct_lexical_criteria(
+            parse_oracle_xml(xml)).get("P_CRITERIA_X", "")
+
+    # _Bind and _Value both reduce to the same wildcard-capable predicate.
+    for fn in ("F_Criteria_Varchar2_Bind", "F_Criteria_Varchar2_Value",
+               "F_Criteria_Varchar2"):
+        frag = _cm(f"{fn}( pvColumn_1 => cvPERM, "
+                   f"pvBind_Variable => 'P_Name')")
+        assert "(:P_Name IS NULL OR P.Perm_Name LIKE UPPER(TRIM(:P_Name)))" \
+            in frag, f"{fn}: {frag}"
+
+    # Numbers stay equality.
+    frag = _cm("F_Criteria_Number_Value( pvColumn_1 => cvPERM, "
+               "pvBind_Variable => 'P_Num')")
+    assert "(:P_Num IS NULL OR P.Perm_Name = :P_Num)" in frag, frag
+
+    # A second column means "match either".
+    frag = _cm("F_Criteria_Varchar2( pvColumn_1 => cvPERM, "
+               "pvColumn_2 => cvALT, pvBind_Variable => 'P_Name')")
+    assert "P.Perm_Name LIKE UPPER(TRIM(:P_Name))" in frag
+    assert "P.Alt_Name LIKE UPPER(TRIM(:P_Name))" in frag
+    assert " OR " in frag
+
+
+def test_local_accumulator_and_range_builder_reconstruct():
+    """Fire 151: criteria staged through a LOCAL before being appended
+    (``vCriteria := F_Criteria_...(...) ; :P_LEX := :P_LEX || vCriteria``)
+    must still reconstruct, and the RANGE-form signature
+    (``pvColumn`` + ``pvBind_Variable_1/_2``) has non-obvious semantics
+    read from the real function body:
+
+        both binds -> col >= :A AND col <= :B
+        only A     -> col = :A   (EQUALITY, not an open range)
+        only B     -> col = :B
+
+    An open-range shortcut would silently widen a single-value search into
+    "everything from that value onward", so the four states are enumerated.
+    """
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.generators.rdl import (_reconstruct_lexical_criteria,
+                                          _inline_local_accumulators)
+
+    # The local is resolved to its staged call.
+    inl = _inline_local_accumulators(
+        " vCriteria := F_Criteria_Number_Bind( pvColumn => cvFY, "
+        "pvBind_Variable_1 => 'P_A', pvBind_Variable_2 => 'P_B') ; "
+        " :P_Criteria_X := :P_Criteria_X || vCriteria ; ")
+    assert "F_Criteria_Number_Bind" in inl.split(":P_Criteria_X :=")[1]
+
+    def _frag(call):
+        xml = (
+            '<?xml version="1.0"?><report name="R" DTDVersion="9.0.2.0.10">'
+            '<data><dataSource name="Q_1"><select><![CDATA[SELECT a FROM '
+            'CSB_Logsheets CL WHERE 1=1 &P_Criteria_X]]></select>'
+            '<group name="G_1"><dataItem name="A" datatype="vchar2"/>'
+            '</group></dataSource></data><programUnits><function name="bp">'
+            '<textSource><![CDATA['
+            "cvFY CONSTANT VARCHAR2(15) := 'CL.Fiscal_Yr';\n"
+            " vCriteria := " + call + " ;\n"
+            " :P_Criteria_X := :P_Criteria_X || vCriteria ;\n"
+            ']]></textSource></function></programUnits></report>').encode()
+        return _reconstruct_lexical_criteria(
+            parse_oracle_xml(xml)).get("P_CRITERIA_X", "")
+
+    two = _frag("F_Criteria_Number_Bind( pvColumn => cvFY, "
+                "pvBind_Variable_1 => 'P_A', pvBind_Variable_2 => 'P_B')")
+    assert "CL.Fiscal_Yr >= :P_A" in two and "CL.Fiscal_Yr <= :P_B" in two
+    assert "CL.Fiscal_Yr = :P_A" in two, "A-only must be EQUALITY"
+    assert "CL.Fiscal_Yr = :P_B" in two, "B-only must be EQUALITY"
+
+    one = _frag("F_Criteria_Number_Bind( pvColumn => cvFY, "
+                "pvBind_Variable_1 => 'P_A', pvBind_Variable_2 => NULL)")
+    assert "(:P_A IS NULL OR CL.Fiscal_Yr = :P_A)" in one, one
+
+
+def test_lexical_position_ignores_sql_comments():
+    """Fire 152: the grammatical position of a lexical is decided by the
+    preceding CODE character, so SQL comments must be stripped first.
+
+    Oracle authors write prose in ``--`` comments, and a sentence ending
+    in a period made the next lexical look like an identifier fragment
+    (``SCHEMA.&P_TABLE``) — raising a FALSE BLOCKER on a lexical that was
+    really in ordinary WHERE position::
+
+        ... IS NULL) --No review question exists. &P_Site_Criteria
+
+    A false BLOCKER is corrosive: it trains the user to distrust every
+    verdict, including the true ones."""
+    from converter.validators.preflight import preflight_audit
+
+    def _verdict_rules(sql: str):
+        rdl = (
+            '<?xml version="1.0"?><Report xmlns="http://schemas.microsoft.'
+            'com/sqlserver/reporting/2008/01/reportdefinition">'
+            '<DataSources><DataSource Name="DS">'
+            '<DataSourceReference>Shared</DataSourceReference>'
+            '</DataSource></DataSources><DataSets>'
+            '<DataSet Name="Q1"><Query><DataSourceName>DS</DataSourceName>'
+            f"<CommandText>{sql}</CommandText></Query><Fields>"
+            '<Field Name="a"><DataField>a</DataField></Field></Fields>'
+            "</DataSet></DataSets>"
+            '<Body><ReportItems><Textbox Name="T"><Paragraphs><Paragraph>'
+            "<TextRuns><TextRun><Value>Title</Value></TextRun>"
+            "</TextRuns></Paragraph></Paragraphs></Textbox></ReportItems>"
+            "<Height>1in</Height></Body><Width>7in</Width>"
+            "<Page><PageHeight>11in</PageHeight><PageWidth>8.5in</PageWidth>"
+            "</Page></Report>")
+        pf = preflight_audit(rdl)
+        # Severity BY RULE — the overall verdict also reflects unrelated
+        # gates (a deliberately minimal fixture trips the hollow-body one),
+        # and this test is about how the LEXICAL is classified.
+        return {i["rule"]: i["severity"] for i in pf["issues"]}
+
+    # Period inside a line comment -> NOT an identifier, NOT a BLOCKER.
+    rules = _verdict_rules(
+        "SELECT a FROM t WHERE x IS NULL "
+        "--No review question exists. "
+        "/* lexical ref &amp;P_Site_Criteria -- neutralized */ GROUP BY a")
+    assert not any(r.startswith("sql.lexical_identifier") for r in rules), rules
+    dropped = [r for r in rules if r.startswith("sql.lexical_where_dropped")]
+    assert dropped, rules
+    assert rules[dropped[0]] == "RED", "WHERE-position loss is RED, not BLOCKER"
+
+    # A REAL identifier fragment still blocks.
+    rules2 = _verdict_rules(
+        "SELECT a FROM DIRECCION."
+        "/* lexical ref &amp;P_TABLA -- neutralized */")
+    ident = [r for r in rules2 if r.startswith("sql.lexical_identifier")]
+    assert ident, rules2
+    assert rules2[ident[0]] == "BLOCKER"
+
+
+def test_page_number_wording_comes_from_the_source():
+    """Fire 153: the report's OWN page-number wording must survive. Oracle
+    carries it as boilerplate holding the page builtins (``&<PageNumber>``
+    / ``&<TotalPages>``); emitting a hardcoded English "Page X of Y"
+    injects a foreign language into a report that isn't in English
+    (wild-corpus: a Greek report lost its "από" wording). Detection is
+    structural — we look for the BUILTINS, never for particular words."""
+    from converter.generators.rdl import _source_page_number_expr
+    from converter.models import ParsedReport, LayoutGroup, LayoutField
+
+    rep = ParsedReport(name="R", dtd_version="9")
+    lg = LayoutGroup(name="M")
+    lg.fields.append(LayoutField(name="T", kind="text",
+                                 text="&<PageNumber> από &<TotalPages>"))
+    rep.layout.append(lg)
+    expr = _source_page_number_expr(rep)
+    assert expr == '=Globals!PageNumber & " από " & Globals!TotalPages', expr
+
+    # No page builtin -> no claim (caller keeps its default).
+    rep2 = ParsedReport(name="R2", dtd_version="9")
+    lg2 = LayoutGroup(name="M")
+    lg2.fields.append(LayoutField(name="T", kind="text", text="Just a title"))
+    rep2.layout.append(lg2)
+    assert _source_page_number_expr(rep2) is None
+
+
+def test_field_names_are_cls_compliant():
+    """Fire 153: SSRS rejects a field name with no LETTER in it. A column
+    named entirely in a non-Latin script sanitizes to underscores ("___"),
+    and Oracle's uniquifier suffix only makes it "___1" — still rejected
+    ("Field names must be CLS-compliant identifiers"), engine-verified.
+    DataField must keep the ORIGINAL name so the binding still works."""
+    import re as _re
+    import xml.etree.ElementTree as _ET
+    from converter.generators.rdl import _build_dataset
+    from converter.models import DataQuery, DataItem
+
+    q = DataQuery(name="Q_1")
+    q.sql = "SELECT a, b FROM t"
+    q.items = [DataItem(name="ΣΤΟΠ"), DataItem(name="ΣΤΟΝ")]
+    x = _ET.tostring(_build_dataset(q, [], target_db="oracle"),
+                     encoding="unicode")
+    names = _re.findall(r'<(?:\w+:)?Field Name="([^"]+)"', x)
+    assert len(names) == 2, names
+    for n in names:
+        assert _re.search(r"[A-Za-z]", n), f"not CLS-compliant: {n}"
+    assert len(set(names)) == 2, names
+    assert "ΣΤΟΠ" in x and "ΣΤΟΝ" in x, "DataField must keep the original"

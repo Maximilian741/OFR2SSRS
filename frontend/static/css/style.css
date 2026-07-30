@@ -221,6 +221,19 @@ body.show-advanced .tab-adv{ display:inline-flex; }
   font-family:var(--font-mono); font-size:12.5px; line-height:1.6;
   border-top:1px solid var(--code-border);
 }
+/* "What each view is for" table in the How-it-works modal */
+.howto-views{ border-collapse:collapse; width:100%; font-size:13px; }
+.howto-views td{ padding:6px 10px 6px 0; vertical-align:top;
+  border-bottom:1px solid rgba(128,128,128,.18); }
+.howto-views td:first-child{ white-space:nowrap; padding-right:14px; }
+
+/* Big highlighted code = tens of thousands of spans; without this, every
+   tab un-hide re-lays-out the whole block (~1s frozen UI on real reports).
+   content-visibility lets the browser lay out only what's on screen. */
+.code-block code{
+  content-visibility:auto;
+  contain-intrinsic-size:auto 4000px;
+}
 .code-block code{ font-family:var(--font-mono); background:none; border:none; padding:0; color:inherit; }
 /* prism-tomorrow already targets a dark well — keep it; just align the canvas */
 pre[class*="language-"]{ background:var(--code-bg) !important; margin:0; }

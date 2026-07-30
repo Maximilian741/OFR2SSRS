@@ -169,12 +169,61 @@ def detect_subreport_links(report) -> List[Dict[str, Any]]:
                 ):
                     body = fbody
                     break
+        # Report-TRIGGER-built placeholders (":CP_URL_X := ..." inside a
+        # trigger/program-unit body rather than a CF_ formula). Without
+        # this, the body stays empty and the child-name FALLBACK below
+        # claims the URL for an unrelated child — which attached a
+        # mass-email distribution button to the envelope sub-report link
+        # (clicking "Send Emails" would have opened envelopes).
+        if not body:
+            for t in getattr(report, "triggers", []) or []:
+                tbody = getattr(t, "body", "") or ""
+                am = re.search(
+                    rf":{re.escape(url_source)}\s*:=\s*(.+?);",
+                    tbody, re.IGNORECASE | re.DOTALL)
+                if am:
+                    body = am.group(1)
+                    break
+
+        # A report-server ACTION URL is not a drill-through to a child:
+        #   * ``distribute=YES`` re-runs THIS report to mass-deliver it
+        #     (the in-report "Send Emails" button idiom);
+        #   * ``'&report=' || :BIND`` targets a report chosen at runtime
+        #     (usually the report itself) — there is no named child to
+        #     link to, and guessing one wires the button to the wrong
+        #     report.
+        body_low = body.lower()
+        if "distribute=" in body_low:
+            continue
+        _dyn = re.search(
+            r"report\s*=\s*'\s*\|\|\s*:(\w+)", body, re.IGNORECASE)
 
         # Extract child report name from the URL body (if any).
         child_name = None
         rm = _REPORT_NAME_RE.search(body)
         if rm:
             child_name = rm.group(1)
+        if not child_name and _dyn:
+            # Dynamic ``'&report=' || :BIND`` target. When the bind is a
+            # declared parameter whose initialValue names a report (the
+            # P_ENVELOPE pattern), THAT is the child. Otherwise the target
+            # is chosen at runtime — usually the report itself (P_REPORT,
+            # the regenerate-without-header action) — and linking it to a
+            # guessed child wires the button to the wrong report.
+            _bind_up = _dyn.group(1).upper()
+            for p in getattr(report, "parameters", []) or []:
+                if _norm(p.name) == _bind_up:
+                    iv = (getattr(p, "initial_value", "") or "").strip()
+                    if iv and re.match(r"^[A-Za-z][A-Za-z0-9_]+$", iv):
+                        child_name = iv
+                    break
+            if not child_name:
+                continue
+        # A URL that re-invokes THIS report is an in-report action
+        # (regenerate/distribute), never a sub-report link.
+        if child_name and child_name.upper() == \
+                (getattr(report, "name", "") or "").strip().upper():
+            continue
         # Fall back to candidate_child_names (P_AS_PATH initialValue).
         if not child_name and candidate_child_names:
             child_name = candidate_child_names[0]
