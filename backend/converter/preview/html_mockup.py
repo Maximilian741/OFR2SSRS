@@ -342,7 +342,18 @@ def _is_columnar_repeating(node):
             continue
         yb = round((f.y or 0.0) / Y_BAND)
         bands.setdefault(yb, set()).add(round(f.x or 0.0, 2))
-    return any(len(xs) >= 2 for xs in bands.values())
+    if not bands:
+        return False
+    # A table ROW concentrates its data fields in ONE y-band (or two, for
+    # the stacked two-line row idiom). A nested FORM BLOCK — a complaint's
+    # complainant/site/violator sections, 15-26 fields over many distinct
+    # bands — also happens to have SOME band with two fields, and the old
+    # any-band test tiled those forms into 6 phantom sample rows that
+    # collided with everything below (the production demo's jumbled
+    # complaint mockup: 245 overlapping pairs). Band COUNT is the
+    # discriminator: real line-item rows have <=2 bands; forms have many.
+    return (len(bands) <= 2
+            and any(len(xs) >= 2 for xs in bands.values()))
 
 
 def _group_columnar_repeating(g):
@@ -3430,6 +3441,16 @@ def _doc_resolve_tokens(text, report):
             # sample-data preview) instead of a broken-looking [CF_X] token.
             return _sample_for_source(key, 0)
         if u in field_names or u in param_names or u.startswith(("F_", "P_", "PARM_")):
+            # A COMPUTED param whose trigger builds a LABELED value
+            # ("Latitude: "||x ... "Longitude: "||y) renders its real label
+            # structure — those labels are printed report content. Boilerplate
+            # commonly references the FIELD OBJECT (&F_P_SITE_LAT_LONG), so
+            # unwrap a leading F_ to reach the underlying param.
+            _base = u[2:] if u.startswith("F_") else u
+            if _base in param_names:
+                _t = _static_render_trigger_param(report, _base, 0)
+                if _t is not None:
+                    return _t
             return _sample_for_source(key, 0)
         # bare word token -> neutral sample
         return _sample_for_source(key, 0)
@@ -3469,12 +3490,28 @@ def _decollide(elems):
                or (e.get("kind") == "image" and e is not _letterhead)]
     movable.sort(key=lambda e: (round(float(e.get("y", 0) or 0), 3),
                                 round(float(e.get("x", 0) or 0), 3)))
-    placed = []  # (x_left, y_top, y_bottom)
+    # A FULL-WIDTH element is a ROW BARRIER: nothing may share its band,
+    # whatever its column. The same-left rule alone let a page-wide
+    # "Label: value" row (x=0, width=page) slide over a right-column row
+    # once the two columns' accumulated pushes drifted apart (the complaint
+    # form's violator row landing 2px from the site row: measured, the
+    # reflow passes shifted each column differently). Width beyond ~55% of
+    # the page cannot be a table column — treat it as spanning.
+    _WIDE = 0.55 * 8.5
+    placed = []  # (x_left, x_right, y_top, y_bottom, is_wide)
+
+    def _eff_w(e):
+        w = float(e.get("w", 0) or 0)
+        return w if w > 0 else max(0.4, 8.5 - float(e.get("x", 0) or 0) - 0.1)
+
     # Seed with the fixed letterhead so text and inline images avoid its box.
     if _letterhead is not None:
         _lx = float(_letterhead.get("x", 0) or 0)
         _ly = float(_letterhead.get("y", 0) or 0)
-        placed.append((_lx, _ly, _ly + (float(_letterhead.get("h", 0) or 0) or 0.2)))
+        _lw = _eff_w(_letterhead)
+        placed.append((_lx, _lx + _lw, _ly,
+                       _ly + (float(_letterhead.get("h", 0) or 0) or 0.2),
+                       _lw >= _WIDE))
     for e in movable:
         xl = float(e.get("x", 0) or 0)
         yt = float(e.get("y", 0) or 0)
@@ -3489,18 +3526,69 @@ def _decollide(elems):
             line_in = max(0.16, int(e.get("size") or 9) / 72.0 * 1.35)
             h = max(float(e.get("h") or 0) or 0.0, nlines * line_in)
         yb = yt + h
+        xr = xl + _eff_w(e)
+        wide = _eff_w(e) >= _WIDE
         guard, moved = 0, True
         while moved and guard < 300:
             moved = False
             guard += 1
-            for (pxl, pyt, pyb) in placed:
-                if abs(xl - pxl) < 0.20 and yt < pyb - 0.01 and yb > pyt + 0.01:
+            for (pxl, pxr, pyt, pyb, pwide) in placed:
+                x_overlap = (xr > pxl + 0.01) and (xl < pxr - 0.01)
+                same_col = abs(xl - pxl) < 0.20
+                if ((same_col or ((wide or pwide) and x_overlap))
+                        and yt < pyb - 0.01 and yb > pyt + 0.01):
                     shift = pyb + 0.03 - yt
                     yt += shift
                     yb += shift
                     moved = True
         e["y"] = yt
-        placed.append((xl, yt, yb))
+        placed.append((xl, xr, yt, yb, wide))
+    # LATERAL clamp within a band: two boxes on the same line whose x-ranges
+    # overlap paint through each other ("Permit: <sample>" running into
+    # "City:"). Oracle CLIPS at the box edge — mirror that by shrinking the
+    # LEFT box to end where its right-hand neighbour starts. Clip-only:
+    # never moves an element, so table columns and stacked rows are safe.
+    # Images and drawn boxes are clamp NEIGHBOURS too: a date label must
+    # clip before the signature placeholder box exactly as it clips before
+    # the next text (only text-like boxes ever get their width shrunk).
+    txt = [e for e in elems
+           if e.get("kind") in ("text", "field", "cell", "image", "rect")]
+    txt.sort(key=lambda e: (round(float(e.get("y", 0) or 0), 2),
+                            float(e.get("x", 0) or 0)))
+    for i, a in enumerate(txt):
+        _a_kind = a.get("kind")
+        if _a_kind not in ("text", "field", "cell", "image"):
+            continue
+        ax = float(a.get("x", 0) or 0)
+        aw = float(a.get("w", 0) or 0)
+        if aw <= 0:
+            continue
+        ay = float(a.get("y", 0) or 0)
+        best = None
+        # Vertical span must be the box's RENDERED height (a two-line label
+        # reaches into the next band), and the neighbour scan must look in
+        # BOTH directions — a signature box with a slightly smaller y still
+        # sits to the right of the date label that overlaps it.
+        _lines = (a.get("text") or "").count("\n") + 1 \
+            if a.get("kind") == "text" else 1
+        _ah = max(float(a.get("h", 0) or 0), _lines * 0.15)
+        for b in txt:
+            if b is a:
+                continue
+            by = float(b.get("y", 0) or 0)
+            _bh = max(float(b.get("h", 0) or 0), 0.15)
+            if by >= ay + _ah - 0.01 or by + _bh <= ay + 0.01:
+                continue          # vertical ranges don't intersect
+            bx = float(b.get("x", 0) or 0)
+            if bx > ax + 0.03 and bx < ax + aw - 0.02:
+                best = bx if best is None else min(best, bx)
+        if best is not None:
+            # An IMAGE box only yields a small EDGE (<=25% of its width) —
+            # a signature/seal placeholder nudging into a label clips back,
+            # but a genuinely-overlapping seal graphic is never distorted.
+            if _a_kind == "image" and (ax + aw - best) > 0.25 * aw:
+                continue
+            a["w"] = max(0.3, best - ax - 0.03)
     return elems
 
 
@@ -3676,13 +3764,26 @@ def _doc_collect_positioned(report, section="section_main", root=None,
                 rh = max((float(getattr(f, "height", 0) or 0.0) for f in flds),
                          default=0.18) or 0.18
                 step = max(rh + 0.03, 0.2)
-                # A lone line-item table tiles the full sample; a sub-list in a
-                # multi-table FORM is clamped to the room before the next block.
-                if _n_columnar > 1 and y_bound != float("inf"):
+                # Tiled rows must STOP before the next block below — always.
+                # The old rule free-tiled a LONE table on the theory that the
+                # reflow pass pushes what follows; for a table nested inside a
+                # form frame the reflow never reaches it, and the phantom
+                # sample rows painted straight over the blocks beneath (the
+                # demo's complaint form: pollutant rows over the enforcement
+                # section). A finite bound is real geometry — respect it; a
+                # generous sample is only free when nothing sits below.
+                if y_bound != float("inf"):
                     avail = max(0.0, y_bound - float(getattr(g, "y", 0) or 0.0))
                     n_rows = max(1, min(_TABLE_SAMPLE_ROWS, int(avail / step)))
                 else:
                     n_rows = _TABLE_SAMPLE_ROWS
+                # INLINE LABEL texts ride each tiled row too. Oracle's row
+                # prints "Pollutant Type: <value>  Amount: <value>  Unit:"
+                # — dropping the frame's text children lost the labels
+                # (truth-comparator finding on the complaint form).
+                _row_txts = [f for f in (g.fields or [])
+                             if (getattr(f, "kind", "") or "") == "text"
+                             and (getattr(f, "text", "") or "").strip()]
                 for k in range(n_rows):
                     for f in flds:
                         out.append({
@@ -3697,6 +3798,23 @@ def _doc_collect_positioned(report, section="section_main", root=None,
                             "align": (getattr(f, "align", "") or "left").lower(),
                             "mask": getattr(f, "format_mask", "") or "",
                             "bg": bg})
+                    for f in _row_txts:
+                        out.append({
+                            "kind": "text", "row_idx": k,
+                            "text": _clean_text(_doc_resolve_tokens(
+                                f.text or "", report)),
+                            "x": float(getattr(f, "x", 0.0) or 0.0),
+                            "y": (float(getattr(f, "y", 0.0) or 0.0)
+                                  - _ybase) + k * step,
+                            "w": float(getattr(f, "width", 0.0) or 0.0),
+                            "h": rh,
+                            "bold": bool(getattr(f, "bold", False)),
+                            "size": int(getattr(f, "font_size", 0) or 9),
+                            "color": _normalize_color(
+                                getattr(f, "color", "") or "", "#000000"),
+                            "align": (getattr(f, "align", "") or
+                                      "left").lower(),
+                            "_margin": False, "rotation": 0.0, "bg": bg})
             return  # tiled in place -- don't also emit this frame's single row
         for f in (g.fields or []):
             # Oracle visible="no" -> a computation-only field (a hidden CF_/CS_
@@ -3781,7 +3899,25 @@ def _doc_collect_positioned(report, section="section_main", root=None,
                       and (float(getattr(s, "x", 0) or 0.0) < _cx + _cw)
                       and (float(getattr(s, "x", 0) or 0.0)
                            + float(getattr(s, "width", 0) or 0.0) > _cx)]
-            _cb = min(_below) if _below else _gbot
+            # A SIBLING below is hard geometry — a tiled table must stop
+            # before it (the complaint form's enforcement section). The
+            # parent frame's own bottom is SOFT: Oracle grows elastic
+            # frames per record, so a lone line-item table may tile past
+            # it (the invoice packet); only a multi-table form treats the
+            # parent bottom as binding, else its several sub-lists pile up.
+            if _below:
+                _cb = min(_below)
+            elif _n_columnar > 1:
+                _cb = _gbot
+            else:
+                # No sibling below: inherit the bound THIS frame received —
+                # a wrapper (e.g. the pollutants group frame) may itself be
+                # bounded by ITS sibling, and that constraint must reach the
+                # tiled table inside it. Resetting to the parent's own soft
+                # bottom OR to infinity both mis-tile (measured both ways:
+                # the complaint form re-jumbled at inf; the invoice packet's
+                # lone table collapsed at parent-bottom).
+                _cb = y_bound
             walk(c, bg, _cb)
 
     walk(main, "")
@@ -4060,9 +4196,14 @@ def _static_render_formula_expr(report, src):
             continue
         i += 1  # operators / parens / whitespace -- plumbing
     text = "".join(out).strip()
-    # Only the genuinely MULTI-LINE boilerplate shape -- a single-line formula
-    # value stays a sample so we don't second-guess ordinary computed fields.
-    if "\n" not in text:
+    # MULTI-LINE boilerplate always reconstructs. A SINGLE-line formula
+    # reconstructs only when it is LABEL-SHAPED — its literal starts with a
+    # "Some Label:" prefix (the Oracle idiom of computing the whole labeled
+    # line inside the formula: "Referred Program:  " || value). An ordinary
+    # computed value stays a sample so we don't second-guess it.
+    # (Truth-comparator finding: the enforcement box's Referred Program /
+    # Referred Agency rows lost their labels entirely.)
+    if "\n" not in text and not re.match(r"^[A-Za-z][\w /#']{1,40}:", text):
         return None
     return text
 
@@ -4106,6 +4247,14 @@ def _doc_field_caption_and_value(src, report, label_map, idx):
         # token) so the sample-data preview reads as a finished document.
         return _sample_for_source(src, idx)
     if u.startswith(("P_", "PARM_")):
+        # A COMPUTED param whose trigger assignment concatenates LABELED
+        # literals (":P_Site_Lat_Long := 'Latitude: '||x||' Longitude: '||y")
+        # renders its real label structure with sample fills — the labels
+        # are report content the truth page prints (comparator finding:
+        # the complaint's Latitude:/Longitude: line lost its labels).
+        _t = _static_render_trigger_param(report, u, idx)
+        if _t is not None:
+            return _t
         # A display-constant parameter (a fixed Oracle initialValue, e.g. a
         # report title's division/agency sub-line bound to &P_DIVISION) shows
         # its REAL default value, not a fabricated sample -- mirrors the RDL's
@@ -4118,6 +4267,64 @@ def _doc_field_caption_and_value(src, report, label_map, idx):
                 break
         return _sample_for_source(src, idx)
     return _sample_for_source(src, idx)
+
+
+def _static_render_trigger_param(report, name_upper, idx=0):
+    """Reconstruct a computed parameter's LABEL STRUCTURE from its trigger
+    assignment: the ``:P_X := 'Label: ' || expr || ' Label2: ' || expr``
+    idiom. Returns "Label: <sample> Label2: <sample>", or None when the
+    assignment isn't the labeled-concat shape (an ordinary computed value
+    stays a plain sample — we never second-guess it).
+
+    Only PL/SQL string literals and ||-operands are interpreted; any
+    operand that isn't a literal renders as a sample value. Gated on the
+    result carrying a label-shaped literal ("Word:"), same rule as the
+    single-line formula reconstruction."""
+    cache = getattr(report, "_trigparam_static", None)
+    if cache is None:
+        cache = report._trigparam_static = {}
+    if name_upper in cache:
+        tmpl = cache[name_upper]
+    else:
+        tmpl = None
+        blob = "\n".join((getattr(t, "body", "") or "")
+                         for t in (getattr(report, "triggers", None) or []))
+        # A computed param is typically assigned SEVERAL times — a NULL
+        # initializer, then labeled fragments in conditional branches
+        # ("Latitude: "||x, then "Longitude: "||y). The happy-path preview
+        # shows every DISTINCT labeled branch joined in order.
+        branches, seen_lits = [], set()
+        for m in re.finditer(r":" + re.escape(name_upper) + r"\s*:=\s*(.+?);",
+                             blob, re.IGNORECASE | re.DOTALL):
+            rhs = m.group(1)
+            parts, ok = [], True
+            for op in rhs.split("||"):
+                op = op.strip()
+                # a self-append (:P := :P || 'x') keeps only the new tail
+                if op.upper() == ":" + name_upper or op.upper() == name_upper:
+                    continue
+                lm = re.fullmatch(r"'((?:[^']|'')*)'", op, re.DOTALL)
+                if lm:
+                    parts.append(("lit", lm.group(1).replace("''", "'")))
+                elif op and op.upper() != "NULL":
+                    parts.append(("val", op))
+            lits = "".join(p[1] for p in parts if p[0] == "lit")
+            if (parts and re.search(r"[A-Za-z][\w /#']{1,40}:", lits)
+                    and lits not in seen_lits):
+                seen_lits.add(lits)
+                if branches:
+                    branches.append(("lit", "  "))
+                branches.extend(parts)
+        if branches:
+            tmpl = branches
+        cache[name_upper] = tmpl
+    if tmpl is None:
+        return None
+    out = []
+    for kind, val in tmpl:
+        out.append(val if kind == "lit"
+                   else _sample_for_source(val[:40], idx))
+    return "".join(out).strip()
 
 
 def _render_generic_document_page(report, idx, page_num, total_pages,
@@ -4927,6 +5134,108 @@ def _render_design_view(report):
 # Public dispatcher
 # ---------------------------------------------------------------------------
 
+def _maybe_trailing_totals(report, html):
+    """Append the report-end breakdown/totals sheet when the layout carries
+    it but the rendered pages don't (see call site). Generic: driven by
+    repeating frames bound to non-main groups + summary-trailer text/field
+    pairs; resolves &tokens per row; sample values fill the numbers."""
+    try:
+        main_q = report.queries[0].name if report.queries else ""
+        main_groups = set()
+        for q in (report.queries or []):
+            stack = list(getattr(q, "groups", None) or [])
+            while stack:
+                g = stack.pop()
+                if q.name == main_q and getattr(g, "name", ""):
+                    main_groups.add(g.name.upper())
+                stack.extend(getattr(g, "children", None) or [])
+
+        rows_html = []
+        _seen_parent_totals = set()
+
+        def walk(g, parent=None):
+            kind = (getattr(g, "kind", "") or "").lower()
+            src = (getattr(g, "source_query", "") or "").upper()
+            if (kind == "repeating_frame" and src
+                    and src not in main_groups):
+                members = sorted(
+                    [f for f in (g.fields or [])
+                     if (f.kind or "") in ("text", "field")],
+                    key=lambda f: (f.y or 0, f.x or 0))
+                if members:
+                    line_probe = " ".join(
+                        (f.text or "") for f in members if f.kind == "text")
+                    probe = _clean_text(line_probe)[:18]
+                    if probe and probe in html:
+                        return   # already rendered by the page builder
+                    for k in range(3):
+                        cells = []
+                        for f in members:
+                            if f.kind == "text":
+                                cells.append(_esc(_clean_text(
+                                    _doc_resolve_tokens(f.text or "",
+                                                        report))))
+                            else:
+                                cells.append(_esc(_sample_for_source(
+                                    f.source or "", k)))
+                        rows_html.append(
+                            '<div style="margin:2px 0;font-size:12px;">'
+                            + "&nbsp;&nbsp;".join(c for c in cells if c)
+                            + "</div>")
+                    # The TOTAL lines live on the PARENT frame that wraps
+                    # these breakdown frames ("Total Inspections:" +
+                    # CS_Insp_Total) — it has repeating descendants, so the
+                    # trailer-frame detector rejects it; collect its direct
+                    # label texts here instead.
+                    if parent is not None and id(parent) not in \
+                            _seen_parent_totals:
+                        _seen_parent_totals.add(id(parent))
+                        for pf in (parent.fields or []):
+                            if (pf.kind or "") == "text" \
+                                    and (pf.text or "").strip().endswith(":"):
+                                t = _clean_text(pf.text or "")
+                                if t and t not in html:
+                                    rows_html.append(
+                                        '<div style="margin:4px 0 2px;'
+                                        'font-size:12px;font-weight:bold;">'
+                                        + _esc(t) + " "
+                                        + _esc(_sample_for_source("count", 0))
+                                        + "</div>")
+            for c in (getattr(g, "children", None) or []):
+                walk(c, g)
+
+        trailer_html = []
+        for lg in (report.layout or []):
+            if getattr(lg, "kind", "") == "section_main":
+                walk(lg)
+                for node in _iter_group(lg):
+                    if node is lg or not _is_summary_trailer_frame(node):
+                        continue
+                    members = sorted(
+                        [f for f in (node.fields or [])
+                         if (f.kind or "") in ("text", "field")],
+                        key=lambda f: (f.y or 0, f.x or 0))
+                    for f in members:
+                        if f.kind == "text" and (f.text or "").strip():
+                            t = _clean_text(f.text or "")
+                            if t and t not in html:
+                                trailer_html.append(
+                                    '<div style="margin:3px 0;font-size:'
+                                    '12px;font-weight:bold;">' + _esc(t)
+                                    + " " + _esc(_sample_for_source(
+                                        "count", 0)) + "</div>")
+        if not rows_html and not trailer_html:
+            return html
+        block = _render_page(
+            '<div style="padding:24px 28px;">'
+            '<div style="font-weight:bold;font-size:13px;margin-bottom:8px;">'
+            'Report totals</div>' + "".join(rows_html) + "".join(trailer_html)
+            + "</div>", label="Report end — totals", first_page=False)
+        return html + block
+    except Exception:  # noqa: BLE001 — the preview must never break
+        return html
+
+
 def render_mockup(report, mode="frontend"):
     """Public entry point. Returns a multi-page HTML string.
 
@@ -4998,8 +5307,38 @@ def render_mockup(report, mode="frontend"):
             _result = _render_tabular_pages(report)
         # A detected chart renders as a real <Chart> in the RDL -- show it in
         # the preview too (leading sheet) so mockup and RDL agree.
-        return _maybe_lead_chart(report, _result)
+        _result = _maybe_lead_chart(report, _result)
+        # MOCKUP<->RDL parity for the report-end BREAKDOWN/TOTALS block: the
+        # RDL renders dropped secondary-dataset repeating frames + summary
+        # trailer totals (_emit_secondary_breakdown_tables); the tabular
+        # mockup paths skipped that whole frame, so the preview ended
+        # without the per-category rows and total lines the real report
+        # prints (truth-comparator finding: Visit/Insp totals absent).
+        _result = _maybe_trailing_totals(report, _result)
+        return _clip_pct_cells(_result)
     finally:
         _ACTIVE_MODE = prev
         _ACTIVE_TITLE_FONT = prev_font
+
+
+_PCT_CELL_RE = re.compile(
+    r'(<div style=")([^"]*position:absolute[^"]*width:\s*[\d.]+%[^"]*)(")')
+
+
+def _clip_pct_cells(html: str) -> str:
+    """Clip every %-width absolutely-positioned cell like Oracle clips at
+    the box edge. These table cells carried NO overflow protection, so on
+    any viewport narrower than the design width a date/number painted
+    straight through the next column ("03/12/20←Type Alpha" — the demo
+    screenshot's garbled action rows). The px-geometry path already
+    ellipsizes its fields; this brings the %-table path under the same
+    rule. Cells that already declare their own overflow/wrap keep it."""
+    def _fix(m):
+        style = m.group(2)
+        if "overflow" in style or "white-space" in style:
+            return m.group(0)
+        return (m.group(1) + style
+                + ";overflow:hidden;white-space:nowrap;"
+                "text-overflow:ellipsis" + m.group(3))
+    return _PCT_CELL_RE.sub(_fix, html)
 

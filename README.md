@@ -337,16 +337,9 @@ guidelines.
 
 ## License
 
-**Elastic License 2.0** (source-available). In plain terms:
+**MIT** — free to use, modify, distribute, and build on, for any purpose,
+including commercial use. Full text in [LICENSE](LICENSE).
 
-- Free to use, modify, and run inside your organization — convert as many of
-  your own reports as you like.
-- Free to evaluate, fork, and contribute.
-- You may not offer Oracle2SSRS itself to third parties as a hosted or
-  managed service.
-- You may not remove or circumvent the license-key functionality
-  (`O2S_LICENSE` tiers).
-
-Commercial licenses (Pro / Enterprise: unlimited batch, white-label
-Migration Assessments, support) — open an issue or contact the author. Full
-text in [LICENSE](LICENSE).
+Optional paid tiers (Pro / Enterprise: unlimited batch, white-label
+Migration Assessments, support) remain available — open an issue or contact
+the author.

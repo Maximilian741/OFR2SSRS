@@ -1819,7 +1819,8 @@ def _lexical_splice_expression(pre_text: str, resolved_map: dict,
 def _build_dataset(query: DataQuery, declared_params: Iterable[str],
                    target_db: str = "oracle",
                    param_types: Optional[dict] = None,
-                   criteria_map: Optional[dict] = None) -> ET.Element:
+                   criteria_map: Optional[dict] = None,
+                   param_defaults: Optional[dict] = None) -> ET.Element:
     """Build one <DataSet> element from a DataQuery.
 
     ``target_db`` selects which CommandText flavor and parameter prefix to
@@ -1873,11 +1874,27 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         _lex_src = cmd_text  # neighbor lookups read the pre-substitution text
         _unresolved: list = []
 
+        _pdefaults = {k.upper(): v for k, v in (param_defaults or {}).items()
+                      if (v or "").strip()}
+
         def _lex_sub(m):
             nm = m.group(1)
             frag = _cmap.get(nm.upper())
             if frag is not None:
                 return frag
+            # A lexical whose declared parameter carries a STATIC Oracle
+            # initialValue (the ORDER-BY / sort-fragment idiom: P_ORDER_BY
+            # defaulting to 'Site_Name, Perm_Name') can be inlined as that
+            # default — static SQL, faithful default behaviour, and the
+            # design-time Refresh Fields flow stays prompt-free. Only pure
+            # SQL-fragment-shaped defaults inline (identifiers, commas,
+            # dots, spaces); anything else keeps the honest stub.
+            _dv = _pdefaults.get(nm.upper())
+            if _dv and re.fullmatch(r"[A-Za-z_][\w.]*(\s*,\s*[A-Za-z_][\w.]*)*",
+                                    _dv.strip()):
+                return (_dv.strip()
+                        + f" /* lexical default &{nm} -- inlined from the "
+                        f"report's initial value; edit here to change */")
             _unresolved.append(nm)
             comment = (f"/* lexical ref &{nm} -- reimplement as dynamic "
                        f"WHERE/SELECT at deploy time */")
@@ -1921,29 +1938,20 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         item_names = [it.name for it in (query.items or [])]
         if item_names:
             cmd_text = _alias_select_items(cmd_text, item_names)
-        # EXPRESSION-CommandText fallback: when an unresolved lexical names a
-        # DECLARED parameter, splice it live instead of stubbing it. SSRS
-        # CommandText accepts an expression, which is the native equivalent
-        # of Oracle's lexical text-substitution — the never-match /
-        # NULL-degraded / invalid-FROM outcomes of stubbing disappear and
-        # the parameter actually drives the SQL at run time, exactly as it
-        # did in Oracle. Proven reconstructions (criteria_map) stay
-        # authoritative; only the leftovers splice. The pre-substitution
-        # text goes through the SAME static passes (semicolon strip,
-        # TO_DATE bind wrapping, select aliasing) before splicing so both
-        # forms carry identical SQL.
-        _declared_up = {(p or "").strip().upper()
-                        for p in (declared_params or [])}
-        if any(nm.upper() in _declared_up for nm in _unresolved):
-            _pre = re.sub(r"[;\s]+$", "", _lex_src)
-            if param_types:
-                _pre = _make_ssrs_oracle_compatible(_pre, param_types)
-            if item_names:
-                _pre = _alias_select_items(_pre, item_names)
-            _expr = _lexical_splice_expression(
-                _pre, _cmap, declared_params)
-            if _expr:
-                cmd_text = _expr
+        # CommandText MUST stay STATIC SQL — never an expression.
+        #
+        # An expression-valued CommandText ("=... & CStr(Parameters!X...)")
+        # was tried here (it splices runtime lexicals 1:1 like Oracle) and
+        # REVERTED after it broke the project's #1 invariant IN PRODUCTION:
+        # Report Builder cannot evaluate the expression at design time, so
+        # Refresh Fields pops "Define Query Parameters" and asks the END
+        # USER to type values for every bind — on every report. Runtime
+        # fidelity is worthless if the deploy workflow dies at design time.
+        # The static-text path (binds declared as QueryParameters bound to
+        # =Nothing-defaulted report parameters) is the ONLY form that
+        # refreshes prompt-free. Guarded by
+        # test_commandtext_is_never_an_expression — do not re-attempt
+        # without an end-to-end Report Builder design-time proof.
         _sub(q_el, "CommandText", cmd_text)
 
         # Oracle bind vars look like :P_FOO. Declare each one referenced in
@@ -2092,6 +2100,25 @@ def _formula_dataset_columns(report: ParsedReport) -> List[str]:
             continue
         seen.add(name.upper())
         names.append(name)
+    # COMPUTED-PLACEHOLDER PARAMETERS belong here too. The token resolver
+    # deliberately routes a parameter whose value a report trigger computes
+    # (":P_Complainant_Phone := <query result>") AWAY from Parameters! —
+    # its SSRS parameter value would be the dummy initialValue at best —
+    # and emits a Fields! ref expecting THIS stub dataset to declare it.
+    # It only declared CF_/CP_ formulas, so every such ref was DANGLING:
+    # invisible in staticized local renders, but a publish-time rejection
+    # on the real server ("refers to the field ... not in the dataset") —
+    # found by the all-artifacts three-surface audit on four production
+    # complaint/enforcement reports.
+    try:
+        _cph = _computed_placeholder_params(report)
+    except Exception:  # noqa: BLE001
+        _cph = set()
+    for p in (getattr(report, "parameters", None) or []):
+        pname = (getattr(p, "name", "") or "").strip()
+        if pname and pname.upper() in _cph and pname.upper() not in seen:
+            seen.add(pname.upper())
+            names.append(pname)
     return names
 
 
@@ -2179,6 +2206,31 @@ def _build_formula_dataset(report: ParsedReport,
     # generator stay happy. Per-column help (auto-translation note OR the
     # original PL/SQL body) lives in a comment manifest emitted BEFORE
     # the SELECT keyword.
+    # Trivial-RETURN inline SAFETY GATE (wild-corpus verified): a ``:bind``
+    # may only inline when it IS a declared report parameter — any other
+    # bind (an Oracle summary reference like :SumXPerReport) would ride
+    # into CommandText as a raw bind the server demands a value for = the
+    # "Define Query Parameters" prompt (#1-rule class). A bare token may
+    # only inline when it is an Oracle pseudo-column valid on DUAL — a
+    # real table column in a FROM DUAL select is an ORA-00904.
+    _param_aliases: set = set()
+    for _p in (getattr(report, "parameters", None) or []):
+        _pu = (getattr(_p, "name", "") or "").upper()
+        if _pu:
+            _param_aliases.add(_pu)
+            for _pref in ("P_", "PARM_"):
+                if _pu.startswith(_pref) and len(_pu) > len(_pref):
+                    _param_aliases.add(_pu[len(_pref):])
+    _DUAL_PSEUDO = {"SYSDATE", "SYSTIMESTAMP", "CURRENT_DATE",
+                    "CURRENT_TIMESTAMP", "LOCALTIMESTAMP", "USER", "UID",
+                    "SESSIONTIMEZONE", "DBTIMEZONE"}
+
+    def _stub_expr_safe(e: str) -> bool:
+        e = (e or "").strip()
+        if e.startswith(":"):
+            return e[1:].upper() in _param_aliases
+        return e.upper() in _DUAL_PSEUDO
+
     select_items: List[str] = []
     manifest_lines: List[str] = []
     auto_translated = 0
@@ -2187,6 +2239,8 @@ def _build_formula_dataset(report: ParsedReport,
         body = (getattr(f, "plsql_body", "") or "").strip() if f else ""
         col_safe = _safe(c)
         expr = _try_simple_formula_expression(body) if body else None
+        if expr is not None and not _stub_expr_safe(expr):
+            expr = None
         if expr is not None:
             select_items.append(f"{expr} AS {col_safe}")
             manifest_lines.append(
@@ -2240,6 +2294,30 @@ def _build_formula_dataset(report: ParsedReport,
     query = _sub(ds, "Query")
     _sub(query, "DataSourceName", "SharedDataSource")
     _sub(query, "CommandText", command_text)
+    # Declare a QueryParameter for every LIVE bind in the stub SELECT
+    # (comments stripped — the manifest quotes PL/SQL bodies full of binds,
+    # and a QueryParameter for a bind Oracle never sees is an ORA-01036).
+    # Same never-prompt convention as _build_dataset: declared param →
+    # =Parameters!X.Value, anything else → =Nothing (silent NULL).
+    _live_sql = re.sub(r"'[^']*'|--[^\n]*|/\*.*?\*/", " ", command_text,
+                       flags=re.S)
+    _live_binds = _detect_oracle_bind_vars(_live_sql)
+    if _live_binds:
+        _qp_root = _sub(query, "QueryParameters")
+        _canon = {}
+        for _p in (getattr(report, "parameters", None) or []):
+            _pn = getattr(_p, "name", "") or ""
+            if _pn:
+                _canon[_pn.upper()] = _pn
+                for _pref in ("P_", "PARM_"):
+                    if _pn.upper().startswith(_pref):
+                        _canon.setdefault(_pn.upper()[len(_pref):], _pn)
+        for _b in _live_binds:
+            _qp = _sub(_qp_root, "QueryParameter")
+            _qp.set("Name", f":{_b}")
+            _c = _canon.get(_b.upper())
+            _sub(_qp, "Value",
+                 f"=Parameters!{_safe(_c)}.Value" if _c else "=Nothing")
     fields = _sub(ds, "Fields")
     for c in cols:
         fld = _sub(fields, "Field")
@@ -2289,9 +2367,13 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
     criteria_map = _reconstruct_lexical_criteria(report)
 
     seen_ds_names: set = set()
+    _pdefs = {(getattr(p, "name", "") or ""): (getattr(p, "initial_value", "")
+                                               or "")
+              for p in (getattr(report, "parameters", None) or [])}
     for q in report.queries:
         ds = _build_dataset(q, declared, target_db=target_db,
-                            param_types=param_types, criteria_map=criteria_map)
+                            param_types=param_types, criteria_map=criteria_map,
+                            param_defaults=_pdefs)
         # SSRS rejects duplicate <DataSet Name>. Keep the first occurrence's
         # name; disambiguate later collisions (a scoped reference to an
         # ambiguous duplicate name resolves to the first anyway).
@@ -3794,6 +3876,32 @@ def _build_token_resolver(report: ParsedReport):
     # through value resolution instead (step 2c below).
     computed_ph = _computed_placeholder_params(report)
 
+    # Oracle GROUP-tree summaries (<summary> inside a query <group>):
+    # name -> (source column, function, owning query). A layout field whose
+    # source is such a summary is NOT a dataset column, so it previously fell
+    # to the =Nothing placeholder — blanking whole detail columns (an
+    # accreditation-history course table lost 5 of its 8 columns). Resolve
+    # structurally: through the Oracle <link> correlation when the owning
+    # query is a linked detail of the bound dataset (full multi-row
+    # fidelity), else as a dataset-scoped aggregate over the owning dataset.
+    group_summaries: dict = {}
+
+    def _collect_group_summaries(groups, qname):
+        for g in (groups or []):
+            for s in (getattr(g, "summaries", None) or []):
+                nm = (s.get("name") or "").strip()
+                src = (s.get("source") or "").strip()
+                if nm and src:
+                    group_summaries.setdefault(
+                        nm.upper(),
+                        (src, (s.get("function") or "").lower(), qname))
+            _collect_group_summaries(getattr(g, "children", None) or [],
+                                     qname)
+
+    for _gq_ in (report.queries or []):
+        _collect_group_summaries(getattr(_gq_, "groups", None) or [],
+                                 _gq_.name or "")
+
     def resolve(token: str, dataset_name: str = "", _depth: int = 0):
         if not token:
             return ("field_unverified", token, "empty token")
@@ -3849,6 +3957,31 @@ def _build_token_resolver(report: ParsedReport):
             return ("formula", "=Nothing",
                     f"computed placeholder {token!r}: per-row PL/SQL value "
                     f"not deterministically translatable")
+        # 2d) GROUP-tree summary of ANOTHER query (see group_summaries above).
+        #     Cross-dataset only: a summary of the bound dataset itself keeps
+        #     the existing formula/aggregate paths (group-scoped totals are
+        #     handled by the tablix machinery, not here).
+        if u in group_summaries and _depth == 0:
+            _gsrc, _gfn, _gq = group_summaries[u]
+            if _gq and _gq.upper() != (dataset_name or "").upper():
+                if _gfn in ("", "first", "last"):
+                    _lk = _lookup_for_child(_gsrc, _gq, dataset_name)
+                    if _lk:
+                        return ("formula", _lk,
+                                f"group summary {token!r} -> correlated "
+                                f"lookup over linked {_gq}")
+                _SSG = {"count": "Count", "sum": "Sum", "avg": "Avg",
+                        "average": "Avg", "min": "Min", "max": "Max",
+                        "stddev": "StDev", "variance": "Var",
+                        "first": "First", "last": "Last"}
+                _fn = _SSG.get(_gfn, "First")
+                _col = dataset_fields.get((_gq or "").upper(), {}) \
+                    .get(_gsrc.upper())
+                if _col:
+                    return ("formula",
+                            f'={_fn}(Fields!{_safe(_col)}.Value, '
+                            f'"{_safe(_gq)}")',
+                            f"group summary {token!r} -> {_fn}() over {_gq}")
         # 3) Formula match (Oracle CF_*/CP_*). SSRS has no native formula
         # construct, so we emit =Nothing here -- the user-visible PDF must
         # show NOTHING (not a literal "<X -- populate at deploy time>"
@@ -3890,6 +4023,28 @@ def _build_token_resolver(report: ParsedReport):
                             if _own else f'={_fn}(Fields!{_safe(_s)}.Value)')
                     return ("formula", expr,
                             f"Oracle summary {_aggfn}({_aggsrc}) -> {_fn}()")
+                # CROSS-DATASET report-scope summary: the agg source is a
+                # column of ANOTHER dataset (a summary-header stat table
+                # aggregates its detail queries) — resolve() above returned
+                # field_other_ds, so the pre-existing path fell to the
+                # =Nothing placeholder and the whole stat COLUMN went blank.
+                # With reset="report" Oracle computes over ALL child rows,
+                # which a dataset-scoped SSRS aggregate reproduces exactly.
+                # Group-scoped (reset=G_X) cross-dataset summaries stay on
+                # the honest placeholder — a dataset-wide value would be
+                # silently WRONG per group.
+                _own = _agg_owner.get(_aggsrc.upper())
+                _scope = (getattr(f, "agg_scope", "") or "").lower()
+                if (_own and _own.upper() != (dataset_name or "").upper()
+                        and _scope in ("", "report")):
+                    _col = dataset_fields.get(_own.upper(), {}) \
+                        .get(_aggsrc.upper())
+                    if _col:
+                        return ("formula",
+                                f'={_fn}(Fields!{_safe(_col)}.Value, '
+                                f'"{_safe(_own)}")',
+                                f"Oracle summary {_aggfn}({_aggsrc}) "
+                                f"reset=report -> {_fn}() over {_own}")
             canonical = getattr(f, "name", token) or token
             body_preview = (getattr(f, "plsql_body", "") or "").strip()
             body_preview = " ".join(body_preview.split())
@@ -4223,6 +4378,12 @@ def _field_value_for(
     src = raw.lstrip("&:")
     upper = src.upper()
     if upper == "CURRENTDATE" or upper == "CURRENT_DATE":
+        # Honor the field's Oracle formatMask (MM/DD/RRRR etc.) — the
+        # name-keyed <Format> post-pass can't reach a Globals! value.
+        _mask = (getattr(lf, "format_mask", "") or "").strip().upper()
+        _net = _oracle_mask_to_net(_mask) if _mask else ""
+        if _net:
+            return f'=Format(Globals!ExecutionTime, "{_net}")'
         return "=Globals!ExecutionTime"
     resolver = _build_token_resolver(report)
     kind, name, note = resolver(src, dataset_name)
@@ -4498,11 +4659,12 @@ def _oracle_number_to_net(m: str, fill_mode: bool = False) -> str:
 
 def _wrap_inline_masked_date_refs(root, report) -> None:
     """Wrap ``Fields!X.Value`` (or ``First(Fields!X.Value, "DS")``) with
-    ``Format(..., "<net>")`` wherever X carries a DATE formatMask and the
-    ref sits inside a CONCATENATION expression — the <Format> style can't
-    reach an inlined date, so it rendered the raw ToString. Refs already
-    inside a Format( stay untouched; non-date masks are ignored (numeric
-    inlines rarely concatenate, and Format on a string is a no-op)."""
+    ``Format(..., "<net>")`` wherever X carries a date OR NUMBER formatMask
+    and the ref sits inside a CONCATENATION expression — the <Format> style
+    can't reach an inlined value, so it rendered the raw ToString. Refs
+    already inside a Format( stay untouched. VB Format() falls back to the
+    value unchanged when it can't apply the style, so wrapping is null- and
+    string-safe."""
     masks = {}
     try:
         from ..fidelity import _walk_fields
@@ -4514,16 +4676,56 @@ def _wrap_inline_masked_date_refs(root, report) -> None:
         src = (getattr(f, "source", "") or "").strip()
         if not mask or not src:
             continue
-        if not any(tok in mask for tok in ("DD", "RRRR", "YYYY", "MON", "YY")):
-            continue
+        # Dates AND numbers: the date-only gate assumed dollar amounts
+        # never concatenate — a production grant letter does exactly that
+        # ("... in the amount of " & Fields!GRANT_AMOUNT.Value & ...), so
+        # its -$NNN,NNN,NN0.00 mask was dropped in every composite line.
+        # VB Format() on a string value is a no-op, so wrapping is safe.
         net = _oracle_mask_to_net(mask)
         if net:
             masks[_safe(src).upper()] = net
     if not masks:
         return
     pat = re.compile(
-        r'(First\(Fields!([A-Za-z0-9_]+)\.Value,\s*"[^"]+"\)'
+        r'((?:First|Last|Sum|Avg|Min|Max)'
+        r'\(Fields!([A-Za-z0-9_]+)\.Value,\s*"[^"]+"\)'
         r'|Fields!([A-Za-z0-9_]+)\.Value)')
+
+    def _display_position(t: str, s: int, e: int) -> bool:
+        """True only when the ref at t[s:e] is in DISPLAY position (a concat
+        operand / IIf result branch), never computational position. Wrapping
+        a ref that feeds a comparison or arithmetic (IIf(Fields!X.Value < 0)
+        drives the grant letter's balance wording) would compare a formatted
+        STRING to a number — a silent semantics break."""
+        i = e
+        while i < len(t) and t[i] in " )":
+            i += 1
+        if i < len(t) and t[i] in "<>=+-*/\\^":
+            return False
+        if t[i:i + 3].lower() == "mod" and not (
+                i + 3 < len(t) and (t[i + 3].isalnum() or t[i + 3] == "_")):
+            return False
+        j = s - 1
+        while j >= 0:
+            if t[j] == " ":
+                j -= 1
+                continue
+            if t[j] in "<>=+*/\\^-":
+                return False
+            if t[j] == "(":
+                # grouping paren is fine; a direct FUNCTION call around the
+                # ref (Sum(, Trim(, Abs( ...) would receive a string instead
+                # of the typed value — skip those too.
+                k = j - 1
+                while k >= 0 and t[k] == " ":
+                    k -= 1
+                if k >= 0 and (t[k].isalnum() or t[k] == "_"):
+                    return False
+                j = k
+                continue
+            return True          # '&', ',', '"', or expression start
+        return True
+
     for v in root.iter(_q("Value")):
         t = v.text or ""
         if not t.startswith("=") or "&" not in t or "Fields!" not in t:
@@ -4535,7 +4737,8 @@ def _wrap_inline_masked_date_refs(root, report) -> None:
             nm = (m.group(2) or m.group(3) or "").upper()
             net = masks.get(nm)
             pre = t[max(0, m.start() - 14):m.start()]
-            if net and "Format(" not in pre:
+            if net and "Format(" not in pre \
+                    and _display_position(t, m.start(), m.end()):
                 out.append(t[last:m.start()])
                 out.append(f'Format({m.group(1)}, "{net}")')
                 changed = True
@@ -4620,12 +4823,56 @@ def _format_index(report) -> dict:
             walk(getattr(g, "children", None) or [])
 
     walk(getattr(report, "layout", None) or [])
+    # A layout field may bind a SUMMARY (name CS_X/C_X, source column X);
+    # the emitted expression uses the UNDERLYING column (First(Fields!X...,
+    # "Q") for a group summary, Sum(Fields!X..., "Q") for a report-level
+    # one), so alias the mask onto that column name too — otherwise the
+    # summary-name key never matches any textbox.
+    if idx:
+        for q in (getattr(report, "queries", None) or []):
+            stack = list(getattr(q, "groups", None) or [])
+            while stack:
+                g = stack.pop()
+                for s in (getattr(g, "summaries", None) or []):
+                    nm = (s.get("name") or "").strip().upper()
+                    src = (s.get("source") or "").strip().upper()
+                    if nm in idx and src:
+                        idx.setdefault(src, idx[nm])
+                stack.extend(getattr(g, "children", None) or [])
+        for f in (getattr(report, "formulas", None) or []):
+            nm = (getattr(f, "name", "") or "").strip().upper()
+            src = (getattr(f, "agg_source", "") or "").strip().upper()
+            if nm in idx and src:
+                idx.setdefault(src, idx[nm])
     return idx
 
 
+def _stamp_format_on_textbox(tb, net) -> None:
+    """Set <Format> on the textbox's first TextRun Style when absent —
+    shared by the emit sites whose value expressions the name-keyed
+    post-pass can't match (compiled summaries, computed placeholders)."""
+    run = next(iter(tb.iter(_q("TextRun"))), None)
+    if run is None:
+        return
+    style = run.find(_q("Style"))
+    if style is None:
+        style = _sub(run, "Style")
+    if style.find(_q("Format")) is None:
+        _sub(style, "Format", net)
+
+
 _PURE_FIELD_RE = re.compile(
-    r'^\s*=\s*(?:First\(\s*)?Fields!([A-Za-z0-9_]+)\.Value'
+    r'^\s*=\s*(?:(?:First|Last|Sum|Avg|Min|Max|Count|CountDistinct)'
+    r'\(\s*)?Fields!([A-Za-z0-9_]+)\.Value'
     r'(?:\s*,\s*"[^"]*")?\s*\)?\s*$'
+)
+
+# A pure cross-dataset Lookup: the DISPLAYED value is the 3rd argument
+# (result column) — key the <Format> off that. Join(LookupSet(...)) is a
+# joined STRING, so it stays out (Format would be a no-op anyway).
+_PURE_LOOKUP_RE = re.compile(
+    r'^\s*=\s*Lookup\((?:[^()]|\([^()]*\))*?,\s*'
+    r'Fields!([A-Za-z0-9_]+)\.Value,\s*"[^"]*"\)\s*$'
 )
 
 
@@ -4646,6 +4893,8 @@ def _apply_field_formats(root, report) -> None:
         if val_el is None or not (val_el.text or "").strip():
             continue
         mobj = _PURE_FIELD_RE.match(val_el.text)
+        if not mobj:
+            mobj = _PURE_LOOKUP_RE.match(val_el.text)
         if not mobj:
             continue
         entry = idx.get(mobj.group(1).upper())
@@ -4706,6 +4955,28 @@ def _repair_dangling_field_refs(root, report) -> None:
         nm = rp.get("Name") or ""
         if nm and nm.upper() not in _cph:
             params[nm.upper()] = nm
+    # Oracle <summary> columns re-implement as SSRS aggregates (so they are
+    # deliberately NOT stub-dataset fields) — but a secondary builder that
+    # binds the summary NAME verbatim leaves a dangling Fields! ref (the
+    # accreditation report's C_* first-of-column summaries: five publish
+    # rejections the staticized render masked). Resolve the NAME to its
+    # aggregate re-implementation instead of Nothing.
+    _SSMAP = {"count": "Count", "sum": "Sum", "avg": "Avg", "average": "Avg",
+              "min": "Min", "max": "Max", "first": "First", "last": "Last",
+              "stddev": "StDev", "variance": "Var"}
+    _col_owner: dict = {}
+    for _q2 in (getattr(report, "queries", None) or []):
+        for _it in (getattr(_q2, "items", None) or []):
+            if getattr(_it, "name", ""):
+                _col_owner.setdefault(_it.name.upper(), _q2.name)
+    summary_expr: dict = {}
+    for _f in (getattr(report, "formulas", None) or []):
+        _fn = _SSMAP.get((getattr(_f, "agg_function", "") or "").lower())
+        _src = (getattr(_f, "agg_source", "") or "").strip()
+        _own = _col_owner.get(_src.upper())
+        if _fn and _src and _own and getattr(_f, "name", ""):
+            summary_expr[_f.name.upper()] = \
+                f'{_fn}(Fields!{_safe(_src)}.Value, "{_safe(_own)}")'
     parent = {c: p for p in root.iter() for c in p}
 
     def scope_of(el) -> str:
@@ -4769,6 +5040,8 @@ def _repair_dangling_field_refs(root, report) -> None:
                 return f"Parameters!{params[up]}.Value"
             if ("P_" + up) in params:
                 return f"Parameters!{params['P_' + up]}.Value"
+            if up in summary_expr:
+                return summary_expr[up]
             if up in _ORACLE_PAGE_BUILTINS:
                 return "Nothing"
             for d, fs in ds_fields.items():
@@ -7749,6 +8022,13 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
                        text_align="Right", vertical_align="Middle",
                        border_color="#ffffff", padding="2pt", can_grow=False)
         _t = fri[-1]
+        # A footer value is often a COMPILED summary (=Sum(IIf(...))) the
+        # name-keyed Format post-pass can't match — stamp the layout
+        # field's mask here, keyed by the footer's source name.
+        if vk == "field":
+            _fe = _format_index(report).get((vval or "").upper())
+            if _fe and _fe[0]:
+                _stamp_format_on_textbox(_t, _fe[0])
         _sub(_t, "Top", f"{top:.2f}in")
         _sub(_t, "Left", f"{max(0.02, vx):.2f}in")
         _sub(_t, "Width", f"{max(0.6, BODY_W - vx):.2f}in")
@@ -8835,9 +9115,12 @@ def _emit_field_textbox(
     # real text that merely mentions a page token (e.g. "See page &<PageNumber> for
     # the appendix") from being dropped.
     if kind == "text" and re.search(
-        r"&<\s*(?:total)?(?:page|panel|physical|logical)", text, re.I
+        r"&<?\s*(?:total)?(?:page|panel|physical|logical)", text, re.I
     ):
-        _resid = re.sub(r"&<[^>]*>", "", text)
+        # Oracle writes page tokens both bracketed (&<PageNumber>) and bare
+        # (&PhysicalPageNumber); the bare form used to slip through and
+        # render as "Page  of " once the builtins repaired to Nothing.
+        _resid = re.sub(r"&<[^>]*>|&\w+", "", text)
         _resid = re.sub(r"(?i)\b(?:page|of)\b", "", _resid)
         _resid = re.sub(r"[\s/\-,.:#&]+", "", _resid)
         if not _resid:
@@ -9187,6 +9470,17 @@ def _emit_field_textbox(
     _cf = getattr(lf, "conditional_formats", None)
     if _cf:
         tb.set("data-cf", str(_cf_register(report, _cf)))
+    # The field's Oracle formatMask travels to the emitted textbox no matter
+    # HOW the value resolved (pure ref, aggregate, computed placeholder,
+    # cross-dataset lookup, inline-translated formula) — the name-keyed
+    # post-pass only reaches pure refs, so a computed stat percent was
+    # printing raw. <Format> on a string value is a no-op, so this is
+    # type-safe at every binding shape.
+    _msk = (getattr(lf, "format_mask", "") or "").strip()
+    if kind == "field" and _msk and value_expr.startswith("="):
+        _net = _oracle_mask_to_net(_msk)
+        if _net:
+            _stamp_format_on_textbox(tb, _net)
     return (True, rel_top + place_h)
 
 
@@ -12763,6 +13057,217 @@ def _ensure_layout_images_emitted(root: ET.Element, report) -> None:
                     body_h_el.text = f"{_need:.2f}in"
 
 
+def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
+    """Render the per-category BREAKDOWN frames the main body builders drop.
+
+    The Oracle idiom (production ASBINSPC truth, general shape): the report
+    ends with small repeating frames bound to SECONDARY aggregate datasets —
+    one row per category ("&INSPECTOR Inspections:  <count>", "&VISIT_TYPE
+    Visits:  <count>") — followed by grand-total lines. The tabular/stacked
+    body builders render the MAIN dataset's table and skip every other
+    repeating frame, so the printed breakdown vanished and only the two
+    fabricated grand totals survived ("the last page is definitely wrong").
+
+    For each section_main repeating frame whose group belongs to a dataset
+    that no Tablix renders, emit a one-column tablix with a details group
+    over that dataset; each row reproduces the frame's own members at their
+    relative geometry (label boilerplate resolved via
+    _resolve_text_expression in that dataset's scope, fields as plain
+    refs). Stacked below the body, before the grand totals. Purely
+    structural — frame + dataset driven, nothing report-specific."""
+    body = root.find(_q("Body"))
+    if body is None:
+        return
+    # PER-RECORD documents (letters/certificates — the Tablix_Record
+    # container) render their secondary frames INSIDE each record via the
+    # per-record frame walker; appending them again below the body both
+    # duplicates content and blows the one-record page-height model (the
+    # Greek letters spilled alternating blank pages: body 63in vs page
+    # 45in). This pass is for the TABULAR family, whose builders render
+    # only the main dataset's table.
+    for t in root.iter(_q("Tablix")):
+        if (t.get("Name") or "").startswith("Tablix_Record"):
+            return
+    rendered_ds = {t.findtext(_q("DataSetName")) or ""
+                   for t in root.iter(_q("Tablix"))}
+    declared_ds = {d.get("Name") or "" for d in root.iter(_q("DataSet"))}
+
+    group_owner: dict = {}
+    for q in (getattr(report, "queries", None) or []):
+        stack = list(getattr(q, "groups", None) or [])
+        while stack:
+            g = stack.pop()
+            if getattr(g, "name", ""):
+                group_owner[g.name.upper()] = q.name
+            stack.extend(getattr(g, "children", None) or [])
+
+    todo = []
+
+    def walk(g):
+        kind = (getattr(g, "kind", "") or "").lower()
+        if kind == "repeating_frame":
+            src = (getattr(g, "source_query", "") or "").upper()
+            ds = group_owner.get(src, "")
+            if (ds and _safe(ds) not in rendered_ds and _safe(ds) in declared_ds
+                    and int(getattr(g, "max_records_per_page", 0) or 0) != 1
+                    and any((f.kind or "") == "field"
+                            for f in (g.fields or []))):
+                todo.append((g, _safe(ds)))
+        for c in (getattr(g, "children", None) or []):
+            walk(c)
+
+    for lg in (getattr(report, "layout", None) or []):
+        if getattr(lg, "kind", "") == "section_main":
+            walk(lg)
+    if not todo:
+        return
+
+    ri = body.find(_q("ReportItems"))
+    if ri is None:
+        ri = _sub(body, "ReportItems")
+    body_h_el = body.find(_q("Height"))
+    try:
+        y = float((body_h_el.text or "0").replace("in", "")) + 0.15 \
+            if body_h_el is not None else 0.15
+    except ValueError:
+        y = 0.15
+
+    # A breakdown frame's field member may name a SUMMARY column (Oracle
+    # <summary first(col)>) rather than a dataset column — emitted verbatim
+    # it is a dangling ref the repair nets never see (this pass runs after
+    # them). Resolve member sources here: dataset column -> plain ref;
+    # summary -> its aggregate re-implementation; anything else -> skip.
+    _SSM = {"count": "Count", "sum": "Sum", "avg": "Avg", "average": "Avg",
+            "min": "Min", "max": "Max", "first": "First", "last": "Last"}
+    _col_owner: dict = {}
+    for _q2 in (getattr(report, "queries", None) or []):
+        for _it in (getattr(_q2, "items", None) or []):
+            if getattr(_it, "name", ""):
+                _col_owner.setdefault(_it.name.upper(), _q2.name)
+    _summ: dict = {}
+    for _f in (getattr(report, "formulas", None) or []):
+        _fn = _SSM.get((getattr(_f, "agg_function", "") or "").lower())
+        _src = (getattr(_f, "agg_source", "") or "").strip()
+        if _fn and _src and getattr(_f, "name", "") \
+                and _src.upper() in _col_owner:
+            _summ[_f.name.upper()] = (_fn, _src, _col_owner[_src.upper()])
+
+    # Field refs must use the dataset's EMITTED <Field Name> — the field
+    # namer applies CLS + uniqueness rules (a non-ASCII column becomes
+    # Col<n>, never the raw _safe() of the source, which collapses Greek
+    # names to '___' and dangles). Map DataField -> Name from the RDL
+    # itself so both naming paths can never disagree again.
+    _ds_field_name: dict = {}
+    for _dsel in root.iter(_q("DataSet")):
+        _dn = _dsel.get("Name") or ""
+        _m = _ds_field_name.setdefault(_dn, {})
+        for _fe in _dsel.iter(_q("Field")):
+            _df = (_fe.findtext(_q("DataField")) or _fe.get("Name") or "")
+            if _df:
+                _m[_df.upper()] = _fe.get("Name")
+
+    def _member_value(f, ds):
+        src = (getattr(f, "source", "") or "").strip()
+        if not src:
+            return None
+        fmap = _ds_field_name.get(ds, {})
+        hit = fmap.get(src.upper())
+        if hit:
+            return f"=Fields!{hit}.Value"
+        s = _summ.get(src.upper())
+        if s:
+            _fn, _sc, _own = s
+            _ohit = _ds_field_name.get(_safe(_own), {}).get(_sc.upper())
+            if _ohit:
+                return f'={_fn}(Fields!{_ohit}.Value, "{_safe(_own)}")'
+        return None
+
+    for bi, (frm, ds) in enumerate(todo):
+        fx = float(getattr(frm, "x", 0) or 0)
+        row_h = max(0.18, float(getattr(frm, "height", 0) or 0.19))
+        members = [f for f in (frm.fields or [])
+                   if (f.kind or "") in ("field", "text")]
+        if not members:
+            continue
+        right = max(float(f.x or 0) + float(f.width or 0) for f in members)
+        width = max(1.0, right - fx + 0.05)
+        # Never exceed the body's printable width — a breakdown tablix
+        # wider than the report Width spills a blank right-half page after
+        # every real page (the fire-54 horizontal-overflow signature,
+        # re-hit on a 9.8in-wide Greek letter's breakdown block).
+        try:
+            _rw = float((root.findtext(_q("Width")) or "7.5in")
+                        .replace("in", ""))
+        except ValueError:
+            _rw = 7.5
+        fx = min(fx, max(0.0, _rw - 1.0))
+        width = min(width, _rw - fx - 0.05)
+
+        tablix = _sub(ri, "Tablix")
+        tablix.set("Name", f"Tablix_Breakdown_{bi}")
+        tb = _sub(tablix, "TablixBody")
+        cols = _sub(tb, "TablixColumns")
+        _sub(_sub(cols, "TablixColumn"), "Width", f"{width:.2f}in")
+        rows = _sub(tb, "TablixRows")
+        trow = _sub(rows, "TablixRow")
+        _sub(trow, "Height", f"{row_h:.2f}in")
+        cell = _sub(_sub(_sub(trow, "TablixCells"), "TablixCell"),
+                    "CellContents")
+        rect = _sub(cell, "Rectangle")
+        rect.set("Name", f"Bd_Row_{bi}")
+        _sub(_sub(rect, "Style"), "Border")
+        rri = _sub(rect, "ReportItems")
+        for mi, f in enumerate(sorted(members, key=lambda m: (m.y or 0,
+                                                              m.x or 0))):
+            if (f.kind or "") == "text":
+                val, _is_expr = _resolve_text_expression(
+                    f.text or "", report, dataset_name=ds)
+                if not (val or "").strip():
+                    continue
+                value = val
+            else:
+                value = _member_value(f, ds)
+                if value is None:
+                    continue
+            _build_textbox(
+                rri, f"Bd_{bi}_{mi}", value,
+                bold=bool(getattr(f, "bold", False)),
+                font_size=f"{int(getattr(f, 'font_size', 0) or 9)}pt",
+                fg="#111111",
+                text_align=("Right" if (getattr(f, "align", "") or "")
+                            .lower() in ("end", "right") else "Left"),
+                vertical_align="Middle", border_color="#ffffff",
+                padding="1pt", can_grow=False)
+            tbx = rri[-1]
+            _sub(tbx, "Top", "0.00in")
+            _sub(tbx, "Left", f"{max(0.0, float(f.x or 0) - fx):.2f}in")
+            _sub(tbx, "Width", f"{max(0.3, float(f.width or 0.5)):.2f}in")
+            _sub(tbx, "Height", f"{min(row_h, 0.22):.2f}in")
+        # Every member may decline (unmappable sources, empty labels) —
+        # an EMPTY <ReportItems> is schema-invalid ("has incomplete
+        # content") and kills the whole report at load. Emit nothing
+        # rather than an empty row.
+        if len(rri) == 0:
+            ri.remove(tablix)
+            continue
+        hier = _sub(tablix, "TablixColumnHierarchy")
+        _sub(_sub(hier, "TablixMembers"), "TablixMember")
+        rh = _sub(tablix, "TablixRowHierarchy")
+        rm = _sub(_sub(rh, "TablixMembers"), "TablixMember")
+        grp = _sub(rm, "Group")
+        grp.set("Name", f"Details_Breakdown_{bi}")
+        _sub(tablix, "DataSetName", ds)
+        _sub(tablix, "Top", f"{y:.2f}in")
+        _sub(tablix, "Left", f"{max(0.05, fx):.2f}in")
+        _sub(tablix, "Height", f"{row_h:.2f}in")
+        _sub(tablix, "Width", f"{width:.2f}in")
+        _sub(_sub(tablix, "Style"), "Border")
+        y += row_h + 0.10
+
+    if body_h_el is not None:
+        body_h_el.text = f"{y + 0.05:.2f}in"
+
+
 def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
     """Oracle report-level <summary compute="report"> GRAND TOTALS are placed in
     the layout as fields bound to the summary name, but flat / multi-section body
@@ -12896,6 +13401,40 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
              else f'={fn}(Fields!{_safe(src)}.Value)')
         return (e, _chained, fn, src)
 
+    # The layout's OWN wording beats a name-derived label: Oracle prints
+    # "Total Inspections:" (the boilerplate text sitting beside the summary
+    # field in the trailer frame), while the summary NAME yields the
+    # fabricated "Insp Total". Pair each summary-bound layout field with
+    # the nearest same-band label text to its left that ends with ':'.
+    _layout_label: dict = {}
+
+    def _pair_labels(g):
+        flds = list(getattr(g, "fields", None) or [])
+        texts = [t for t in flds
+                 if (getattr(t, "kind", "") or "") == "text"
+                 and (getattr(t, "text", "") or "").strip().endswith(":")]
+        for f in flds:
+            srcu = (getattr(f, "source", "") or "").upper()
+            if not srcu or (getattr(f, "kind", "") or "") != "field":
+                continue
+            best = None
+            fy = float(getattr(f, "y", 0) or 0)
+            fx = float(getattr(f, "x", 0) or 0)
+            for t in texts:
+                ty = float(getattr(t, "y", 0) or 0)
+                tx = float(getattr(t, "x", 0) or 0)
+                if abs(ty - fy) <= 0.1 and tx < fx:
+                    if best is None or tx > float(getattr(best, "x", 0) or 0):
+                        best = t
+            if best is not None:
+                _layout_label.setdefault(
+                    srcu, (best.text or "").strip().rstrip(":").strip())
+        for c in (getattr(g, "children", None) or []):
+            _pair_labels(c)
+
+    for _lg in (getattr(report, "layout", None) or []):
+        _pair_labels(_lg)
+
     existing = {(v.text or "") for v in root.iter(_q("Value"))}
     # De-dup grand totals that already render (e.g. resolved via a layout &token).
     todo = []
@@ -12905,6 +13444,10 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
             continue
         e, _chained, _fn, _src = r
         if e in existing or e in [t[1] for t in todo]:
+            continue
+        _ll = _layout_label.get((f.name or "").upper())
+        if _ll:
+            todo.append((_ll, e))
             continue
         if _chained:
             # The raw name is an auto-generated summary-of-summary blob
@@ -13877,6 +14420,7 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # (multi-section / flat) -> emit as labeled dataset-scoped aggregates below
     # the content. After the scope/repair passes so their explicit dataset scope
     # is preserved.
+    _emit_secondary_breakdown_tables(root, report)
     _ensure_summary_totals_emitted(root, report)
     # Cross-query GROUP subtotals (placed, direct-child, link-resolvable) -> a
     # per-key master-bound subtotal Tablix using LookupSet over Oracle's exact

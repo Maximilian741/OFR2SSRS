@@ -23,6 +23,203 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "backend"))
 
 
+_TOTALS_XML = (
+    '<?xml version="1.0"?><report name="TOTALS_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<dataSource name="Q_Main"><select><![CDATA[select site_nm, visit_dt '
+    'from visits]]></select>'
+    '<group name="G_Main"><dataItem name="SITE_NM" datatype="vchar2"/>'
+    '<dataItem name="VISIT_DT" datatype="date"/></group></dataSource>'
+    '<dataSource name="Q_Insp"><select><![CDATA[select insp_nm, n_visits '
+    'from per_insp]]></select>'
+    '<group name="G_Insp"><dataItem name="INSP_NM" datatype="vchar2"/>'
+    '<dataItem name="N_VISITS" datatype="number"/></group></dataSource>'
+    '<summary name="CS_Grand" function="sum" source="N_VISITS" '
+    'reset="report" compute="report"/>'
+    '</data>'
+    '<layout><section name="main">'
+    '<frame name="M_Body"><geometryInfo x="0" y="0" width="8" height="4"/>'
+    '<repeatingFrame name="R_Main" source="G_Main" printDirection="down">'
+    '<geometryInfo x="0.2" y="0.2" width="7.5" height="0.2"/>'
+    '<field name="F_S" source="SITE_NM"><geometryInfo x="0.2" y="0.2" '
+    'width="3" height="0.2"/></field>'
+    '<field name="F_D" source="VISIT_DT"><geometryInfo x="3.4" y="0.2" '
+    'width="1.4" height="0.2"/></field></repeatingFrame>'
+    '<frame name="M_Totals"><geometryInfo x="0.2" y="1.2" width="7.5" '
+    'height="0.9"/>'
+    '<text name="B_GRAND"><geometryInfo x="0.3" y="1.75" width="1.8" '
+    'height="0.19"/><textSegment><font face="Arial" size="9"/>'
+    '<string><![CDATA[Total Site Visits:]]></string></textSegment></text>'
+    '<field name="F_GRAND" source="CS_Grand"><geometryInfo x="2.2" '
+    'y="1.75" width="0.9" height="0.19"/></field>'
+    '<repeatingFrame name="R_Insp" source="G_Insp" printDirection="down">'
+    '<geometryInfo x="0.3" y="1.3" width="4" height="0.19"/>'
+    '<text name="B_I"><geometryInfo x="0.3" y="1.3" width="2.4" '
+    'height="0.19"/><textSegment><font face="Arial" size="8"/>'
+    '<string><![CDATA[&INSP_NM Visits:]]></string></textSegment></text>'
+    '<field name="F_N" source="N_VISITS" alignment="end"><geometryInfo '
+    'x="2.9" y="1.3" width="0.9" height="0.19"/></field>'
+    '</repeatingFrame></frame></frame></section></layout></report>'
+).encode()
+
+
+def test_report_end_totals_reach_mockup_and_rdl_wording():
+    """The report-end breakdown/totals block must reach BOTH surfaces with
+    the layout's OWN wording: the mockup appends the secondary-frame rows +
+    the parent frame's total label (truth-comparator finding: they were
+    absent), and the RDL grand total uses the trailer label TEXT
+    ('Total Site Visits:'), never a name-derived fabrication."""
+    from converter import convert
+
+    out = convert(_TOTALS_XML)
+    mock, rdl = out["mockup_html"], out["rdl_xml"]
+    assert "Visits:" in mock, "breakdown rows missing from mockup"
+    assert "Total Site Visits:" in mock, "parent total label missing"
+    assert "Total Site Visits:" in rdl, (
+        "RDL grand-total label must use the layout's trailer wording")
+
+
+def test_trigger_param_label_structure_reconstructs():
+    """A computed parameter whose trigger builds a LABELED value across
+    conditional branches (:P_X := 'Latitude: '||a ... 'Longitude: '||b)
+    renders its real label structure in the mockup — including when the
+    boilerplate references the FIELD OBJECT name (&F_P_X)."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.preview.html_mockup import (
+        _static_render_trigger_param, _doc_resolve_tokens)
+
+    xml = (
+        '<?xml version="1.0"?><report name="TP" DTDVersion="9.0.2.0.10">'
+        '<data><userParameter name="P_Loc" datatype="character"/>'
+        '<dataSource name="Q_1"><select><![CDATA[select a from t]]>'
+        '</select></dataSource></data>'
+        '<programUnits><function name="beforerep"><textSource><![CDATA['
+        'function BeforeReport return boolean is begin\n'
+        "  :P_Loc := NULL;\n"
+        "  IF x IS NOT NULL THEN :P_Loc := 'Latitude: '||TO_CHAR(x); "
+        "END IF;\n"
+        "  IF y IS NOT NULL THEN :P_Loc := :P_Loc||' Longitude: '"
+        "||TO_CHAR(y); END IF;\n"
+        '  return (TRUE);\nend;]]></textSource></function>'
+        '</programUnits></report>'
+    ).encode()
+    rep = parse_oracle_xml(xml)
+    t = _static_render_trigger_param(rep, "P_LOC", 0)
+    assert t and "Latitude:" in t and "Longitude:" in t
+    resolved = _doc_resolve_tokens("Site: &F_P_Loc", rep)
+    assert "Latitude:" in resolved, "F_-wrapped token must unwrap to param"
+
+
+def _decollide_elems(elems):
+    from converter.preview.html_mockup import _decollide
+    return _decollide(elems)
+
+
+def test_decollide_full_width_rows_are_barriers():
+    """A page-wide element cannot share a band with ANY column — the
+    same-left-only rule let a full-width 'Label: value' row slide over a
+    right-column row once the columns' accumulated pushes drifted (the
+    complaint form's violator row landing 2px from the site row)."""
+    wide = {"kind": "text", "text": "FULL WIDTH ROW", "x": 0.0, "y": 1.0,
+            "w": 8.5, "h": 0.15, "size": 9}
+    col = {"kind": "text", "text": "right column", "x": 3.2, "y": 1.05,
+           "w": 2.0, "h": 0.15, "size": 9}
+    _decollide_elems([wide, col])
+    assert col["y"] >= wide["y"] + 0.14, (
+        "column row must be pushed below the full-width barrier")
+
+
+def test_decollide_lateral_clamp_is_bidirectional():
+    """The left box must clip at its right-hand neighbour's start even when
+    the neighbour sorts EARLIER (smaller y) — the permit signature box sat
+    at a slightly smaller y than the date label overlapping it."""
+    left = {"kind": "text", "text": "Expiration Date:\n03/12/2026",
+            "x": 2.7, "y": 1.02, "w": 2.5, "h": 0.30, "size": 11}
+    right = {"kind": "text", "text": "neighbour", "x": 4.6, "y": 1.00,
+             "w": 1.5, "h": 0.15, "size": 11}
+    _decollide_elems([right, left])
+    assert left["x"] + left["w"] <= right["x"], (
+        "left box must clip before its right-hand neighbour")
+
+
+def test_decollide_images_yield_only_small_edges():
+    """An image placeholder nudging a few px into a label clips back, but a
+    genuinely-overlapping seal graphic is never distorted (>25% overlap
+    leaves the image untouched)."""
+    nudge = {"kind": "image", "source": "SIG", "x": 2.0, "y": 1.0,
+             "w": 2.0, "h": 0.4, "size": 11}
+    label = {"kind": "text", "text": "Effective Date:", "x": 3.9, "y": 1.05,
+             "w": 1.5, "h": 0.15, "size": 11}
+    _decollide_elems([nudge, label])
+    assert nudge["w"] <= 1.9, "small edge intrusion must clip the image"
+
+    seal = {"kind": "image", "source": "SEAL", "x": 2.0, "y": 3.0,
+            "w": 2.0, "h": 2.0, "size": 11}
+    caption = {"kind": "text", "text": "licensed to operate", "x": 2.5,
+               "y": 3.5, "w": 1.5, "h": 0.15, "size": 11}
+    _decollide_elems([seal, caption])
+    assert seal["w"] == 2.0, "a deeply-overlapping seal must NOT be resized"
+
+
+def test_secondary_breakdown_frames_render_as_tables():
+    """Production truth (inspections report): the report ends with small
+    repeating frames bound to SECONDARY aggregate datasets — one row per
+    category ("&NAME Inspections:  <count>") — followed by grand totals.
+    The body builders render only the MAIN dataset's table, so the printed
+    breakdown vanished ("the last page is definitely wrong").
+    _emit_secondary_breakdown_tables must render each dropped
+    secondary-dataset repeating frame as a details tablix over its dataset,
+    with the label boilerplate resolved in THAT dataset's scope."""
+    import re
+    from converter import convert
+
+    xml = (
+        '<?xml version="1.0"?><report name="BRKDN" DTDVersion="9.0.2.0.10">'
+        '<data>'
+        '<dataSource name="Q_Main"><select><![CDATA[select site_nm, insp_dt '
+        'from visits]]></select>'
+        '<group name="G_Main"><dataItem name="SITE_NM" datatype="vchar2"/>'
+        '<dataItem name="INSP_DT" datatype="date"/></group></dataSource>'
+        '<dataSource name="Q_ByWorker"><select><![CDATA[select worker_nm, '
+        'cnt from per_worker]]></select>'
+        '<group name="G_ByWorker"><dataItem name="WORKER_NM" '
+        'datatype="vchar2"/><dataItem name="CNT" datatype="number"/>'
+        '</group></dataSource></data>'
+        '<layout><section name="main">'
+        '<frame name="M_Body"><geometryInfo x="0" y="0" width="8" '
+        'height="3"/>'
+        '<repeatingFrame name="R_Main" source="G_Main" '
+        'printDirection="down"><geometryInfo x="0.2" y="0.2" width="7.5" '
+        'height="0.2"/>'
+        '<field name="F_S" source="SITE_NM"><geometryInfo x="0.2" y="0.2" '
+        'width="3" height="0.2"/></field>'
+        '<field name="F_D" source="INSP_DT"><geometryInfo x="3.4" y="0.2" '
+        'width="1.4" height="0.2"/></field></repeatingFrame>'
+        '<frame name="M_Totals"><geometryInfo x="0.2" y="1.2" width="7.5" '
+        'height="0.8"/>'
+        '<repeatingFrame name="R_Worker" source="G_ByWorker" '
+        'printDirection="down"><geometryInfo x="0.3" y="1.3" width="4" '
+        'height="0.19"/>'
+        '<text name="B_W"><geometryInfo x="0.3" y="1.3" width="2.4" '
+        'height="0.19"/><textSegment><font face="Arial" size="8"/>'
+        '<string><![CDATA[&WORKER_NM Inspections:]]></string>'
+        '</textSegment></text>'
+        '<field name="F_C" source="CNT" alignment="end"><geometryInfo '
+        'x="2.9" y="1.3" width="0.9" height="0.19"/></field>'
+        '</repeatingFrame></frame></frame></section></layout></report>'
+    ).encode()
+    rdl = convert(xml)["rdl_xml"]
+    m = re.search(r'<Tablix Name="Tablix_Breakdown_0"(.*?)</Tablix>', rdl,
+                  re.S)
+    assert m, "secondary-dataset repeating frame was not rendered"
+    body = m.group(1)
+    assert "<DataSetName>Q_ByWorker</DataSetName>" in body
+    assert "Fields!CNT.Value" in body
+    # the label boilerplate resolves its &token in the SECONDARY scope
+    assert "Fields!WORKER_NM.Value" in body
+    assert "Inspections:" in body
+
+
 def test_link_key_pairs_prefers_parsed_link_over_bind_scan():
     from converter.generators.rdl import _link_key_pairs
 
@@ -1082,53 +1279,53 @@ _SPLICE_XML = (
 ).encode()
 
 
-def test_unresolved_declared_lexical_becomes_live_splice():
-    """A runtime lexical the reconstruction passes can't prove used to be
-    NULL-stubbed — an IN operand that can NEVER match (zero rows), an
-    invalid FROM, a NULL-degraded expression. SSRS CommandText accepts an
-    EXPRESSION, the native equivalent of Oracle's lexical substitution:
-    when the lexical names a DECLARED parameter, the query must be emitted
-    as ="..." & CStr(Parameters!X.Value & "") & "..." so the parameter
-    actually drives the SQL at run time, exactly as in Oracle."""
+def test_commandtext_is_never_an_expression():
+    """THE #1 INVARIANT, learned the hard way twice: CommandText must be
+    STATIC SQL. An expression-valued CommandText ("=..." built from
+    Parameters!) was shipped once to splice runtime lexicals 1:1 — and in
+    the production demo Report Builder popped "Define Query Parameters" at
+    Refresh Fields on EVERY report, asking the end user to type values for
+    every bind. Report Builder cannot evaluate the expression at design
+    time; static text with QueryParameters bound to =Nothing-defaulted
+    report parameters is the only prompt-free form. Never regress this."""
+    import re
+    from converter import convert
+
+    for src in (_SPLICE_XML, _ACTION_BUTTON_XML):
+        rdl = convert(src)["rdl_xml"]
+        for m in re.finditer(r"<CommandText>(.*?)</CommandText>", rdl, re.S):
+            assert not m.group(1).lstrip().startswith("="), (
+                "EXPRESSION CommandText emitted — this reintroduces the "
+                "Refresh-Fields parameter-prompt bug that broke the "
+                "production demo. CommandText must be static SQL.")
+
+
+def test_lexical_with_static_default_inlines_that_default():
+    """The safe fraction of runtime-lexical fidelity: when the lexical's
+    declared parameter carries a static SQL-fragment initialValue (the
+    ORDER-BY idiom — P_ORDER_BY defaulting to a column list), inline the
+    default as STATIC SQL. Faithful to Oracle's default run, and the
+    design-time Refresh Fields flow stays prompt-free. Anything without
+    such a default keeps the honest stub + finding."""
     import json as _json
     import re
     from converter import convert
 
-    out = convert(_SPLICE_XML)
-    rdl = out["rdl_xml"]
-    m = re.search(r"<CommandText>(.*?)</CommandText>", rdl, re.S)
-    assert m, "no CommandText emitted"
-    ct = m.group(1)
-    assert ct.lstrip().startswith("="), "expected EXPRESSION CommandText"
-    # declared lexical -> live splice, in declared casing
-    assert 'CStr(Parameters!P_Dias.Value &amp; "")' in ct
-    # undeclared lexical -> keeps the honest stub comment (no value exists)
-    assert "lexical ref &amp;P_UNDECLARED" in ct
-    # raw newlines never survive inside VB literals (BC30648)
-    inner = ct.replace("&amp;", "&")
-    for lit in re.findall(r'"(?:[^"]|"")*"', inner):
-        assert "\n" not in lit, "raw newline inside a VB string literal"
-    assert "vbCrLf" in inner, "SQL line structure must be preserved"
-    # the trailing semicolon must be stripped in the expression form too
-    assert ";" not in re.sub(r"/\*.*?\*/", "", inner)
-    # preflight: reclassified as a preserved splice, not a dropped filter
-    blob = _json.dumps(out["preflight"])
-    assert "lexical_spliced" in blob
-    assert "lexical_nevermatch" not in blob
-    assert out["preflight"]["verdict"] != "RED"
+    src = _SPLICE_XML.replace(
+        b'<userParameter name="P_Dias" datatype="character"/>',
+        b'<userParameter name="P_Dias" datatype="character" '
+        b'initialValue="COL_A, COL_B"/>')
+    out = convert(src)
+    m = re.search(r"<CommandText>(.*?)</CommandText>", out["rdl_xml"], re.S)
+    assert m and not m.group(1).lstrip().startswith("=")
+    assert "COL_A, COL_B" in m.group(1), "static default not inlined"
+    assert "lexical default &amp;P_Dias" in m.group(1)
+    assert "lexical_default_inlined" in _json.dumps(out["preflight"])
 
-
-def test_splice_leaves_lexical_free_queries_untouched():
-    """A report with NO unresolved declared lexicals keeps plain static
-    CommandText — the expression form is a fallback, never the default."""
-    import re
-    from converter import convert
-
-    plain = _SPLICE_XML.replace(b"in (&P_Dias)", b"in ('A')")
-    rdl = convert(plain)["rdl_xml"]
-    m = re.search(r"<CommandText>(.*?)</CommandText>", rdl, re.S)
-    assert m and not m.group(1).lstrip().startswith("="), (
-        "static SQL must stay static")
+    # No static default -> the honest stub survives, with its finding.
+    out2 = convert(_SPLICE_XML)
+    m2 = re.search(r"<CommandText>(.*?)</CommandText>", out2["rdl_xml"], re.S)
+    assert "lexical ref &amp;P_Dias" in m2.group(1)
 
 
 def test_geometryless_groupleft_routes_tabular():
@@ -1977,3 +2174,247 @@ def test_field_names_are_cls_compliant():
         assert _re.search(r"[A-Za-z]", n), f"not CLS-compliant: {n}"
     assert len(set(names)) == 2, names
     assert "ΣΤΟΠ" in x and "ΣΤΟΝ" in x, "DataField must keep the original"
+
+
+# --- Group-summary sources, CurrentDate masks, display-position wraps -----
+# A layout field may bind a GROUP-tree <summary> of ANOTHER query (the
+# accreditation-history idiom: R_Course's columns bind C_Course_Provider =
+# first(COURSE_PROVIDER) of Q_COURSE). Those used to fall to =Nothing,
+# blanking whole detail columns. They must resolve structurally, the
+# summary's formatMask must follow to the underlying column, a masked
+# CurrentDate builtin must carry its mask, and bare-& page boilerplate
+# ("Page &PhysicalPageNumber of ...") must be suppressed in the body.
+_GRPSUM_XML = (
+    '<?xml version="1.0"?><report name="GRPSUM_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<dataSource name="Q_M"><select><![CDATA[select acol, mid from m]]>'
+    '</select><group name="G_M"><dataItem name="ACOL" datatype="vchar2"/>'
+    '<dataItem name="MID" datatype="number"/></group></dataSource>'
+    '<dataSource name="Q_C"><select><![CDATA[select cval, cdt, cnum '
+    'from c]]>'
+    '</select><group name="G_C">'
+    '<summary name="C_CDT" source="CDT" function="first"/>'
+    '<dataItem name="CVAL" datatype="vchar2"/>'
+    '<dataItem name="CDT" datatype="date"/>'
+    '<dataItem name="CNUM" datatype="number"/></group></dataSource>'
+    '<summary name="CS_TOT" source="CNUM" function="sum" reset="report" '
+    'compute="report"/>'
+    '</data>'
+    '<layout><section name="main">'
+    '<frame name="M_Body"><geometryInfo x="0" y="0" width="8" height="6"/>'
+    '<text name="B_P1"><geometryInfo x="0.2" y="0.1" width="7" '
+    'height="0.5"/><textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[This document summarizes the review history\n'
+    'for the applicant shown below, including each course record\n'
+    'held on file with the department.]]></string></textSegment></text>'
+    '<text name="B_P2"><geometryInfo x="0.2" y="0.7" width="7" '
+    'height="0.5"/><textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[Questions about the accuracy of the record\n'
+    'may be directed to the program office during normal business\n'
+    'hours for correction or appeal.]]></string></textSegment></text>'
+    '<repeatingFrame name="R_M" source="G_M" printDirection="down">'
+    '<geometryInfo x="0.2" y="1.3" width="7.5" height="2.0"/>'
+    '<field name="F_A" source="ACOL"><geometryInfo x="0.2" y="1.3" '
+    'width="3" height="0.2"/></field>'
+    '<field name="F_CDT" source="C_CDT" formatMask="MM/DD/RRRR">'
+    '<geometryInfo x="0.2" y="1.6" width="1.4" height="0.2"/></field>'
+    '<field name="F_NOW" source="CurrentDate" formatMask="MM/DD/RRRR">'
+    '<geometryInfo x="0.2" y="1.9" width="1.4" height="0.2"/></field>'
+    '<field name="F_TOT" source="CS_TOT" formatMask="NNNGNN0">'
+    '<geometryInfo x="0.2" y="2.2" width="1.4" height="0.2"/></field>'
+    '<text name="B_PGNUM"><geometryInfo x="0.2" y="2.5" width="3" '
+    'height="0.19"/><textSegment><font face="Arial" size="8"/>'
+    '<string><![CDATA[Page &PhysicalPageNumber of '
+    '&TotalPhysicalPages]]></string></textSegment></text>'
+    '</repeatingFrame></frame></section></layout></report>'
+).encode()
+
+
+def test_group_summary_sources_resolve_with_mask_and_chrome_rules():
+    from converter import convert
+
+    out = convert(_GRPSUM_XML)
+    rdl = out["rdl_xml"]
+
+    # 1) The cross-dataset group-summary source computes (scoped aggregate
+    #    or link-correlated lookup) instead of blanking to Nothing.
+    assert (
+        'First(Fields!CDT.Value, "Q_C")' in rdl
+        or 'Lookup(' in rdl and 'Fields!CDT.Value' in rdl
+    ), "group-summary source must resolve to the underlying Q_C column"
+
+    # 2) The summary's formatMask follows to the underlying column ref.
+    import re as _re
+    m = _re.search(
+        r'First\(Fields!CDT\.Value, "Q_C"\).{0,600}?<Format>([^<]+)</Format>',
+        rdl, _re.S)
+    assert m and m.group(1) == "MM/dd/yyyy", (
+        "the C_CDT mask must stamp <Format>MM/dd/yyyy</Format> on the "
+        "underlying-column textbox")
+
+    # 3) A masked CurrentDate builtin formats inline (the name-keyed
+    #    post-pass can never reach a Globals! value).
+    assert 'Format(Globals!ExecutionTime, "MM/dd/yyyy")' in rdl
+
+    # 4) Bare-& page boilerplate never reaches the body as "Page  of ".
+    assert '"Page " & Nothing' not in rdl
+    assert 'Nothing & " of "' not in rdl
+
+    # 5) A REPORT-level (reset="report") summary over ANOTHER dataset's
+    #    column computes as a dataset-scoped aggregate (the stat-table
+    #    idiom) — never the =Nothing placeholder — and the emit-time
+    #    Format stamp carries its NNNGNN0 mask (G = group separator).
+    m2 = _re.search(
+        r'Sum\(Fields!CNUM\.Value, "Q_C"\).{0,600}?<Format>([^<]+)</Format>',
+        rdl, _re.S)
+    assert m2 and m2.group(1) == "###,##0", (
+        "cross-dataset report-scope summary must emit "
+        'Sum(Fields!CNUM.Value, "Q_C") with <Format>###,##0</Format>')
+
+
+def test_inline_mask_wrap_skips_computational_positions():
+    """The concat Format() wrapper covers NUMBER masks now — but it must
+    never wrap a ref in comparison/arithmetic position (IIf(amount < 0)
+    drives real letter wording; Format() there compares a STRING to 0)."""
+    import xml.etree.ElementTree as _ET
+    from types import SimpleNamespace as _NS
+    from converter.generators.rdl import _wrap_inline_masked_date_refs, _q
+
+    report = _NS(layout=[_NS(
+        fields=[_NS(format_mask="-$NNN,NNN,NN0.00", source="AMT")],
+        children=[],
+    )])
+    root = _ET.Element(_q("Report"))
+    v1 = _ET.SubElement(root, _q("Value"))
+    v1.text = ('="Balance: " & Fields!AMT.Value & '
+               'IIf(((Fields!AMT.Value < 0)), " (credit)", "") & '
+               'Sum(Fields!AMT.Value)')
+    _wrap_inline_masked_date_refs(root, report)
+
+    t = v1.text
+    assert t.count("Format(Fields!AMT.Value") == 1, t
+    assert "IIf(((Fields!AMT.Value < 0))" in t, (
+        "comparison-position ref must stay bare: " + t)
+    assert "Sum(Fields!AMT.Value)" in t, (
+        "function-argument ref must stay bare: " + t)
+
+
+def test_lookup_and_aggregate_pure_shapes_match_format_pass():
+    """The <Format> post-pass must key off the DISPLAYED column of a pure
+    cross-dataset Lookup (3rd argument) and of a pure scoped aggregate —
+    the two shapes the flat-value builders emit for masked columns."""
+    from converter.generators.rdl import _PURE_LOOKUP_RE, _PURE_FIELD_RE
+
+    m = _PURE_LOOKUP_RE.match(
+        '=Lookup(Fields!Site_Id.Value, Fields!Site_Id.Value, '
+        'Fields!CMVGY_Total.Value, "Q_CMVGY")')
+    assert m and m.group(1) == "CMVGY_Total"
+    m2 = _PURE_FIELD_RE.match('=Sum(Fields!APP_APPROVED.Value, "Q_RENEWAL")')
+    assert m2 and m2.group(1) == "APP_APPROVED"
+    # Join(LookupSet(...)) is a joined STRING — must NOT match.
+    assert not _PURE_LOOKUP_RE.match(
+        '=Join(LookupSet(Fields!K.Value, Fields!K2.Value, '
+        'Fields!V.Value, "Q_C"), vbCrLf)')
+
+
+def test_inline_mask_wrap_covers_scoped_aggregate_units():
+    """A masked column referenced through a SCOPED aggregate inside a
+    concat ("All Total: " & Sum(Fields!X.Value, "Q")) wraps the WHOLE
+    aggregate in Format() — wrapping inside the aggregate would feed
+    Sum a string."""
+    import xml.etree.ElementTree as _ET
+    from types import SimpleNamespace as _NS
+    from converter.generators.rdl import _wrap_inline_masked_date_refs, _q
+
+    report = _NS(layout=[_NS(
+        fields=[_NS(format_mask="NNN,NN0", source="CMVGY_Total")],
+        children=[],
+    )])
+    root = _ET.Element(_q("Report"))
+    v = _ET.SubElement(root, _q("Value"))
+    v.text = '="All Total:  " & Sum(Fields!CMVGY_Total.Value, "Q_CMVGY")'
+    _wrap_inline_masked_date_refs(root, report)
+    assert v.text == ('="All Total:  " & Format(Sum(Fields!CMVGY_Total.Value,'
+                      ' "Q_CMVGY"), "###,##0")'), v.text
+
+
+def test_formula_stub_never_ships_raw_nonparam_binds():
+    """A trivial-RETURN formula referencing a NON-parameter bind (an Oracle
+    summary like :SumXPerReport) must NOT inline into the formula-dataset
+    SELECT — a raw bind with no QueryParameter is the 'Define Query
+    Parameters' prompt on the server (#1-rule class). Parameter binds may
+    inline but must arrive with a QueryParameter bound to the parameter."""
+    import re as _re
+    import xml.etree.ElementTree as _ET
+    from converter import convert
+
+    xml = (
+        '<?xml version="1.0"?><report name="STUB_T" DTDVersion="9.0.2.0.10">'
+        '<data>'
+        '<userParameter name="P_ANIO" datatype="number"/>'
+        '<dataSource name="Q_M"><select><![CDATA[select a from t]]>'
+        '</select><group name="G_M"><dataItem name="A" datatype="vchar2"/>'
+        '</group></dataSource>'
+        '<formula name="CF_OK" datatype="number">'
+        '<plsql><![CDATA[return(:P_ANIO);]]></plsql></formula>'
+        '<formula name="CF_BAD" datatype="number">'
+        '<plsql><![CDATA[return(:SumMonto2PerReport);]]></plsql>'
+        '</formula>'
+        '</data>'
+        '<layout><section name="main">'
+        '<frame name="M_B"><geometryInfo x="0" y="0" width="8" height="2"/>'
+        '<field name="F_OK" source="CF_OK"><geometryInfo x="0.2" y="0.2" '
+        'width="2" height="0.2"/></field>'
+        '<field name="F_BAD" source="CF_BAD"><geometryInfo x="0.2" y="0.5" '
+        'width="2" height="0.2"/></field>'
+        '</frame></section></layout></report>'
+    ).encode()
+    rdl = convert(xml)["rdl_xml"]
+
+    root = _ET.fromstring(rdl.encode("utf-8"))
+    ns = root.tag.split("}")[0][1:]
+
+    def q(t):
+        return f"{{{ns}}}{t}"
+
+    for ds in root.iter(q("DataSet")):
+        if ds.get("Name") != "DS_REPORT_FORMULAS":
+            continue
+        qe = ds.find(q("Query"))
+        ct = qe.findtext(q("CommandText")) or ""
+        live = _re.sub(r"'[^']*'|--[^\n]*|/\*.*?\*/", " ", ct, flags=_re.S)
+        binds = set(_re.findall(r":([A-Za-z_]\w*)", live))
+        qps = {}
+        for qp in qe.iter(q("QueryParameter")):
+            qps[(qp.get("Name") or "").lstrip(":").upper()] = \
+                (qp.findtext(q("Value")) or "").strip()
+        # the summary bind never reaches live SQL
+        assert "SUMMONTO2PERREPORT" not in {b.upper() for b in binds}, ct
+        # the param bind is inlined AND declared, bound to the parameter
+        assert "P_ANIO" in {b.upper() for b in binds}, ct
+        assert qps.get("P_ANIO") == "=Parameters!P_ANIO.Value", qps
+        # every live bind has a non-empty QueryParameter value
+        for b in binds:
+            assert qps.get(b.upper()), f"live bind :{b} lacks a QP value"
+        break
+    else:
+        raise AssertionError("DS_REPORT_FORMULAS missing")
+
+
+def test_preflight_enum_check_allows_style_expressions():
+    """Conditional-format styles are EXPRESSIONS (=IIf(..., "Bold",
+    "Normal")) — the enum BLOCKER must only fire on invalid LITERALS."""
+    from converter.validators.preflight import preflight_audit
+
+    good = ('<Report xmlns="http://schemas.microsoft.com/sqlserver/'
+            'reporting/2008/01/reportdefinition">'
+            '<FontStyle>=IIf((Fields!X.Value = "S"), "Normal", "Normal")'
+            '</FontStyle></Report>')
+    bad = good.replace(
+        '=IIf((Fields!X.Value = "S"), "Normal", "Normal")', 'Oblique')
+    g_issues = [i for i in preflight_audit(good)["issues"]
+                if "bad_enum" in str(i)]
+    b_issues = [i for i in preflight_audit(bad)["issues"]
+                if "bad_enum" in str(i)]
+    assert not g_issues, g_issues
+    assert b_issues, "a literal invalid enum must still be a BLOCKER"

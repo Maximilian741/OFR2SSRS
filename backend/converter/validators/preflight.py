@@ -211,26 +211,34 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
     _lex_seen: dict = {}
     for ct in find_all(tree, "CommandText"):
         sql = ct.text or ""
-        # EXPRESSION CommandText with live Parameters! splices: the runtime
-        # lexical was preserved 1:1 (SSRS builds the SQL from the parameter
-        # exactly as Oracle spliced it). Not a dropped filter — but say
-        # what it is: the parameter value enters the SQL as text, the same
-        # power the Oracle report's users already had.
-        if sql.lstrip().startswith("=") and "CStr(Parameters!" in sql:
-            _spliced_names = sorted(set(re.findall(
-                r"CStr\(Parameters!(\w+)\.Value", sql)))
+        # An EXPRESSION-valued CommandText is FORBIDDEN output. It was tried
+        # (runtime lexical splicing) and broke the #1 invariant in
+        # production: Report Builder cannot evaluate the expression at
+        # design time, so Refresh Fields prompts the END USER for every
+        # query parameter on every report. This rule is the last-resort net
+        # so that class of regression can never ship silently again.
+        if sql.lstrip().startswith("="):
             issues.append((
-                "AMBER",
-                "sql.lexical_spliced." + ",".join(_spliced_names[:4]),
-                f"Runtime SQL splice preserved 1:1: this dataset's query is "
-                f"built at run time from parameter(s) "
-                f"{', '.join(_spliced_names[:6])} — the same lexical "
-                f"substitution the Oracle report performed. The value is "
-                f"inserted as SQL text (not a bind), so it carries the same "
-                f"substitute-anything power the Oracle version already gave "
-                f"its users.",
+                "BLOCKER",
+                "rdl.expression_commandtext",
+                "This dataset's CommandText is an EXPRESSION (=\"...\"). "
+                "Report Builder cannot evaluate it at design time, so "
+                "Refresh Fields prompts the end user for every query "
+                "parameter — the workflow this converter must never break. "
+                "The query must be emitted as static SQL.",
             ))
             continue
+        # Informational: a runtime lexical inlined from its Oracle default.
+        for _dm in sorted(set(re.findall(r"lexical default &(\w+)", sql))):
+            issues.append((
+                "AMBER",
+                f"sql.lexical_default_inlined.{_dm}",
+                f"The runtime lexical &{_dm} was fixed at its Oracle "
+                f"initial value (inlined as static SQL). The report behaves "
+                f"exactly like Oracle's DEFAULT run; to honour a different "
+                f"user choice at run time, edit the marked spot in the "
+                f"query.",
+            ))
         for m in re.finditer(
                 r"(NULL\s*)?/\*\s*lexical ref &(\w+)[^*]*\*/(\s*\.)?", sql):
             name = m.group(2)
@@ -790,6 +798,12 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
     bad_values: Dict[str, int] = {}
     for tag, val in enum_re.findall(rdl_xml):
         v = val.strip()
+        # Style enums accept EXPRESSIONS (=IIf(..., "Bold", "Normal") is the
+        # conditional-format idiom and publishes fine) — only a LITERAL can
+        # be enum-checked here. Flagging expressions was a false BLOCKER on
+        # legitimate conditional-format RDLs (wild-corpus verified).
+        if v.startswith("="):
+            continue
         if v and v not in ENUM_RULES[tag]:
             key = f"{tag}={v}"
             bad_values[key] = bad_values.get(key, 0) + 1

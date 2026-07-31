@@ -112,7 +112,7 @@ Please use the GitHub issue templates:
 
 ## License
 
-This project is licensed under the Elastic License 2.0 (see `LICENSE`). By
+This project is licensed under the MIT License (see `LICENSE`). By
 submitting a contribution you agree that it will be licensed under the same
 terms.
 
