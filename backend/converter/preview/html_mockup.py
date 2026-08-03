@@ -1146,6 +1146,7 @@ _PAGE_BORDER   = "#cccccc"
 
 
 def _render_page(content_html, label=None, max_width="8.25in", min_height="10.5in",
+                 min_width=None,
                  first_page=True):
     """Wrap content in a paper-sheet div so the preview shows page boundaries.
 
@@ -1173,7 +1174,11 @@ def _render_page(content_html, label=None, max_width="8.25in", min_height="10.5i
         + label_html
         + '<div style="background:' + _PAGE_SHEET_BG + '; '
         'max-width:' + max_width + '; min-height:' + min_height + '; '
-        'margin:18px auto; padding:0.6in 0.7in; '
+        # Fixed-px positioned content must NEVER be clipped by a sheet that
+        # shrank to a narrow viewport — the caller passes the content width
+        # as a hard floor and the desk container scrolls instead.
+        + ('min-width:' + min_width + '; ' if min_width else '')
+        + 'margin:18px auto; padding:0.6in 0.7in; '
         'border:1px solid ' + _PAGE_BORDER + '; '
         'box-shadow:0 4px 14px rgba(15,23,42,0.10); '
         'position:relative; font-family:Arial,Helvetica,sans-serif; '
@@ -1203,7 +1208,7 @@ def _render_pages_wrapper(pages_html):
             joined += _DIVIDER + p
     return (
         '<div style="background:' + _PAGE_DESK_BG + '; '
-        'padding:24px 0; min-height:100%;">'
+        'padding:24px 0; min-height:100%; overflow-x:auto;">'
         + joined
         + '</div>'
     )
@@ -4394,6 +4399,38 @@ def _render_generic_document_page(report, idx, page_num, total_pages,
                 '<div style="position:absolute;left:' + gx + ';top:' + gy
                 + ';width:' + gw + ';height:' + f"{max(1.0, bw):.0f}px"
                 + ';background:' + _esc(bcol) + ';"></div>')
+    # WIDEN clipped one-line labels into provably free space (the mockup
+    # twin of the RDL's _widen_clipped_constant_labels): a narrow Oracle
+    # label box ("Contact Address:" declared 0.5in) renders one line in
+    # Oracle because the label is horizontally elastic — hard-clipping it
+    # at the declared width loses the label tail. Grow the box up to its
+    # natural text width, stopping short of the nearest same-band element
+    # to the right (never overpaint a neighbour).
+    _texts = [e for e in elems if e["kind"] == "text"
+              and not float(e.get("rotation", 0) or 0)]
+    for e in _texts:
+        t = (e.get("text") or "")
+        if not t or "\n" in t:
+            continue
+        _eh = float(e.get("h") or 0.0)
+        _line_in = max(6.0, float(e.get("size") or 11)) * 1.25 / 72.0
+        if not (_eh > 0 and _eh < 2 * _line_in):
+            continue
+        natural = len(t) * max(7, min(28, e.get("size") or 11)) * 0.62 / 96.0
+        if natural <= (e.get("w") or 0):
+            continue
+        y0, y1 = e["y"], e["y"] + max(_eh, _line_in)
+        right_edge = pw - 0.05
+        for o in elems:
+            if o is e or o["kind"] in ("panel", "line"):
+                continue
+            oy0 = o["y"]
+            oy1 = o["y"] + max(float(o.get("h") or 0.0), _line_in)
+            if o["x"] > e["x"] and oy0 < y1 and oy1 > y0:
+                right_edge = min(right_edge, o["x"] - 0.04)
+        widened = min(natural, right_edge - e["x"])
+        if widened > (e.get("w") or 0):
+            e["w"] = widened
     # then text/fields/images
     for e in elems:
         if e["kind"] == "panel":
@@ -4439,7 +4476,21 @@ def _render_generic_document_page(report, idx, page_num, total_pages,
         field_css = "white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"
         text_css = "white-space:pre-wrap;"
         if e["kind"] == "text":
-            parts.append('<div style="' + style + text_css + '">' + _esc(e["text"]) + '</div>')
+            # Same geometry discriminator the RDL emitter uses: a text whose
+            # Oracle box HEIGHT only fits ONE line renders as one line — a
+            # narrow label ("Facility ID:" in a 0.5in box) must never
+            # pre-wrap into a 4-line stack that spills over the rows below
+            # (production screenshot: the garbled Contact/Facility band).
+            # Oracle hard-clips a fixed box at its edge, so overflow:hidden
+            # (no ellipsis) is the faithful render; multi-line boxes keep
+            # the wrapping behavior for addresses/paragraphs.
+            _eh = float(e.get("h") or 0.0)
+            _line_in = max(6.0, float(e.get("size") or 11)) * 1.25 / 72.0
+            _one_line = (_eh > 0 and _eh < 2 * _line_in
+                         and "\n" not in (e.get("text") or ""))
+            _tcss = ("white-space:nowrap;overflow:hidden;"
+                     if _one_line else text_css)
+            parts.append('<div style="' + style + _tcss + '">' + _esc(e["text"]) + '</div>')
         elif e["kind"] == "cell":
             val = _doc_cell_value(e.get("source", ""), e.get("row_idx", 0), e.get("mask", ""))
             parts.append('<div style="' + style + field_css + '">' + _esc(val) + '</div>')
@@ -4476,8 +4527,13 @@ def _render_generic_document_page(report, idx, page_num, total_pages,
 
     inner = ('<div style="position:relative;width:' + px(pw) + ';height:' + px(ph)
              + ';margin:0 auto;background:#fff;">' + "".join(parts) + '</div>')
+    # The sheet carries 0.7in side padding EACH side (_render_page), so its
+    # max-width must be content + 1.4in + slack — at "+0.3" the fixed-px
+    # inner box overflowed the card by ~1.1in and CLIPPED both edges under
+    # horizontal scroll (production screenshot: left label chars cut off).
     return _render_page(inner, label="Page " + str(page_num) + " of " + str(total_pages),
-                        max_width=f"{pw + 0.3:.1f}in")
+                        max_width=f"{pw + 1.5:.1f}in",
+                        min_width=f"{pw + 1.4:.1f}in")
 
 
 def _is_dark(hexc):
@@ -4636,11 +4692,18 @@ def _maybe_lead_chart(report, html):
     if not spec:
         return html
     lead = _render_page(_render_chart_svg(spec), label="Chart", first_page=True)
-    marker = 'min-height:100%;">'
-    i = html.find(marker)
+    # Splice inside the desk wrapper — match its opening tag END, not an
+    # exact style string (adding overflow-x to the wrapper silently broke
+    # the old literal marker and dropped the chart page).
+    i = -1
+    for marker in ('min-height:100%; overflow-x:auto;">',
+                   'min-height:100%;">'):
+        i = html.find(marker)
+        if i >= 0:
+            i += len(marker)
+            break
     if i < 0:
         return html
-    i += len(marker)
     divider = ('<div style="border-top:1px dashed #cbd5e1; '
                'max-width:8.25in; margin:0 auto 12px;"></div>')
     return html[:i] + lead + divider + html[i:]
@@ -5158,6 +5221,21 @@ def _maybe_trailing_totals(report, html):
             src = (getattr(g, "source_query", "") or "").upper()
             if (kind == "repeating_frame" and src
                     and src not in main_groups):
+                # REPORT-END TOTALS ONLY: the parent frame must carry a
+                # total-shaped label ("Total Inspections:") — that is the
+                # ASBINSPC breakdown signal this block exists for. Without
+                # this gate the pass duplicated ORDINARY secondary-dataset
+                # record frames (a complaint form's VIOLATION SITE band,
+                # already on page 1) into a junk "Report totals" sheet
+                # (production screenshot verified).
+                _ptotals = [
+                    pf for pf in (getattr(parent, "fields", None) or [])
+                    if (pf.kind or "") == "text"
+                    and (pf.text or "").strip().endswith(":")
+                    and re.search(r"\btotal", pf.text or "", re.I)
+                ]
+                if not _ptotals:
+                    return
                 members = sorted(
                     [f for f in (g.fields or [])
                      if (f.kind or "") in ("text", "field")],
@@ -5231,6 +5309,13 @@ def _maybe_trailing_totals(report, html):
             '<div style="font-weight:bold;font-size:13px;margin-bottom:8px;">'
             'Report totals</div>' + "".join(rows_html) + "".join(trailer_html)
             + "</div>", label="Report end — totals", first_page=False)
+        # Inject INSIDE the desk-background wrapper. Appending after it
+        # produced top-level SIBLING divs, which the app's preview pane laid
+        # out SIDE-BY-SIDE — the totals sheet floated next to page 1 and
+        # overlapped it (production screenshot verified).
+        if html.rstrip().endswith("</div>"):
+            _cut = html.rstrip()
+            return _cut[:-len("</div>")] + block + "</div>"
         return html + block
     except Exception:  # noqa: BLE001 — the preview must never break
         return html

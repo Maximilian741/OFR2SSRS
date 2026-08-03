@@ -1145,7 +1145,7 @@ footer {
     <div class="diff-grid">
       <div class="diff-card">
         <h3>SharedDataSourceReference design <span class="diff-badge">load-bearing</span></h3>
-        <p>RDL is emitted with a <code>DataSourceReference</code> pointed at the shared data source path <em>you</em> configure in the sidebar — no embedded connection string, no credentials block. When the path matches a shared data source on your server, the upload binds automatically. Every parameter carries a <code>=Nothing</code> default and every query bind is wired, so the "Define Query Parameters" dialog never pops — at upload, Refresh Fields, or run.</p>
+        <p>RDL is emitted with a <code>DataSourceReference</code> pointed at the shared data source path <em>you</em> configure in the sidebar — no embedded connection string, no credentials block. When the path matches a shared data source on your server, the upload binds automatically. Every parameter carries a <code>=Nothing</code> default and every query bind is wired, so end users are never prompted — at upload or at run. The field list is emitted complete, so <b>you never need to click Refresh Fields</b>. (If you do manually execute a parameterized dataset's query in the designer, Report Builder itself asks for design-time values — that's Report Builder's own dialog for any parameterized query, and OK-with-nulls proceeds safely.)</p>
         <p>This is the difference between a 30-second deploy and a 30-minute one.</p>
       </div>
       <div class="diff-card">

@@ -988,7 +988,7 @@ function renderDeployStatus(data) {
     '<div class="ds-steps"><b>1</b> Download .rdl <span>→</span> <b>2</b> Upload to SSRS ' +
       (getSharedDsPath()
         ? '<span>→</span> <b>3</b> Run (data source pre-bound to ' + escapeHtml(getSharedDsPath()) + ')</div>'
-        : '<span>→</span> <b>3</b> Repoint data source + Refresh Fields <span>→</span> <b>4</b> Run</div>') +
+        : '<span>→</span> <b>3</b> Repoint data source <span>→</span> <b>4</b> Run &nbsp;<em>(skip Refresh Fields — fields are pre-wired)</em></div>') +
     '<button id="ds-download" class="ds-btn" type="button">Download .rdl</button>';
 
   // Drill-through dependency: the report links to child report(s) that MUST be

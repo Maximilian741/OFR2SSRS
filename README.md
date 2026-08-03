@@ -237,10 +237,16 @@ unlimited); set `O2S_LICENSE=pro` to lift the cap.
   the sidebar (for example `/Data Sources/MyOracle`) and every generated
   artifact — main RDL, sub-report RDLs, the burst pack — ships pre-bound to
   it.
-- **Parameters never prompt** — undeclared query binds and system/path
-  parameters bind to an empty `=Nothing` default rather than triggering a
-  runtime prompt, and every query bind is wired. The "Define Query
-  Parameters" dialog never pops, at upload, Refresh Fields, or run.
+- **Parameters never prompt end users** — undeclared query binds and
+  system/path parameters bind to an empty `=Nothing` default rather than
+  triggering a runtime prompt, and every query bind is wired, so the
+  report uploads and runs without ever asking for values. One honest
+  caveat: *manually executing* a parameterized dataset's query in the
+  designer (Refresh Fields / Query Designer ▸ Run) makes Report Builder
+  itself ask for design-time values — that is Report Builder's dialog for
+  any parameterized query, not an RDL defect, and it is entirely
+  avoidable because the field list is emitted complete: **never click
+  Refresh Fields**.
 - **Hidden internal vs visible user params** — Oracle parameters marked
   `display="no"`, and system/internal name patterns, become hidden
   ReportParameters; genuine user parameters stay visible.
@@ -293,8 +299,12 @@ a Report Server. After downloading the `.rdl`:
 1. Upload it to your SSRS folder (Report Manager or Report Builder).
 2. Open the report's Data Source properties and point it at the shared data
    source already configured in that folder.
-3. Open the dataset and **Refresh Fields** — no parameter prompt should
-   appear (this is what the shared-data-source reference buys you).
+3. **Run.** Do not click Refresh Fields — the field list is emitted
+   complete and already matches the SQL aliases, so there is nothing to
+   refresh. (Refresh Fields executes the query at design time; on a
+   parameterized dataset Report Builder asks for design-time values —
+   its own dialog for any parameterized query. OK-with-nulls is safe if
+   you land there: the SELECT list is static.)
 4. Save, view, export to PDF for end users.
 
 ## Architecture

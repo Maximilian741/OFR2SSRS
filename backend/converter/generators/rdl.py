@@ -293,7 +293,15 @@ def _alias_select_items(sql: str, item_names) -> str:
         elif ch == ")":
             depth -= 1
         elif depth == 0 and upper[i:i + 4] == "FROM" and (
-            i + 4 == len(sql) or not sql[i + 4].isalnum()
+            i + 4 == len(sql)
+            or (not sql[i + 4].isalnum() and sql[i + 4] not in "_$#")
+        ) and (
+            # WORD boundary on BOTH sides: a column alias CONTAINING the
+            # token ("CF_EMAIL_FROM", "VALID_FROM", "FROM_DT") must never
+            # terminate the select list — it silently left every later
+            # item unaliased (the blank-column / Refresh-mismatch class).
+            i == 0
+            or (not sql[i - 1].isalnum() and sql[i - 1] not in "_$#")
         ):
             from_idx = i
             break
@@ -341,6 +349,68 @@ def _alias_select_items(sql: str, item_names) -> str:
     # order-independent derive-from-expression alias.
     _names = [str(n).strip() for n in (item_names or [])]
     _positional = len(parts) == len(_names) and all(_names)
+    _names_upper = {n.upper() for n in _names}
+
+    def _stem(s):
+        return re.sub(r"_?\d+$", "", s or "").upper()
+
+    # Effective OUTPUT-name token of every select item (its alias when
+    # aliased, else the bare column tail) — used by the unique-stem
+    # pairing below to refuse a rename when TWO select items would claim
+    # the same declared name.
+    _terminals = []
+    for _p0 in parts:
+        _c0 = _strip_trailing_sql_comment((_p0 or "").strip()) or ""
+        _t0 = re.search(r"([A-Za-z_][A-Za-z0-9_$#]*)\s*$", _c0)
+        _terminals.append(_t0.group(1) if _t0 else "")
+
+    def _stem_target(name, idx):
+        """Declared dataItem this select item's output name should map to
+        under the trailing-number stem rule (customer XML renumbers its
+        dataItems: item site_name1 over column site_name — Oracle bound by
+        POSITION so it worked; SSRS binds by NAME so the field reads NULL).
+        Positional pairing first; else UNIQUE stem pairing (exactly one
+        declared candidate AND exactly one select item with that stem —
+        both uniqueness guards are load-bearing, see
+        test_select_realias_pairs_by_name_not_position)."""
+        st = _stem(name)
+        if not st or name.upper() in _names_upper:
+            return None
+        if (_positional and idx < len(_names)
+                and _stem(_names[idx]) == st
+                and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _names[idx])
+                and _names[idx].upper() != name.upper()):
+            return _names[idx]
+        cands = [n for n in _names
+                 if _stem(n) == st
+                 and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", n)
+                 and n.upper() != name.upper()]
+        if (len(cands) == 1
+                and sum(1 for t in _terminals if _stem(t) == st) == 1):
+            return cands[0]
+        return None
+
+    def _renumber_realias(raw, core, idx, alias_m, group=1):
+        """Oracle binds dataItems to SQL columns BY POSITION, so an author
+        whose dataItem says ACTION_TYPE_ID_3 while the SQL alias says
+        ACTION_TYPE_ID_2 shipped a working Oracle report — but SSRS binds
+        BY NAME, so that DataField reads NULL forever (production
+        verified: two quarterly-stat datasets rendered blank columns).
+        When the select list aligns 1:1 with the dataItems AND the alias
+        differs from the positional dataItem name ONLY by a trailing
+        number (same stem), rewrite the alias to the dataItem name. The
+        STEM GUARD is load-bearing: unrestricted positional realiasing
+        silently SWAPPED columns on an alphabetized export (see
+        test_select_realias_pairs_by_name_not_position).
+        Returns the rewritten item or None."""
+        alias = alias_m.group(group)
+        target = _stem_target(alias, idx)
+        if target is None:
+            return None
+        lead = raw[:len(raw) - len(raw.lstrip())]
+        after = raw[len(lead) + len(core):]
+        return (lead + core[:alias_m.start(group)] + target
+                + core[alias_m.end(group):] + after)
 
     new_parts = []
     for idx, raw in enumerate(parts):
@@ -356,14 +426,28 @@ def _alias_select_items(sql: str, item_names) -> str:
         if not core:
             new_parts.append(raw)
             continue
+        # A star expansion (* or O.*) can NEVER take an alias — "O.* AS O"
+        # is ORA-00923 the moment the query executes on the real server
+        # (production verified: a wrapped SELECT O.* was blindly aliased
+        # and the report died on deploy while every local rail — none of
+        # which execute SQL — stayed green). Oracle already returns the
+        # expanded columns' own names, which match the declared fields.
+        if re.fullmatch(
+            r"\s*(?:[A-Za-z_][A-Za-z0-9_$#]*\s*\.\s*)?\*\s*", core
+        ):
+            new_parts.append(raw)
+            continue
         # Already aliased? Oracle SQL allows BOTH explicit "expr AS name"
         # AND implicit "expr name" (a bare trailing identifier). We must
         # detect both -- the implicit form previously slipped through and
         # got double-aliased ("Pkg_Util.F(...) Violations AS DERIVED").
         # The implicit form is recognized as: ")" or a word char, then
         # whitespace, then an identifier at end of item.
-        if re.search(r"\bAS\b\s+[A-Za-z_][A-Za-z0-9_]*\s*$", core, re.IGNORECASE):
-            new_parts.append(raw)
+        _mas = re.search(r"\bAS\b\s+([A-Za-z_][A-Za-z0-9_]*)\s*$", core,
+                         re.IGNORECASE)
+        if _mas:
+            _rr = _renumber_realias(raw, core, idx, _mas)
+            new_parts.append(_rr if _rr is not None else raw)
             continue
         # Already aliased with an Oracle DOUBLE-QUOTED identifier alias, e.g.
         #    NVL(x,'-----') "localdepartement"        (implicit, no AS)
@@ -420,7 +504,16 @@ def _alias_select_items(sql: str, item_names) -> str:
                     continue
             new_parts.append(raw)
             continue
-        if re.search(r"(?:\)|[A-Za-z0-9_]|')\s+[A-Za-z_][A-Za-z0-9_]*\s*$", core):
+        # After ")" or "'" the whitespace is OPTIONAL — Oracle accepts
+        # ``count(*)inspections`` (no space), and requiring \s+ made the
+        # deriver append a SECOND alias -> ORA-00923 invalid SQL on the
+        # server (production corpus, two datasets). After a word char the
+        # whitespace stays REQUIRED (else this would eat the tail of any
+        # single identifier).
+        _mim = re.search(
+            r"(?:[\)']\s*|[A-Za-z0-9_]\s+)([A-Za-z_][A-Za-z0-9_]*)\s*$",
+            core)
+        if _mim:
             # Trailing identifier following ")", a word char, OR a
             # closing single-quote (string-literal concatenation) =
             # implicit Oracle alias. Don't add a second one.
@@ -436,7 +529,8 @@ def _alias_select_items(sql: str, item_names) -> str:
             # Caveat: a bare "TABLE.COL" also matches the word-char
             # branch, but bare column refs were already short-circuited
             # above.
-            new_parts.append(raw)
+            _rr = _renumber_realias(raw, core, idx, _mim)
+            new_parts.append(_rr if _rr is not None else raw)
             continue
         # Bare column ref (TABLE.COL or COL) -- Oracle returns the COL
         # part as the column name, which matches what our parser
@@ -452,10 +546,25 @@ def _alias_select_items(sql: str, item_names) -> str:
         # they are means NO alias, Oracle returns EMP#/AMT$ verbatim, and the
         # DataField matches. (Leading char stays letter/_ -- Oracle forbids a
         # leading $ or #.)
-        if re.fullmatch(
-            r"\s*[A-Za-z_][A-Za-z0-9_$#]*(\.[A-Za-z_][A-Za-z0-9_$#]*)?\s*",
+        _mbare = re.fullmatch(
+            r"\s*(?:[A-Za-z_][A-Za-z0-9_$#]*\.)?([A-Za-z_][A-Za-z0-9_$#]*)"
+            r"\s*",
             core,
-        ):
+        )
+        if _mbare:
+            # RENUMBERED dataItem over a bare column (customer XML:
+            # dataItem "site_name1" over "site.site_name" — Oracle bound
+            # by position, SSRS binds by name → blank column). Same
+            # positional + stem guard as _renumber_realias, expressed as
+            # an APPENDED alias.
+            _col = _mbare.group(1)
+            _tgt = _stem_target(_col, idx)
+            if _tgt is not None:
+                lead = raw[:len(raw) - len(raw.lstrip())]
+                after = raw[len(lead) + len(core):]
+                new_parts.append(lead + core.rstrip() + " AS "
+                                 + _tgt + after)
+                continue
             new_parts.append(raw)
             continue
         # Derive a deterministic alias from the expression itself --
@@ -3653,8 +3762,23 @@ def _strip_link_filter_predicates(report, child_names: set) -> None:
         if not master_cols:
             continue
 
+        # Stripping the predicate also erases the ONLY record of the join
+        # key for a child whose <link> carried no parentColumn/childColumn
+        # pairs — the correlated Lookup() then cannot be built and the
+        # child's values fall back to a global First(), i.e. ANOTHER
+        # record's row (agent-army verified P0 on an accreditation
+        # history). Capture (bind, column) as we drop so the correlation
+        # survives in link_pairs.
+        captured: list = []
+
         def _maybe_drop(m):
-            return " " if m.group(1).upper() in master_cols else m.group(0)
+            bind = m.group("bind")
+            if bind.upper() not in master_cols:
+                return m.group(0)
+            col = (m.groupdict().get("col") or "").split(".")[-1]
+            if col:
+                captured.append((bind, col))
+            return " "
 
         for attr in ("sql", "tsql"):
             s = getattr(q, attr, "") or ""
@@ -3663,14 +3787,23 @@ def _strip_link_filter_predicates(report, child_names: set) -> None:
             # Form B (the converter's optional-param NULL guard, which is how the
             # Oracle link predicate is emitted): AND (:p IS NULL OR <expr> = :p)
             new = re.sub(
-                r"(?i)\bAND\s*\(\s*[:@]([A-Za-z_]\w*)\s+IS\s+NULL\s+OR\s+"
-                r"[\w.]+\s*=\s*[:@]\1\s*\)",
+                r"(?i)\bAND\s*\(\s*[:@](?P<bind>[A-Za-z_]\w*)\s+IS\s+NULL"
+                r"\s+OR\s+(?P<col>[\w.]+)\s*=\s*[:@](?P=bind)\s*\)",
                 _maybe_drop, s)
             # Form A (bare equality): AND <expr> = :p
-            new = re.sub(r"(?i)\bAND\s+[\w.]+\s*=\s*[:@]([A-Za-z_]\w*)\b(?!\s*\))",
-                         _maybe_drop, new)
+            new = re.sub(
+                r"(?i)\bAND\s+(?P<col>[\w.]+)\s*=\s*"
+                r"[:@](?P<bind>[A-Za-z_]\w*)\b(?!\s*\))",
+                _maybe_drop, new)
             if new != s:
                 setattr(q, attr, new)
+        if captured:
+            existing = {(p or "").upper()
+                        for p, _c in (getattr(q, "link_pairs", None) or [])}
+            for bind, col in captured:
+                if bind.upper() not in existing:
+                    existing.add(bind.upper())
+                    q.link_pairs.append((bind, col))
 
 
 def _build_token_resolver(report: ParsedReport):
@@ -3790,6 +3923,51 @@ def _build_token_resolver(report: ParsedReport):
             f'=Lookup({src}, {dst}, '
             f'Fields!{_safe(result_col)}.Value, "{_safe(child_ds)}")'
         )
+
+    def _lookup_via_chain(result_col, child_ds, bound_ds):
+        """Correlated lookup into a linked child that is TWO hops away.
+
+        Oracle chains <link>s (applicant -> application -> course). SSRS has
+        no notion of that chain, so a value from the far end must be reached
+        by NESTING lookups: first fetch the middle query's key for the
+        current row, then use it as the lookup key into the far child.
+
+        Without this the far child resolved to a dataset-scoped ``First()``
+        — the globally first row, i.e. ANOTHER applicant's course data
+        painted onto every record (agent-army verified, P0). Restricted to
+        single-column keys on both hops; anything else returns None so the
+        caller can fall back honestly."""
+        child_q = query_by_name.get((child_ds or "").upper())
+        if child_q is None or not getattr(child_q, "parent_group", ""):
+            return None
+        mid_name = ""
+        for _q3 in (report.queries or []):
+            if (getattr(child_q, "parent_group", "") or "").upper() in {
+                    (g or "").upper()
+                    for g in (getattr(_q3, "group_names", None) or [])}:
+                mid_name = _q3.name or ""
+                break
+        if not mid_name or mid_name.upper() == (bound_ds or "").upper():
+            return None
+        mid_q = query_by_name.get(mid_name.upper())
+        if mid_q is None or not getattr(mid_q, "parent_group", ""):
+            return None
+        bound_cols = dataset_fields.get((bound_ds or "").upper(), {})
+        mid_cols = dataset_fields.get(mid_name.upper(), {})
+        child_cols = dataset_fields.get((child_ds or "").upper(), {})
+        if not (bound_cols and mid_cols and child_cols):
+            return None
+        hop2 = _link_key_pairs(child_q, mid_cols, child_cols)
+        hop1 = _link_key_pairs(mid_q, bound_cols, mid_cols)
+        if len(hop1) != 1 or len(hop2) != 1:
+            return None
+        b_col, m_key = hop1[0]
+        m_col, c_col = hop2[0]
+        inner = (f'Lookup(Fields!{_safe(b_col)}.Value, '
+                 f'Fields!{_safe(m_key)}.Value, '
+                 f'Fields!{_safe(m_col)}.Value, "{_safe(mid_name)}")')
+        return (f'=Lookup({inner}, Fields!{_safe(c_col)}.Value, '
+                f'Fields!{_safe(result_col)}.Value, "{_safe(child_ds)}")')
 
     def _corr_count_for_child(result_col, child_ds, bound_ds):
         """Correlated COUNT of a linked child's rows for the CURRENT master row:
@@ -3965,11 +4143,24 @@ def _build_token_resolver(report: ParsedReport):
             _gsrc, _gfn, _gq = group_summaries[u]
             if _gq and _gq.upper() != (dataset_name or "").upper():
                 if _gfn in ("", "first", "last"):
-                    _lk = _lookup_for_child(_gsrc, _gq, dataset_name)
+                    _lk = (_lookup_for_child(_gsrc, _gq, dataset_name)
+                           or _lookup_via_chain(_gsrc, _gq, dataset_name))
                     if _lk:
                         return ("formula", _lk,
                                 f"group summary {token!r} -> correlated "
                                 f"lookup over linked {_gq}")
+                # A LINKED child with no resolvable correlation must NOT
+                # fall through to a dataset-scoped aggregate: over a
+                # per-parent detail set that returns the globally first row
+                # — another record's data painted on every record. An
+                # honest blank beats confidently wrong data.
+                _cq = query_by_name.get((_gq or "").upper())
+                if _cq is not None and getattr(_cq, "parent_group", ""):
+                    return ("formula", "=Nothing",
+                            f"group summary {token!r}: {_gq} is a linked "
+                            f"detail whose correlation to the current scope "
+                            f"could not be resolved — left blank rather "
+                            f"than showing another record's row")
                 _SSG = {"count": "Count", "sum": "Sum", "avg": "Avg",
                         "average": "Avg", "min": "Min", "max": "Max",
                         "stddev": "StDev", "variance": "Var",
@@ -7739,12 +7930,13 @@ def _grouped_tabular_title(report):
     tf = max(cands, key=lambda f: (int(getattr(f, "font_size", 0) or 0),
                                    -(getattr(f, "y", 0) or 0),
                                    len((getattr(f, "text", "") or "").strip())))
-    try:
-        from converter.preview.html_mockup import _resolve_tokens
-        out = [_resolve_tokens(ln, 0).strip()
-               for ln in (tf.text or "").splitlines() if ln.strip()][:3]
-    except Exception:  # noqa: BLE001 -- never crash title resolution
-        out = [re.sub(r"&[A-Za-z_]\w*", "", (tf.text or "")).strip()]
+    # Return the lines with &TOKENs INTACT: the PageHeader's _title_atom
+    # resolves each line through _resolve_text_expression into a REAL SSRS
+    # expression (=... & First(Fields!Vehicle_Type.Value, "Q") & ...).
+    # Resolving here with the MOCKUP's sample resolver baked the fabricated
+    # sample value ("...for Type Alpha") into the deployable RDL as a
+    # static title (agent-army verified, P0).
+    out = [ln.strip() for ln in (tf.text or "").splitlines() if ln.strip()][:3]
     return [ln for ln in out if ln]
 
 
@@ -8985,6 +9177,151 @@ def _section_has_image_field(section, report) -> bool:
         return False
 
     return walk(section)
+
+
+def _ensure_consume_container_whitespace(root) -> None:
+    """Tell SSRS to reclaim empty container space.
+
+    A per-record letter reserves a tall body. When its data region comes
+    back EMPTY the content collapses but the reserved height does not, and
+    the renderer emits a trailing blank sheet after the "no data" page
+    (four letter reports did exactly that at rows=0). This flag makes the
+    renderer consume that whitespace instead of paginating it.
+
+    Applied at the single finishing pass every builder flows through, so
+    all six exit points get it. Placed immediately before <Language>,
+    matching the Report content model."""
+    if root.find(_q("ConsumeContainerWhitespace")) is not None:
+        return
+    el = ET.Element(_q("ConsumeContainerWhitespace"))
+    el.text = "true"
+    lang = root.find(_q("Language"))
+    if lang is not None:
+        root.insert(list(root).index(lang), el)
+    else:
+        root.append(el)
+
+
+def _ensure_no_rows_message(root) -> None:
+    """Give every data region something to say when it has NO rows.
+
+    Zero rows is the most common production shape — a filter that matches
+    nothing — and it is the one shape nothing here ever rendered. A
+    report whose only data region comes back empty printed a completely
+    BLANK sheet: no title, no message, nothing the reader can act on
+    (caught by tools/renderlab/shape_matrix.py at rows=0).
+
+    ``NoRowsMessage`` renders ONLY when the region is empty, so a report
+    with data is byte-identical apart from this element."""
+    for tablix in root.iter(_q("Tablix")):
+        if tablix.find(_q("NoRowsMessage")) is not None:
+            continue
+        ds = tablix.find(_q("DataSetName"))
+        if ds is None:
+            continue
+        # Schema order: NoRowsMessage follows DataSetName in the Tablix
+        # content model, so insert immediately after it.
+        idx = list(tablix).index(ds)
+        el = ET.Element(_q("NoRowsMessage"))
+        el.text = "No data was returned for the selected criteria."
+        tablix.insert(idx + 1, el)
+
+
+def _drop_duplicated_header_margin_items(root) -> None:
+    """Remove a page-header margin item whose value the BODY already
+    renders, and always strip the ``data-marginx`` tag.
+
+    The page is built without sight of the body, so margin-resident fields
+    (a parameter echo, a run-date stamp) are emitted optimistically; this
+    pass reconciles the two afterwards so nothing prints twice. It also
+    re-tightens the header height for anything it removes."""
+    page = root.find(_q("Page"))
+    body = root.find(_q("Body"))
+    if page is None:
+        return
+    ph = page.find(_q("PageHeader"))
+    if ph is None:
+        return
+    body_vals = set()
+    if body is not None:
+        for v in body.iter(_q("Value")):
+            t = (v.text or "").strip()
+            if t:
+                body_vals.add(t)
+    items = ph.find(_q("ReportItems"))
+    removed = 0
+    for tb in list(ph.iter(_q("Textbox"))):
+        if "data-marginx" not in tb.attrib:
+            continue
+        del tb.attrib["data-marginx"]
+        val = next((v.text or "").strip() for v in tb.iter(_q("Value"))) \
+            if next(tb.iter(_q("Value")), None) is not None else ""
+        if val and val in body_vals and items is not None and tb in list(items):
+            items.remove(tb)
+            removed += 1
+    if removed:
+        h_el = ph.find(_q("Height"))
+        try:
+            h = float((h_el.text or "0").replace("in", ""))
+            h_el.text = f"{max(0.25, h - 0.24 * removed):.2f}in"
+        except (AttributeError, ValueError):
+            pass
+
+
+def _repair_blob_textboxes(root, report) -> None:
+    """Publish-safety net (agent-army verified): a BLOB column bound into a
+    Textbox prints raw bytes at runtime. Replace every Textbox whose single
+    Value is a pure blob-field ref with a Source=Database <Image> carrying
+    the same name, value expression, and geometry — the shape
+    _emit_db_image publishes. Builder-agnostic, so any emit path that
+    binds a blob (secondary tables, breakdown frames, cards) is covered."""
+    blob_items = set()
+    for q in (getattr(report, "queries", None) or []):
+        for it in (getattr(q, "items", None) or []):
+            dt = (getattr(it, "datatype", "") or "").lower()
+            ff = (getattr(it, "file_format", "") or "").lower()
+            if dt == "blob" or ff in ("image", "png", "gif", "jpeg", "jpg"):
+                nm = (getattr(it, "name", "") or "").upper()
+                if nm:
+                    blob_items.add(nm)
+    if not blob_items:
+        return
+    blob_fields = set()
+    for ds in root.iter(_q("DataSet")):
+        for fe in ds.iter(_q("Field")):
+            df = (fe.findtext(_q("DataField")) or fe.get("Name") or "").upper()
+            if df in blob_items:
+                blob_fields.add((fe.get("Name") or "").upper())
+    if not blob_fields:
+        return
+    pure = re.compile(
+        r'^\s*=\s*(?:First\(\s*)?Fields!([A-Za-z0-9_]+)\.Value'
+        r'(?:\s*,\s*"[^"]*")?\s*\)?\s*$')
+    parents = {c: p for p in root.iter() for c in p}
+    for tb in list(root.iter(_q("Textbox"))):
+        vals = [v.text or "" for v in tb.iter(_q("Value"))]
+        if len(vals) != 1:
+            continue
+        m = pure.match(vals[0])
+        if not m or m.group(1).upper() not in blob_fields:
+            continue
+        parent = parents.get(tb)
+        if parent is None:
+            continue
+        idx = list(parent).index(tb)
+        geo = {t: tb.findtext(_q(t))
+               for t in ("Top", "Left", "Height", "Width")}
+        img = ET.Element(_q("Image"))
+        img.set("Name", tb.get("Name") or "Img_Blob")
+        _sub(img, "Source", "Database")
+        _sub(img, "Value", vals[0])
+        _sub(img, "MIMEType", "image/png")
+        _sub(img, "Sizing", "FitProportional")
+        for t in ("Top", "Left", "Height", "Width"):
+            if geo[t]:
+                _sub(img, t, geo[t])
+        parent.remove(tb)
+        parent.insert(idx, img)
 
 
 def _emit_db_image(parent_items, name, ds_name, col_name,
@@ -12348,8 +12685,39 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
     _margin_extra = []
     if title_lines and not _echo:
         _sm_hdr = _section_by_kind(report, "section_main")
+        # The MARGIN band = everything above the first body frame. Only
+        # items in that band are page chrome; a direct field below it
+        # belongs to the body builders.
         for _mf in (getattr(_sm_hdr, "fields", None) or []) if _sm_hdr is not None else []:
-            if (getattr(_mf, "kind", "") or "") != "text":
+            _mkind = (getattr(_mf, "kind", "") or "")
+            if _mkind == "field":
+                # A margin FIELD — the parameter echo / date stamp Oracle
+                # prints in the page margin (and the criteria-echo line an
+                # after-parameter trigger builds) — was dropped entirely:
+                # the mockup printed it and the deployed report did not
+                # (agent-army verified). Page-header safe only when it
+                # resolves Fields!-free (a parameter, a builtin date, or a
+                # parameter-only formula); a trigger-computed placeholder
+                # resolves to =Nothing and is skipped below.
+                #
+                # NB: no y-based "margin band" gate — Oracle margin objects
+                # share the body's coordinate space (body frames start at
+                # y=0), so a y test can never separate them. Duplication
+                # with the body is prevented instead by the post-pass
+                # _drop_duplicated_header_margin_items, which compares the
+                # finished header against the finished body.
+                if not (getattr(_mf, "source", "") or "").strip():
+                    continue
+                try:
+                    _mv = _field_value_for(_mf, report)
+                except Exception:  # noqa: BLE001
+                    continue
+                if (not _mv or "Fields!" in _mv
+                        or _mv.strip() in ("=Nothing", "=")):
+                    continue
+                _margin_extra.append((_mf, _mv))
+                continue
+            if _mkind != "text":
                 continue
             _mt = (getattr(_mf, "text", "") or "").strip()
             if not _mt or "&<" in _mt or "&" not in _mt:
@@ -12413,6 +12781,10 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
                 border_color="#ffffff", padding="2pt",
             )
             _mtb = ph_items[-1]
+            # Tagged so the post-pass can drop it if the BODY already
+            # renders the same value (the page is built without sight of
+            # the body).
+            _mtb.set("data-marginx", "1")
             _sub(_mtb, "Top", f"{meta_y:.2f}in")
             _sub(_mtb, "Left", "0.1in")
             _sub(_mtb, "Width", "7.3in")
@@ -13101,6 +13473,21 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
                 group_owner[g.name.upper()] = q.name
             stack.extend(getattr(g, "children", None) or [])
 
+    # BLOB/image-bound sources must never reach a breakdown TEXTBOX — a
+    # logo blob emitted as =Fields!X.Value prints raw bytes (agent-army
+    # verified on a page-header logo frame the tabular builder dropped).
+    # A frame whose only field members are blob-bound has nothing tabular
+    # to break down at all.
+    _blob_srcs = {
+        (getattr(it, "name", "") or "").upper()
+        for q in (getattr(report, "queries", None) or [])
+        for it in (getattr(q, "items", None) or [])
+        if (getattr(it, "datatype", "") or "").lower() == "blob"
+        or (getattr(it, "file_format", "") or "").lower() in
+        ("image", "png", "gif", "jpeg", "jpg")
+    }
+    _blob_srcs.discard("")
+
     todo = []
 
     def walk(g):
@@ -13111,6 +13498,7 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
             if (ds and _safe(ds) not in rendered_ds and _safe(ds) in declared_ds
                     and int(getattr(g, "max_records_per_page", 0) or 0) != 1
                     and any((f.kind or "") == "field"
+                            and (f.source or "").upper() not in _blob_srcs
                             for f in (g.fields or []))):
                 todo.append((g, _safe(ds)))
         for c in (getattr(g, "children", None) or []):
@@ -13131,6 +13519,22 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
             if body_h_el is not None else 0.15
     except ValueError:
         y = 0.15
+    # Anchor to the ACTUAL content extent, not the declared body height:
+    # a builder may leave trailing slack in Height, and starting below it
+    # opens a dead vertical gap that pushes this block onto a page of its
+    # own — leaving the previous page's tail blank (production-verified on
+    # a grant letter: content ended 19.84in, this block started 21.19in).
+    # Never MOVES content down (max with nothing), only removes dead space.
+    content_bottom = 0.0
+    for el in list(ri):
+        try:
+            _t = float((el.findtext(_q("Top")) or "0").replace("in", ""))
+            _h = float((el.findtext(_q("Height")) or "0").replace("in", ""))
+        except ValueError:
+            continue
+        content_bottom = max(content_bottom, _t + _h)
+    if content_bottom > 0:
+        y = min(y, content_bottom + 0.15)
 
     # A breakdown frame's field member may name a SUMMARY column (Oracle
     # <summary first(col)>) rather than a dataset column — emitted verbatim
@@ -13170,6 +13574,8 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
         src = (getattr(f, "source", "") or "").strip()
         if not src:
             return None
+        if src.upper() in _blob_srcs:
+            return None      # a blob in a textbox prints raw bytes
         fmap = _ds_field_name.get(ds, {})
         hit = fmap.get(src.upper())
         if hit:
@@ -14426,6 +14832,15 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # per-key master-bound subtotal Tablix using LookupSet over Oracle's exact
     # <link> keys. After the grand-total pass so the body-height baseline is set.
     _ensure_group_subtotals_emitted(root, report)
+    # Publish-safety net: a BLOB column bound into a TEXTBOX prints raw
+    # bytes at runtime — convert every pure blob-field textbox into a real
+    # Source=Database <Image> in place. Builder-agnostic (secondary tables,
+    # breakdowns, cards all covered). After the repair passes so the value
+    # expression is final.
+    _repair_blob_textboxes(root, report)
+    _drop_duplicated_header_margin_items(root)
+    _ensure_no_rows_message(root)
+    _ensure_consume_container_whitespace(root)
     # Fidelity: stamp <Format> onto field values that carried an Oracle
     # formatMask, so currency / dates / thousands render like the original.
     _apply_field_formats(root, report)

@@ -239,7 +239,7 @@ def _parse_queries(data_el, warnings: List[str]) -> List[DataQuery]:
             select_el = _find(ds, "select")
             sql = ""
             if select_el is not None:
-                sql = (select_el.text or "").strip()
+                sql = _strip_statement_terminator((select_el.text or "").strip())
             # Oracle Reports lets a single <dataSource> hold multiple sibling
             # <group> elements (e.g. G_Site + G_VISIT under Q_VISIT). Walk
             # ALL of them — not just the first — and harvest dataItems
@@ -394,6 +394,188 @@ def _normalize_image_hex(raw_hex: str) -> str:
     return h
 
 
+def _strip_statement_terminator(sql: str) -> str:
+    """Drop a trailing ``;`` statement terminator (and any comment-only
+    tail after it) from a report's query text.
+
+    Oracle Reports exports frequently store the terminator, and often a
+    commented-out alternative query after it, inside the ``<select>``
+    CDATA. Standalone that is harmless — but this converter WRAPS a query
+    as a derived table (``SELECT O.*, (...) FROM ( <query> ) O``) to
+    inline formula columns, and a ``;`` inside parentheses is a hard
+    syntax error. Real-grammar validation caught two wild reports built
+    exactly that way.
+
+    Only a terminator at the true end of the statement is removed, judged
+    on comment/literal-masked text, so a ``;`` inside a string or comment
+    is untouched."""
+    if not sql or ";" not in sql:
+        return sql
+    code = _sql_code_positions(sql)
+    last = -1
+    for i, ch in enumerate(sql):
+        if ch == ";" and code[i]:
+            last = i
+    if last < 0:
+        return sql
+    # everything after the terminator must be comments/whitespace only,
+    # otherwise this is a multi-statement body we must not truncate
+    tail = "".join(ch if code[i] else " "
+                   for i, ch in enumerate(sql[last + 1:], start=last + 1))
+    if tail.strip():
+        return sql
+    return sql[:last].rstrip()
+
+
+def _sql_code_positions(sql: str):
+    """list[bool] the length of ``sql``: True where the char is CODE (not
+    inside a '...' literal, a "..." quoted identifier, or a --/ /* */
+    comment). Local copy so the parser never imports a generator."""
+    mask = [True] * len(sql)
+    i, n = 0, len(sql)
+    while i < n:
+        c = sql[i]
+        if c == "'":
+            mask[i] = False
+            i += 1
+            while i < n:
+                mask[i] = False
+                if sql[i] == "'":
+                    if i + 1 < n and sql[i + 1] == "'":
+                        mask[i + 1] = False
+                        i += 2
+                        continue
+                    i += 1
+                    break
+                i += 1
+        elif c == '"':
+            mask[i] = False
+            i += 1
+            while i < n:
+                mask[i] = False
+                if sql[i] == '"':
+                    i += 1
+                    break
+                i += 1
+        elif c == "-" and i + 1 < n and sql[i + 1] == "-":
+            while i < n and sql[i] != "\n":
+                mask[i] = False
+                i += 1
+        elif c == "/" and i + 1 < n and sql[i + 1] == "*":
+            mask[i] = mask[i + 1] = False
+            i += 2
+            while i < n:
+                mask[i] = False
+                if sql[i] == "*" and i + 1 < n and sql[i + 1] == "/":
+                    mask[i + 1] = False
+                    i += 2
+                    break
+                i += 1
+        else:
+            i += 1
+    return mask
+
+
+_SET_OPS = ("UNION ALL", "UNION", "INTERSECT", "MINUS", "EXCEPT")
+
+
+def _top_level_branch_spans(sql: str):
+    """[(start, end)] of each top-level set-operator branch. A single-branch
+    query returns one span covering the whole text; returns [] when there is
+    no SELECT at all."""
+    if not sql or not re.search(r"\bSELECT\b", sql, re.IGNORECASE):
+        return []
+    code = _sql_code_positions(sql)
+    up = sql.upper()
+    cuts = []
+    depth = 0
+    i = 0
+    n = len(sql)
+    while i < n:
+        if not code[i]:
+            i += 1
+            continue
+        c = sql[i]
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif depth == 0:
+            for kw in _SET_OPS:
+                if up.startswith(kw, i):
+                    before_ok = i == 0 or not (sql[i - 1].isalnum()
+                                               or sql[i - 1] == "_")
+                    j = i + len(kw)
+                    after_ok = j >= n or not (sql[j].isalnum() or sql[j] == "_")
+                    if before_ok and after_ok:
+                        cuts.append((i, j))
+                        i = j
+                        break
+            else:
+                i += 1
+                continue
+            continue
+        i += 1
+    spans = []
+    prev = 0
+    for s, e in cuts:
+        spans.append((prev, s))
+        prev = e
+    spans.append((prev, len(sql)))
+    return [(s, e) for s, e in spans
+            if re.search(r"\bSELECT\b", sql[s:e], re.IGNORECASE)]
+
+
+def _column_visible_in_branch(branch_sql: str, col: str) -> bool:
+    """True when ``col`` (possibly ``ALIAS.COL``) can be referenced from this
+    branch's OWN select list.
+
+    Only the branch's TOP-LEVEL FROM list counts. A table named inside a
+    subquery (``FROM DUAL WHERE NOT EXISTS (SELECT * FROM COGX ...)``) is
+    NOT in scope for the outer select list — injecting the qualified column
+    there is ORA-00904 (production-verified on a grant-status fallback
+    branch). Anything uncertain answers False, and the caller then emits
+    ``NULL <alias>``: arity-correct and always legal.
+    """
+    code = _sql_code_positions(branch_sql)
+    # blank out every character inside parentheses (subqueries, function
+    # arguments) as well as comments/literals -> only top-level code remains
+    live_chars = []
+    depth = 0
+    for k, ch in enumerate(branch_sql):
+        if not code[k]:
+            live_chars.append(" ")
+            continue
+        if ch == "(":
+            depth += 1
+            live_chars.append(" ")
+            continue
+        if ch == ")":
+            depth = max(0, depth - 1)
+            live_chars.append(" ")
+            continue
+        live_chars.append(ch if depth == 0 else " ")
+    live = "".join(live_chars)
+    m = re.search(r"\bFROM\b", live, re.IGNORECASE)
+    if not m:
+        return False
+    from_scope = live[m.end():]
+    stop = re.search(r"\b(WHERE|GROUP|HAVING|ORDER|CONNECT|START|MODEL)\b",
+                     from_scope, re.IGNORECASE)
+    if stop:
+        from_scope = from_scope[:stop.start()]
+    if re.fullmatch(r"\s*DUAL\s*", from_scope, re.IGNORECASE):
+        return False
+    qualifier = col.split(".")[0] if "." in col else ""
+    if qualifier:
+        return bool(re.search(rf"\b{re.escape(qualifier)}\b", from_scope,
+                              re.IGNORECASE))
+    # Unqualified column: accept only when this branch selects from real
+    # tables (not the DUAL fallback) — the column then belongs to one of
+    # them, exactly as the report author wrote it elsewhere.
+    return bool(from_scope.strip())
+
+
 def _augment_child_join_keys(child, master, warnings: List[str]) -> None:
     """Make the child's join-key column SELECT-able so a Lookup() can bind to
     it. A join key is a bind variable that the child SQL EQUATES to a real
@@ -461,21 +643,149 @@ def _augment_child_join_keys(child, master, warnings: List[str]) -> None:
         if not keys:
             return
 
+        def _mask_only(seg: str) -> str:
+            """``seg`` with ONLY comments/literals blanked — parentheses and
+            their contents preserved (ROLLUP/CUBE args are grouping keys)."""
+            code = _sql_code_positions(seg)
+            return "".join(ch if code[k] else " "
+                           for k, ch in enumerate(seg))
+
+        def _top_level_live(seg: str) -> str:
+            """``seg`` with comments, literals and every parenthesised span
+            blanked out — what the branch's OWN clause structure looks like."""
+            code = _sql_code_positions(seg)
+            out = []
+            depth = 0
+            for k, ch in enumerate(seg):
+                if not code[k]:
+                    out.append(" ")
+                    continue
+                if ch == "(":
+                    depth += 1
+                    out.append(" ")
+                    continue
+                if ch == ")":
+                    depth = max(0, depth - 1)
+                    out.append(" ")
+                    continue
+                out.append(ch if depth == 0 else " ")
+            return "".join(out)
+
+        _AGG_RE = re.compile(
+            r"\b(SUM|COUNT|AVG|MIN|MAX|STDDEV|VARIANCE|MEDIAN|LISTAGG"
+            r"|COLLECT|CORR|COVAR_POP|COVAR_SAMP)\s*\(", re.IGNORECASE)
+
+        def _has_top_level_aggregate(seg: str) -> bool:
+            """True when this branch's OWN select list calls an aggregate.
+
+            Detection runs on PAREN-PRESERVING text (``COUNT(*)`` loses its
+            '(' in the top-level view, so the regex could never match there
+            — that silent miss let an ORA-00937 through), and only counts a
+            call whose NAME sits at depth 0 of the select list, so an
+            aggregate inside a scalar subquery does not trigger it."""
+            masked = _mask_only(seg)
+            live = _top_level_live(seg)
+            sel = re.search(r"\bSELECT\b", live, re.IGNORECASE)
+            frm = re.search(r"\bFROM\b", live, re.IGNORECASE)
+            if not sel or not frm or frm.start() < sel.end():
+                return False
+            depth = 0
+            for m in re.finditer(r"[()]|" + _AGG_RE.pattern,
+                                 masked[sel.end():frm.start()],
+                                 re.IGNORECASE):
+                tok = m.group(0)
+                if tok == "(":
+                    depth += 1
+                elif tok == ")":
+                    depth = max(0, depth - 1)
+                elif depth == 0:
+                    return True
+            return False
+
         def _inject(text: str) -> str:
-            # Insert "col alias, " right after the first top-level SELECT
+            # Insert "col alias, " right after EVERY top-level branch's SELECT
             # (after DISTINCT if present). Oracle column-alias form, no AS --
             # matches the report's own style ("SA.Site_Id SA_Site_Id").
-            m = re.search(r"\bSELECT\b", text, re.IGNORECASE)
-            if not m:
+            #
+            # EVERY branch, not just the first: a UNION ALL query whose
+            # branches then differ in column count is ORA-01789 and the
+            # dataset cannot execute at all (production: a grant-status
+            # report shipped 11-vs-10 and 10-vs-9 branches). A branch that
+            # cannot see the source column (the classic "no rows" fallback
+            # ``SELECT ..., 1, NULL FROM DUAL``) receives ``NULL alias``
+            # instead, which is arity-correct and type-neutral.
+            spans = _top_level_branch_spans(text)
+            if not spans:
                 return text
-            at = m.end()
-            dm = re.match(r"\s+DISTINCT\b", text[at:], re.IGNORECASE)
-            if dm:
-                at += dm.end()
-            frag = " " + ", ".join(
-                (col if col.upper() == alias.upper() else f"{col} {alias}")
-                for alias, col in keys) + ","
-            return text[:at] + frag + text[at:]
+            edits = []      # (position, inserted_text) — applied right-to-left
+            for bstart, bend in spans:
+                seg = text[bstart:bend]
+                m = re.search(r"\bSELECT\b", seg, re.IGNORECASE)
+                if not m:
+                    continue
+                at = bstart + m.end()
+                dm = re.match(r"\s+DISTINCT\b", text[at:], re.IGNORECASE)
+                if dm:
+                    at += dm.end()
+                live = _top_level_live(seg)
+                gb = re.search(r"\bGROUP\s+BY\b", live, re.IGNORECASE)
+                has_agg = _has_top_level_aggregate(seg)
+                parts = []
+                add_to_gb = []
+                for alias, col in keys:
+                    # A column this branch cannot see (a DUAL fallback, or a
+                    # table that only appears inside a subquery) is ORA-00904;
+                    # a real column in an AGGREGATE query with no GROUP BY is
+                    # ORA-00937. Both cases select a typed NULL instead —
+                    # arity-correct, always legal, and the Lookup simply finds
+                    # no match for that row.
+                    if not _column_visible_in_branch(seg, col):
+                        parts.append(f"NULL {alias}")
+                        continue
+                    if has_agg and not gb:
+                        parts.append(f"NULL {alias}")
+                        continue
+                    parts.append(col if col.upper() == alias.upper()
+                                 else f"{col} {alias}")
+                    if gb:
+                        # Selecting a non-aggregated column from a GROUPED
+                        # query is ORA-00979 unless it is also grouped —
+                        # production-verified on three letter reports whose
+                        # datasets could never execute. Grouping by the
+                        # correlation key is exactly the per-master
+                        # granularity the Lookup() needs.
+                        #
+                        # The membership test keeps PARENTHESES: a column
+                        # inside ROLLUP()/CUBE()/GROUPING SETS() is already
+                        # a grouping key, and re-adding it as a plain key
+                        # would suppress the rollup's grand-total row.
+                        gb_clause = _mask_only(seg)[gb.end():]
+                        _st = re.search(
+                            r"\b(HAVING|ORDER|CONNECT|START|MODEL)\b",
+                            gb_clause, re.IGNORECASE)
+                        if _st:
+                            gb_clause = gb_clause[:_st.start()]
+                        # Match the qualified form OR the bare column name:
+                        # Oracle resolves ``GROUP BY Org_Id`` against a
+                        # ``SELECT T.Org_Id``, so either spelling means it
+                        # is already grouped. (The tail lookbehind must not
+                        # exclude '.', or it could never match inside a
+                        # qualified entry.)
+                        _tail = col.split(".")[-1]
+                        already = (
+                            re.search(rf"(?<![\w.]){re.escape(col)}\b",
+                                      gb_clause, re.IGNORECASE)
+                            or re.search(rf"(?<![\w]){re.escape(_tail)}\b",
+                                         gb_clause, re.IGNORECASE))
+                        if not already:
+                            add_to_gb.append(col)
+                if add_to_gb:
+                    edits.append((bstart + gb.end(),
+                                  " " + ", ".join(add_to_gb) + ","))
+                edits.append((at, " " + ", ".join(parts) + ","))
+            for pos, frag in sorted(edits, key=lambda e: -e[0]):
+                text = text[:pos] + frag + text[pos:]
+            return text
 
         child.sql = _inject(child.sql or "")
         if child.tsql:

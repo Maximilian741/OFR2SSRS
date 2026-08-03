@@ -18,6 +18,8 @@ from .preview.live_data import run_query
 from .validators.tsql_check import validate_report
 from .validators.rdl_check import validate_rdl
 from .validators.preflight import preflight_audit
+from .validators.sql_syntax import differential_issues as sql_differential_issues
+from .validators.coverage import coverage_issues, unaccounted_fields
 from .validators.layout_audit import audit_layout
 from .deployment import build_checklist
 from .audit import build_audit_trail
@@ -25,6 +27,28 @@ from .fidelity import build_fidelity_report
 from .ai_assist import build_prompts
 from .bursting import detect_bursting, build_burst_query, build_powershell_dds_script, build_email_burst_query, build_email_powershell_script, build_service_account_checklist, build_email_config_template
 from .subreports import detect_subreport_links, is_drillthrough_only
+
+
+def _dataset_command_texts(rdl_xml: str) -> dict:
+    """``{dataset name: CommandText}`` read back out of the emitted RDL —
+    the exact SQL that will run on the server, after every rewrite pass."""
+    import xml.etree.ElementTree as _ET
+    out: dict = {}
+    try:
+        root = _ET.fromstring(rdl_xml.encode("utf-8"))
+    except Exception:  # noqa: BLE001
+        return out
+    ns = root.tag.split("}")[0][1:] if "}" in root.tag else ""
+
+    def q(tag):
+        return f"{{{ns}}}{tag}" if ns else tag
+
+    for ds in root.iter(q("DataSet")):
+        qe = ds.find(q("Query"))
+        if qe is None:
+            continue
+        out[ds.get("Name") or ""] = qe.findtext(q("CommandText")) or ""
+    return out
 
 
 def _fallback_rdl(parsed, error: str) -> str:
@@ -392,6 +416,40 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
         bursting_info = {"is_bursting": False, "error": f"{type(e).__name__}: {e}"}
 
     preflight = preflight_audit(rdl_xml, target_db=target_db)
+    # REAL-GRAMMAR SQL validation. Every other check reasons about the
+    # RDL; none of them ever asked whether the SQL we emit is SQL Oracle
+    # would accept — and the render harness cannot tell, because it feeds
+    # synthetic rows in by field name. Four classes of un-runnable SQL
+    # reached production that way. Judged DIFFERENTIALLY (generated fails
+    # to parse while the ORIGINAL parsed cleanly) so Oracle constructs the
+    # grammar can't model never masquerade as findings. Degrades to "no
+    # opinion" when the optional grammar backend is absent.
+    try:
+        _ds_sql = _dataset_command_texts(rdl_xml)
+        _sql_issues = sql_differential_issues(parsed, _ds_sql,
+                                              dialect=("tsql" if target_db
+                                                       == "sqlserver"
+                                                       else "oracle"))
+        if _sql_issues:
+            preflight = dict(preflight)
+            preflight["issues"] = list(preflight.get("issues") or []) \
+                + _sql_issues
+            preflight["verdict"] = "BLOCKER"
+    except Exception:  # noqa: BLE001 - a validator must never sink convert()
+        pass
+    # CONTENT-COVERAGE CONTRACT: name every visible source field whose
+    # data did not reach the RDL. Content has vanished quietly before (a
+    # title segment, a subtitle line, 21 margin fields, an entire header
+    # frame); a field either lands in the artifact or the user is told it
+    # did not. AMBER — a fidelity gap to disclose, not a reason to block
+    # a report that otherwise deploys and runs.
+    try:
+        _cov = coverage_issues(parsed, rdl_xml)
+        if _cov:
+            preflight = dict(preflight)
+            preflight["issues"] = list(preflight.get("issues") or []) + _cov
+    except Exception:  # noqa: BLE001 - disclosure must never sink convert()
+        pass
     # Honest verdict for PARTIAL Oracle artifacts (wild-corpus verified):
     # a customization overlay or a data-model-only export is not a full
     # report. Tell the user plainly instead of shipping a near-blank RDL

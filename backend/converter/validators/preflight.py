@@ -228,6 +228,80 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
                 "The query must be emitted as static SQL.",
             ))
             continue
+        # UNION/INTERSECT/MINUS branches must all select the SAME number of
+        # columns — unequal arity is ORA-01789 and the dataset cannot run at
+        # all (production: a link-key column was injected into the first
+        # branch only, and the report shipped "READY").
+        try:
+            from converter.parsers.oracle_xml import (
+                _top_level_branch_spans as _tlbs,
+                _sql_code_positions as _scp,
+            )
+            _spans = _tlbs(sql)
+            if len(_spans) > 1:
+                _ar = []
+                for _bs, _be in _spans:
+                    _seg = sql[_bs:_be]
+                    _sc = _scp(_seg)
+                    _su = _seg.upper()
+                    _d = 0
+                    _sel = _frm = -1
+                    for _i in range(len(_seg)):
+                        if not _sc[_i]:
+                            continue
+                        _c = _seg[_i]
+                        if _c == "(":
+                            _d += 1
+                        elif _c == ")":
+                            _d -= 1
+                        elif _d == 0 and _sel < 0 and _su.startswith(
+                                "SELECT", _i):
+                            _sel = _i + 6
+                        elif _d == 0 and _sel >= 0 and _su.startswith(
+                                "FROM", _i):
+                            _frm = _i
+                            break
+                    if _sel < 0 or _frm < 0:
+                        _ar = []
+                        break
+                    _n, _d2 = 1, 0
+                    for _j in range(_sel, _frm):
+                        if not _sc[_j]:
+                            continue
+                        _ch = _seg[_j]
+                        if _ch == "(":
+                            _d2 += 1
+                        elif _ch == ")":
+                            _d2 -= 1
+                        elif _ch == "," and _d2 == 0:
+                            _n += 1
+                    _ar.append(_n)
+                if _ar and len(set(_ar)) > 1:
+                    issues.append((
+                        "BLOCKER",
+                        "sql.union_arity_mismatch",
+                        f"Set-operator branches select different column "
+                        f"counts {_ar} — Oracle raises ORA-01789 and this "
+                        f"dataset returns no data at all.",
+                    ))
+        except Exception:  # noqa: BLE001 — a checker must never break convert
+            pass
+        # A star expansion with an alias is a hard ORA-00923 at execution
+        # ("SELECT O.* AS O") — production verified: it shipped once and
+        # died on the real server while every local rail (none of which
+        # execute SQL) stayed green. Zero false positives: "* AS x" is
+        # never valid Oracle.
+        _live = re.sub(r"'[^']*'|--[^\n]*|/\*.*?\*/", " ", sql, flags=re.S)
+        for _sa in re.findall(
+                r"(?:[A-Za-z_][\w$#]*\s*\.\s*)?\*\s+AS\s+[\w$#\"]+", _live,
+                re.I):
+            issues.append((
+                "BLOCKER",
+                "sql.star_alias",
+                f"The SELECT list aliases a star expansion ({_sa.strip()!r})"
+                " — invalid Oracle SQL (ORA-00923 at execution). The "
+                "aliasing pass must never touch '*' items.",
+            ))
         # Informational: a runtime lexical inlined from its Oracle default.
         for _dm in sorted(set(re.findall(r"lexical default &(\w+)", sql))):
             issues.append((
@@ -764,6 +838,88 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
                 issues.append(("BLOCKER", f"{tag.lower()}.{elname}.bad_dataset",
                                f"{tag} {elname} binds to DataSet {dsn.text!r} which doesn't exist"))
 
+    # 8z) THE #1 RULE, enforced by the product itself.
+    #
+    # Every :BIND that survives into a CommandText must have a
+    # <QueryParameter> carrying a NON-EMPTY <Value>, and any report
+    # parameter that Value references must exist and be answerable
+    # without the end user (a DefaultValue, or Nullable). Miss any of
+    # those and SSRS demands values — the "Define Query Parameters"
+    # dialog that broke a live stakeholder demo.
+    #
+    # This lived only in an external audit script until mutation testing
+    # (tools/sqlcheck/mutation_test.py) showed that blanking a
+    # QueryParameter Value sailed through preflight untouched. The
+    # product must catch its own cardinal defect.
+    try:
+        def _ft(el, tag):
+            if el is None:
+                return None
+            return el.findtext(NS + tag) if NS else el.findtext(tag)
+
+        def _fe(el, tag):
+            if el is None:
+                return None
+            return el.find(NS + tag) if NS else el.find(tag)
+
+        _declared_params: Dict[str, Tuple[bool, bool]] = {}
+        for _rp in find_all(tree, "ReportParameter"):
+            _nm = (_rp.get("Name") or "").upper()
+            _dv = _fe(_rp, "DefaultValue")
+            _has_default = _dv is not None and bool(find_all(_dv, "Value"))
+            _nullable = (_ft(_rp, "Nullable") or "").strip().lower() == "true"
+            _declared_params[_nm] = (_has_default, _nullable)
+
+        for _ds in find_all(tree, "DataSet"):
+            _dsname = _ds.get("Name") or "?"
+            _q = _fe(_ds, "Query")
+            if _q is None:
+                continue
+            _ct = _ft(_q, "CommandText") or ""
+            _live = _strip_sql_comments(_ct)
+            _live = re.sub(r"'[^']*'", " ", _live)
+            _binds = {b.upper() for b in
+                      re.findall(r"[:@]([A-Za-z_]\w*)", _live)}
+            if not _binds:
+                continue
+            _qps: Dict[str, str] = {}
+            for _qp in find_all(_q, "QueryParameter"):
+                _qn = (_qp.get("Name") or "").lstrip(":@").upper()
+                _qps[_qn] = (_ft(_qp, "Value") or "").strip()
+            for _b in sorted(_binds):
+                if _b not in _qps:
+                    issues.append((
+                        "BLOCKER", f"rdl.query_param_missing.{_dsname}",
+                        f"Dataset {_dsname!r} binds :{_b} but declares no "
+                        f"<QueryParameter> for it — SSRS will prompt the "
+                        f"end user for a value."))
+                    continue
+                if not _qps[_b]:
+                    issues.append((
+                        "BLOCKER", f"rdl.query_param_empty.{_dsname}",
+                        f"Dataset {_dsname!r} declares :{_b} with an EMPTY "
+                        f"<Value/> — an empty value is itself a prompt "
+                        f"trigger. Bind it to a parameter or =Nothing."))
+                    continue
+                _m = re.match(r"=.*?Parameters!(\w+)\.Value", _qps[_b])
+                if not _m:
+                    continue
+                _pu = _m.group(1).upper()
+                if _pu not in _declared_params:
+                    issues.append((
+                        "BLOCKER", f"rdl.query_param_undeclared.{_dsname}",
+                        f"Dataset {_dsname!r} binds :{_b} to "
+                        f"Parameters!{_m.group(1)}, which is not a declared "
+                        f"ReportParameter."))
+                elif not any(_declared_params[_pu]):
+                    issues.append((
+                        "BLOCKER", f"rdl.query_param_no_default.{_dsname}",
+                        f"Parameter {_m.group(1)!r} (bound to :{_b}) has no "
+                        f"DefaultValue and is not Nullable — the report "
+                        f"cannot run without the user supplying a value."))
+    except Exception:  # noqa: BLE001 - a checker must never sink the audit
+        pass
+
     # 9) Body / Page presence
     if not find_all(tree, "Body"):
         issues.append(("BLOCKER", "rdl.no_body", "Missing <Body>"))
@@ -791,6 +947,25 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
         "WritingMode":    {"Horizontal", "Vertical", "Rotate270"},
         "BreakLocation":  {"Start", "End", "StartAndEnd", "Between", "EndOfGroup"},
         "KeepWithGroup":  {"None", "Before", "After"},
+        # Found by mutation-testing this validator (tools/sqlcheck/
+        # mutation_test.py): an invalid FontWeight sailed straight through
+        # because the element simply was not in this table.
+        "FontWeight":     {"Default", "Lighter", "Normal", "Bold", "Bolder",
+                           "100", "200", "300", "400", "500", "600", "700",
+                           "800", "900"},
+        "TextEffect":     {"Default", "None", "Emboss", "Engrave",
+                           "Outline", "Shadow"},
+        "BackgroundGradientType": {
+            "Default", "None", "LeftRight", "TopBottom", "Center",
+            "DiagonalLeft", "DiagonalRight", "HorizontalCenter",
+            "VerticalCenter"},
+        "BackgroundRepeat": {"Default", "Repeat", "NoRepeat", "RepeatX",
+                             "RepeatY", "Fit", "FitProportional", "Clip"},
+        "Sizing":         {"AutoSize", "Fit", "FitProportional", "Clip"},
+        "Source":         {"External", "Embedded", "Database"},
+        "DataElementStyle": {"Auto", "AttributeNormal", "ElementNormal"},
+        "DataElementOutput": {"Auto", "Output", "NoOutput",
+                              "ContentsOnly"},
     }
     enum_re = re.compile(
         r"<(" + "|".join(ENUM_RULES.keys()) + r")>([^<]+)</\1>"

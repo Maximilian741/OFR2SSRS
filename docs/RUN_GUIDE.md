@@ -170,10 +170,17 @@ curl -F "file=@REPORT.xml" \
   in the sidebar once; every artifact produced in the session (downloads,
   batch output, sub-reports) binds to it.
 - **Embedded:** supply a connection string per request.
-- Undeclared query binds default to `Nothing` so SSRS **never prompts**
-  at upload, Refresh Fields, or run — a deliberate, load-bearing design.
+- Undeclared query binds default to `Nothing` so SSRS **never prompts
+  end users** — at upload or at run — a deliberate, load-bearing design.
   Optional prompts stay optional: `col = :P` predicates are NULL-guarded,
   so an empty prompt means *all rows*, not zero.
+- **Do not click Refresh Fields.** The field list is emitted complete, so
+  there is nothing to refresh. Manually executing a parameterized
+  dataset's query in the designer (Refresh Fields / Query Designer ▸ Run)
+  makes **Report Builder itself** ask for design-time parameter values —
+  that dialog is Report Builder behavior for *any* parameterized query,
+  not a defect in the RDL. If you land in it, OK with nulls is safe: the
+  SELECT list is static, so the field metadata is identical.
 
 ---
 
@@ -182,9 +189,12 @@ curl -F "file=@REPORT.xml" \
 1. Upload the `.rdl` via the Report Server web portal (or
    `rs.exe` / PowerShell `Publish-RsRestItemContent`).
 2. Point the report at your data source (shared reference recommended).
-3. Open the report once in **Report Builder** and run **Refresh Fields**
-   — the generated SQL aliases every column so the refreshed field list
-   matches the RDL exactly; the report must not prompt.
+3. **Run.** Skip Refresh Fields — the field list is emitted complete and
+   already matches the SQL aliases exactly, so there is nothing to
+   refresh. (Refresh Fields executes the query at design time, and for a
+   parameterized query Report Builder will ask for design-time values —
+   its own dialog, not an RDL defect. OK-with-nulls is safe if you land
+   there.)
 4. Run with real parameters and compare against a known-good output of
    the original report.
 5. For DATE parameters, values pass as `yyyy-MM-dd` strings and are

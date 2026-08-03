@@ -2418,3 +2418,741 @@ def test_preflight_enum_check_allows_style_expressions():
                 if "bad_enum" in str(i)]
     assert not g_issues, g_issues
     assert b_issues, "a literal invalid enum must still be a BLOCKER"
+
+
+def test_star_select_items_never_aliased():
+    """'SELECT O.* AS O' is ORA-00923 the moment the query executes on the
+    real server — the production failure that presented as a parameter
+    problem. Star expansions must pass through the aliasing pass untouched,
+    and preflight must flag any star-alias as a BLOCKER."""
+    from converter.generators.rdl import _alias_select_items
+    from converter.validators.preflight import preflight_audit
+
+    sql = ("SELECT O.*, (SELECT MAX(X.ID) FROM T X WHERE X.K = O.K) AS CF_A "
+           "FROM (SELECT A, B FROM T2) O")
+    out = _alias_select_items(sql, ["A", "B", "CF_A"])
+    assert "* AS" not in out.upper().replace("  ", " "), out
+    assert "O.*" in out, out
+
+    bad_rdl = ('<Report xmlns="http://schemas.microsoft.com/sqlserver/'
+               'reporting/2008/01/reportdefinition"><DataSets><DataSet '
+               'Name="Q"><Query><DataSourceName>D</DataSourceName>'
+               '<CommandText>SELECT O.* AS O FROM T O</CommandText>'
+               '</Query><Fields><Field Name="A"><DataField>A</DataField>'
+               '</Field></Fields></DataSet></DataSets></Report>')
+    hits = [i for i in preflight_audit(bad_rdl)["issues"]
+            if i.get("rule") == "sql.star_alias"]
+    assert hits and hits[0]["severity"] == "BLOCKER", hits
+
+
+def test_trailing_totals_requires_total_label_and_stays_inside_wrapper():
+    """The report-end totals sheet must ONLY render when the layout carries
+    a genuine total-shaped label — an ordinary secondary-dataset record
+    frame (a complaint form's VIOLATION SITE band) must never be duplicated
+    into a junk totals page. When it DOES render, it must sit INSIDE the
+    desk wrapper (top-level siblings render side-by-side in the app)."""
+    from converter import convert
+
+    # _TOTALS_XML carries 'Total Site Visits:' -> totals sheet fires...
+    html = convert(_TOTALS_XML)["mockup_html"]
+    if "Report end" in html:
+        # ...and the whole document must be ONE root element: everything
+        # (including the totals sheet) inside the desk wrapper div.
+        import re as _re
+        first_div_end = _re.match(r"\s*<div", html)
+        assert first_div_end is not None
+        # strip the one root div; no OTHER top-level div may follow
+        assert html.rstrip().endswith("</div>")
+        depth = 0
+        roots = 0
+        for m in _re.finditer(r"<div\b|</div>", html):
+            if m.group(0) == "<div":
+                if depth == 0:
+                    roots += 1
+                depth += 1
+            else:
+                depth -= 1
+        assert roots == 1, f"totals sheet escaped the wrapper ({roots} roots)"
+
+    # A secondary-dataset frame with NO total label anywhere: no totals page.
+    no_total = _TOTALS_XML.replace(b"Total Site Visits:", b"Site Visits:")
+    html2 = convert(no_total)["mockup_html"]
+    assert "Report end" not in html2, (
+        "totals sheet fabricated without any total-shaped label")
+
+
+def test_renumbered_dataitem_aliases_rebind_by_stem():
+    """Oracle binds dataItems to SQL columns BY POSITION; SSRS binds BY
+    NAME. A customer XML whose dataItem says ACTION_TYPE_ID_3 over a SQL
+    alias ACTION_TYPE_ID_2 (or dataItem site_name1 over bare column
+    site_name) shipped blank columns on the real server. The aliasing pass
+    must rebind via the trailing-number STEM rule — positionally when the
+    lists align, by unique stem otherwise — and must REFUSE ambiguous
+    pairings (the alphabetized-export swap guard)."""
+    from converter.generators.rdl import _alias_select_items
+
+    # implicit alias, positional pairing
+    out = _alias_select_items(
+        "select at.ACTION_TYPE_ID ACTION_TYPE_ID_2, at.DES DESC_2, "
+        "count(*) C from t",
+        ["ACTION_TYPE_ID_3", "DESC_3", "C"])
+    assert "ACTION_TYPE_ID_3" in out and "ACTION_TYPE_ID_2" not in out, out
+    assert "DESC_3" in out, out
+
+    # bare column, NON-positional (order differs) -> unique-stem pairing
+    out2 = _alias_select_items(
+        "select s.site_id sic_id, s.site_name, s.other from t",
+        ["other", "site_name1", "sic_id"])
+    assert "site_name AS site_name1" in out2, out2
+
+    # positional 1:1 with pairwise stem agreement rebinds BOTH (Oracle
+    # bound them positionally — that IS the correct pairing)
+    out3 = _alias_select_items(
+        "select s.site_id, f.site_id2 from t",
+        ["site_id1", "site_id3"])
+    assert "AS site_id1" in out3 and "AS site_id3" in out3, out3
+
+    # NON-positional with TWO declared stem-candidates must refuse
+    out4 = _alias_select_items(
+        "select s.site_id from t",
+        ["site_id1", "site_id3", "unrelated"])
+    assert "AS " not in out4, out4
+
+
+def test_no_space_implicit_alias_never_double_aliased():
+    """Oracle accepts ``count(*)inspections`` (no space before the
+    implicit alias). The detector must see it — appending a derived alias
+    produced ``count(*)inspections AS COUNT_INSPECTIONS`` = ORA-00923 on
+    the server (production corpus, two datasets)."""
+    from converter.generators.rdl import _alias_select_items
+
+    out = _alias_select_items(
+        "select count(*)inspections from t", ["inspections"])
+    assert out.strip() == "select count(*)inspections from t", out
+    out2 = _alias_select_items(
+        "select count(*)num_enf_req_8 from x", ["num_enf_req_8"])
+    assert "AS " not in out2, out2
+
+
+def test_rdl_title_keeps_tokens_for_expression_resolution():
+    """The grouped-tabular title picker must return &TOKEN lines RAW — the
+    PageHeader resolves them into real SSRS expressions. Resolving with the
+    mockup's sample resolver baked fabricated sample data ('...for Type
+    Alpha') into the deployable RDL as a static title (agent-army P0)."""
+    from types import SimpleNamespace as _NS
+    from converter.generators.rdl import _grouped_tabular_title
+
+    rep = _NS(layout=[_NS(kind="section_main", fields=[
+        _NS(kind="text", text="Logsheets for &REPORT_VEHICLE_TYPE",
+            font_size=16, y=0.1),
+        _NS(kind="text", text="(continued)", font_size=8, y=0.5),
+    ], children=[])])
+    lines = _grouped_tabular_title(rep)
+    assert lines == ["Logsheets for &REPORT_VEHICLE_TYPE"], lines
+
+
+def test_breakdown_pass_never_binds_blob_columns_as_text():
+    """A dropped frame whose field member is a BLOB (a page-header logo)
+    must not become a breakdown tablix textbox — =Fields!Logo.Value prints
+    raw bytes at runtime (agent-army P0)."""
+    from converter import convert
+
+    xml = (
+        '<?xml version="1.0"?><report name="BLOB_T" DTDVersion="9.0.2.0.10">'
+        '<data>'
+        '<dataSource name="Q_M"><select><![CDATA[select a, b from t]]>'
+        '</select><group name="G_M"><dataItem name="A" datatype="vchar2"/>'
+        '<dataItem name="B" datatype="vchar2"/></group></dataSource>'
+        '<dataSource name="Q_IMG"><select><![CDATA[select logo from imgs]]>'
+        '</select><group name="G_IMG"><dataItem name="LOGO" '
+        'datatype="blob" fileFormat="image"/></group></dataSource>'
+        '</data>'
+        '<layout><section name="main">'
+        '<frame name="M_B"><geometryInfo x="0" y="0" width="8" height="4"/>'
+        '<repeatingFrame name="R_M" source="G_M" printDirection="down">'
+        '<geometryInfo x="0.2" y="0.2" width="7.5" height="0.2"/>'
+        '<field name="F_A" source="A"><geometryInfo x="0.2" y="0.2" '
+        'width="3" height="0.2"/></field>'
+        '<field name="F_B" source="B"><geometryInfo x="3.4" y="0.2" '
+        'width="2" height="0.2"/></field></repeatingFrame>'
+        '<repeatingFrame name="R_IMG" source="G_IMG" printDirection="down">'
+        '<geometryInfo x="0.2" y="1.0" width="2" height="1.0"/>'
+        '<field name="F_LOGO" source="LOGO"><geometryInfo x="0.2" y="1.0" '
+        'width="2" height="1.0"/></field></repeatingFrame>'
+        '</frame></section></layout></report>'
+    ).encode()
+    import xml.etree.ElementTree as _ET
+    rdl = convert(xml)["rdl_xml"]
+    root = _ET.fromstring(rdl.encode("utf-8"))
+    ns = root.tag.split("}")[0][1:]
+    for tb in root.iter(f"{{{ns}}}Textbox"):
+        for v in tb.iter(f"{{{ns}}}Value"):
+            assert "Fields!LOGO" not in (v.text or ""), (
+                f"blob bound as TEXT in {tb.get('Name')}")
+    imgs = [i for i in root.iter(f"{{{ns}}}Image")
+            if "Fields!LOGO" in "".join(
+                v.text or "" for v in i.iter(f"{{{ns}}}Value"))]
+    assert imgs, "blob field lost entirely — expected a Database <Image>"
+    assert imgs[0].findtext(f"{{{ns}}}Source") == "Database"
+
+
+def test_link_key_injected_into_every_union_branch():
+    """Oracle <link> join-key augmentation must add the key column to EVERY
+    set-operator branch, or the branches differ in column count and the
+    dataset dies with ORA-01789 (production: a grant-status report shipped
+    11-vs-10 and 10-vs-9 branches while preflight said READY). A branch
+    that cannot see the source table — the classic ``FROM DUAL`` fallback,
+    even when it names the table inside a NOT EXISTS subquery — must get
+    ``NULL <alias>``, never the qualified column (ORA-00904)."""
+    from converter.parsers.oracle_xml import (
+        _augment_child_join_keys, _column_visible_in_branch,
+        _top_level_branch_spans)
+    from converter.models import DataQuery, DataItem
+
+    child = DataQuery(name="Q_CHILD")
+    child.sql = (
+        "SELECT X.A A, X.B B FROM T X WHERE X.Org_Id = :Org_Id\n"
+        "UNION ALL\n"
+        "SELECT NULL A, 1 B FROM DUAL "
+        "WHERE NOT EXISTS(SELECT * FROM T X WHERE X.Org_Id = :Org_Id)")
+    child.items = [DataItem(name="A"), DataItem(name="B")]
+    master = DataQuery(name="Q_MASTER")
+    master.items = [DataItem(name="Org_Id")]
+    warnings = []
+    _augment_child_join_keys(child, master, warnings)
+    assert not warnings, warnings
+
+    spans = _top_level_branch_spans(child.sql)
+    assert len(spans) == 2, child.sql
+    b0, b1 = (child.sql[s:e] for s, e in spans)
+    assert "X.Org_Id Org_Id" in b0, b0
+    # the DUAL fallback names T/X only inside NOT EXISTS -> NULL, not X.Org_Id
+    assert "NULL Org_Id" in b1, b1
+    assert "X.Org_Id Org_Id" not in b1, b1
+    # both branches now select the same number of top-level items
+    def _arity(seg):
+        head = seg.upper().split("FROM", 1)[0]
+        return head.count(",") + 1
+    assert _arity(b0) == _arity(b1), (b0, b1)
+
+    # the visibility helper must not be fooled by a subquery mention
+    assert not _column_visible_in_branch(
+        "SELECT 1 FROM DUAL WHERE NOT EXISTS(SELECT * FROM COGX C)",
+        "C.Org_Id")
+    assert _column_visible_in_branch("SELECT 1 FROM COGX C WHERE 1=1",
+                                     "C.Org_Id")
+
+
+def test_preflight_flags_union_arity_mismatch():
+    """The ORA-01789 class must be a BLOCKER, never a silent READY."""
+    from converter.validators.preflight import preflight_audit
+
+    def _rdl(sql):
+        return ('<Report xmlns="http://schemas.microsoft.com/sqlserver/'
+                'reporting/2008/01/reportdefinition"><DataSets><DataSet '
+                'Name="Q"><Query><DataSourceName>D</DataSourceName>'
+                f'<CommandText>{sql}</CommandText></Query><Fields>'
+                '<Field Name="A"><DataField>A</DataField></Field>'
+                '</Fields></DataSet></DataSets></Report>')
+
+    bad = _rdl("SELECT A, B, C FROM T UNION ALL SELECT A, B FROM S")
+    good = _rdl("SELECT A, B FROM T UNION ALL SELECT A, B FROM S")
+    hits = [i for i in preflight_audit(bad)["issues"]
+            if i.get("rule") == "sql.union_arity_mismatch"]
+    assert hits and hits[0]["severity"] == "BLOCKER", hits
+    assert not [i for i in preflight_audit(good)["issues"]
+                if i.get("rule") == "sql.union_arity_mismatch"]
+
+
+def test_link_key_injection_respects_group_by_and_aggregates():
+    """Selecting the injected join key from a GROUPED query is ORA-00979
+    unless the key is also grouped, and from an AGGREGATE query with no
+    GROUP BY it is ORA-00937 (production: three letter reports shipped
+    datasets that could never execute). The key must therefore be added to
+    an existing GROUP BY, must NOT be re-added when it is already grouped
+    inside ROLLUP()/CUBE() (that would suppress the rollup total row), and
+    must degrade to NULL when the query aggregates without grouping."""
+    from converter.parsers.oracle_xml import _augment_child_join_keys
+    from converter.models import DataQuery, DataItem
+
+    master = DataQuery(name="Q_M")
+    master.items = [DataItem(name="Org_Id")]
+
+    # 1) GROUPED query -> key added to the GROUP BY list
+    a = DataQuery(name="Q_A")
+    a.sql = ("SELECT T.Name, COUNT(*) N FROM T WHERE T.Org_Id = :Org_Id "
+             "GROUP BY T.Name ORDER BY T.Name")
+    a.items = [DataItem(name="Name"), DataItem(name="N")]
+    _augment_child_join_keys(a, master, [])
+    assert "T.Org_Id Org_Id" in a.sql, a.sql
+    gb = a.sql.upper().split("GROUP BY", 1)[1]
+    assert "ORG_ID" in gb.split("ORDER BY")[0], a.sql
+
+    # 2) ROLLUP already groups it -> not re-added (one occurrence in GB)
+    b = DataQuery(name="Q_B")
+    b.sql = ("SELECT T.Name, SUM(T.Amt) S FROM T WHERE T.Org_Id = :Org_Id "
+             "GROUP BY ROLLUP(T.Org_Id, T.Name)")
+    b.items = [DataItem(name="Name"), DataItem(name="S")]
+    _augment_child_join_keys(b, master, [])
+    gb_b = b.sql.upper().split("GROUP BY", 1)[1]
+    assert gb_b.count("ORG_ID") == 1, b.sql
+
+    # 3) AGGREGATE with no GROUP BY -> NULL, never a bare column
+    c = DataQuery(name="Q_C")
+    c.sql = "SELECT COUNT(*) N FROM T WHERE T.Org_Id = :Org_Id"
+    c.items = [DataItem(name="N")]
+    _augment_child_join_keys(c, master, [])
+    assert "NULL Org_Id" in c.sql, c.sql
+    assert "T.Org_Id Org_Id" not in c.sql, c.sql
+
+
+_CHAIN_XML = (
+    '<?xml version="1.0"?><report name="CHAIN_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<dataSource name="Q_TOP"><select><![CDATA[select org_id, nm '
+    'from orgs]]></select>'
+    '<group name="G_TOP"><dataItem name="Org_Id" datatype="number"/>'
+    '<dataItem name="NM" datatype="vchar2"/></group></dataSource>'
+    '<dataSource name="Q_MID"><select><![CDATA[select app_id, org_id '
+    'from apps where org_id = :Org_Id]]></select>'
+    '<group name="G_MID"><dataItem name="APP_ID" datatype="number"/>'
+    '<dataItem name="Org_Id" datatype="number"/></group></dataSource>'
+    '<dataSource name="Q_FAR"><select><![CDATA[select app_id, cval '
+    'from courses where app_id = :App_Id]]></select>'
+    '<group name="G_FAR"><dataItem name="APP_ID" datatype="number"/>'
+    '<dataItem name="CVAL" datatype="vchar2"/>'
+    '<summary name="C_CVAL" source="CVAL" function="first"/>'
+    '</group></dataSource>'
+    '<link parentGroup="G_TOP" childQuery="Q_MID"/>'
+    '<link parentGroup="G_MID" childQuery="Q_FAR"/>'
+    '</data>'
+    '<layout><section name="main">'
+    '<frame name="M_B"><geometryInfo x="0" y="0" width="8" height="6"/>'
+    '<text name="B_P1"><geometryInfo x="0.2" y="0.1" width="7" '
+    'height="0.5"/><textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[This packet summarizes the accreditation record\n'
+    'for the applicant shown below, including each course on file\n'
+    'with the department at this time.]]></string></textSegment></text>'
+    '<text name="B_P2"><geometryInfo x="0.2" y="0.7" width="7" '
+    'height="0.5"/><textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[Questions about the accuracy of this record may\n'
+    'be directed to the program office during normal business hours\n'
+    'for correction or appeal.]]></string></textSegment></text>'
+    '<repeatingFrame name="R_TOP" source="G_TOP" printDirection="down">'
+    '<geometryInfo x="0.2" y="1.3" width="7.5" height="1.6"/>'
+    '<field name="F_NM" source="NM"><geometryInfo x="0.2" y="1.3" '
+    'width="3" height="0.2"/></field>'
+    '<field name="F_C" source="C_CVAL"><geometryInfo x="0.2" y="1.6" '
+    'width="3" height="0.2"/></field>'
+    '</repeatingFrame></frame></section></layout></report>'
+).encode()
+
+
+def test_two_hop_link_resolves_by_correlation_not_global_first():
+    """A value from a linked child TWO hops away (applicant -> application
+    -> course) must be reached with NESTED correlated Lookups. A
+    dataset-scoped First() there returns the globally first row — another
+    record's data painted onto every record (agent-army verified P0). When
+    no correlation can be built the value must be blank, never a global
+    aggregate over a per-parent detail set."""
+    from converter import convert
+
+    rdl = convert(_CHAIN_XML)["rdl_xml"]
+    assert 'Lookup(Lookup(' in rdl.replace(" ", ""), rdl[:400]
+    assert 'Fields!CVAL.Value, "Q_FAR"' in rdl, rdl[:400]
+    # never the uncorrelated form
+    assert 'First(Fields!CVAL.Value, "Q_FAR")' not in rdl
+
+
+def test_stripped_link_predicate_preserves_join_keys():
+    """De-correlating a 1:many child (so it returns all rows) must not
+    erase the join key — link_pairs has to keep it or the correlated
+    Lookup can never be rebuilt."""
+    from converter.generators.rdl import _strip_link_filter_predicates
+    from converter.models import ParsedReport, DataQuery, DataItem
+
+    rep = ParsedReport(name="R", dtd_version="9")
+    master = DataQuery(name="Q_M")
+    master.items = [DataItem(name="Org_Id")]
+    master.group_names = ["G_M"]
+    child = DataQuery(name="Q_C")
+    child.items = [DataItem(name="Org_Id"), DataItem(name="V")]
+    child.parent_group = "G_M"
+    child.sql = ("SELECT V FROM T WHERE 1=1 "
+                 "AND (:Org_Id IS NULL OR T.Org_Id = :Org_Id)")
+    rep.queries.extend([master, child])
+
+    _strip_link_filter_predicates(rep, {"Q_C"})
+    assert ":Org_Id" not in child.sql, child.sql
+    assert any((p or "").upper() == "ORG_ID"
+               for p, _c in child.link_pairs), child.link_pairs
+
+
+_MARGINF_XML = (
+    '<?xml version="1.0"?><report name="MARGINF_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<userParameter name="P_BUREAU" datatype="character">'
+    '<userParameterValue value="Air"/></userParameter>'
+    '<dataSource name="Q_M"><select><![CDATA[select a from t]]></select>'
+    '<group name="G_M"><dataItem name="A" datatype="vchar2"/>'
+    '</group></dataSource>'
+    '</data>'
+    '<layout><section name="main">'
+    '<text name="B_TITLE"><geometryInfo x="0.2" y="0.1" width="7" '
+    'height="0.3"/><textSegment><font face="Arial" size="16"/>'
+    '<string><![CDATA[Bureau Activity Report]]></string></textSegment></text>'
+    '<field name="F_bureau" source="P_BUREAU"><geometryInfo x="2.0" '
+    'y="0.6" width="3" height="0.2"/></field>'
+    '<frame name="M_B"><geometryInfo x="0" y="1.0" width="8" height="3"/>'
+    '<repeatingFrame name="R_M" source="G_M" printDirection="down">'
+    '<geometryInfo x="0.2" y="1.2" width="7.5" height="0.2"/>'
+    '<field name="F_A" source="A"><geometryInfo x="0.2" y="1.2" '
+    'width="3" height="0.2"/></field></repeatingFrame></frame>'
+    '</section></layout></report>'
+).encode()
+
+
+def test_margin_parameter_field_reaches_the_page_header():
+    """Oracle prints margin-resident FIELDS (a parameter echo, a run-date
+    stamp) on every page. The page-header pass only accepted text items, so
+    these were dropped from the RDL while the mockup still showed them —
+    the deployed report silently lost the line (agent-army verified).
+    The temporary data-marginx tag must never survive into the RDL."""
+    import xml.etree.ElementTree as _ET
+    from converter import convert
+
+    rdl = convert(_MARGINF_XML)["rdl_xml"]
+    assert "data-marginx" not in rdl, "internal tag leaked into the RDL"
+    root = _ET.fromstring(rdl.encode("utf-8"))
+    ns = root.tag.split("}")[0][1:]
+    page = root.find(f"{{{ns}}}Page")
+    ph = page.find(f"{{{ns}}}PageHeader")
+    vals = [(v.text or "") for v in ph.iter(f"{{{ns}}}Value")]
+    assert any("Parameters!P_BUREAU.Value" in v for v in vals), vals
+
+
+def test_header_margin_item_not_duplicated_when_body_renders_it():
+    """The page is built without sight of the body, so margin items are
+    emitted optimistically; the reconciliation post-pass must drop one
+    whose exact value the body already renders."""
+    import xml.etree.ElementTree as _ET
+    from converter.generators.rdl import (
+        _drop_duplicated_header_margin_items, _q)
+
+    root = _ET.Element(_q("Report"))
+    body = _ET.SubElement(root, _q("Body"))
+    bri = _ET.SubElement(body, _q("ReportItems"))
+    btb = _ET.SubElement(bri, _q("Textbox"))
+    _ET.SubElement(_ET.SubElement(_ET.SubElement(_ET.SubElement(
+        btb, _q("Paragraphs")), _q("Paragraph")), _q("TextRuns")),
+        _q("TextRun")).append(_ET.Element(_q("Value")))
+    next(btb.iter(_q("Value"))).text = "=Parameters!P_X.Value"
+
+    page = _ET.SubElement(root, _q("Page"))
+    ph = _ET.SubElement(page, _q("PageHeader"))
+    _ET.SubElement(ph, _q("Height")).text = "0.97in"
+    pri = _ET.SubElement(ph, _q("ReportItems"))
+    for expr in ("=Parameters!P_X.Value", "=Parameters!P_KEEP.Value"):
+        tb = _ET.SubElement(pri, _q("Textbox"))
+        tb.set("data-marginx", "1")
+        _ET.SubElement(_ET.SubElement(_ET.SubElement(_ET.SubElement(
+            tb, _q("Paragraphs")), _q("Paragraph")), _q("TextRuns")),
+            _q("TextRun")).append(_ET.Element(_q("Value")))
+        list(tb.iter(_q("Value")))[0].text = expr
+
+    _drop_duplicated_header_margin_items(root)
+    left = ["".join(v.text or "" for v in tb.iter(_q("Value")))
+            for tb in pri.iter(_q("Textbox"))]
+    assert left == ["=Parameters!P_KEEP.Value"], left
+    assert not any("data-marginx" in tb.attrib
+                   for tb in pri.iter(_q("Textbox")))
+    assert ph.findtext(_q("Height")) == "0.73in"
+
+
+def test_sql_grammar_validator_flags_only_converter_introduced_breakage():
+    """Real-grammar SQL validation, judged DIFFERENTIALLY.
+
+    A generated query that fails to parse is only OUR defect when the
+    ORIGINAL parsed cleanly. Oracle constructs a third-party grammar
+    cannot model (legacy (+) comparisons, KEEP DENSE_RANK, package calls)
+    appear in BOTH and must never be reported — that noise would bury the
+    real finding. With no grammar backend installed the validator must
+    have no opinion rather than raise a false alarm."""
+    from types import SimpleNamespace as _NS
+    from converter.validators import sql_syntax as S
+
+    src_good = "SELECT A, B FROM T"
+    report = _NS(queries=[_NS(name="Q_OK", sql=src_good),
+                          _NS(name="Q_ORACLEISM",
+                              sql="SELECT A FROM T WHERE X(+) < 5")])
+
+    if not S.grammar_available():
+        assert S.differential_issues(report, {"Q_OK": "SELECT ("}) == []
+        return
+
+    # 1) we broke a query whose source was fine -> BLOCKER
+    issues = S.differential_issues(
+        report, {"Q_OK": "SELECT A, FROM T WHERE ("})
+    assert issues and issues[0]["severity"] == "BLOCKER", issues
+    assert "Q_OK" in issues[0]["rule"]
+
+    # 2) source carries the same unmodellable construct -> silence
+    assert S.differential_issues(
+        report, {"Q_ORACLEISM": "SELECT A FROM T WHERE X(+) < 5"}) == []
+
+    # 3) a clean query is clean
+    assert S.differential_issues(report, {"Q_OK": src_good}) == []
+
+    # 4) bind variables are placeholders, not grammar — never a failure
+    ok, _err = S.parse_check(
+        "SELECT A FROM T WHERE ID = :P_ID AND D >= :P_START")
+    assert ok
+
+
+def test_broken_sql_reaches_the_preflight_verdict():
+    """The grammar validator must actually gate convert()'s verdict, not
+    just exist — a query we broke has to surface as a BLOCKER."""
+    from converter.validators import sql_syntax as S
+    if not S.grammar_available():
+        return
+    from converter import _dataset_command_texts
+
+    rdl = ('<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting'
+           '/2008/01/reportdefinition"><DataSets><DataSet Name="Q_X">'
+           '<Query><DataSourceName>D</DataSourceName>'
+           '<CommandText>SELECT A, FROM T WHERE (</CommandText></Query>'
+           '</DataSet></DataSets></Report>')
+    got = _dataset_command_texts(rdl)
+    assert got == {"Q_X": "SELECT A, FROM T WHERE ("}, got
+
+    from types import SimpleNamespace as _NS
+    rep = _NS(queries=[_NS(name="Q_X", sql="SELECT A, B FROM T")])
+    issues = S.differential_issues(rep, got)
+    assert issues and issues[0]["severity"] == "BLOCKER"
+
+
+def test_statement_terminator_stripped_so_subquery_wrapping_is_valid():
+    """Oracle exports often store a trailing ';' — and a commented-out
+    alternative query after it — inside the <select> CDATA. Harmless
+    standalone, but this converter wraps a query as a derived table to
+    inline formula columns, and ';' inside parentheses is a hard syntax
+    error (found by real-grammar validation on two wild reports). Only a
+    true trailing terminator is removed; a ';' inside a literal or a
+    multi-statement body must survive untouched."""
+    from converter.parsers.oracle_xml import _strip_statement_terminator
+
+    assert _strip_statement_terminator(
+        "SELECT A FROM T;") == "SELECT A FROM T"
+    assert _strip_statement_terminator(
+        "SELECT A FROM T;\n/*SELECT B FROM U;*/") == "SELECT A FROM T"
+    assert _strip_statement_terminator(
+        "SELECT A FROM T;  -- old query") == "SELECT A FROM T"
+    # a ';' inside a string literal is data, not a terminator
+    kept = "SELECT ';' AS SEP FROM T"
+    assert _strip_statement_terminator(kept) == kept
+    # real second statement -> never truncate
+    multi = "SELECT A FROM T; SELECT B FROM U"
+    assert _strip_statement_terminator(multi) == multi
+    assert _strip_statement_terminator("") == ""
+
+
+def test_deliberate_placeholder_query_is_not_a_sql_finding():
+    """A dataset whose Oracle source was a NON-relational pluggable
+    source gets a comment-only CommandText explaining how to wire it up.
+    That is a declared limitation, not a query we broke — the grammar
+    validator must stay silent (otherwise every such report would get a
+    bogus BLOCKER verdict)."""
+    from types import SimpleNamespace as _NS
+    from converter.validators import sql_syntax as S
+
+    if not S.grammar_available():
+        return
+    stub = ("-- This dataset originally read from a NON-SQL source.\n"
+            "-- Point it at your data source in Report Builder.")
+    report = _NS(queries=[_NS(name="QP_1", sql="")])
+    assert S.differential_issues(report, {"QP_1": stub}) == []
+    # an EMPTY source query also means there was never a query to break
+    assert S.differential_issues(report, {"QP_1": "SELECT A, FROM"}) == []
+
+
+def test_preflight_catches_its_own_cardinal_defects():
+    """MUTATION TEST, in CI. Every other test asks 'is the artifact
+    good?'; this asks 'if it were bad, would we notice?'.
+
+    Both cases below were REAL holes found by tools/sqlcheck/
+    mutation_test.py: an emptied QueryParameter Value (the exact #1-rule
+    prompt trigger) and an invalid FontWeight sailed through preflight
+    untouched, because one rule lived only in an external script and the
+    other element was missing from the enum table."""
+    from converter.validators.preflight import preflight_audit
+
+    def _rdl(query_body, style="<FontWeight>Bold</FontWeight>"):
+        return (
+            '<Report xmlns="http://schemas.microsoft.com/sqlserver/reporting'
+            '/2008/01/reportdefinition">'
+            '<ReportParameters><ReportParameter Name="P_ID">'
+            '<DataType>String</DataType><Nullable>true</Nullable>'
+            '<DefaultValue><Values><Value>=Nothing</Value></Values>'
+            '</DefaultValue></ReportParameter></ReportParameters>'
+            '<DataSets><DataSet Name="Q_1"><Query>'
+            '<DataSourceName>D</DataSourceName>'
+            '<CommandText>SELECT A FROM T WHERE ID = :P_ID</CommandText>'
+            + query_body +
+            '</Query><Fields><Field Name="A"><DataField>A</DataField>'
+            '</Field></Fields></DataSet></DataSets>'
+            '<Body><ReportItems><Textbox Name="T1"><Style>' + style +
+            '</Style></Textbox></ReportItems></Body><Page/></Report>')
+
+    good_qp = ('<QueryParameters><QueryParameter Name=":P_ID">'
+               '<Value>=Parameters!P_ID.Value</Value>'
+               '</QueryParameter></QueryParameters>')
+
+    def rules(rdl):
+        return " ".join(str(i.get("rule", ""))
+                        for i in preflight_audit(rdl)["issues"])
+
+    # baseline: the well-formed artifact trips none of these
+    base = rules(_rdl(good_qp))
+    assert "query_param" not in base, base
+    assert "bad_enum" not in base, base
+
+    # 1) emptied QueryParameter Value -> the prompt trigger
+    empty_qp = good_qp.replace("<Value>=Parameters!P_ID.Value</Value>",
+                               "<Value></Value>")
+    assert "rdl.query_param_empty" in rules(_rdl(empty_qp))
+
+    # 2) bind with no QueryParameter at all
+    assert "rdl.query_param_missing" in rules(_rdl(""))
+
+    # 3) bound to a parameter that isn't declared
+    undecl = good_qp.replace("Parameters!P_ID.Value",
+                             "Parameters!P_GHOST.Value")
+    assert "rdl.query_param_undeclared" in rules(_rdl(undecl))
+
+    # 4) invalid style enum literal
+    assert "bad_enum" in rules(_rdl(good_qp, "<FontWeight>Chunky</FontWeight>"))
+
+
+def test_content_coverage_contract_declares_what_it_drops():
+    """A visible source field either lands in the artifact or the user is
+    TOLD it did not. Content has vanished quietly before (a title segment,
+    a subtitle line, 21 margin fields, a whole header frame) — silence is
+    the failure mode this contract makes impossible.
+
+    Disclosure is AMBER: a fidelity gap to report, never a reason to block
+    a report that otherwise deploys and runs."""
+    from types import SimpleNamespace as _NS
+    from converter.validators.coverage import (
+        visible_data_fields, is_accounted, unaccounted_fields,
+        coverage_issues)
+
+    rep = _NS(
+        layout=[_NS(fields=[
+            _NS(kind="field", source="SHOWN", name="F_SHOWN", visible=True),
+            _NS(kind="field", source="GONE", name="F_GONE", visible=True),
+            _NS(kind="field", source="HIDDEN", name="F_H", visible=False),
+            _NS(kind="text", text="Label:", name="B_L", visible=True),
+        ], children=[])],
+        queries=[], formulas=[])
+
+    assert visible_data_fields(rep) == [("F_SHOWN", "SHOWN"),
+                                        ("F_GONE", "GONE")]
+
+    rdl = "<Report><Value>=Fields!SHOWN.Value</Value></Report>"
+    assert is_accounted("SHOWN", rdl, rep)
+    assert not is_accounted("GONE", rdl, rep)
+    assert unaccounted_fields(rep, rdl) == [("F_GONE", "GONE")]
+
+    issues = coverage_issues(rep, rdl)
+    assert len(issues) == 1
+    assert issues[0]["severity"] == "AMBER", issues
+    assert "GONE" in issues[0]["message"]
+    # a fully-covered report says nothing
+    assert coverage_issues(rep, rdl + "<Value>=Fields!GONE.Value</Value>") \
+        == []
+
+
+def test_coverage_disclosure_reaches_convert_output():
+    """The disclosure must actually surface to the user through
+    convert()'s preflight, not merely exist as a helper."""
+    from converter import convert
+
+    out = convert(_GRPSUM_XML)
+    rules = [str(i.get("rule", "")) for i in out["preflight"]["issues"]]
+    # this fixture is fully mapped; the rule must not fire spuriously
+    assert "fidelity.unmapped_source_fields" not in rules, rules
+    # and the verdict is unaffected by an AMBER disclosure
+    assert out["preflight"]["verdict"] != "BLOCKER"
+
+
+def test_ssrs_smoke_deploy_is_inert_until_configured():
+    """The publish-time blind spot is closed by asking a REAL server —
+    but the tool must be provably safe: no server configured means no
+    network call, no upload, no deletion. It also must build well-formed
+    SOAP and parse the server's own fault text, since that message is the
+    whole point of the check."""
+    import importlib.util
+    import pathlib as _pl
+
+    tool = (_pl.Path(__file__).resolve().parents[1] / "tools" /
+            "ssrscheck" / "smoke_deploy.py")
+    assert tool.exists(), "smoke-deploy tool missing"
+    spec = importlib.util.spec_from_file_location("o2s_smoke", tool)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    import os
+    saved = os.environ.pop("O2S_SSRS_URL", None)
+    try:
+        assert mod.server_configured() is False
+        res = mod.smoke_deploy("<Report/>", "NAME")
+        assert res["verdict"] == "SKIPPED", res
+    finally:
+        if saved is not None:
+            os.environ["O2S_SSRS_URL"] = saved
+
+    soap = mod._soap("CreateCatalogItem", "<Name>X</Name>")
+    assert soap.startswith("<?xml")
+    assert "CreateCatalogItem" in soap and "soap:Envelope" in soap
+    # the server's own message is what makes a rejection actionable
+    assert mod._tag_text(
+        "<a><faultstring>rsInvalidReportDefinition</faultstring></a>",
+        "faultstring") == "rsInvalidReportDefinition"
+    assert mod._tag_text("<a/>", "faultstring") == ""
+
+
+def test_empty_result_set_says_so_instead_of_printing_a_blank_page():
+    """Zero rows is the most common production shape — a filter that
+    matches nothing — and it was the one shape nothing here ever
+    rendered. A report whose data region came back empty printed a
+    completely BLANK sheet (found by tools/renderlab/shape_matrix.py at
+    rows=0). Every data region must carry a NoRowsMessage, which renders
+    ONLY when the region is empty.
+
+    Schema position matters: NoRowsMessage follows DataSetName in the
+    Tablix content model, and a misplaced element makes the whole RDL
+    unloadable."""
+    import xml.etree.ElementTree as _ET
+    from converter import convert
+
+    rdl = convert(_TOTALS_XML)["rdl_xml"]
+    root = _ET.fromstring(rdl.encode("utf-8"))
+    ns = root.tag.split("}")[0][1:]
+
+    tablixes = list(root.iter(f"{{{ns}}}Tablix"))
+    assert tablixes, "fixture emitted no data region"
+    for tx in tablixes:
+        if tx.find(f"{{{ns}}}DataSetName") is None:
+            continue
+        kids = [k.tag.split("}")[-1] for k in list(tx)]
+        assert "NoRowsMessage" in kids, kids
+        assert kids.index("NoRowsMessage") == kids.index("DataSetName") + 1, \
+            f"NoRowsMessage out of schema order: {kids}"
+        msg = tx.findtext(f"{{{ns}}}NoRowsMessage") or ""
+        assert msg.strip(), "empty no-rows message helps nobody"
+
+    # idempotent: the net must never double-insert on re-application
+    from converter.generators.rdl import _ensure_no_rows_message
+    _ensure_no_rows_message(root)
+    for tx in root.iter(f"{{{ns}}}Tablix"):
+        assert len(tx.findall(f"{{{ns}}}NoRowsMessage")) <= 1
