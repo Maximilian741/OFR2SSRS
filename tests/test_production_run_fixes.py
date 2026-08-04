@@ -2307,8 +2307,8 @@ def test_lookup_and_aggregate_pure_shapes_match_format_pass():
 
     m = _PURE_LOOKUP_RE.match(
         '=Lookup(Fields!Site_Id.Value, Fields!Site_Id.Value, '
-        'Fields!CMVGY_Total.Value, "Q_CMVGY")')
-    assert m and m.group(1) == "CMVGY_Total"
+        'Fields!SAMPLE_TOTAL.Value, "Q_SAMPLE")')
+    assert m and m.group(1) == "SAMPLE_TOTAL"
     m2 = _PURE_FIELD_RE.match('=Sum(Fields!APP_APPROVED.Value, "Q_RENEWAL")')
     assert m2 and m2.group(1) == "APP_APPROVED"
     # Join(LookupSet(...)) is a joined STRING — must NOT match.
@@ -2327,15 +2327,15 @@ def test_inline_mask_wrap_covers_scoped_aggregate_units():
     from converter.generators.rdl import _wrap_inline_masked_date_refs, _q
 
     report = _NS(layout=[_NS(
-        fields=[_NS(format_mask="NNN,NN0", source="CMVGY_Total")],
+        fields=[_NS(format_mask="NNN,NN0", source="SAMPLE_TOTAL")],
         children=[],
     )])
     root = _ET.Element(_q("Report"))
     v = _ET.SubElement(root, _q("Value"))
-    v.text = '="All Total:  " & Sum(Fields!CMVGY_Total.Value, "Q_CMVGY")'
+    v.text = '="All Total:  " & Sum(Fields!SAMPLE_TOTAL.Value, "Q_SAMPLE")'
     _wrap_inline_masked_date_refs(root, report)
-    assert v.text == ('="All Total:  " & Format(Sum(Fields!CMVGY_Total.Value,'
-                      ' "Q_CMVGY"), "###,##0")'), v.text
+    assert v.text == ('="All Total:  " & Format(Sum(Fields!SAMPLE_TOTAL.Value,'
+                      ' "Q_SAMPLE"), "###,##0")'), v.text
 
 
 def test_formula_stub_never_ships_raw_nonparam_binds():
@@ -3208,3 +3208,177 @@ def test_mockup_pages_stack_as_uniform_sheets():
         "the preview host is a flex row again — pages will render "
         "side by side and be shrunk into each other")
     assert "display:block" in body, body
+
+
+def test_preview_boxes_cannot_paint_outside_their_oracle_rectangle():
+    """Oracle lays out FIXED boxes and hard-clips what does not fit. The
+    preview instead let a box GROW when its text wrapped, so a long
+    string in a narrow box painted straight over its neighbours — the
+    wallet cards on a permit's second page were unreadable.
+
+    Every positioned box therefore carries its declared height plus
+    overflow:hidden, which makes that whole collision class impossible by
+    construction rather than by after-the-fact nudging."""
+    import re as _re
+    from converter import convert
+
+    # a positioned (letter/document) archetype, not the tabular path
+    html = convert(_GRPSUM_XML)["mockup_html"]
+    boxes = _re.findall(r'<div style="(position:absolute;[^"]*)"', html)
+    assert boxes, "no positioned boxes emitted"
+    bounded = [b for b in boxes if "height:" in b]
+    assert bounded, "no box declares a height"
+    for b in bounded:
+        # a box with a declared height must also clip
+        assert "overflow:hidden" in b, b[:140]
+
+
+def test_card_text_is_not_clamped_against_a_seal_image():
+    """A certificate/wallet card places text deliberately alongside (and
+    partly over) a seal. Treating the seal as a hard right edge crushed a
+    3.05in card text down to 0.65in and shredded it. Text is never
+    clamped against an image — vertical bounding already prevents the
+    collision this clamp was guarding."""
+    from converter.preview.html_mockup import _decollide
+
+    elems = [
+        {"kind": "text", "x": 0.15, "y": 8.9, "w": 3.05, "h": 0.50,
+         "text": "STATE AGENCY 2026"},
+        {"kind": "image", "x": 0.80, "y": 8.9, "w": 1.20, "h": 1.20,
+         "source": "SEAL"},
+    ]
+    out = _decollide([dict(e) for e in elems])
+    card = [e for e in out if e["kind"] == "text"][0]
+    assert card["w"] == 3.05, f"seal clamped the card text to {card['w']}"
+
+    # a text neighbour still clamps normally
+    elems2 = [
+        {"kind": "text", "x": 0.15, "y": 8.9, "w": 3.05, "h": 0.20,
+         "text": "Label:"},
+        {"kind": "text", "x": 1.00, "y": 8.9, "w": 1.00, "h": 0.20,
+         "text": "Value"},
+    ]
+    out2 = _decollide([dict(e) for e in elems2])
+    first = [e for e in out2 if e["text"] == "Label:"][0]
+    assert first["w"] < 3.05, "text-vs-text clamp stopped working"
+
+
+def test_per_record_document_previews_one_page_per_record():
+    """A letter / certificate / single-record form prints ONE PAGE PER
+    RECORD in SSRS. The preview showed a single sheet, so it misstated
+    the shape of the document: the engine rendered three pages from three
+    rows while the preview claimed one. Measured across the corpus, 26 of
+    32 reports disagreed with their own render.
+
+    Each preview record page must also use its OWN record index, so the
+    sample values differ and the repetition reads as real records rather
+    than the same page duplicated."""
+    import re as _re
+    from converter import convert
+    from converter.preview.html_mockup import _PREVIEW_RECORD_PAGES
+
+    html = convert(_GRPSUM_XML)["mockup_html"]
+    pages = len(_re.findall(r'class="o2s-page"', html))
+    assert pages >= _PREVIEW_RECORD_PAGES, (
+        f"per-record document previewed {pages} page(s); the engine "
+        f"renders one per record")
+
+    # page labels must count the real total, not "Page 1 of 1"
+    labels = _re.findall(r"Page (\d+) of (\d+)", html)
+    assert labels, "no page labels emitted"
+    totals = {t for _n, t in labels}
+    assert len(totals) == 1, f"inconsistent page totals: {totals}"
+    assert int(totals.pop()) == pages, labels
+
+    # record pages differ: sample values are drawn per record index
+    sheets = _re.split(r'class="o2s-page"', html)[1:]
+    texts = [_re.sub(r"<[^>]+>", " ", s) for s in sheets]
+    assert len(set(texts)) > 1, "every record page is byte-identical"
+
+
+def test_no_customer_identifiers_anywhere_in_the_repo():
+    """This is a PUBLIC repo converting PRIVATE government reports.
+
+    A customer's agency name or report filenames must never appear in
+    anything git tracks — not even as test fixture input, which is
+    exactly how one crept in (a seal-clamp fixture used the real agency's
+    certificate wording, and two tests used real dataset and column
+    names). Synthetic names carry the same test value and leak nothing.
+
+    Scope is `git ls-files`, because that IS the public surface: local
+    scratch output under ignored paths is not published and must not fail
+    this guard."""
+    import re as _re
+    import subprocess as _sp
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parents[1]
+    try:
+        listing = _sp.run(["git", "ls-files"], cwd=root, capture_output=True,
+                          text=True, timeout=60)
+    except Exception:                                   # noqa: BLE001
+        return                                          # no git -> skip
+    if listing.returncode != 0:
+        return
+
+    # assembled from fragments so this guard never matches itself
+    parts = ["mont" + "ana", "hel" + "ena", "mt" + "deq", "CM" + "VGY",
+             "ASB" + "INSPC", "HZ" + "WST", "METH" + "ACT",
+             "ASB" + "ACCRD", "ASB" + "ABATE"]
+    banned = _re.compile("|".join(parts), _re.IGNORECASE)
+    exts = {".py", ".md", ".js", ".css", ".html", ".txt", ".json", ".yml",
+            ".xml", ".bat", ".sh", ".cfg", ".toml"}
+
+    hits = []
+    for rel in listing.stdout.splitlines():
+        path = root / rel
+        if path.suffix.lower() not in exts or not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for n, line in enumerate(text.splitlines(), 1):
+            if banned.search(line):
+                hits.append(f"{rel}:{n}: {line.strip()[:90]}")
+    assert not hits, (
+        "customer identifiers found in tracked files: "
+        + "; ".join(hits[:12]))
+
+
+
+def test_text_is_never_buried_under_a_seal_image():
+    """A certificate seal must render BEHIND the words.
+
+    This defect class hid for an entire session because the overlap
+    metric filtered images out: a seal painted straight across the wallet
+    card's text and the audit still reported "0 overlaps". Both halves
+    are asserted here — the z-order contract that makes it impossible,
+    and the clamp floor that stopped the previous over-correction (which
+    crushed a 3.05in card down to 0.65in trying to dodge the seal)."""
+    import re as _re
+    from converter import convert
+    from converter.preview.html_mockup import _decollide
+
+    html = convert(_GRPSUM_XML)["mockup_html"]
+    for st in _re.findall(r'<div style="(position:absolute;[^"]*)"', html):
+        assert "z-index:2" in st.replace(" ", ""), st[:110]
+
+    # a seal wide enough to leave a usable line DOES clamp the text back
+    near = _decollide([
+        {"kind": "text", "x": 0.15, "y": 8.9, "w": 3.05, "h": 0.20,
+         "text": "Card line"},
+        {"kind": "image", "x": 2.40, "y": 8.9, "w": 1.20, "h": 1.20,
+         "source": "SEAL"},
+    ])
+    assert [e for e in near if e["kind"] == "text"][0]["w"] < 3.05
+
+    # a seal that would leave only a sliver must NOT clamp — the text
+    # keeps its width and z-order keeps it readable over the seal
+    deep = _decollide([
+        {"kind": "text", "x": 0.15, "y": 8.9, "w": 3.05, "h": 0.20,
+         "text": "Card line"},
+        {"kind": "image", "x": 0.80, "y": 8.9, "w": 1.20, "h": 1.20,
+         "source": "SEAL"},
+    ])
+    assert [e for e in deep if e["kind"] == "text"][0]["w"] == 3.05

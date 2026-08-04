@@ -800,39 +800,58 @@ function renderMockupTab(data) {
   host.innerHTML = html;
 }
 
+// Three ways to look at the SAME report, in one place:
+//   "frontend" -> data.mockup_html          (browser mockup, sample data)
+//   "backend"  -> data.mockup_backend_html  (Report Builder design skeleton)
+//   "render"   -> page images of the generated .rdl run through Microsoft's
+//                 report engine -- not an approximation, the real output
+const MOCKUP_MODES = ["frontend", "backend", "render"];
+
 function _setMockupMode(mode) {
   state.mockupMode = mode;
-  const fe = document.getElementById("mockup-mode-frontend");
-  const be = document.getElementById("mockup-mode-backend");
-  // The active/inactive look is now driven entirely by CSS rules keyed off
-  // aria-checked. We keep the legacy .mockup-mode-active class in sync for
-  // any older selectors, but don't write inline styles anymore.
-  if (fe && be) {
-    const feOn = mode === "frontend";
-    const beOn = mode === "backend";
-    fe.setAttribute("aria-checked", feOn ? "true" : "false");
-    be.setAttribute("aria-checked", beOn ? "true" : "false");
-    fe.classList.toggle("mockup-mode-active", feOn);
-    be.classList.toggle("mockup-mode-active", beOn);
-    fe.tabIndex = feOn ? 0 : -1;
-    be.tabIndex = beOn ? 0 : -1;
+  MOCKUP_MODES.forEach(m => {
+    const b = document.getElementById("mockup-mode-" + m);
+    if (!b) return;
+    const on = m === mode;
+    b.setAttribute("aria-checked", on ? "true" : "false");
+    b.classList.toggle("mockup-mode-active", on);
+    b.tabIndex = on ? 0 : -1;
+  });
+
+  const mockHost = document.getElementById("mockup-host");
+  const renderHost = document.getElementById("render-host");
+  const ask = document.getElementById("render-ask");
+  const isRender = mode === "render";
+  if (mockHost) mockHost.hidden = isRender;
+  if (renderHost) renderHost.hidden = !isRender;
+
+  if (isRender) {
+    // Rendering costs a real engine round-trip, so ask how many sample rows
+    // instead of burying a default. Pages already rendered stay on screen.
+    const havePages = renderHost && renderHost.querySelector("img");
+    if (ask) ask.hidden = !!havePages;
+    if (!havePages && renderHost) renderHost.innerHTML = "";
+  } else if (ask) {
+    ask.hidden = true;
   }
-  if (state.data) renderMockupTab(state.data);
+  if (state.data && !isRender) renderMockupTab(state.data);
 }
 
 // Wire toggle buttons once on load. We attach immediately if the DOM is
 // already ready, otherwise wait for DOMContentLoaded — app.js may be
 // included near the end of <body>, in which case the listener never fires.
 function _wireMockupToggle() {
-  const fe = document.getElementById("mockup-mode-frontend");
-  const be = document.getElementById("mockup-mode-backend");
-  if (fe && !fe._wired) {
-    fe.addEventListener("click", () => _setMockupMode("frontend"));
-    fe._wired = true;
-  }
-  if (be && !be._wired) {
-    be.addEventListener("click", () => _setMockupMode("backend"));
-    be._wired = true;
+  MOCKUP_MODES.forEach(m => {
+    const b = document.getElementById("mockup-mode-" + m);
+    if (b && !b._wired) {
+      b.addEventListener("click", () => _setMockupMode(m));
+      b._wired = true;
+    }
+  });
+  const cancel = document.getElementById("render-cancel");
+  if (cancel && !cancel._wired) {
+    cancel.addEventListener("click", () => _setMockupMode("frontend"));
+    cancel._wired = true;
   }
 }
 if (document.readyState === "loading") {
@@ -2555,3 +2574,77 @@ function postEnrichmentBundle(newFiles) {
       toast((err && err.message) || 'Failed to add artifacts', 'err');
     });
 }
+
+// ---------------------------------------------------------------------------
+// Rendered Pages: run the GENERATED RDL through Microsoft's ReportViewer
+// engine and show the resulting page images. The HTML mockup re-implements
+// Oracle's layout in the browser and can only approximate it; this cannot
+// disagree with the deliverable because it IS the deliverable, rendered.
+// ---------------------------------------------------------------------------
+async function runRenderPreview() {
+  const host = document.getElementById("render-host");
+  const ask = document.getElementById("render-ask");
+  const btn = document.getElementById("render-run");
+  if (!host) return;
+  if (!state.data) { toast("Convert a report first.", "warn"); return; }
+  const rowsEl = document.getElementById("render-rows");
+  const rows = Math.max(1, Math.min(25, parseInt(rowsEl && rowsEl.value, 10) || 3));
+  if (ask) ask.hidden = true;
+  host.hidden = false;
+  host.innerHTML = '<div class="render-empty">Rendering through the report '
+    + "engine… this takes a few seconds.</div>";
+  if (btn) btn.disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append("rows", String(rows));
+    const r = await fetch("/api/render-preview", { method: "POST", body: fd });
+    const j = await r.json();
+    if (!r.ok || j.error) {
+      // Offer the prompt again so a failure is recoverable in place.
+      host.innerHTML = '<div class="render-empty">'
+        + escHtml(j.error || "the report engine could not render this RDL")
+        + ' <button class="btn btn-ghost" id="render-retry">Try again</button></div>';
+      const again = document.getElementById("render-retry");
+      if (again) again.addEventListener("click", () => {
+        host.innerHTML = "";
+        if (ask) ask.hidden = false;
+      });
+      toast(j.error || "render failed", "warn");
+      return;
+    }
+    host.innerHTML = "";
+    const bar = document.createElement("div");
+    bar.className = "render-bar";
+    bar.innerHTML = '<span>' + j.pages.length + " page(s) rendered from the "
+      + "generated <code>.rdl</code> at " + rows + " sample row(s)</span>";
+    const redo = document.createElement("button");
+    redo.className = "btn btn-ghost";
+    redo.textContent = "Re-render…";
+    redo.addEventListener("click", () => {
+      host.innerHTML = "";
+      if (ask) ask.hidden = false;
+    });
+    bar.appendChild(redo);
+    host.appendChild(bar);
+    j.pages.forEach((src, i) => {
+      const lab = document.createElement("div");
+      lab.className = "render-page-label";
+      lab.textContent = "Page " + (i + 1) + " of " + j.pages.length;
+      const img = document.createElement("img");
+      img.src = src;
+      img.alt = "Rendered page " + (i + 1);
+      host.appendChild(lab);
+      host.appendChild(img);
+    });
+    toast("Rendered " + j.count + " page(s) from the generated RDL.", "ok");
+  } catch (e) {
+    host.innerHTML = '<div class="render-empty">' + escHtml(String(e)) + "</div>";
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const b = document.getElementById("render-run");
+  if (b) b.addEventListener("click", runRenderPreview);
+});

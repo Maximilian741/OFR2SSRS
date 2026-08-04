@@ -295,3 +295,81 @@ def test_endpoints_never_500_on_bad_input(client):
                     data={"file": (_io.BytesIO(b"not xml at all"), "x.xml")},
                     content_type="multipart/form-data")
     assert g.status_code < 500
+
+
+def test_render_preview_returns_page_images_of_the_generated_rdl(client):
+    """The truest preview is the generated RDL rendered by the real engine.
+
+    A hand-built HTML mockup re-implements the layout and can only ever
+    approximate it; this endpoint returns page images produced by
+    Microsoft's ReportViewer from the .rdl the tool emits, so the preview
+    cannot disagree with the deliverable. Skips when the render engine
+    (ReportViewer DLLs / PyMuPDF) is not present on the machine.
+    """
+    import pathlib
+    import sys as _sys
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    _sys.path.insert(0, str(root / "tools" / "renderlab"))
+    try:
+        import fitz  # noqa: F401
+        from render import lib_ready
+    except Exception:  # noqa: BLE001
+        pytest.skip("renderlab not available")
+    if not lib_ready():
+        pytest.skip("ReportViewer DLLs not fetched")
+
+    sample = next((root / "samples" / "oracle").glob("*.xml"), None)
+    if sample is None:
+        pytest.skip("no sample report")
+
+    # nothing converted yet -> must refuse rather than render garbage
+    assert client.post("/api/render-preview").status_code == 400
+
+    client.post("/api/convert", data={
+        "file": (io.BytesIO(sample.read_bytes()), sample.name)},
+        content_type="multipart/form-data")
+    r = client.post("/api/render-preview", data={"rows": "3"})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    j = r.get_json()
+    assert j["count"] >= 1
+    assert len(j["pages"]) == j["count"]
+    for src in j["pages"]:
+        assert src.startswith("data:image/png;base64,")
+        # a real page image, not a blank stub
+        assert len(src) > 5000
+
+
+def test_preview_is_one_tab_with_three_modes():
+    """Preview is ONE tab, not a mockup tab plus a rendered-pages tab.
+
+    Two tabs showing the same report was a hedge: the user has to guess
+    which one is authoritative. One tab, three modes -- browser mockup
+    (sample data), Report Builder skeleton, and the real engine render.
+    A stray second copy of the render panel also duplicates the
+    render-host/render-rows element ids, which silently breaks
+    getElementById, so the ids are asserted unique too.
+    """
+    import pathlib as _pl
+    root = _pl.Path(__file__).resolve().parents[1]
+    html = (root / "frontend" / "templates"
+            / "index.html").read_text(encoding="utf-8")
+
+    assert 'data-tab="render"' not in html, "old Rendered Pages tab still wired"
+    assert 'id="tab-render"' not in html, "old Rendered Pages panel still present"
+    assert "> Preview\n" in html or "></span> Preview" in html
+
+    for mode in ("frontend", "backend", "render"):
+        assert f'data-mode="{mode}"' in html, f"missing preview mode {mode}"
+
+    for el in ("render-host", "render-rows", "render-run", "render-ask",
+               "mockup-host"):
+        assert html.count(f'id="{el}"') == 1, f"duplicate element id {el}"
+
+    # the row count is ASKED for, not silently defaulted
+    assert "How many sample rows" in html
+
+    js = (root / "frontend" / "static" / "js"
+          / "app.js").read_text(encoding="utf-8")
+    assert '"frontend", "backend", "render"' in js, \
+        "mode list must drive the toggle wiring"

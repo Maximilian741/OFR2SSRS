@@ -1,11 +1,14 @@
 # Oracle Reports to SSRS Converter
 
+**License: [MIT](LICENSE)** — free to use, modify, distribute and build on,
+including commercial and government use, with no fee and no lock-in.
+
 Drag an Oracle Reports artifact in, get a deployable SSRS RDL out.
 
 Oracle Reports is desupported. Oracle2SSRS converts your reports to SSRS in
 minutes — and **proves** the output instead of promising it:
 
-- **698 automated tests**, including renders through **Microsoft's own
+- **762 automated tests**, including renders through **Microsoft's own
   ReportViewer engine** (the same RDL processing code SSRS runs) with the
   produced PDFs measured for page cadence, blank pages, and geometry.
 - **Generated RDL validated** against Microsoft's official RDL 2008 XSD

@@ -1680,7 +1680,7 @@ def _apply_conditional_format(tb, entries) -> None:
 def _strict_trigger_resolve(report):
     """Resolver for trigger-body names: declared parameters and dataset
     columns ONLY, in their DECLARED casing (SSRS refs are case-sensitive;
-    a body's :complnt_stat casing published as-is broke 9 corpus reports
+    a body's :status_code casing published as-is broke 9 corpus reports
     the moment the expression host returned). Unknown names raise -> the
     trigger translation DECLINES and the object keeps today's behavior."""
     pmap = {}
@@ -13432,7 +13432,7 @@ def _ensure_layout_images_emitted(root: ET.Element, report) -> None:
 def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
     """Render the per-category BREAKDOWN frames the main body builders drop.
 
-    The Oracle idiom (production ASBINSPC truth, general shape): the report
+    The Oracle idiom (verified against a production truth artifact): the report
     ends with small repeating frames bound to SECONDARY aggregate datasets —
     one row per category ("&INSPECTOR Inspections:  <count>", "&VISIT_TYPE
     Visits:  <count>") — followed by grand-total lines. The tabular/stacked

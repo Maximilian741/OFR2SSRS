@@ -299,6 +299,48 @@ def api_convert():
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 
+@app.post("/api/render-preview")
+def api_render_preview():
+    """Page images of what the generated RDL ACTUALLY prints.
+
+    The HTML mockup re-implements Oracle's layout in the browser, so it can
+    only approximate the report. This runs the generated RDL through
+    Microsoft's own ReportViewer engine and rasterises the result, so the
+    preview cannot disagree with the deliverable -- it IS the deliverable.
+
+    Rendered in layout mode (expressions staticized): geometry, pagination
+    and page count are faithful; computed values appear as placeholders.
+    """
+    import base64
+    import tempfile
+
+    rdl = (_last() or {}).get("rdl_xml")
+    if not rdl:
+        return jsonify({"error": "convert a report first"}), 400
+    tools = str(HERE.parent / "tools" / "renderlab")
+    if tools not in sys.path:
+        sys.path.insert(0, tools)
+    try:
+        from rdl_preview import preview_pages
+    except Exception as e:  # noqa: BLE001 - renderlab is an optional extra
+        return jsonify({"error": f"render engine unavailable: {e}"}), 503
+    try:
+        rows = max(1, min(25, int(request.form.get("rows") or 3)))
+        with tempfile.TemporaryDirectory() as d:
+            pages = preview_pages(rdl, d, rows=rows)
+            if not pages:
+                return jsonify({
+                    "error": "the report engine could not render this RDL",
+                    "pages": []}), 502
+            imgs = ["data:image/png;base64," +
+                    base64.b64encode(p.read_bytes()).decode("ascii")
+                    for p in pages]
+        return jsonify({"pages": imgs, "count": len(imgs), "mode": "layout"})
+    except Exception as e:  # noqa: BLE001
+        traceback.print_exc()
+        return jsonify({"error": str(e)}), 500
+
+
 @app.post("/api/compare")
 def api_compare():
     """Compare two Oracle XML reports (file_a, file_b) and return a structured diff."""

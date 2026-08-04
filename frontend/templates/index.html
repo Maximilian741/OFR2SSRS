@@ -224,7 +224,7 @@
   <main class="main">
     <nav class="tabbar" role="tablist">
       <button class="tab tab-main active" data-tab="mockup" role="tab">
-        <span class="tab-dot dot-mockup"></span> HTML Mockup
+        <span class="tab-dot dot-mockup"></span> Preview
         <span class="tab-badge" id="badge-mockup" hidden></span>
       </button>
       <button class="tab tab-main" data-tab="rdl" role="tab">
@@ -282,13 +282,16 @@
       <div id="empty-state" class="empty-state">
         <div class="empty-glyph">&#x21BB;</div>
         <h2>Convert an Oracle Report to SSRS</h2>
-        <p class="empty-lede">Drop an XML/RDF (or a folder of related artifacts) into the sidebar &mdash; get an SSRS-ready <code>.rdl</code> plus a live HTML mockup of how it will render.</p>
-        <p class="empty-sub">Four main views: <b>HTML Mockup</b>, <b>RDL XML</b>, <b>Bursting</b>, <b>Sub-Reports</b>. Toggle <i>Advanced views</i> for validation, side-by-side diff, live data, and deploy checklist.</p>
+        <p class="empty-lede">Drop an XML/RDF (or a folder of related artifacts) into the sidebar &mdash; get an SSRS-ready <code>.rdl</code> plus a preview of how it will render — mockup or real rendered pages.</p>
+        <p class="empty-sub">Four main views: <b>Preview</b>, <b>RDL XML</b>, <b>Bursting</b>, <b>Sub-Reports</b>. Toggle <i>Advanced views</i> for validation, side-by-side diff, live data, and deploy checklist.</p>
       </div>
 
-      <!-- Tab: HTML Mockup -->
+      <!-- Tab: Preview — ONE place to look at the report, three ways.
+           Frontend/Backend are the fast in-browser mockups; Live rendered
+           pages runs the generated .rdl through Microsoft's own report
+           engine, so it is not an approximation -- it IS what SSRS prints. -->
       <div id="tab-mockup" class="tab-panel" hidden>
-        <div class="mockup-mode-toggle" role="radiogroup" aria-label="Mockup view mode">
+        <div class="mockup-mode-toggle" role="radiogroup" aria-label="Preview mode">
           <button id="mockup-mode-frontend" class="mockup-mode-btn" data-mode="frontend"
                   role="radio" aria-checked="true" type="button">
             <span class="mockup-mode-icon" aria-hidden="true">&#x1F441;</span>
@@ -299,9 +302,33 @@
             <span class="mockup-mode-icon" aria-hidden="true">&#x1F527;</span>
             <span>Backend (Report Builder skeleton)</span>
           </button>
+          <button id="mockup-mode-render" class="mockup-mode-btn" data-mode="render"
+                  role="radio" aria-checked="false" type="button">
+            <span class="mockup-mode-icon" aria-hidden="true">&#x1F5A8;</span>
+            <span>Live rendered pages</span>
+          </button>
         </div>
         <div class="panel-card mockup-card">
           <div id="mockup-host" class="mockup-host"></div>
+          <div id="render-host" class="render-host" hidden></div>
+          <!-- Asked for at the moment the user picks Live rendered pages:
+               rendering costs a real engine round-trip, so how many sample
+               rows to feed it is a decision, not a hidden default. -->
+          <div id="render-ask" class="render-ask" hidden>
+            <div class="render-ask-card">
+              <h3>Render the generated RDL</h3>
+              <p>Page images come from Microsoft&rsquo;s report engine &mdash;
+                 the same one SSRS uses &mdash; so layout, pagination and page
+                 count are exact. Computed values appear as placeholders
+                 because expressions evaluate against live data on the server.</p>
+              <label for="render-rows">How many sample rows per dataset?</label>
+              <input id="render-rows" type="number" min="1" max="25" value="3">
+              <div class="render-ask-actions">
+                <button id="render-run" class="btn btn-primary" type="button">Render pages</button>
+                <button id="render-cancel" class="btn btn-ghost" type="button">Cancel</button>
+              </div>
+            </div>
+          </div>
         </div>
         <div id="mockup-cta" class="mockup-cta-bar" hidden>
           <div class="cta-text">

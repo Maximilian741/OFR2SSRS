@@ -457,9 +457,16 @@ def _render_single_record_form_pages(report):
     paint section_main's frames/fields at their real geometry and tile the
     embedded line-item table in place. Geometry-faithful; no fabricated cover,
     no run-info card, no navy band collapse."""
-    page = _render_generic_document_page(
-        report, 0, 1, 1, section="section_main", tile_tables=True, lift_title=True)
-    return _render_pages_wrapper([page])
+    # ONE PAGE PER RECORD (maxRecordsPerPage=1 is exactly that promise) —
+    # the engine renders a page per master row, so previewing a single
+    # sheet misrepresented the document's shape.
+    n = _PREVIEW_RECORD_PAGES
+    return _render_pages_wrapper([
+        _render_generic_document_page(
+            report, i, i + 1, n, section="section_main",
+            tile_tables=True, lift_title=True)
+        for i in range(n)
+    ])
 
 
 def _any_maxrec1(report):
@@ -675,19 +682,25 @@ def _render_per_record_document_pages(report):
                       and not _is_summary_trailer_frame(c)]
     if not _record_frames:
         _trailers = []  # don't strip a report that is ALL summary
+    # ONE PAGE PER RECORD — this archetype IS a document printed once per
+    # record, so the preview shows several with differing sample values
+    # instead of a lone sheet.
+    _n = _PREVIEW_RECORD_PAGES
     pages = []
     if _has_cover_page(report):
-        total = 2 + len(_trailers)
+        total = 1 + _n + len(_trailers)
         pages.append(_render_header_summary_page(
             report, page_label="Page 1 of %d" % total))
-        pages.append(_render_generic_document_page(
-            report, 0, 2, total, section="section_main",
-            tile_tables=_tile, lift_title=True))
+        for _i in range(_n):
+            pages.append(_render_generic_document_page(
+                report, _i, _i + 2, total, section="section_main",
+                tile_tables=_tile, lift_title=True))
     else:
-        total = 1 + len(_trailers)
-        pages.append(_render_generic_document_page(
-            report, 0, 1, total, section="section_main",
-            tile_tables=_tile, lift_title=True))
+        total = _n + len(_trailers)
+        for _i in range(_n):
+            pages.append(_render_generic_document_page(
+                report, _i, _i + 1, total, section="section_main",
+                tile_tables=_tile, lift_title=True))
     for _tr in _trailers:
         pages.append(_render_generic_document_page(
             report, 0, len(pages) + 1, total, section="section_main",
@@ -983,24 +996,30 @@ def _sample_for_source(src, idx):
         return _TOKEN_PREVIEW[u]
     key = (src or "").lower().replace("_", " ").strip()
 
-    # Structural keyword pools. Each pool has 2 fictional alternatives so two
-    # sample rows look different. NEVER use customer/jurisdiction-specific
-    # tokens (no jurisdiction- or subject-specific words).
-    NAME_POOL    = ["Sample Org One", "Sample Org Two"]
-    PERSON_POOL  = ["Alex Rivera", "Jordan Casey"]
+    # Structural keyword pools. Each pool holds THREE fictional alternatives.
+    # Two was not enough: a per-record document previews one page per record,
+    # and with a 2-value pool record 3 wrapped back to record 1 — the preview
+    # showed "the same page three times", which reads as a bug rather than as
+    # three different records. NEVER use customer/jurisdiction-specific tokens
+    # (no jurisdiction- or subject-specific words).
+    NAME_POOL    = ["Sample Org One", "Sample Org Two", "Sample Org Three"]
+    PERSON_POOL  = ["Alex Rivera", "Jordan Casey", "Morgan Ellis"]
     ADDR_POOL    = ["100 Main St, Springfield, ST 00000",
-                    "200 Commerce Way, Riverside, ST 00000"]
-    CITY_POOL    = ["Springfield", "Riverside"]
-    DATE_POOL    = ["03/12/2026", "04/02/2026"]
-    NUM_POOL     = ["1001", "1002"]
-    MONEY_POOL   = ["$1,250.00", "$3,480.00"]
-    SHORT_ID     = ["ID-0001", "ID-0002"]
-    TYPE_POOL    = ["Type Alpha", "Type Bravo"]
-    STATUS_POOL  = ["Active", "Pending"]
-    COMMENT_POOL = ["Initial review completed.", "Follow-up scheduled."]
-    GROUP_POOL   = ["Group One", "Group Two"]
-    EMAIL_POOL   = ["[email protected]", "[email protected]"]
-    PHONE_POOL   = ["(555) 010-1001", "(555) 010-1002"]
+                    "200 Commerce Way, Riverside, ST 00000",
+                    "300 Lakeview Rd, Fairport, ST 00000"]
+    CITY_POOL    = ["Springfield", "Riverside", "Fairport"]
+    DATE_POOL    = ["03/12/2026", "04/02/2026", "05/21/2026"]
+    NUM_POOL     = ["1001", "1002", "1003"]
+    MONEY_POOL   = ["$1,250.00", "$3,480.00", "$865.50"]
+    SHORT_ID     = ["ID-0001", "ID-0002", "ID-0003"]
+    TYPE_POOL    = ["Type Alpha", "Type Bravo", "Type Charlie"]
+    STATUS_POOL  = ["Active", "Pending", "Closed"]
+    COMMENT_POOL = ["Initial review completed.", "Follow-up scheduled.",
+                    "Awaiting supporting documents."]
+    GROUP_POOL   = ["Group One", "Group Two", "Group Three"]
+    EMAIL_POOL   = ["[email protected]", "[email protected]",
+                    "[email protected]"]
+    PHONE_POOL   = ["(555) 010-1001", "(555) 010-1002", "(555) 010-1003"]
 
     # Keyword → pool dispatch (order matters: more-specific keywords first).
     # Non-English stems (RO/ES/FR/PT/IT) are listed alongside English so the
@@ -1012,11 +1031,11 @@ def _sample_for_source(src, idx):
         (("phone", "tel", "telefon", "telefono", "telephone"), PHONE_POOL),
         # Generic structural keywords (envelope/chief cover the common
         # Oracle CF_/CP_ formula naming without any client tokens).
-        (("envelope",),                    ["Sample Envelope Report",
-                                            "Sample Envelope Report"]),
+        (("envelope",),                    ["Sample Envelope Report"] * 3),
         (("chief", "director", "officer", "jefe", "directeur"),
                                            ["Sample Chief, Bureau Chief",
-                                            "Sample Director, Division"]),
+                                            "Sample Director, Division",
+                                            "Sample Administrator, Program"]),
         # Money / amount / balance (placed BEFORE number so "saldo"/"valor"
         # read as currency, not a bare count).
         (("salar", "salai", "sueldo", "saldo", "importe", "monto", "montant",
@@ -1041,10 +1060,12 @@ def _sample_for_source(src, idx):
         # "count", so a word-boundary "count" match would otherwise paint a
         # whole geography report as "1001" (wild-corpus verified: Judet-Tara).
         (("country", "nation", "pais", "pays", "tara"),
-                                           ["Westeria", "Eastland"]),
+                                           ["Westeria", "Eastland",
+                                            "Northmark"]),
         (("county", "region", "province", "provincia",
           "judet", "departament", "district", "comarca"),
-                                           ["North District", "South District"]),
+                                           ["North District", "South District",
+                                            "East District"]),
         (("city", "town", "oras", "ciudad", "ville", "cidade", "localidad"),
                                            CITY_POOL),
         (("date", "dt", "sysdate", "rundate", "data", "fecha", "vigencia", "fech"), DATE_POOL),
@@ -3595,6 +3616,17 @@ def _decollide(elems):
             if by >= ay + _ah - 0.01 or by + _bh <= ay + 0.01:
                 continue          # vertical ranges don't intersect
             bx = float(b.get("x", 0) or 0)
+            # TEXT vs IMAGE (a certificate seal) needs a middle course.
+            # Clamping hard crushed a 3.05in wallet-card text to 0.65in
+            # and shredded it; NOT clamping at all let the text paint 163
+            # px straight across the seal, which is just as unreadable.
+            # So: clamp only when what remains is still a usable line —
+            # otherwise leave the width alone and let z-order (text above
+            # seal, set at emit time) keep it legible.
+            if a.get("kind") == "text" and b.get("kind") == "image":
+                _remaining = bx - ax - 0.03
+                if _remaining < max(1.0, 0.55 * aw):
+                    continue
             if bx > ax + 0.03 and bx < ax + aw - 0.02:
                 best = bx if best is None else min(best, bx)
         if best is not None:
@@ -4342,6 +4374,13 @@ def _static_render_trigger_param(report, name_upper, idx=0):
     return "".join(out).strip()
 
 
+# How many sample RECORD pages a per-record document previews. Matched to
+# the render harness's sample row count so the preview and the engine
+# agree on the SHAPE of the document: a letter/certificate/form repeats
+# once per record, and showing a single page misrepresents that.
+_PREVIEW_RECORD_PAGES = 3
+
+
 def _render_generic_document_page(report, idx, page_num, total_pages,
                                   section="section_main", root=None,
                                   tile_tables=False, lift_title=False,
@@ -4470,12 +4509,28 @@ def _render_generic_document_page(report, idx, page_num, total_pages,
         _deco = []
         if e.get("underline"):
             _deco.append("underline")
-        style = ("position:absolute;left:" + left + ";top:" + top + ";width:" + width
-                 + ";font-size:" + str(max(7, min(28, e["size"]))) + "px;"
+        # BOUND EVERY BOX TO ITS ORACLE RECTANGLE. Oracle lays out fixed
+        # boxes and hard-clips whatever does not fit; the preview instead
+        # let a box GROW when its text wrapped, so a long string in a
+        # narrow box painted straight over its neighbours (the wallet
+        # cards on a permit's page 2 were unreadable). Constraining the
+        # height to what Oracle declared is both faithful and the only
+        # way a positioned layout can be collision-free by construction.
+        # A one-line floor keeps descenders from being shaved when the
+        # declared height is exactly one Oracle line.
+        _decl_h = float(e.get("h") or 0.0)
+        _fs_px = max(7, min(28, e["size"]))
+        _bound_css = ""
+        if _decl_h > 0 and not rot_css:
+            _bound_px = max(_decl_h * 96.0, _fs_px * 1.35)
+            _bound_css = f"height:{_bound_px:.0f}px;overflow:hidden;"
+        style = ("position:absolute;z-index:2;left:" + left + ";top:" + top + ";width:" + width
+                 + ";font-size:" + str(_fs_px) + "px;"
                  + ("font-weight:bold;" if e["bold"] else "")
                  + ("font-style:italic;" if e.get("italic") else "")
                  + ("text-decoration:underline;" if _deco else "")
                  + "color:" + fg + ";text-align:" + align + ";line-height:1.25;"
+                 + _bound_css
                  + rot_css)
         # A bound FIELD/CELL is single-line data in a fixed-width Oracle box: it
         # CLIPS overflow, it does not reflow into the block below. Wrapping a
@@ -4527,7 +4582,12 @@ def _render_generic_document_page(report, idx, page_num, total_pages,
             uri = _img_data_uri(im) if im else ""
             if uri:
                 h = px(max(0.3, e["h"])) if e.get("h") else width
-                parts.append('<img src="' + uri + '" style="position:absolute;left:'
+                # z-index 0: a seal/logo is BACKGROUND. Text is emitted at
+                # z-index 2, so where Oracle's geometry overlaps the two the
+                # words stay readable ON TOP of the seal instead of being
+                # buried under it.
+                parts.append('<img src="' + uri + '" style="position:absolute;'
+                             'z-index:0;left:'
                              + left + ';top:' + top + ';width:' + width
                              + ';height:' + h + ';object-fit:contain;"/>')
             else:
@@ -4825,14 +4885,24 @@ def _render_generic_document_pages(report):
     # section_header (Run-info + selection criteria) print it as page 1
     # before the per-record body -- mirror the RDL's _build_letter_cover_page
     # so the preview's first page matches the real report's first page.
+    # ONE PAGE PER RECORD — the same shape the engine renders. A letter /
+    # certificate / complaint form repeats per record in SSRS, so a
+    # single-page preview misrepresents the document: the report server
+    # produced three pages from three rows while the preview showed one.
+    # Each page uses its own record index, so the sample values differ
+    # and the repetition reads as real records rather than a duplicate.
+    n = _PREVIEW_RECORD_PAGES
     if _has_cover_page(report):
-        total = 2
-        return _render_pages_wrapper([
-            _render_header_summary_page(report, page_label="Page 1 of %d" % total),
-            _render_generic_document_page(report, 0, 2, total, section="section_main"),
-        ])
+        total = 1 + n
+        return _render_pages_wrapper(
+            [_render_header_summary_page(report,
+                                         page_label="Page 1 of %d" % total)]
+            + [_render_generic_document_page(report, i, i + 2, total,
+                                             section="section_main")
+               for i in range(n)])
     return _render_pages_wrapper([
-        _render_generic_document_page(report, 0, 1, 1)
+        _render_generic_document_page(report, i, i + 1, n)
+        for i in range(n)
     ])
 
 
@@ -5253,7 +5323,7 @@ def _maybe_trailing_totals(report, html):
                     and src not in main_groups):
                 # REPORT-END TOTALS ONLY: the parent frame must carry a
                 # total-shaped label ("Total Inspections:") — that is the
-                # ASBINSPC breakdown signal this block exists for. Without
+                # report-end breakdown signal this block exists for. Without
                 # this gate the pass duplicated ORDINARY secondary-dataset
                 # record frames (a complaint form's VIOLATION SITE band,
                 # already on page 1) into a junk "Report totals" sheet
