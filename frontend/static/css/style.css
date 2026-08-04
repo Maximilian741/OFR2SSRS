@@ -445,15 +445,13 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
   gap:12px; margin:0 auto 18px; max-width:820px; text-align:left;
   font-size:12.5px; color:var(--muted); }
 
-/* Row-count prompt, shown when Live rendered pages is picked: rendering is a
-   real engine round-trip, so the sample size is asked for, not assumed. */
-.render-ask{ background:var(--surface-2); padding:48px 22px; text-align:center; }
-.render-ask-card{ max-width:520px; margin:0 auto; text-align:left;
-  background:var(--surface); border:1px solid var(--border);
-  border-radius:12px; padding:22px 24px; box-shadow:var(--shadow-lg); }
-.render-ask-card h3{ margin:0 0 8px; font-size:16px; }
-.render-ask-card p{ margin:0 0 16px; font-size:12.5px; line-height:1.55;
-  color:var(--muted); }
-.render-ask-card label{ display:block; font-size:12.5px; margin-bottom:6px; }
-.render-ask-card input{ width:96px; padding:6px 8px; margin-bottom:16px; }
-.render-ask-actions{ display:flex; gap:10px; }
+/* Frontend-mode toolbar: render status + the sample-row count that drives
+   the engine's synthesized data. Sits above whichever host is showing. */
+.render-toolbar{ display:flex; align-items:center; gap:14px;
+  padding:10px 14px; border-bottom:1px solid var(--border);
+  font-size:12.5px; }
+.render-status{ color:var(--muted); flex:1; text-align:left;
+  line-height:1.45; }
+.render-toolbar label{ display:inline-flex; align-items:center; gap:6px;
+  color:var(--muted); white-space:nowrap; }
+.render-toolbar input{ width:58px; padding:4px 6px; }

@@ -9850,6 +9850,42 @@ def _record_has_watermark(report) -> bool:
     return found[0]
 
 
+def _is_page_furniture_frame(group) -> bool:
+    """True for a frame whose every printable member is page furniture:
+    a CurrentDate/SysDate-sourced field, page-number boilerplate
+    (&<PageNumber>/&<TotalPages>/physical variants), or a report-filename
+    literal (*.rdf/*.rep). Such bands are Oracle's in-section page footer;
+    their SSRS home is the PageHeader/PageFooter, never the body flow."""
+    kind = (getattr(group, "kind", "") or "").lower()
+    if "frame" not in kind:
+        return False
+    members = list(getattr(group, "fields", None) or [])
+    for c in (getattr(group, "children", None) or []):
+        members.extend(getattr(c, "fields", None) or [])
+    printable = 0
+    for f in members:
+        fk = (getattr(f, "kind", "") or "").lower()
+        src = (getattr(f, "source", "") or "").upper()
+        txt = (getattr(f, "text", "") or "")
+        if fk == "field":
+            if src in ("CURRENTDATE", "SYSDATE", "CURRENT_DATE"):
+                printable += 1
+                continue
+            return False
+        if fk == "text":
+            s = txt.strip()
+            if not s:
+                continue
+            if ("&<PageNumber>" in s or "&<TotalPages>" in s
+                    or "&<PhysicalPageNumber>" in s
+                    or "&<TotalPhysicalPages>" in s
+                    or s.lower().endswith((".rdf", ".rep"))):
+                printable += 1
+                continue
+            return False
+    return printable > 0
+
+
 def _emit_frame_rect(
     parent_items, group, parent_x, parent_y, parent_w,
     report, cover_title_lines, name_prefix, counter,
@@ -9869,6 +9905,17 @@ def _emit_frame_rect(
     # the normal form. Mirrors the mockup's _doc_collect_positioned skip so
     # preview and RDL agree.
     if _is_conditional_alert_frame(group):
+        return parent_y
+    # PAGE FURNITURE FRAMES never enter the body flow. Oracle sections carry
+    # their own footer bands as root-level frames parked at the page bottom
+    # ("<date>   Page &<PageNumber> of &<TotalPages>   REPORT.rdf"). SSRS puts
+    # that furniture in the PageHeader/PageFooter, which this converter emits
+    # separately -- and a date box leaked into the BODY at absolute y floats:
+    # when a conditionally-suppressed region above it collapses at render
+    # time (ConsumeContainerWhitespace), the date rides UP into the data rows
+    # (engine-render-verified: a grant-status stat table printed the run date
+    # straight across its "Missing FY..." label). Structural test only.
+    if _is_page_furniture_frame(group):
         return parent_y
     # A conditional ERROR/empty-state frame named by the err/error convention
     # AND gated by a format trigger (e.g. M_PERMITEE_ERROR / M_CONTACT_ERROR,
@@ -13463,6 +13510,20 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
     rendered_ds = {t.findtext(_q("DataSetName")) or ""
                    for t in root.iter(_q("Tablix"))}
     declared_ds = {d.get("Name") or "" for d in root.iter(_q("DataSet"))}
+    # A dataset is ALSO rendered when any body expression pulls its data by
+    # scope — Lookup/LookupSet/aggregate calls carry the dataset name as a
+    # quoted argument (the grid emitter renders a nested contacts frame as
+    # Join(LookupSet(..., "Q_X")) cells). Re-emitting such a dataset here
+    # painted the same content twice, one copy straight over the other
+    # (production-verified: a grant-status grid page rendered its contact
+    # block through lookups AND got a rescue table on top of the grid).
+    _body_exprs = "".join(
+        v.text or ""
+        for tb in body.iter(_q("Textbox"))
+        for v in tb.iter(_q("Value")))
+    for _ds in declared_ds:
+        if _ds and f'"{_ds}"' in _body_exprs:
+            rendered_ds.add(_ds)
 
     group_owner: dict = {}
     for q in (getattr(report, "queries", None) or []):

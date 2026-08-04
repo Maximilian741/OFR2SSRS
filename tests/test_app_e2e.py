@@ -340,36 +340,49 @@ def test_render_preview_returns_page_images_of_the_generated_rdl(client):
         assert len(src) > 5000
 
 
-def test_preview_is_one_tab_with_three_modes():
-    """Preview is ONE tab, not a mockup tab plus a rendered-pages tab.
+def test_preview_frontend_is_the_real_render():
+    """ONE Preview tab, TWO modes -- and the frontend mode IS the render.
 
-    Two tabs showing the same report was a hedge: the user has to guess
-    which one is authoritative. One tab, three modes -- browser mockup
-    (sample data), Report Builder skeleton, and the real engine render.
-    A stray second copy of the render panel also duplicates the
-    render-host/render-rows element ids, which silently breaks
-    getElementById, so the ids are asserted unique too.
+    History, so nobody re-splits this: the preview started as a hand-built
+    HTML mockup (an approximation), grew a second "Rendered Pages" tab
+    (engine truth), then a third in-tab mode. The user's verdict on all of
+    that: one place to look, and the real engine output is what you see --
+    the mockup is only the instant stand-in while the engine works or when
+    the engine is absent. A rows control (not a popup) sets the sample size.
+
+    The Report Labels sidebar is gone too: parameters are unbounded, and a
+    wall of per-report label inputs read as hardcoding, not a product.
     """
     import pathlib as _pl
     root = _pl.Path(__file__).resolve().parents[1]
     html = (root / "frontend" / "templates"
             / "index.html").read_text(encoding="utf-8")
 
-    assert 'data-tab="render"' not in html, "old Rendered Pages tab still wired"
-    assert 'id="tab-render"' not in html, "old Rendered Pages panel still present"
-    assert "> Preview\n" in html or "></span> Preview" in html
+    # one preview surface, no resurrected second tab or third mode
+    assert 'data-tab="render"' not in html
+    assert 'id="tab-render"' not in html
+    assert '></span> Preview' in html
+    assert 'data-mode="frontend"' in html
+    assert 'data-mode="backend"' in html
+    assert 'data-mode="render"' not in html
+    assert 'id="render-ask"' not in html
 
-    for mode in ("frontend", "backend", "render"):
-        assert f'data-mode="{mode}"' in html, f"missing preview mode {mode}"
+    # the rows control lives in the toolbar, once
+    for el in ("render-host", "render-rows", "render-run", "render-toolbar",
+               "render-status", "mockup-host"):
+        assert html.count(f'id="{el}"') == 1, f"element id {el}"
+    assert "Sample rows" in html
 
-    for el in ("render-host", "render-rows", "render-run", "render-ask",
-               "mockup-host"):
-        assert html.count(f'id="{el}"') == 1, f"duplicate element id {el}"
-
-    # the row count is ASKED for, not silently defaulted
-    assert "How many sample rows" in html
+    # the label-override sidebar is gone
+    assert 'label-overrides-section' not in html
+    assert 'Report labels' not in html
 
     js = (root / "frontend" / "static" / "js"
           / "app.js").read_text(encoding="utf-8")
-    assert '"frontend", "backend", "render"' in js, \
-        "mode list must drive the toggle wiring"
+    assert 'const MOCKUP_MODES = ["frontend", "backend"];' in js
+    # frontend mode auto-upgrades from mockup to engine pages
+    assert "runRenderPreview()" in js
+    assert "renderLabelOverrides" not in js
+    # stale-render guard: a slow response must never paint over a newer
+    # conversion's preview
+    assert "_renderToken" in js

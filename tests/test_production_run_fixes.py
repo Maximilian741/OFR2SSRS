@@ -1737,12 +1737,16 @@ def test_region_aware_trigger_application_and_nested_first_repair():
         assert 'Fields!ST.Value = "X"' in x2
 
 
-def test_label_override_ui_contract():
-    """Fire 144: the sidebar UI contract — the template carries the label
-    section + Apply button, app.js renders/applies/ships the overrides in
-    the FormData field the backend reads, and the round-trip lands in BOTH
-    the RDL and the mockup. Browser-verified; locked here so a frontend
-    refactor can't silently break the wiring."""
+def test_label_override_api_survives_without_the_sidebar_ui():
+    """Label overrides are an API capability, not a sidebar.
+
+    Fire 144 added a sidebar of per-report label inputs; the user's later
+    verdict was that a wall of report-specific fields reads as hardcoding,
+    not a product, and ordered it removed. This test locks BOTH halves of
+    that decision: the UI must stay gone from the template and app.js, and
+    the converter's label_overrides round-trip (used programmatically and
+    by artifact stacking) must keep working end to end.
+    """
     import io
     import json as _json
     from pathlib import Path
@@ -1751,27 +1755,23 @@ def test_label_override_ui_contract():
     root = Path(__file__).resolve().parent.parent
     html = (root / "frontend" / "templates" / "index.html").read_text(
         encoding="utf-8")
-    assert 'id="label-overrides-section"' in html
-    assert 'id="label-override-list"' in html
-    assert 'id="label-override-apply"' in html
+    assert 'label-overrides-section' not in html
+    assert 'label-override-apply' not in html
 
     js = (root / "frontend" / "static" / "js" / "app.js").read_text(
         encoding="utf-8")
-    assert "function renderLabelOverrides(" in js
-    assert "function applyLabelOverrides(" in js
-    assert 'fd.append("label_overrides"' in js, "must ship the API field"
-    assert "renderLabelOverrides(data)" in js, "must render on convert"
-    assert 'getElementById("label-override-apply")' in js, "Apply must wire"
-    # Re-convert path must reuse the stored source, not a patched copy.
-    assert "state.lastFile" in js and "state.lastBundle" in js
+    assert "renderLabelOverrides" not in js
+    assert "applyLabelOverrides" not in js
 
+    # the converter API is intact: inventory ships, overrides land in BOTH
+    # the RDL and the mockup
     xml = (root / "samples" / "oracle" / "SAMPLE_INSPECTION.xml").read_bytes()
     c = app.test_client()
     r1 = c.post("/api/convert", data={"file": (io.BytesIO(xml), "s.xml")},
                 content_type="multipart/form-data")
     j1 = r1.get_json()
     inv = j1.get("overridable_labels") or []
-    assert inv, "inventory must ship for the UI to render"
+    assert inv, "label inventory must still ship in the payload"
     shared = next((l for l in inv
                    if ">" + l["text"] + "<" in (j1.get("mockup_html") or "")),
                   None)

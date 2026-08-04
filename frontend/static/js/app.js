@@ -10,7 +10,7 @@ console.log("[Oracle2SSRS] app.js loaded at", new Date().toLocaleTimeString());
 const state = { data: null, activeTab: "mockup",
                 // Last source + label overrides, so "Apply labels"
                 // re-runs the SAME artifact through the real pipeline.
-                lastFile: null, lastBundle: null, labelOverrides: {} };
+                lastFile: null, lastBundle: null };
 
 // ----- DOM helpers -----
 const $  = (sel, root) => (root || document).querySelector(sel);
@@ -293,73 +293,10 @@ function appendDeployFields(fd) {
   const dsp = getSharedDsPath(); if (dsp) fd.append("shared_ds_path", dsp);
   const rsu = getReportServerUrl(); if (rsu) fd.append("report_server_url", rsu);
   const gal = getGenerateAllLabel(); if (gal) fd.append("generate_all_label", gal);
-  if (state.labelOverrides && Object.keys(state.labelOverrides).length) {
-    fd.append("label_overrides", JSON.stringify(state.labelOverrides));
-  }
 }
 
 // ----- Report labels (generic override facility) -----
 // The converter inventories every LITERAL label it emitted in
-// data.overridable_labels ({name, text, region}). Some wording exists only
-// in the source system (a title for a report built from bare SQL, an
-// operator's name for a link), so we let the user supply it rather than
-// invent it. Data expressions are never overridable — only labels.
-const _LABEL_REGION_TITLES = {
-  page_header: "Page header",
-  body: "Body",
-  page_footer: "Page footer",
-};
-
-function renderLabelOverrides(data) {
-  const section = document.getElementById("label-overrides-section");
-  const list = document.getElementById("label-override-list");
-  if (!section || !list) return;
-  const labels = (data && data.overridable_labels) || [];
-  if (!labels.length) { section.hidden = true; list.innerHTML = ""; return; }
-  section.hidden = false;
-  list.innerHTML = "";
-  const byRegion = {};
-  labels.forEach(l => { (byRegion[l.region] = byRegion[l.region] || []).push(l); });
-  Object.keys(byRegion).forEach(region => {
-    const h = document.createElement("div");
-    h.className = "muted-note conn-note";
-    h.style.margin = "8px 0 4px";
-    h.innerHTML = "<b>" + (_LABEL_REGION_TITLES[region] || region) + "</b>";
-    list.appendChild(h);
-    byRegion[region].forEach(l => {
-      const inp = document.createElement("input");
-      inp.type = "text";
-      inp.className = "conn-input";
-      inp.dataset.labelName = l.name;
-      inp.placeholder = l.text;
-      inp.title = l.name;
-      inp.value = (state.labelOverrides && state.labelOverrides[l.name]) || "";
-      inp.style.marginBottom = "6px";
-      list.appendChild(inp);
-    });
-  });
-}
-
-// Collect the edited labels and re-convert the SAME source through the
-// normal pipeline, so every pane (mockup, RDL, verdict, fidelity) refreshes
-// from one authoritative conversion rather than a patched copy.
-async function applyLabelOverrides() {
-  const list = document.getElementById("label-override-list");
-  if (!list) return;
-  const next = {};
-  list.querySelectorAll("input[data-label-name]").forEach(inp => {
-    const v = (inp.value || "").trim();
-    if (v) next[inp.dataset.labelName] = v;
-  });
-  state.labelOverrides = next;
-  if (state.lastBundle && state.lastBundle.length) {
-    await uploadBundle(state.lastBundle);
-  } else if (state.lastFile) {
-    await uploadFile(state.lastFile);
-  } else {
-    toast("Convert a report first, then edit its labels", "err");
-  }
-}
 
 // ----- Report images (seals / logos / watermarks) -----
 // The converter reports every layout image placeholder in
@@ -532,6 +469,11 @@ async function uploadBundle(list) {
 }
 
 async function runSample(name, btn) {
+  // Re-entry guard: duplicate event wiring once fired one click as several
+  // identical conversions, whose racing responses left the preview hung.
+  // The guard makes that impossible no matter how the button gets wired.
+  if (runSample._busy) return;
+  runSample._busy = true;
   setStatus("Loading sample…", "busy");
   if (btn) btn.classList.add("busy");
   try {
@@ -552,6 +494,7 @@ async function runSample(name, btn) {
     setStatus("Error", "err");
     toast(err.message || "Failed to load sample", "err");
   } finally {
+    runSample._busy = false;
     if (btn) btn.classList.remove("busy");
   }
 }
@@ -615,7 +558,7 @@ function onConverted(data) {
   // aborted EVERYTHING after it — the sidebar filled in but every tab panel
   // stayed empty and activateTab never ran, i.e. "tabs don't load". One bad
   // card must never blank the whole app; log it loudly and keep going.
-  [renderSummary, renderImageSlots, renderLabelOverrides,
+  [renderSummary, renderImageSlots, resetRenderState,
    (d) => { if (d.ingest_report) renderIngestSummary(d.ingest_report); },
    renderCrossValidation, renderEnrichmentBanner, renderMockupTab,
    renderRdlTab, renderSideBySideTab, renderLiveTab, renderValidationTab,
@@ -783,29 +726,22 @@ function renderIngestSummary(report) {
 }
 
 // ----- Tab 1: Mockup -----
-// Two view modes per conversion:
-//   "frontend" -> data.mockup_html (filled with sample data; what SSRS will render)
-//   "backend"  -> data.mockup_backend_html (placeholders; Report Builder design view)
-// The toggle buttons live in #tab-mockup and set state.mockupMode.
-function renderMockupTab(data) {
-  const host = $("#mockup-host");
-  if (!host) return;
-  // state is the module-level closure variable declared at the top of this
-  // file (const state = {...}). DON'T reference window.state — it doesn't
-  // exist and the toggle would silently no-op.
-  const mode = state.mockupMode || "frontend";
-  const html = mode === "backend"
-    ? (data.mockup_backend_html || data.mockup_html || "<em>No backend skeleton.</em>")
-    : (data.mockup_html || "<em>No mockup available.</em>");
-  host.innerHTML = html;
-}
+// Two ways to look at the SAME report:
+//   "frontend" -> the generated .rdl rendered by Microsoft's report engine
+//                 (the REAL output). The browser mockup (data.mockup_html)
+//                 paints instantly as a stand-in while the engine works --
+//                 or permanently on machines without the engine.
+//   "backend"  -> data.mockup_backend_html (Report Builder design skeleton)
+const MOCKUP_MODES = ["frontend", "backend"];
 
-// Three ways to look at the SAME report, in one place:
-//   "frontend" -> data.mockup_html          (browser mockup, sample data)
-//   "backend"  -> data.mockup_backend_html  (Report Builder design skeleton)
-//   "render"   -> page images of the generated .rdl run through Microsoft's
-//                 report engine -- not an approximation, the real output
-const MOCKUP_MODES = ["frontend", "backend", "render"];
+// A fresh conversion invalidates any pages rendered for the previous one.
+// The token guards against a slow render response landing AFTER the user
+// converted a different report -- stale pages must never paint.
+function resetRenderState() {
+  state.renderedPages = null;
+  state._renderFailed = null;
+  state._renderToken = (state._renderToken || 0) + 1;
+}
 
 function _setMockupMode(mode) {
   state.mockupMode = mode;
@@ -817,24 +753,120 @@ function _setMockupMode(mode) {
     b.classList.toggle("mockup-mode-active", on);
     b.tabIndex = on ? 0 : -1;
   });
+  if (state.data) renderMockupTab(state.data);
+}
 
-  const mockHost = document.getElementById("mockup-host");
-  const renderHost = document.getElementById("render-host");
-  const ask = document.getElementById("render-ask");
-  const isRender = mode === "render";
-  if (mockHost) mockHost.hidden = isRender;
-  if (renderHost) renderHost.hidden = !isRender;
+function _renderStatus(msg) {
+  const el = document.getElementById("render-status");
+  if (el) el.innerHTML = msg || "";
+}
 
-  if (isRender) {
-    // Rendering costs a real engine round-trip, so ask how many sample rows
-    // instead of burying a default. Pages already rendered stay on screen.
-    const havePages = renderHost && renderHost.querySelector("img");
-    if (ask) ask.hidden = !!havePages;
-    if (!havePages && renderHost) renderHost.innerHTML = "";
-  } else if (ask) {
-    ask.hidden = true;
+function renderMockupTab(data) {
+  const host = $("#mockup-host");
+  const rhost = $("#render-host");
+  const bar = document.getElementById("render-toolbar");
+  if (!host) return;
+  const mode = state.mockupMode || "frontend";
+  if (bar) bar.hidden = mode !== "frontend";
+
+  if (mode === "backend") {
+    if (rhost) rhost.hidden = true;
+    host.hidden = false;
+    host.innerHTML = data.mockup_backend_html || data.mockup_html
+      || "<em>No backend skeleton.</em>";
+    return;
   }
-  if (state.data && !isRender) renderMockupTab(state.data);
+
+  // frontend: real pages when we have them; the instant mockup while the
+  // engine works (or forever, on a machine without the engine)
+  if (state.renderedPages && state.renderedPages.length) {
+    _showRenderedPages();
+    return;
+  }
+  if (rhost) { rhost.hidden = true; rhost.innerHTML = ""; }
+  host.hidden = false;
+  host.innerHTML = data.mockup_html || "<em>No mockup available.</em>";
+  if (state._renderFailed) {
+    _renderStatus("Engine render unavailable — showing browser mockup. "
+      + '<button class="btn-tiny" id="render-retry" type="button">Retry</button>');
+    const rb = document.getElementById("render-retry");
+    if (rb) rb.addEventListener("click", () => {
+      state._renderFailed = null;
+      runRenderPreview();
+    });
+  } else {
+    _renderStatus("Browser mockup (quick view) — rendering the real "
+      + "pages through the report engine…");
+    if (!state._renderInFlight) runRenderPreview();
+  }
+}
+
+function _showRenderedPages() {
+  const host = $("#mockup-host");
+  const rhost = $("#render-host");
+  if (!rhost) return;
+  if (host) host.hidden = true;
+  rhost.hidden = false;
+  rhost.innerHTML = "";
+  const pages = state.renderedPages || [];
+  pages.forEach((src, i) => {
+    const lab = document.createElement("div");
+    lab.className = "render-page-label";
+    lab.textContent = "Page " + (i + 1) + " of " + pages.length;
+    const img = document.createElement("img");
+    img.src = src;
+    img.alt = "Rendered page " + (i + 1);
+    rhost.appendChild(lab);
+    rhost.appendChild(img);
+  });
+  _renderStatus("Rendered by Microsoft’s report engine — "
+    + pages.length + " page(s) at " + (state.renderedRows || 3)
+    + " sample row(s). Values are placeholders; the report server fills "
+    + "them from live data.");
+}
+
+async function runRenderPreview() {
+  if (!state.data) { toast("Convert a report first.", "warn"); return; }
+  const rowsEl = document.getElementById("render-rows");
+  const rows = Math.max(1, Math.min(25,
+    parseInt(rowsEl && rowsEl.value, 10) || 3));
+  const token = state._renderToken || 0;
+  state._renderInFlight = true;
+  const btn = document.getElementById("render-run");
+  if (btn) btn.disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append("rows", String(rows));
+    const r = await fetch("/api/render-preview", { method: "POST", body: fd });
+    const j = await r.json();
+    if ((state._renderToken || 0) !== token) return;  // a newer conversion won
+    if (!r.ok || j.error) {
+      state._renderFailed = j.error || "engine render failed";
+      if (state.mockupMode !== "backend" && state.data)
+        renderMockupTab(state.data);
+      return;
+    }
+    state.renderedPages = j.pages;
+    state.renderedRows = rows;
+    if ((state.mockupMode || "frontend") === "frontend") _showRenderedPages();
+  } catch (e) {
+    if ((state._renderToken || 0) === token) {
+      state._renderFailed = String(e);
+      if (state.mockupMode !== "backend" && state.data)
+        renderMockupTab(state.data);
+    }
+  } finally {
+    state._renderInFlight = false;
+    if (btn) btn.disabled = false;
+    // A newer conversion superseded this render while it ran: its response
+    // was discarded above and nothing repainted, leaving the status stuck
+    // on "rendering...". Kick one fresh render for the CURRENT conversion.
+    if ((state._renderToken || 0) !== token && !state.renderedPages
+        && !state._renderFailed && state.data
+        && (state.mockupMode || "frontend") === "frontend") {
+      runRenderPreview();
+    }
+  }
 }
 
 // Wire toggle buttons once on load. We attach immediately if the DOM is
@@ -848,10 +880,14 @@ function _wireMockupToggle() {
       b._wired = true;
     }
   });
-  const cancel = document.getElementById("render-cancel");
-  if (cancel && !cancel._wired) {
-    cancel.addEventListener("click", () => _setMockupMode("frontend"));
-    cancel._wired = true;
+  const rr = document.getElementById("render-run");
+  if (rr && !rr._wired) {
+    rr.addEventListener("click", () => {
+      state.renderedPages = null;
+      state._renderFailed = null;
+      runRenderPreview();
+    });
+    rr._wired = true;
   }
 }
 if (document.readyState === "loading") {
@@ -2137,12 +2173,6 @@ function renderRecentList() {
 function wireEverything() {
   console.log("[Oracle2SSRS] wiring DOM event listeners");
 
-  // Sample chips ("Try a sample" in the sidebar): one click converts the
-  // bundled synthetic sample through the REAL pipeline.
-  $$("#samples-list .sample-chip").forEach(c => {
-    c.addEventListener("click", () => runSample(c.dataset.sample, c));
-  });
-
   // Tabs
   $$(".tab").forEach(t => {
     t.addEventListener("click", (e) => {
@@ -2289,8 +2319,6 @@ function wireEverything() {
   if (clearBtn) clearBtn.addEventListener("click", clearRecent);
   const subAddBtn = document.getElementById("subreport-add-manual");
   if (subAddBtn) subAddBtn.addEventListener("click", subAddManual);
-  const lblApply = document.getElementById("label-override-apply");
-  if (lblApply) lblApply.addEventListener("click", applyLabelOverrides);
   initSharedDsPath();
   initReportServerUrl();
   initGenerateAllLabel();
@@ -2575,76 +2603,3 @@ function postEnrichmentBundle(newFiles) {
     });
 }
 
-// ---------------------------------------------------------------------------
-// Rendered Pages: run the GENERATED RDL through Microsoft's ReportViewer
-// engine and show the resulting page images. The HTML mockup re-implements
-// Oracle's layout in the browser and can only approximate it; this cannot
-// disagree with the deliverable because it IS the deliverable, rendered.
-// ---------------------------------------------------------------------------
-async function runRenderPreview() {
-  const host = document.getElementById("render-host");
-  const ask = document.getElementById("render-ask");
-  const btn = document.getElementById("render-run");
-  if (!host) return;
-  if (!state.data) { toast("Convert a report first.", "warn"); return; }
-  const rowsEl = document.getElementById("render-rows");
-  const rows = Math.max(1, Math.min(25, parseInt(rowsEl && rowsEl.value, 10) || 3));
-  if (ask) ask.hidden = true;
-  host.hidden = false;
-  host.innerHTML = '<div class="render-empty">Rendering through the report '
-    + "engine… this takes a few seconds.</div>";
-  if (btn) btn.disabled = true;
-  try {
-    const fd = new FormData();
-    fd.append("rows", String(rows));
-    const r = await fetch("/api/render-preview", { method: "POST", body: fd });
-    const j = await r.json();
-    if (!r.ok || j.error) {
-      // Offer the prompt again so a failure is recoverable in place.
-      host.innerHTML = '<div class="render-empty">'
-        + escHtml(j.error || "the report engine could not render this RDL")
-        + ' <button class="btn btn-ghost" id="render-retry">Try again</button></div>';
-      const again = document.getElementById("render-retry");
-      if (again) again.addEventListener("click", () => {
-        host.innerHTML = "";
-        if (ask) ask.hidden = false;
-      });
-      toast(j.error || "render failed", "warn");
-      return;
-    }
-    host.innerHTML = "";
-    const bar = document.createElement("div");
-    bar.className = "render-bar";
-    bar.innerHTML = '<span>' + j.pages.length + " page(s) rendered from the "
-      + "generated <code>.rdl</code> at " + rows + " sample row(s)</span>";
-    const redo = document.createElement("button");
-    redo.className = "btn btn-ghost";
-    redo.textContent = "Re-render…";
-    redo.addEventListener("click", () => {
-      host.innerHTML = "";
-      if (ask) ask.hidden = false;
-    });
-    bar.appendChild(redo);
-    host.appendChild(bar);
-    j.pages.forEach((src, i) => {
-      const lab = document.createElement("div");
-      lab.className = "render-page-label";
-      lab.textContent = "Page " + (i + 1) + " of " + j.pages.length;
-      const img = document.createElement("img");
-      img.src = src;
-      img.alt = "Rendered page " + (i + 1);
-      host.appendChild(lab);
-      host.appendChild(img);
-    });
-    toast("Rendered " + j.count + " page(s) from the generated RDL.", "ok");
-  } catch (e) {
-    host.innerHTML = '<div class="render-empty">' + escHtml(String(e)) + "</div>";
-  } finally {
-    if (btn) btn.disabled = false;
-  }
-}
-
-document.addEventListener("DOMContentLoaded", () => {
-  const b = document.getElementById("render-run");
-  if (b) b.addEventListener("click", runRenderPreview);
-});
