@@ -1172,7 +1172,13 @@ def _render_page(content_html, label=None, max_width="8.25in", min_height="10.5i
     return (
         rule_html
         + label_html
-        + '<div style="background:' + _PAGE_SHEET_BG + '; '
+        # class + explicit display/flex so a sheet keeps its paper width no
+        # matter what the host container does. The app's preview pane was
+        # a flex ROW, which put page 2 beside page 1 and shrank both below
+        # their content width — the absolutely-positioned content then
+        # overlapped and read as garbled.
+        + '<div class="o2s-page" style="display:block; flex:none; '
+        'background:' + _PAGE_SHEET_BG + '; '
         'max-width:' + max_width + '; min-height:' + min_height + '; '
         # Fixed-px positioned content must NEVER be clipped by a sheet that
         # shrank to a narrow viewport — the caller passes the content width
@@ -1207,7 +1213,11 @@ def _render_pages_wrapper(pages_html):
         for p in pages_html[1:]:
             joined += _DIVIDER + p
     return (
-        '<div style="background:' + _PAGE_DESK_BG + '; '
+        # ONE root, explicitly block: the whole preview is a single desk
+        # containing a vertical stack of sheets. Multiple roots (or a flex
+        # host) laid the pages out side by side.
+        '<div class="o2s-desk" style="display:block; width:100%; '
+        'background:' + _PAGE_DESK_BG + '; '
         'padding:24px 0; min-height:100%; overflow-x:auto;">'
         + joined
         + '</div>'
@@ -4685,6 +4695,26 @@ def _render_chart_svg(chart):
         + svg + '</div>')
 
 
+def _uniform_page_widths(html):
+    """STANDARDISE THE PAPER — every sheet in one preview gets the same
+    width.
+
+    Sheets are sized individually (content width + padding), so a report
+    could show a 792px page above a 912px one: they read as two different
+    documents rather than two pages of one. Runs at the FINAL exit point,
+    after the chart lead-in and the totals trailer have been spliced in —
+    those append their own sheets and would otherwise keep their own
+    width."""
+    if not html:
+        return html
+    widths = [float(w) for w in re.findall(r"max-width:\s*([\d.]+)in", html)]
+    if not widths:
+        return html
+    uniform = f"{max(widths):.2f}in"
+    html = re.sub(r"max-width:\s*[\d.]+in", f"max-width:{uniform}", html)
+    return re.sub(r"min-width:\s*[\d.]+in", f"min-width:{uniform}", html)
+
+
 def _maybe_lead_chart(report, html):
     """If the report has a renderable chart, splice a chart sheet in as the
     first page of the preview (so mockup <-> RDL agree)."""
@@ -5400,7 +5430,10 @@ def render_mockup(report, mode="frontend"):
         # without the per-category rows and total lines the real report
         # prints (truth-comparator finding: Visit/Insp totals absent).
         _result = _maybe_trailing_totals(report, _result)
-        return _clip_pct_cells(_result)
+        # LAST: every sheet spliced in above (chart lead-in, totals
+        # trailer) carries its own width — normalise them so the preview
+        # reads as one document's pages, not several documents.
+        return _uniform_page_widths(_clip_pct_cells(_result))
     finally:
         _ACTIVE_MODE = prev
         _ACTIVE_TITLE_FONT = prev_font

@@ -3156,3 +3156,55 @@ def test_empty_result_set_says_so_instead_of_printing_a_blank_page():
     _ensure_no_rows_message(root)
     for tx in root.iter(f"{{{ns}}}Tablix"):
         assert len(tx.findall(f"{{{ns}}}NoRowsMessage")) <= 1
+
+
+def test_mockup_pages_stack_as_uniform_sheets():
+    """The preview must read as a stack of PAPER: one root, pages the same
+    width, one under the next.
+
+    This bug survived several converter-side fixes because it did not live
+    in the converter at all — the app's preview pane was display:flex, so
+    every page became a flex ITEM sitting BESIDE the previous one, and
+    flex-shrink squeezed each sheet below its natural width until the
+    absolutely-positioned content inside overlapped and read as garbled.
+    Hence the two assertions here: the emitted HTML must be a single
+    block root of uniformly-sized sheets, AND the stylesheet must not lay
+    the host out as a row."""
+    import re as _re
+    from converter import convert
+
+    html = convert(_TOTALS_XML)["mockup_html"]
+
+    # exactly one root element, and it is the desk
+    depth = roots = 0
+    for m in _re.finditer(r"<div\b|</div>", html):
+        if m.group(0) == "<div":
+            if depth == 0:
+                roots += 1
+            depth += 1
+        else:
+            depth -= 1
+    assert roots == 1, f"{roots} top-level roots — pages will not stack"
+    assert 'class="o2s-desk"' in html
+
+    # every page sheet declares the SAME paper width
+    sheets = _re.findall(r'class="o2s-page"[^>]*style="([^"]*)"', html)
+    assert sheets, "no page sheets emitted"
+    widths = {(_re.search(r"max-width:\s*([\d.]+)in", s) or [None, ""])[1]
+              for s in sheets}
+    assert len(widths) == 1, f"pages have differing widths: {widths}"
+    for s in sheets:
+        assert "display:block" in s.replace(" ", "")[:60] or \
+            "display:block" in s, s[:80]
+
+    # THE CONTAINER CONTRACT: the host must not be a flex row
+    from pathlib import Path as _Path
+    css = (_Path(__file__).resolve().parents[1] / "frontend" /
+           "static" / "css" / "style.css").read_text(encoding="utf-8")
+    rule = _re.search(r"\.mockup-host\s*\{([^}]*)\}", css)
+    assert rule, ".mockup-host rule missing"
+    body = rule.group(1).replace(" ", "")
+    assert "display:flex" not in body, (
+        "the preview host is a flex row again — pages will render "
+        "side by side and be shrunk into each other")
+    assert "display:block" in body, body
