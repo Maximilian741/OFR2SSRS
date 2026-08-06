@@ -8,7 +8,7 @@ Drag an Oracle Reports artifact in, get a deployable SSRS RDL out.
 Oracle Reports is desupported. Oracle2SSRS converts your reports to SSRS in
 minutes — and **proves** the output instead of promising it:
 
-- **762 automated tests**, including renders through **Microsoft's own
+- **791 automated tests**, including renders through **Microsoft's own
   ReportViewer engine** (the same RDL processing code SSRS runs) with the
   produced PDFs measured for page cadence, blank pages, and geometry.
 - **Generated RDL validated** against Microsoft's official RDL 2008 XSD
@@ -95,10 +95,14 @@ pip install -r requirements.txt
 
 Every conversion surfaces **four main tabs**:
 
-- **HTML Mockup** — a render of the layout generated from the parsed
-  structure, so you can eyeball the result before you ever open Report
-  Builder. Two modes: *frontend* (filled with synthetic sample data) and
-  *backend* (a Report-Builder skeleton with field-name placeholders).
+- **Preview** — what the report actually prints. The *frontend* mode
+  renders the generated RDL through **Microsoft's own ReportViewer
+  engine** and shows the resulting pages (an instant HTML mockup stands
+  in while the engine works, then the true pages swap in); a Sample-rows
+  control re-renders at any sample size. The *backend* mode shows the
+  Report-Builder skeleton with field-name placeholders. On machines
+  without the engine the preview degrades gracefully (rendered PDF, then
+  mockup) and always says which renderer produced what you see.
 - **RDL XML** — syntax-highlighted, structurally valid SSRS RDL. Download it
   and upload straight to your Report Server.
 - **Bursting** — automatic detection of Oracle distribution patterns
@@ -329,7 +333,7 @@ pip install -r requirements.txt
 python -m pytest -q
 ```
 
-The suite is 698 tests. It validates generated RDL against Microsoft's RDL
+The suite is 791 tests. It validates generated RDL against Microsoft's RDL
 2008 XSD and, when the ReportViewer runtime is present, renders RDLs through
 Microsoft's engine and measures the resulting PDFs.
 

@@ -70,7 +70,7 @@ machine.
 
 | View | What it shows | When you use it |
 |------|----------------|-----------------|
-| **HTML Mockup** | Pixel-faithful preview with sample data; Frontend/Backend toggle switches between the filled-in look and the label/binding skeleton. | The "does it look right?" check. Conditional formatting, seals, letters and in-report action buttons all render here. |
+| **Preview** | The generated RDL rendered by Microsoft's own ReportViewer engine — real pages, real pagination (an instant HTML mockup stands in while the engine works). Frontend/Backend toggle switches between the rendered look and the label/binding skeleton; a Sample-rows control re-renders at any sample size. | The "does it look right?" check — against the real engine, not an approximation. Conditional formatting, seals, letters and in-report action buttons all render here. |
 | **RDL XML** | The generated SSRS definition — the file you deploy. Very large documents preview the first chunk; downloads always carry the complete file. | Transparency, diffing, and copy-pasting fragments. |
 | **Side-by-side** | Oracle source XML next to the generated RDL. | Auditing: "where did this column / query / label end up?" |
 | **Live data** | Runs the report's real queries against your database (connection string in the sidebar); parameter inputs + row grid. | Prove the SQL returns the right rows *before* the report server is involved. |
@@ -242,5 +242,5 @@ fidelity scores, effort tiers). The community tier processes batches of
 ---
 
 *Everything in this guide is exercised by the automated test suite
-(698 tests at last count), including publish + render through Microsoft's
+(791 tests at last count), including publish + render through Microsoft's
 own ReportViewer engine.*

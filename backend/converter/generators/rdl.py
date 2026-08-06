@@ -9412,6 +9412,20 @@ def _layer_images_behind_text(container):
             _set_zindex(k, "0" if k.tag == _q("Image") else "1")
 
 
+def _lf_y(lf) -> float:
+    """A member's emission y: the ELASTICITY-FLOWED position when the frame
+    walker computed one (see the push-down block in _emit_frame_rect),
+    otherwise the declared Oracle y. Oracle letters declare paragraph
+    stacks at COLLAPSED design positions and rely on runtime elasticity to
+    push content apart; SSRS only reflows items whose declared rects do
+    NOT intersect, so emitting the collapsed y prints paragraphs
+    interleaved (engine-render verified on two inspection letters)."""
+    v = getattr(lf, "_flow_y", None)
+    if v is not None:
+        return float(v)
+    return float(getattr(lf, "y", 0.0) or 0.0)
+
+
 def _emit_field_textbox(
     parent_items, name, value, lf, ox, oy, rect_w, rect_h, report,
     cover_title_lines, value_override=None,
@@ -9506,7 +9520,7 @@ def _emit_field_textbox(
         if not emb_name:
             return (False, 0.0)
         fx = float(getattr(lf, "x", 0.0) or 0.0)
-        fy = float(getattr(lf, "y", 0.0) or 0.0)
+        fy = _lf_y(lf)
         iw = float(getattr(lf, "width", 0.0) or 0.0) or 1.0
         ih = float(getattr(lf, "height", 0.0) or 0.0) or 1.0
         i_left = max(0.02, fx - ox)
@@ -9523,7 +9537,7 @@ def _emit_field_textbox(
     # frames the text inside it); a rule is a thin filled bar = the line weight.
     if kind in ("rect", "line"):
         fx_g = float(getattr(lf, "x", 0.0) or 0.0)
-        fy_g = float(getattr(lf, "y", 0.0) or 0.0)
+        fy_g = _lf_y(lf)
         gw = float(getattr(lf, "width", 0.0) or 0.0)
         gh = float(getattr(lf, "height", 0.0) or 0.0)
         bw_pt = float(getattr(lf, "border_width", 0.0) or 0.0) or 1.0
@@ -9589,7 +9603,7 @@ def _emit_field_textbox(
     # staggered the whole stat column). Without the span gate the heuristic
     # mis-read each row label as its own title and centred it.
     fx_abs = float(getattr(lf, "x", 0.0) or 0.0)
-    fy_abs = float(getattr(lf, "y", 0.0) or 0.0)
+    fy_abs = _lf_y(lf)
     _fw = float(getattr(lf, "width", 0.0) or 0.0)
     if (kind == "text" and bold and fs and fs >= 11
             and (fy_abs - oy) <= 1.5
@@ -9930,13 +9944,25 @@ def _emit_frame_rect(
     # dropped, and a frame merely named M_TERMS / M_VENDOR never matches.
     _gname = getattr(group, "name", "") or ""
     _ft_name = getattr(group, "format_trigger", "") or ""
-    # Frame-level <Hidden> emission was REVERTED (engine-verified): frames
-    # emit into varied containment contexts (letters place them body-direct
-    # inside per-record wrappers) where bare Fields! refs in Visibility
-    # violate the outside-a-region scope rules on 6 corpus reports. The
-    # conditional-ERROR drop below stays; field-level trigger Hidden/Style
-    # (inside data regions) remains active.
+    # Frame-level <Hidden> from the frame's own FORMAT TRIGGER. This was
+    # once reverted because bare Fields! refs in Visibility violate scope
+    # rules outside a data region — that hole is closed now:
+    # _scope_body_direct_field_refs walks Hidden elements and wraps bare
+    # refs, and per-record letters emit inside Tablix_Record scope anyway.
+    # Without it, Oracle's conditional VARIANT frames (email-version vs
+    # print-version of an invoice letter, gated by triggers) ALL print at
+    # once, painted onto each other (engine-render verified: 24
+    # painted-over word pairs on one invoice).
     _ft_hidden = None
+    if _ft_name:
+        try:
+            _hm = getattr(report, "_ft_hidden_map_cache", None)
+            if _hm is None:
+                _hm = _format_trigger_hidden_map(report)
+                report._ft_hidden_map_cache = _hm
+            _ft_hidden = _hm.get(_ft_name.lower()) or _hm.get(_ft_name)
+        except Exception:  # noqa: BLE001 - untranslatable trigger: emit visible
+            _ft_hidden = None
     if (_ft_name
             and re.search(r"(?i)(^|_)err(or)?($|_)", _gname)):
         return parent_y
@@ -10007,6 +10033,49 @@ def _emit_frame_rect(
         return True
 
     # Render this group's own fields first.
+    # ORACLE ELASTICITY PUSH-DOWN — the general rule, driven by the source's
+    # own declarations (solves the class for every report, not a pattern):
+    # an ELASTIC member (verticalElasticity expand/variable) pushes every
+    # same-column member declared overlapping its box down below it, exactly
+    # as the Oracle runtime does when the elastic box grows. SSRS reflow
+    # takes over from there (it pushes lower NON-overlapping items when a
+    # CanGrow box expands — it just refuses to untangle DECLARED overlaps).
+    # Constraints, each one load-bearing (a looser global post-pass version
+    # of this broke a previously-clean report and was reverted):
+    #   * fields within ONE frame only — never across containers;
+    #   * only pairs whose x-ranges share >=50% of the narrower box;
+    #   * only MATERIAL overlap (> 0.03in AND >=40% of the shorter height);
+    #   * only when the UPPER member is declared elastic by the source.
+    try:
+        _placed = []  # (final_top, bottom, x0, x1, elastic)
+        for _m in sorted((group.fields or []),
+                         key=lambda f: (float(getattr(f, "y", 0) or 0),
+                                        float(getattr(f, "x", 0) or 0))):
+            _my = float(getattr(_m, "y", 0.0) or 0.0)
+            _mx = float(getattr(_m, "x", 0.0) or 0.0)
+            _mw = float(getattr(_m, "width", 0.0) or 0.0)
+            _mh = float(getattr(_m, "height", 0.0) or 0.0)
+            _new_top = _my
+            for _pt, _pb, _px0, _px1, _pel in _placed:
+                if not _pel:
+                    continue
+                _ox = min(_mx + _mw, _px1) - max(_mx, _px0)
+                _narrow = min(_mw, _px1 - _px0)
+                if _narrow <= 0 or _ox < 0.5 * _narrow:
+                    continue
+                _oy = min(_new_top + _mh, _pb) - max(_new_top, _pt)
+                if _oy > 0.03 and _mh > 0 \
+                        and _oy >= 0.4 * min(_mh, _pb - _pt):
+                    _new_top = max(_new_top, _pb + 0.02)
+            if _new_top > _my + 0.001:
+                _m._flow_y = _new_top
+            _mel = (getattr(_m, "vertical_elasticity", "") or "").lower() \
+                in ("expand", "variable")
+            _placed.append((_new_top, _new_top + _mh,
+                            _mx, _mx + _mw, _mel))
+    except Exception:  # noqa: BLE001 - flow layout must never sink a convert
+        pass
+
     for lf in (group.fields or []):
         _el = (getattr(lf, "vertical_elasticity", "") or "").lower()
         try:

@@ -844,8 +844,63 @@ def translate_format_trigger(body: str,
     """
     if not (body or "").strip():
         return None
+    # LOCAL BOOLEAN CONSTANTS fold before matching. A debug switch is the
+    # classic shape: `cbDEBUG CONSTANT BOOLEAN := FALSE;` then
+    # `ELSIF cbDEBUG THEN RETURN TRUE` — after substitution the branch is a
+    # literal and the chain collapses like any other (wild-corpus: an
+    # invoice's debug frame otherwise printed unconditionally over the
+    # letter, because its trigger declined and got no Hidden at all).
+    consts = {}
+    for cm in re.finditer(
+            r"(?is)\b([A-Za-z_]\w*)\s+CONSTANT\s+BOOLEAN\s*:=\s*"
+            r"(TRUE|FALSE)\s*;", body):
+        consts[cm.group(1).upper()] = cm.group(2).upper()
     src = _strip_comments(_body_between_begin_end(body))
     up = re.sub(r"\s+", " ", src).strip().rstrip(";").strip()
+    if consts:
+        for cname, cval in consts.items():
+            up = re.sub(rf"(?i)\b{re.escape(cname)}\b", cval, up)
+
+    # IF/ELSIF/ELSE chains where every branch is RETURN TRUE|FALSE reduce
+    # to nested IIfs. The single-IF pattern below misses them, and a
+    # declined multi-branch trigger means NO Hidden — the conditional
+    # email-header variant then prints straight over the print-letter
+    # title (engine-render verified on a production invoice).
+    chain = re.fullmatch(
+        r"(?is)IF\s+(.+?)\s+THEN\s+RETURN\s*\(?\s*(TRUE|FALSE)\s*\)?\s*;"
+        r"((?:\s*ELSIF\s+.+?\s+THEN\s+RETURN\s*\(?\s*(?:TRUE|FALSE)\s*\)?\s*;)+)"
+        r"(?:\s*ELSE\s+RETURN\s*\(?\s*(TRUE|FALSE)\s*\)?\s*;?)?\s*END\s*IF"
+        r"\s*;?(?:\s*RETURN\s*\(?\s*(TRUE|FALSE)\s*\)?)?", up)
+    if chain:
+        branches = [(chain.group(1), chain.group(2).upper())]
+        for bm in re.finditer(
+                r"(?is)ELSIF\s+(.+?)\s+THEN\s+RETURN\s*\(?\s*(TRUE|FALSE)"
+                r"\s*\)?\s*;", chain.group(3)):
+            branches.append((bm.group(1), bm.group(2).upper()))
+        default = (chain.group(4) or chain.group(5) or "FALSE").upper()
+        # fold literal-TRUE/FALSE conditions (post constant substitution)
+        vb = "True" if default == "TRUE" else "False"
+        ok = True
+        for cond, ret in reversed(branches):
+            cu = cond.strip().upper()
+            if cu in ("TRUE", "(TRUE)"):
+                vb = "True" if ret == "TRUE" else "False"
+                continue
+            if cu in ("FALSE", "(FALSE)"):
+                continue
+            r = translate_expr(cond, resolve)
+            if not r.get("ok") or not r.get("vb"):
+                ok = False
+                break
+            ret_vb = "True" if ret == "TRUE" else "False"
+            vb = f"IIf({r['vb']}, {ret_vb}, {vb})"
+        if ok:
+            if vb == "True":
+                return None       # unconditionally shown
+            if vb == "False":
+                return "=True"    # unconditionally suppressed
+            return f"=Not({vb})"
+        return None
     m = re.fullmatch(
         r"(?is)IF\s+(.+?)\s+THEN\s+RETURN\s*\(?\s*(TRUE|FALSE)\s*\)?\s*;?"
         r"(?:\s*ELSE\s+RETURN\s*\(?\s*(TRUE|FALSE)\s*\)?\s*;?)?\s*END\s*IF"

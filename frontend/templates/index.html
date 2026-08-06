@@ -118,7 +118,11 @@
       </div>
     </section>
 
-    <section class="side-section side-section-accent">
+    <!-- Contextual: shown ONLY when the converted report actually carries a
+         sub-report cover hyperlink to rename. A permanently visible field
+         describing one report family's envelope idiom read as noise (user:
+         "confusing garbage") on the reports that have no such link. -->
+    <section class="side-section side-section-accent" id="cover-link-section" hidden>
       <div class="side-heading">Cover hyperlink text</div>
       <input id="generate-all-label" type="text" autocomplete="off" spellcheck="false"
              class="conn-input"

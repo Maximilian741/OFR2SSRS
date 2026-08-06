@@ -386,3 +386,130 @@ def test_preview_frontend_is_the_real_render():
     # stale-render guard: a slow response must never paint over a newer
     # conversion's preview
     assert "_renderToken" in js
+
+
+def test_render_preview_falls_back_to_pdf_without_pymupdf(client, monkeypatch):
+    """Missing PyMuPDF must degrade, never die.
+
+    The page-image rasteriser (import name: fitz) is a machine-local
+    dependency; the first machine that pulled the repo without it got a
+    bare ModuleNotFoundError 500 in place of a preview. Without fitz the
+    endpoint returns the engine-rendered PDF itself (browsers display
+    PDFs natively), with an actionable note naming the package.
+    """
+    import pathlib
+    import sys as _sys
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    _sys.path.insert(0, str(root / "tools" / "renderlab"))
+    try:
+        from render import lib_ready
+    except Exception:  # noqa: BLE001
+        pytest.skip("renderlab not available")
+    if not lib_ready():
+        pytest.skip("ReportViewer DLLs not fetched")
+
+    sample = next((root / "samples" / "oracle").glob("*.xml"), None)
+    if sample is None:
+        pytest.skip("no sample report")
+
+    # make `import fitz` raise ImportError inside the endpoint
+    monkeypatch.setitem(_sys.modules, "fitz", None)
+
+    client.post("/api/convert", data={
+        "file": (io.BytesIO(sample.read_bytes()), sample.name)},
+        content_type="multipart/form-data")
+    r = client.post("/api/render-preview", data={"rows": "2"})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    j = r.get_json()
+    assert j.get("pdf", "").startswith("data:application/pdf;base64,")
+    assert "PyMuPDF" in (j.get("note") or ""), "note must name the fix"
+    # a real PDF, not a stub
+    import base64
+    raw = base64.b64decode(j["pdf"].split(",", 1)[1])
+    assert raw[:5] == b"%PDF-"
+
+
+def test_pymupdf_is_a_declared_dependency():
+    """The rasteriser must be in requirements.txt so a fresh machine gets
+    it from `pip install -r requirements.txt` instead of discovering the
+    gap as a 500 in production."""
+    import pathlib
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    req = (root / "requirements.txt").read_text(encoding="utf-8")
+    assert "PyMuPDF" in req
+
+
+def test_local_render_never_depends_on_a_report_server(client):
+    """OUT OF THE BOX: with the local engine present, the preview renders
+    locally even when a (broken) report server URL is configured — the
+    server is a fallback for machines that cannot fetch the engine, never
+    a prerequisite. User requirement, verbatim: "this thing cannot be
+    dependent on some report server i need to run up manually... it
+    literally needs to work out of the box entirely."
+    """
+    import pathlib
+    import sys as _sys
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    _sys.path.insert(0, str(root / "tools" / "renderlab"))
+    try:
+        import fitz  # noqa: F401
+        from render import lib_ready
+    except Exception:  # noqa: BLE001
+        pytest.skip("renderlab not available")
+    if not lib_ready():
+        pytest.skip("ReportViewer DLLs not fetched")
+    sample = next((root / "samples" / "oracle").glob("*.xml"), None)
+    if sample is None:
+        pytest.skip("no sample report")
+
+    client.post("/api/convert", data={
+        "file": (io.BytesIO(sample.read_bytes()), sample.name)},
+        content_type="multipart/form-data")
+    r = client.post("/api/render-preview", data={
+        "rows": "2",
+        # unreachable on any machine: must not matter, must not be tried
+        "report_server_url": "http://127.0.0.1:1/ReportServer"})
+    assert r.status_code == 200, r.get_data(as_text=True)[:300]
+    j = r.get_json()
+    assert j.get("count", 0) >= 1 and j.get("pages")
+    # the broken server was never consulted -- local is self-sufficient
+    assert "Server render failed" not in (j.get("note") or "")
+
+
+def test_missing_local_engine_falls_back_to_server_then_explains(client,
+                                                                 monkeypatch):
+    """When the local engine is truly unavailable the endpoint tries the
+    configured report server; with neither, the error names BOTH the local
+    reason and the one action left (set the server URL) — never a bare 500.
+    """
+    import pathlib
+    import sys as _sys
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    sample = next((root / "samples" / "oracle").glob("*.xml"), None)
+    if sample is None:
+        pytest.skip("no sample report")
+
+    # simulate a machine where the render engine cannot import at all
+    monkeypatch.setitem(_sys.modules, "rdl_preview", None)
+
+    client.post("/api/convert", data={
+        "file": (io.BytesIO(sample.read_bytes()), sample.name)},
+        content_type="multipart/form-data")
+
+    # no server configured -> actionable hint
+    r = client.post("/api/render-preview", data={"rows": "2"})
+    assert r.status_code == 503
+    msg = (r.get_json() or {}).get("error", "")
+    assert "report server URL" in msg
+
+    # broken server configured -> both reasons surface
+    r2 = client.post("/api/render-preview", data={
+        "rows": "2",
+        "report_server_url": "http://127.0.0.1:1/ReportServer"})
+    assert r2.status_code == 503
+    msg2 = (r2.get_json() or {}).get("error", "")
+    assert "render engine" in msg2

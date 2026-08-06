@@ -9,3 +9,7 @@ python-dotenv>=1.0.0
 # RenderLab verification tests (both degrade gracefully without it, but it
 # should work out of the box).
 pypdf>=3.0.0
+# Rasterises the engine-rendered PDF into the Preview tab's page images
+# (import name: fitz). Without it the preview falls back to embedding the
+# PDF itself — the feature still works, just without per-page PNGs.
+PyMuPDF>=1.24.0

@@ -450,6 +450,36 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
             preflight["issues"] = list(preflight.get("issues") or []) + _cov
     except Exception:  # noqa: BLE001 - disclosure must never sink convert()
         pass
+    # CHART/GRAPH DISCLOSURE. No artifact in the entire production or wild
+    # corpus carries an Oracle graph element (census 2026-08-05: zero hits
+    # for <graph>/<chart>/OGD/GraphType across every file ever given), so
+    # there is no real example to build or verify a Chart translation
+    # against — and speculative conversion code that has never seen a true
+    # input is exactly how silent wrong output ships. Until a real
+    # chart-bearing report arrives, the contract is DISCLOSURE: say the
+    # chart exists and that it is not yet translated, never drop it
+    # silently.
+    try:
+        _src_txt = xml_bytes.decode("utf-8", errors="replace")             if isinstance(xml_bytes, (bytes, bytearray)) else str(xml_bytes)
+        import re as _re
+        _chart_hits = _re.findall(
+            r'<\s*(?:rw:)?(?:graph|chart)\b|fileFormat="ogd"|'
+            r"oracle\.graphics", _src_txt, _re.I)
+        if _chart_hits:
+            preflight = dict(preflight)
+            preflight["issues"] = list(preflight.get("issues") or []) + [{
+                "severity": "AMBER",
+                "rule": "source.chart_element",
+                "message": (
+                    "The source report contains a graph/chart element. "
+                    "Chart translation is not implemented yet (no "
+                    "chart-bearing report has been available to verify "
+                    "against) — the chart will NOT appear in the RDL. "
+                    "Everything else converts normally. Share this report "
+                    "so chart support can be built against it."),
+            }]
+    except Exception:  # noqa: BLE001 - disclosure must never sink convert()
+        pass
     # Honest verdict for PARTIAL Oracle artifacts (wild-corpus verified):
     # a customization overlay or a data-model-only export is not a full
     # report. Tell the user plainly instead of shipping a near-blank RDL

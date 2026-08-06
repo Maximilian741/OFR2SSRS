@@ -739,6 +739,7 @@ const MOCKUP_MODES = ["frontend", "backend"];
 // converted a different report -- stale pages must never paint.
 function resetRenderState() {
   state.renderedPages = null;
+  state.renderedPdf = null;
   state._renderFailed = null;
   state._renderToken = (state._renderToken || 0) + 1;
 }
@@ -779,7 +780,8 @@ function renderMockupTab(data) {
 
   // frontend: real pages when we have them; the instant mockup while the
   // engine works (or forever, on a machine without the engine)
-  if (state.renderedPages && state.renderedPages.length) {
+  if ((state.renderedPages && state.renderedPages.length)
+      || state.renderedPdf) {
     _showRenderedPages();
     return;
   }
@@ -808,6 +810,18 @@ function _showRenderedPages() {
   if (host) host.hidden = true;
   rhost.hidden = false;
   rhost.innerHTML = "";
+  if (state.renderedPdf) {
+    const emb = document.createElement("embed");
+    emb.src = state.renderedPdf;
+    emb.type = "application/pdf";
+    emb.style.width = "100%";
+    emb.style.height = "72vh";
+    rhost.appendChild(emb);
+    _renderStatus("Rendered by Microsoft’s report engine at "
+      + (state.renderedRows || 3) + " sample row(s) — shown as the "
+      + "PDF itself. " + (state.renderedNote || ""));
+    return;
+  }
   const pages = state.renderedPages || [];
   pages.forEach((src, i) => {
     const lab = document.createElement("div");
@@ -822,7 +836,8 @@ function _showRenderedPages() {
   _renderStatus("Rendered by Microsoft’s report engine — "
     + pages.length + " page(s) at " + (state.renderedRows || 3)
     + " sample row(s). Values are placeholders; the report server fills "
-    + "them from live data.");
+    + "them from live data."
+    + (state.renderedNote ? " " + state.renderedNote : ""));
 }
 
 async function runRenderPreview() {
@@ -837,6 +852,10 @@ async function runRenderPreview() {
   try {
     const fd = new FormData();
     fd.append("rows", String(rows));
+    // With a report server configured, the server renders the preview --
+    // zero local dependencies, real expression evaluation.
+    const rsu = getReportServerUrl();
+    if (rsu) fd.append("report_server_url", rsu);
     const r = await fetch("/api/render-preview", { method: "POST", body: fd });
     const j = await r.json();
     if ((state._renderToken || 0) !== token) return;  // a newer conversion won
@@ -846,8 +865,21 @@ async function runRenderPreview() {
         renderMockupTab(state.data);
       return;
     }
+    if (j.pdf) {
+      // No PyMuPDF on this machine: the server sent the rendered PDF
+      // itself. Browsers display PDFs natively, so the preview still IS
+      // the real engine output -- just not split into page images.
+      state.renderedPages = null;
+      state.renderedPdf = j.pdf;
+      state.renderedRows = rows;
+      state.renderedNote = j.note || "";
+      if ((state.mockupMode || "frontend") === "frontend") _showRenderedPages();
+      return;
+    }
+    state.renderedPdf = null;
     state.renderedPages = j.pages;
     state.renderedRows = rows;
+    state.renderedNote = j.note || "";
     if ((state.mockupMode || "frontend") === "frontend") _showRenderedPages();
   } catch (e) {
     if ((state._renderToken || 0) === token) {
@@ -1681,7 +1713,13 @@ function renderSubreports(data) {
   // The tab is available after any conversion so a sub-report can be added
   // manually even when no drill-through link was auto-detected.
   if (tabBtn) tabBtn.hidden = !state.data;
-  setBadge("badge-subreports", state.subreportChildren.filter(c => c.detected).length);
+  const nDetected = state.subreportChildren.filter(c => c.detected).length;
+  setBadge("badge-subreports", nDetected);
+  // The cover-hyperlink-text card only exists for reports that HAVE a
+  // cover hyperlink -- on everything else it is noise about someone
+  // else's report shape.
+  const coverCard = document.getElementById("cover-link-section");
+  if (coverCard) coverCard.hidden = nDetected === 0;
 
   renderSubreportsTab();
   renderSubreportSidebar();

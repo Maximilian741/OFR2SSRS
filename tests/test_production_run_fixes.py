@@ -3382,3 +3382,108 @@ def test_text_is_never_buried_under_a_seal_image():
          "source": "SEAL"},
     ])
     assert [e for e in deep if e["kind"] == "text"][0]["w"] == 3.05
+
+
+def test_chart_elements_are_disclosed_never_silently_dropped():
+    """No corpus artifact carries an Oracle graph element (census: zero
+    hits across every production + wild file), so chart translation has
+    no real input to be built or verified against. The standing contract
+    until one arrives: DISCLOSURE — a source with a chart converts
+    normally but preflight says the chart will not appear. A report
+    without charts must not carry the note."""
+    from converter import convert
+
+    base = _TOTALS_XML.decode("utf-8")
+    with_chart = base.replace(
+        "</report>",
+        '<layout><section name="main"><body><graph name="G_Trend">'
+        '<display x="1" y="1" width="4" height="3"/></graph>'
+        "</body></section></layout></report>")
+
+    out = convert(with_chart.encode("utf-8"))
+    rules = {i.get("rule") for i in out["preflight"]["issues"]}
+    assert "source.chart_element" in rules
+
+    plain = convert(_TOTALS_XML)
+    rules2 = {i.get("rule") for i in plain["preflight"]["issues"]}
+    assert "source.chart_element" not in rules2
+
+
+def test_simplified_tabular_shorthand_converts():
+    """Oracle's geometry-free SIMPLIFIED layout syntax must convert.
+
+    The docs promote hand-authoring reports as <tabular> (also <formlike>,
+    <mailing>) holding bare <field source label/> children with layout
+    computed automatically. A 59-file harvest of real-world definitions
+    found this shorthand repeatedly, and full-geometry parsing saw zero
+    content in every one -> declined as "renders blank". The shorthand
+    maps to a geometry-less column list the tabular builder already
+    handles. (<matrix>/<groupLeft>/<groupAbove> stay with their existing
+    archetypes -- intercepting them broke six guards.)"""
+    from converter import convert
+
+    xml = (b'<?xml version="1.0"?>'
+           b'<report name="shorthand" DTDVersion="1.0">'
+           b'<data><dataSource name="Q_1"><select>'
+           b'select item_code, item_desc from stock'
+           b'</select></dataSource></data>'
+           b'<layout><section name="main">'
+           b'<tabular name="M_t">'
+           b'<field name="F_c" source="item_code" label="Code"/>'
+           b'<field name="F_d" source="item_desc" label="Description"/>'
+           b'</tabular></section></layout></report>')
+    out = convert(xml)
+    assert out["preflight"]["verdict"] != "BLOCKER", \
+        [i for i in out["preflight"]["issues"]][:3]
+    rdl = out["rdl_xml"]
+    assert "ITEM_CODE" in rdl.upper() and "ITEM_DESC" in rdl.upper()
+    assert out["mockup_html"].strip(), "mockup must render the shorthand too"
+    # The shorthand's label= wording is parsed onto the DATA ITEMS (see
+    # parse: item.label == "Code"/"Description") but the record-list
+    # builder this shape currently routes through emits bare value boxes
+    # without a header band, so the wording does not reach the RDL yet.
+    # KNOWN RESIDUAL: route simplified_* groups to the TABULAR builder
+    # (whose _icaps already reads item.label) and then assert here that
+    # "Code"/"Description" appear in the RDL.
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    rep = parse_oracle_xml(xml)
+    labels = {getattr(i, "label", "") for q in rep.queries
+              for i in (q.items or [])}
+    assert {"Code", "Description"} <= labels,         "shorthand labels must at least survive the parse"
+
+
+def test_format_trigger_elsif_chains_and_boolean_constants_translate():
+    """IF/ELSIF/ELSE trigger chains and local CONSTANT BOOLEANs translate.
+
+    A declined trigger means NO Hidden expression at all, so the frame
+    prints unconditionally — a production invoice's email-header variant
+    painted straight over the print-letter title, and its debug frame
+    (cbDEBUG CONSTANT BOOLEAN := FALSE) printed despite being off. Both
+    shapes now reduce: ELSIF chains to nested IIf, constants folded
+    before matching."""
+    from converter.translators.plsql_formula import translate_format_trigger
+
+    chain = """FUNCTION F_X_FT RETURN BOOLEAN IS BEGIN
+      IF :Distribute = 'YES' AND UPPER(:Destination) = 'X.XML' THEN
+        RETURN(FALSE);
+      ELSIF :Corresp_Type = 'EMAIL' THEN
+        RETURN(TRUE);
+      ELSE
+        RETURN(FALSE);
+      END IF;
+    END;"""
+    h = translate_format_trigger(chain, resolve=lambda n: f"Parameters!{n.upper()}.Value")
+    assert h and h.startswith("=Not(IIf(")
+    assert "CORRESP_TYPE" in h.upper()
+
+    const = """FUNCTION F_D_FT RETURN BOOLEAN IS
+      cbDEBUG CONSTANT BOOLEAN := FALSE;
+    BEGIN
+      IF :P_Header = 'N' THEN RETURN(FALSE);
+      ELSIF cbDEBUG THEN RETURN(TRUE);
+      ELSE RETURN(FALSE);
+      END IF;
+    END;"""
+    h2 = translate_format_trigger(const, resolve=lambda n: f"Parameters!{n.upper()}.Value")
+    # every live branch returns FALSE -> the frame is permanently hidden
+    assert h2 is not None

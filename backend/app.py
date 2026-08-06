@@ -299,6 +299,31 @@ def api_convert():
         return jsonify({"error": str(e), "trace": traceback.format_exc()}), 500
 
 
+_RV_FETCH_DONE = False
+
+
+def _autofetch_render_engine() -> None:
+    """One-shot, best-effort fetch of the ReportViewer DLL folder.
+
+    The DLLs are Microsoft redistributables downloaded into
+    tools/renderlab/lib (gitignored) -- a project-folder download, not an
+    install. Attempted at most once per process so an offline machine is
+    not hammered on every render click; failure is fine, the caller falls
+    back to the report-server path with an actionable message.
+    """
+    global _RV_FETCH_DONE
+    if _RV_FETCH_DONE:
+        return
+    _RV_FETCH_DONE = True
+    import subprocess
+    script = HERE.parent / "tools" / "renderlab" / "fetch_reportviewer.py"
+    try:
+        subprocess.run([sys.executable, str(script)], capture_output=True,
+                       text=True, timeout=300)
+    except Exception:  # noqa: BLE001 - offline/proxy; caller reports it
+        pass
+
+
 @app.post("/api/render-preview")
 def api_render_preview():
     """Page images of what the generated RDL ACTUALLY prints.
@@ -320,22 +345,121 @@ def api_render_preview():
     tools = str(HERE.parent / "tools" / "renderlab")
     if tools not in sys.path:
         sys.path.insert(0, tools)
+    # OUT OF THE BOX, LOCAL FIRST. The local ReportViewer engine must work
+    # on a fresh clone with no manual steps: its DLL folder (gitignored
+    # Microsoft redistributables) is fetched AUTOMATICALLY on first use --
+    # a download into the project folder, no install, no admin rights. The
+    # customer's report server is the FALLBACK for machines that cannot
+    # reach nuget.org, never a prerequisite (user: "it literally needs to
+    # work out of the box").
+    rsu = (request.form.get("report_server_url") or "").strip()
+    server_note = ""
+
+    def _try_server_render():
+        """Render on the customer's SSRS; returns (response|None, note)."""
+        if not rsu:
+            return None, ""
+        import subprocess
+        ps1 = HERE.parent / "tools" / "ssrscheck" / "server_render.ps1"
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                rp = Path(d) / "preview.rdl"
+                rp.write_text(rdl, encoding="utf-8")
+                pdf = Path(d) / "preview.pdf"
+                proc = subprocess.run(
+                    ["powershell", "-NoProfile", "-ExecutionPolicy",
+                     "Bypass", "-File", str(ps1), "-RdlPath", str(rp),
+                     "-ServerUrl", rsu, "-OutPdf", str(pdf)],
+                    capture_output=True, text=True, timeout=180)
+                log = (proc.stdout or "") + (proc.stderr or "")
+                if proc.returncode == 0 and pdf.exists()                         and pdf.stat().st_size > 100:
+                    pdf_b64 = base64.b64encode(
+                        pdf.read_bytes()).decode("ascii")
+                    return jsonify({
+                        "pdf": "data:application/pdf;base64," + pdf_b64,
+                        "mode": "server",
+                        "note": "Rendered by YOUR report server ("
+                                + rsu + ") — real expression evaluation."}), ""
+                return None, next(
+                    (ln for ln in log.splitlines()
+                     if ln.startswith("SERVER FAIL")), log[-200:].strip())
+        except Exception as e:  # noqa: BLE001
+            return None, f"server render unavailable: {e}"
+
+    local_err = ""
+    preview_pages = render_to_pdf = None
     try:
-        from rdl_preview import preview_pages
+        from rdl_preview import preview_pages, render_to_pdf
+        from render import lib_ready
+        if not lib_ready():
+            _autofetch_render_engine()
+        if not lib_ready():
+            local_err = ("the render engine's DLLs could not be fetched "
+                         "(machine cannot reach nuget.org)")
     except Exception as e:  # noqa: BLE001 - renderlab is an optional extra
-        return jsonify({"error": f"render engine unavailable: {e}"}), 503
+        local_err = f"render engine unavailable: {e}"
+
+    if local_err:
+        # local engine impossible on this machine -> the customer's own
+        # report server is the remaining true-render path
+        resp, server_note = _try_server_render()
+        if resp is not None:
+            return resp
+        msg = local_err
+        if server_note:
+            msg += "; " + server_note
+        elif not rsu:
+            msg += ("; set your report server URL in the sidebar to render "
+                    "through your own SSRS instead")
+        return jsonify({"error": msg}), 503
+
+    # Per-page PNGs need PyMuPDF (import name: fitz). It is a machine-local
+    # rasteriser, NOT part of the render itself -- so when it is absent the
+    # preview must not die with a bare ModuleNotFoundError (that shipped
+    # once: the feature worked on the machine it was built on and 500'd on
+    # the next machine that pulled the repo). Fall back to returning the
+    # rendered PDF itself, which every browser can display natively.
+    try:
+        import fitz  # noqa: F401
+        have_fitz = True
+    except ImportError:
+        have_fitz = False
+
     try:
         rows = max(1, min(25, int(request.form.get("rows") or 3)))
         with tempfile.TemporaryDirectory() as d:
-            pages = preview_pages(rdl, d, rows=rows)
-            if not pages:
-                return jsonify({
-                    "error": "the report engine could not render this RDL",
-                    "pages": []}), 502
-            imgs = ["data:image/png;base64," +
-                    base64.b64encode(p.read_bytes()).decode("ascii")
-                    for p in pages]
-        return jsonify({"pages": imgs, "count": len(imgs), "mode": "layout"})
+            if have_fitz:
+                pages = preview_pages(rdl, d, rows=rows)
+                if not pages:
+                    return jsonify({
+                        "error": "the report engine could not render this RDL",
+                        "pages": []}), 502
+                imgs = ["data:image/png;base64," +
+                        base64.b64encode(p.read_bytes()).decode("ascii")
+                        for p in pages]
+                note = ("Rendered locally (layout mode)."
+                        + ((" Server render failed: " + server_note)
+                           if server_note else ""))
+                return jsonify({"pages": imgs, "count": len(imgs),
+                                "mode": "layout", "note": note})
+            pdf_path = Path(d) / "report.pdf"
+            res = render_to_pdf(rdl, pdf_path, rows=rows)
+            if not res["ok"]:
+                # the render log carries the actionable reason (e.g. the
+                # ReportViewer DLL fetch step) -- surface its tail, not a
+                # generic failure
+                tail = (res.get("log") or "")[-300:].strip()
+                return jsonify({"error": "the report engine could not "
+                                         "render this RDL: " + tail}), 502
+            pdf_b64 = base64.b64encode(pdf_path.read_bytes()).decode("ascii")
+        return jsonify({
+            "pdf": "data:application/pdf;base64," + pdf_b64,
+            "mode": "layout",
+            "note": "Showing the locally rendered PDF directly. "
+                    "(Optional: the PyMuPDF Python package turns this "
+                    "into per-page images.)"
+                    + ((" Server render failed: " + server_note)
+                       if server_note else "")})
     except Exception as e:  # noqa: BLE001
         traceback.print_exc()
         return jsonify({"error": str(e)}), 500

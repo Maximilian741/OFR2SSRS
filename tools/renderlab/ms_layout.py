@@ -248,7 +248,14 @@ def staticize(rdl_xml: str) -> str:
             # not '=' -> a plain literal that renders the label verbatim.
             el.text = ("​" + rendered) if rendered.startswith("=") else rendered
         elif t == "Hidden":
-            el.text = "false"
+            # An EXPRESSION Hidden marks a CONDITIONAL item (a format-trigger
+            # variant frame, an optional enclosure line). On the real server
+            # at most one variant shows; forcing them all VISIBLE painted
+            # every variant onto the same spot and the overlap gate measured
+            # a defect the deployed report doesn't have. Layout mode renders
+            # the UNCONDITIONAL skeleton: expression-hidden items stay
+            # hidden. (Literal true/false Hidden never reaches this loop.)
+            el.text = "true"
         elif t in _COLOR:
             el.text = "White" if t == "BackgroundColor" else "Black"
         elif t in ("Hyperlink", "BookmarkLink"):

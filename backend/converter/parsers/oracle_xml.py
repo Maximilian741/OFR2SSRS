@@ -1261,7 +1261,50 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
 
     for child in node:
         tag = _localname(child)
-        if tag == "repeatingFrame":
+        if tag in ("tabular", "formlike", "mailing"):
+            # ORACLE'S SIMPLIFIED LAYOUT SYNTAX. The docs promote a
+            # geometry-free authoring shorthand — <tabular>/<formlike>/
+            # <mailing> holding bare <field name source label font.../>
+            # children, layout computed automatically. Hand-written wild
+            # XML uses it heavily (harvested real-world definitions), and
+            # full-geometry parsing saw zero content in them -> declined
+            # as "renders blank". Map each to a LayoutGroup whose kind
+            # records the shorthand; fields carry source + label and NO
+            # geometry (0-geometry -> the tabular builder computes columns
+            # as for any geometry-less column list). NOTE: <matrix>,
+            # <groupLeft>, <groupAbove> are deliberately NOT here — the
+            # matrix archetype and geometry-less groupLeft routing parse
+            # those already (intercepting them broke 6 guards).
+            try:
+                sl_name = _attr(child, "name") or tag
+                grp = LayoutGroup(
+                    name=sl_name,
+                    kind=f"simplified_{tag.lower()}",
+                    source_query=_attr(child, "source"),
+                    format_trigger=_format_trigger_of(child),
+                )
+                for fld in child:
+                    if _localname(fld) != "field":
+                        continue
+                    src = _attr(fld, "source")
+                    if not src:
+                        continue
+                    grp.fields.append(LayoutField(
+                        name=_attr(fld, "name") or f"F_{src}",
+                        kind="field",
+                        source=src,
+                        text=_attr(fld, "label"),
+                        font_family=_attr(fld, "font"),
+                        format_mask=_attr(fld, "formatMask"),
+                    ))
+                if grp.fields:
+                    if current_group is None:
+                        root_groups.append(grp)
+                    else:
+                        current_group.children.append(grp)
+            except Exception as exc:  # pragma: no cover - defensive
+                warnings.append(f"failed to parse simplified {tag}: {exc}")
+        elif tag == "repeatingFrame":
             try:
                 rf_name = _attr(child, "name")
                 rf_source = _attr(child, "source")
@@ -1765,6 +1808,30 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
             warnings.append(
                 f"web-source layout: {n_cap} authored column caption(s) "
                 f"carried from the rw:dataArea table headers")
+
+    # SIMPLIFIED-SHORTHAND LABELS carry onto the DATA ITEMS, exactly like
+    # the rw:dataArea caption carry above: <tabular><field source="col"
+    # label="Code"/> is the author's header wording, and every builder
+    # (tabular RDL, mockup, coverage) reads headers from item.label — so
+    # stamping the item here makes the label survive everywhere with zero
+    # generator changes.
+    _sl_labels = {}
+
+    def _collect_sl(g):
+        if (getattr(g, "kind", "") or "").startswith("simplified_"):
+            for f in (g.fields or []):
+                if getattr(f, "text", "") and getattr(f, "source", ""):
+                    _sl_labels[f.source.upper()] = f.text.strip()
+        for c in (getattr(g, "children", None) or []):
+            _collect_sl(c)
+    for _lg in (layout or []):
+        _collect_sl(_lg)
+    if _sl_labels:
+        for _q2 in (queries or []):
+            for _it in (getattr(_q2, "items", None) or []):
+                _cap = _sl_labels.get((_it.name or "").upper())
+                if _cap and not (getattr(_it, "label", "") or "").strip():
+                    _it.label = _cap
 
     return ParsedReport(
         name=name,
