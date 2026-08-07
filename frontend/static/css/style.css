@@ -455,3 +455,16 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
 .render-toolbar label{ display:inline-flex; align-items:center; gap:6px;
   color:var(--muted); white-space:nowrap; }
 .render-toolbar input{ width:58px; padding:4px 6px; }
+
+/* Frontend preview: honest states only — engine pages, a loading card, or
+   the mockup wrapped in an unmissable approximation notice. The mockup is
+   never flashed as a stand-in that then "flips" to different pages. */
+.render-loading{ display:flex; flex-direction:column; align-items:center;
+  gap:14px; padding:64px 16px; color:var(--muted); font-size:13.5px; }
+.render-spinner{ width:28px; height:28px; border-radius:50%;
+  border:3px solid var(--border); border-top-color:var(--accent, #b33);
+  animation:o2s-spin 0.9s linear infinite; }
+@keyframes o2s-spin{ to{ transform:rotate(360deg); } }
+.mockup-fallback-note{ background:#fff4e5; border:1px solid #e0a960;
+  color:#7a4a00; padding:10px 14px; margin:0 0 14px; font-size:13px;
+  line-height:1.5; border-radius:6px; }

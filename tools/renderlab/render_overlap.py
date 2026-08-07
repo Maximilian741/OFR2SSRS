@@ -53,6 +53,13 @@ def _pairs(words):
             # shares most of the line height. Require both.
             if oy < 0.5 * min(ay1 - ay0, by1 - by0):
                 continue
+            # A single-character SEPARATOR glyph ("-", "/", "&") sitting a
+            # point or two into its snug neighbour is Oracle's own tight
+            # label layout rendered faithfully (bisect-verified: a
+            # centre-aligned dash between two labels), not painted-over
+            # text. Words, not separators, still flag at any depth.
+            if ox <= 4 and (a[4] in "-/&|·" or b[4] in "-/&|·"):
+                continue
             smaller = min((ax1 - ax0) * (ay1 - ay0),
                           (bx1 - bx0) * (by1 - by0))
             if smaller > 0 and (ox * oy) / smaller >= _MIN_COVER:

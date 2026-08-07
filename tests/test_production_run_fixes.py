@@ -3487,3 +3487,293 @@ def test_format_trigger_elsif_chains_and_boolean_constants_translate():
     h2 = translate_format_trigger(const, resolve=lambda n: f"Parameters!{n.upper()}.Value")
     # every live branch returns FALSE -> the frame is permanently hidden
     assert h2 is not None
+
+
+def test_elastic_frame_abutment_gets_a_reflow_gap():
+    """Oracle elasticity flow: an elastic-bottomed frame and the sibling
+    frame abutting it must emit with a STRICT positive gap.
+
+    SSRS reflow pushes a sibling only when it sits strictly below the
+    growing frame — at exact declared abutment (two letter frames meeting
+    at the same inch) the engine paints the grown paragraph straight
+    through the sibling (bisect-verified on two inspection letters, an
+    invoice, and a permit). The flow pass reproduces Oracle's own
+    semantics from the source's declarations: band shifts (everything
+    below moves together, so a push can never manufacture a collision),
+    frame-only frontiers (potential growth = elastic bottom-edge member;
+    realized growth = interior flow past the declared box), and an exact
+    recursive mirror of the emitted-height padding."""
+    import re as _re
+    from converter import convert
+
+    xml = (b'<?xml version="1.0"?>'
+           b'<report name="FLOW" DTDVersion="9.0.2.0.10">'
+           b'<data><dataSource name="Q_1"><select>'
+           b'select body_a, body_b from t</select></dataSource></data>'
+           b'<layout><section name="main">'
+           b'<repeatingFrame name="R_Rec" source="Q_1" printDirection="down">'
+           b'<geometryInfo x="0" y="0" width="7.5" height="6.0"/>'
+           b'<frame name="M_Upper">'
+           b'<geometryInfo x="0.2" y="0.2" width="7.0" height="2.0"/>'
+           b'<field name="F_A" source="body_a">'
+           b'<geometryInfo x="0.3" y="2.0" width="6.5" height="0.19"/>'
+           b'<generalLayout verticalElasticity="variable"/>'
+           b'</field></frame>'
+           b'<frame name="M_Lower">'
+           b'<geometryInfo x="0.2" y="2.2" width="7.0" height="1.0"/>'
+           b'<field name="F_B" source="body_b">'
+           b'<geometryInfo x="0.3" y="2.3" width="6.5" height="0.19"/>'
+           b'</field></frame>'
+           b'</repeatingFrame></section></layout></report>')
+    rdl = convert(xml)["rdl_xml"]
+    # find the two frame rectangles' Tops and the upper's Height
+    rects = _re.findall(
+        r'<Rectangle Name="(RecP_Rect_\d+)">.*?<Top>([\d.]+)in</Top>'
+        r'.*?<Height>([\d.]+)in</Height>', rdl, _re.S)
+    assert len(rects) >= 2, rects
+    tops = sorted((float(t), float(h)) for _, t, h in rects)
+    upper_bottom = tops[0][0] + tops[0][1]
+    lower_top = tops[1][0]
+    assert lower_top >= upper_bottom + 0.015, (
+        f"abutting sibling below an elastic-bottomed frame must emit with "
+        f"a strict reflow gap: upper bottom {upper_bottom:.2f} vs lower "
+        f"top {lower_top:.2f}")
+
+
+def test_hidden_expressions_never_violate_server_dataset_scope():
+    """The server's visibility scope rule, enforced before upload.
+
+    A format-trigger Hidden built from another query's column uploaded
+    fine through every local rail and was REFUSED by the state's report
+    server at the Report Manager dialog ("Report item expressions can
+    only refer to fields within the current dataset scope"). Two halves:
+    the emitter scope-qualifies cross-dataset refs via First(...,
+    "OwnerDS"), and preflight carries the server's rule as a BLOCKER —
+    mutation-proved here by un-scoping a ref and asserting the gate
+    fires."""
+    import re as _re
+    from converter import convert
+    from converter.validators.preflight import preflight_audit
+
+    xml = (b'<?xml version="1.0"?>'
+           b'<report name="SCOPE" DTDVersion="9.0.2.0.10">'
+           b'<data>'
+           b'<dataSource name="Q_Main"><select>'
+           b'select rec_id, rec_name from recs</select></dataSource>'
+           b'<dataSource name="Q_Side"><select>'
+           b'select side_flag from sides</select></dataSource>'
+           b'</data>'
+           b'<layout><section name="main">'
+           b'<repeatingFrame name="R_Rec" source="Q_Main" printDirection="down">'
+           b'<geometryInfo x="0" y="0" width="7.5" height="3.0"/>'
+           b'<frame name="M_Var" formatTrigger="f_var_ft">'
+           b'<geometryInfo x="0.2" y="0.2" width="7.0" height="1.0"/>'
+           b'<field name="F_N" source="rec_name">'
+           b'<geometryInfo x="0.3" y="0.3" width="6.5" height="0.19"/>'
+           b'</field></frame>'
+           b'</repeatingFrame></section></layout>'
+           b'<programUnits><function name="f_var_ft"><textSource><![CDATA['
+           b'FUNCTION F_Var_FT RETURN BOOLEAN IS BEGIN '
+           b'IF :side_flag = \'Y\' THEN RETURN(TRUE); '
+           b'ELSE RETURN(FALSE); END IF; END;]]></textSource></function>'
+           b'</programUnits></report>')
+    out = convert(xml)
+    rdl = out["rdl_xml"]
+    rules = [i.get("rule") for i in out["preflight"]["issues"]]
+    assert "rdl.hidden_scope" not in rules, (
+        "emitter must scope-qualify cross-dataset Hidden refs; "
+        + str([h for h in _re.findall(r"<Hidden>([^<]+)</Hidden>", rdl)]))
+    # any emitted cross-dataset Hidden must carry the explicit scope
+    for h in _re.findall(r"<Hidden>(=[^<]*SIDE_FLAG[^<]*)</Hidden>", rdl):
+        assert '"Q_Side"' in h or "SIDE_FLAG" not in h, h
+
+    # PROVE THE GATE CAN FAIL: strip the scope qualifier back off
+    broken = rdl.replace('First(Fields!SIDE_FLAG.Value, "Q_Side")',
+                         "Fields!SIDE_FLAG.Value")
+    if broken != rdl:
+        res = preflight_audit(broken)
+        rules2 = [i[1] if isinstance(i, tuple) else i.get("rule")
+                  for i in res.get("issues", [])]
+        assert "rdl.hidden_scope" in str(rules2), (
+            "gate failed to flag a bare cross-dataset Hidden ref")
+
+
+def test_body_items_never_exceed_printable_width():
+    """Horizontal overflow doubles a report at production volume.
+
+    An item whose right edge passes PageWidth minus the side margins makes
+    SSRS paginate the excess into a near-blank companion page after EVERY
+    content page (work-server verified: 5,758 pages, alternating
+    content/blank, one stray box on each blank). The clamp narrows any
+    protruding item to the printable edge — position untouched — and the
+    root Width obeys the same bound. Mutation-proved: a source item
+    declared past the printable edge must come out clamped."""
+    import re as _re
+    import xml.etree.ElementTree as _ET
+    from converter import convert
+
+    xml = (b'<?xml version="1.0"?>'
+           b'<report name="WIDE" DTDVersion="9.0.2.0.10">'
+           b'<data><dataSource name="Q_1"><select>'
+           b'select col_a from t</select></dataSource></data>'
+           b'<layout><section name="main">'
+           b'<repeatingFrame name="R_Rec" source="Q_1" printDirection="down">'
+           b'<geometryInfo x="0" y="0" width="8.4" height="2.0"/>'
+           b'<field name="F_A" source="col_a">'
+           # right edge at 0.5 + 9.6 = 10.1in — far past ANY printable width
+           b'<geometryInfo x="0.5" y="0.3" width="9.6" height="0.19"/>'
+           b'</field>'
+           b'</repeatingFrame></section></layout></report>')
+    rdl = convert(xml)["rdl_xml"]
+    root = _ET.fromstring(rdl.encode("utf-8"))
+    ns = root.tag.split("}")[0][1:]
+
+    def q(t):
+        return f"{{{ns}}}{t}"
+
+    page = root.find(q("Page"))
+    pw = float(page.findtext(q("PageWidth")).replace("in", ""))
+    lm = float(page.findtext(q("LeftMargin")).replace("in", ""))
+    rm = float(page.findtext(q("RightMargin")).replace("in", ""))
+    printable = pw - lm - rm
+
+    def widest(el, bl):
+        w_here = 0.0
+        tag = el.tag.split("}")[-1]
+        if tag in ("Rectangle", "Textbox", "Tablix", "Image"):
+            bl += float((el.findtext(q("Left")) or "0").replace("in", "")
+                        or 0)
+            w = float((el.findtext(q("Width")) or "0").replace("in", "")
+                      or 0)
+            w_here = bl + w
+        return max([w_here] + [widest(c, bl) for c in el])
+
+    body_extent = widest(root.find(q("Body")), 0.0)
+    assert body_extent <= printable + 0.001, (
+        f"body extends to {body_extent:.2f}in but printable width is "
+        f"{printable:.2f}in — every content page will spawn a blank "
+        f"overflow companion")
+    root_w = float((root.findtext(q("Width")) or "99").replace("in", ""))
+    assert root_w <= printable + 0.001
+
+
+def test_inline_concat_criteria_builders_translate_to_real_filters():
+    """The third criteria idiom: inline ||-concat builders now FILTER.
+
+    A trigger builds ':P_Crit := :P_Crit || ' AND ' || cvCOL || ' LIKE
+    UPPER(TRIM(:P_X))'' (constants naming column expressions, binds inside
+    the literals, locals staging an EXISTS prefix, and a two-bind
+    date-range prompt family). Dropping it ran the query UNFILTERED at
+    the state (every criteria prompt did nothing). The translation is
+    static SQL only: NULL-safe single-bind union + exact prompt-state
+    CASE for the {A,B}/{A}/{B} family — never expression CommandText.
+    """
+    from converter.generators.rdl import _folded_lexical_predicates
+
+    plsql = """
+    FUNCTION After_Param RETURN BOOLEAN IS
+      cvCITY CONSTANT VARCHAR2(30) := 'L.Addr_City' ;
+      cvDT   CONSTANT VARCHAR2(30) := 'I.Ev_Date' ;
+      vEx    VARCHAR2(200) ;
+    BEGIN
+      IF INSTR(:P_City, '%') > 0 THEN
+        :P_Crit := :P_Crit || ' AND ' || cvCITY || ' LIKE UPPER(TRIM(:P_City))' ;
+      ELSE
+        :P_Crit := :P_Crit || ' AND ' || cvCITY || ' = UPPER(TRIM(:P_City))' ;
+      END IF ;
+      vEx := 'AND EXISTS( ' || 'SELECT * FROM Ev E WHERE E.Id = M.Id ' ;
+      IF :P_A IS NOT NULL AND :P_B IS NOT NULL THEN
+        :P_Crit := :P_Crit || vEx || ' AND (' || cvDT || ' >= :P_A' || ' AND ' || cvDT || ' <= :P_B))' ;
+      ELSIF :P_A IS NOT NULL THEN
+        :P_Crit := :P_Crit || vEx || ' AND ' || cvDT || ' = :P_A)' ;
+      ELSIF :P_B IS NOT NULL THEN
+        :P_Crit := :P_Crit || vEx || ' AND ' || cvDT || ' = :P_B)' ;
+      END IF ;
+      RETURN(TRUE) ;
+    END ;
+    """
+    got = _folded_lexical_predicates(plsql)
+    assert "P_CRIT" in got, got
+    frag = got["P_CRIT"]
+    # single-bind city predicates are NULL-safe
+    assert "(:P_City IS NULL OR L.Addr_City LIKE UPPER(TRIM(:P_City)))" in frag
+    # the two-bind family is an exact prompt-state CASE, not a naive union
+    assert "CASE WHEN :P_A IS NOT NULL AND :P_B IS NOT NULL" in frag
+    assert "I.Ev_Date >= :P_A AND I.Ev_Date <= :P_B" in frag
+    assert "ELSE 1 END) = 1" in frag
+    # PROVE IT DECLINES: an opaque part (function call) poisons the
+    # lexical — all-or-nothing, no partially-reconstructed filters
+    poisoned = plsql.replace("|| ' = UPPER(TRIM(:P_City))'",
+                             "|| F_Mystery(:P_City)")
+    assert "P_CRIT" not in _folded_lexical_predicates(poisoned)
+
+
+def test_server_publish_rules_hold_structurally():
+    """Ten server publish rules the upload dialog enforces, checked here.
+
+    The Hidden-scope rejection proved the pattern: the server enforces
+    structural rules no local rail encoded, and the first place they
+    surfaced was the state's Report Manager. This locks the widest
+    testable set: unique item names, CLS naming, no bare Fields! in page
+    header/footer, no forward parameter dependencies, no aggregates in
+    group expressions or dataset filters, subreports carry ReportName.
+    Mutation-proved: a duplicated item name and a bare page-header
+    Fields! ref are both flagged (verified before this test was written).
+    """
+    import collections
+    import pathlib
+    import re as _re
+    import xml.etree.ElementTree as _ET
+    from converter import convert
+
+    AGG = _re.compile(r"\b(Sum|Count|CountDistinct|Avg|Min|Max|First|Last"
+                      r"|StDev|Var|Aggregate|RunningValue)\s*\(", _re.I)
+    CLS = _re.compile(r"^[A-Za-z][A-Za-z0-9_]*$")
+    root_dir = pathlib.Path(__file__).resolve().parents[1]
+    checked = 0
+    for f in sorted((root_dir / "samples" / "oracle").glob("*.xml")):
+        try:
+            rdl = convert(f.read_bytes())["rdl_xml"]
+        except Exception:  # noqa: BLE001
+            continue
+        checked += 1
+        root = _ET.fromstring(rdl.encode("utf-8"))
+        ns = root.tag.split("}")[0][1:]
+
+        def q(t):
+            return f"{{{ns}}}{t}"
+
+        names = collections.Counter(
+            el.get("Name") for el in root.iter()
+            if el.get("Name") and el.tag.split("}")[-1] in
+            ("Textbox", "Rectangle", "Tablix", "Image", "Line", "Subreport"))
+        dups = {n: c for n, c in names.items() if c > 1}
+        assert not dups, f"{f.name}: duplicate item names {dups}"
+        bad = [n for n in names if not CLS.match(n)]
+        assert not bad, f"{f.name}: non-CLS item names {bad[:4]}"
+        for sect in ("PageHeader", "PageFooter"):
+            for ph in root.iter(q(sect)):
+                for v in ph.iter(q("Value")):
+                    t = v.text or ""
+                    assert not (t.startswith("=") and "Fields!" in t
+                                and not AGG.search(t)), (
+                        f"{f.name}: bare Fields! in {sect}: {t[:80]}")
+        porder = {p.get("Name"): i
+                  for i, p in enumerate(root.iter(q("ReportParameter")))}
+        for i, p in enumerate(root.iter(q("ReportParameter"))):
+            for v in p.iter(q("Value")):
+                for ref in _re.findall(r"Parameters!(\w+)", v.text or ""):
+                    assert porder.get(ref, -1) <= i, (
+                        f"{f.name}: forward param dependency "
+                        f"{p.get('Name')} -> {ref}")
+        for ge in root.iter(q("GroupExpression")):
+            assert not AGG.search(ge.text or ""), (
+                f"{f.name}: aggregate in GroupExpression")
+        for ds in root.iter(q("DataSet")):
+            for flt in ds.iter(q("FilterExpression")):
+                assert not AGG.search(flt.text or ""), (
+                    f"{f.name}: aggregate in DataSet Filter")
+        for sr in root.iter(q("Subreport")):
+            assert (sr.findtext(q("ReportName")) or "").strip(), (
+                f"{f.name}: Subreport without ReportName")
+    assert checked, "no sample converted"

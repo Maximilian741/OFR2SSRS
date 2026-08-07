@@ -778,8 +778,13 @@ function renderMockupTab(data) {
     return;
   }
 
-  // frontend: real pages when we have them; the instant mockup while the
-  // engine works (or forever, on a machine without the engine)
+  // frontend: the ENGINE render or an honest loading state. The mockup is
+  // NEVER shown as a stand-in: flashing an approximation and then swapping
+  // to the real pages reads as two contradictory previews, and on a
+  // machine where the engine cannot run the approximation lingered as if
+  // it were the real output (work-machine verified: every report "did not
+  // compare to any preview"). The mockup appears ONLY on engine failure,
+  // wrapped in an unmissable notice saying exactly what it is.
   if ((state.renderedPages && state.renderedPages.length)
       || state.renderedPdf) {
     _showRenderedPages();
@@ -787,20 +792,30 @@ function renderMockupTab(data) {
   }
   if (rhost) { rhost.hidden = true; rhost.innerHTML = ""; }
   host.hidden = false;
-  host.innerHTML = data.mockup_html || "<em>No mockup available.</em>";
   if (state._renderFailed) {
-    _renderStatus("Engine render unavailable — showing browser mockup. "
-      + '<button class="btn-tiny" id="render-retry" type="button">Retry</button>');
+    host.innerHTML =
+      '<div class="mockup-fallback-note">⚠ This is the APPROXIMATE '
+      + "browser mockup — NOT the real render. The report engine "
+      + "could not run on this machine: "
+      + escHtml(String(state._renderFailed).slice(0, 300))
+      + ' <button class="btn-tiny" id="render-retry" type="button">'
+      + "Retry engine render</button></div>"
+      + (data.mockup_html || "<em>No mockup available.</em>");
     const rb = document.getElementById("render-retry");
     if (rb) rb.addEventListener("click", () => {
       state._renderFailed = null;
-      runRenderPreview();
+      renderMockupTab(state.data);
     });
-  } else {
-    _renderStatus("Browser mockup (quick view) — rendering the real "
-      + "pages through the report engine…");
-    if (!state._renderInFlight) runRenderPreview();
+    _renderStatus("Engine render unavailable — approximate mockup "
+      + "shown with a notice.");
+    return;
   }
+  host.innerHTML =
+    '<div class="render-loading"><div class="render-spinner"></div>'
+    + "Rendering through Microsoft’s report engine… the "
+    + "preview will be exactly what the .rdl prints.</div>";
+  _renderStatus("Rendering…");
+  if (!state._renderInFlight) runRenderPreview();
 }
 
 function _showRenderedPages() {

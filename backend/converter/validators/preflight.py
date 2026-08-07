@@ -403,6 +403,55 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
             f"failed and must be repaired before this report is usable.",
         ))
 
+    # THE SERVER'S OWN VISIBILITY SCOPE RULE, enforced here so it can never
+    # again be discovered at the Report Manager upload dialog (production-
+    # verified rejection: "The Hidden expression for the rectangle ...
+    # refers to the field ... Report item expressions can only refer to
+    # fields within the current dataset scope"). A bare Fields!X inside a
+    # data region must belong to THAT region's dataset; outside any region
+    # a bare ref is never legal; an aggregate carrying an explicit
+    # dataset-scope string is always legal.
+    _ds_fields = {}
+    for _ds in find_all(tree, "DataSet"):
+        _ds_fields[_ds.get("Name") or ""] = {
+            _f.get("Name") or "" for _f in find_all(_ds, "Field")}
+
+    def _hidden_scope_walk(el, region_ds):
+        tag = el.tag.split("}")[-1]
+        if tag == "Tablix":
+            for _c in el:
+                if _c.tag.split("}")[-1] == "DataSetName":
+                    region_ds = _c.text or region_ds
+        if tag == "Visibility":
+            for _h in el:
+                if _h.tag.split("}")[-1] != "Hidden":
+                    continue
+                _expr = _h.text or ""
+                if not _expr.startswith("="):
+                    continue
+                _rf = _ds_fields.get(region_ds or "", set())
+                for _ref in set(re.findall(r"Fields!(\w+)\.Value", _expr)):
+                    if _ref in _rf:
+                        continue
+                    if re.search(rf"Fields!{re.escape(_ref)}\.Value\s*,"
+                                 rf"\s*\"[^\"]+\"", _expr):
+                        continue
+                    issues.append((
+                        "BLOCKER",
+                        "rdl.hidden_scope",
+                        f"A Hidden expression references Fields!{_ref} "
+                        f"outside its dataset scope "
+                        f"(enclosing region dataset: {region_ds or 'none'})"
+                        f" — the report server REFUSES this RDL at upload. "
+                        f"Cross-dataset visibility must use an explicit "
+                        f"scope, e.g. First(Fields!{_ref}.Value, "
+                        f"\"<dataset>\").",
+                    ))
+        for _c in el:
+            _hidden_scope_walk(_c, region_ds)
+
+    _hidden_scope_walk(tree, None)
+
     # A report with NO content item anywhere prints blank pages, whatever
     # its datasets look like. This is strictly stronger than the
     # hollow_body rule above, which needs extractable dataset fields to

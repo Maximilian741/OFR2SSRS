@@ -1079,6 +1079,250 @@ def _literal_lexical_predicates(plsql: str) -> dict:
 
 
 
+def _folded_lexical_predicates(plsql: str) -> dict:
+    """Reconstruct lexicals built from INLINE ``||`` CONCATENATIONS of
+    string literals and cv-constants — the third and largest criteria
+    idiom (read from the production builders)::
+
+        cvCITY CONSTANT VARCHAR2(30) := 'GLI.Addr_City';
+        :P_Criteria := :P_Criteria
+                        || ' AND ' || cvCITY
+                        || ' LIKE UPPER(TRIM(:P_City))';
+
+    Every ``||`` part must fold to text (quoted literal, or a cv-constant
+    whose initializer itself folds — multi-literal concats included);
+    binds stay INSIDE the literals, so the folded fragment is already the
+    SQL Oracle spliced. Locals fold too and flow into lexicals through
+    ``:P_LEX := :P_LEX || vLocal`` / ``:P_LEX := vA || vB``.
+
+    Emission mirrors the proven literal-branch doctrine: NULL-safe
+    single-bind union (LIKE-with-no-metacharacters IS equality, so one
+    LIKE predicate reproduces both wildcard branches), PLUS exact
+    enumeration of the DATE-RANGE TRIAD (both/only-A/only-B fragments over
+    one column — a naive union would demand ``col = :A AND col = :B`` when
+    both prompts are set, returning zero rows where Oracle returned the
+    range).
+
+    ALL-OR-NOTHING per lexical: if ANY appended fragment fails to fold,
+    the whole lexical is left to the caller's honest placeholder — a
+    partially-reconstructed filter silently drops the missing predicates,
+    which is the unfiltered-rows failure this exists to kill."""
+    out: dict = {}
+    if not plsql or "||" not in (plsql or ""):
+        return out
+
+    # constants: initializer = one literal or a pure concat of literals
+    consts: dict = {}
+    for m in re.finditer(
+            r"(?is)\b(cv[A-Za-z0-9_]+)\s+CONSTANT\s+VARCHAR2\s*\(\d+\)\s*"
+            r":=\s*((?:'(?:''|[^'])*'\s*(?:\|\|\s*)?)+);", plsql):
+        parts = re.findall(r"'((?:''|[^'])*)'", m.group(2))
+        consts[m.group(1).upper()] = "".join(
+            p.replace("''", "'") for p in parts)
+
+    def _fold(rhs: str, frags=None, dirty=None):
+        """Concat RHS -> folded text, or None when any part is opaque.
+        A part naming a CLEAN local accumulator splices that local's own
+        folded text (the EXISTS-prefix staging idiom: ``vExists`` holds an
+        opening fragment the branch fragments later close)."""
+        text = []
+        for part in re.split(r"\|\|", rhs):
+            part = part.strip()
+            if not part:
+                continue
+            lm = re.fullmatch(r"'((?:''|[^'])*)'", part, re.S)
+            if lm:
+                text.append(lm.group(1).replace("''", "'"))
+                continue
+            cv = consts.get(part.upper())
+            if cv is not None:
+                text.append(cv)
+                continue
+            pu = part.upper()
+            # single-fragment locals only: a multi-fragment local is an
+            # ACCUMULATOR of exclusive IF/ELSIF branches, and joining its
+            # fragments into one splice merges alternatives into nonsense
+            if frags is not None and pu in frags and pu not in (dirty or ()) \
+                    and len(frags[pu]) == 1:
+                text.append(frags[pu][0])
+                continue
+            # a BARE BIND concatenated into the SQL text (the runtime
+            # ID-LIST splice: 'IN ('||:p_site||')') folds to a marker the
+            # predicate stage either rewrites to a static csv-membership
+            # test or declines — never emits as-is
+            bm = re.fullmatch(r":([A-Za-z_][A-Za-z0-9_]*)", part)
+            if bm:
+                text.append("\x01:" + bm.group(1) + "\x01")
+                continue
+            return None
+        return "".join(text)
+
+    # fragment lists per accumulator (locals AND lexicals), source order.
+    # The scan input concatenates parsed trigger bodies WITH the raw XML,
+    # so every statement appears (at least) twice — an exact-duplicate
+    # append must fold ONCE, or a spliced local doubles its opening
+    # fragment and the result unbalances (measured: 'AND EXISTS(' spliced
+    # twice made every date-family predicate decline).
+    frags: dict = {}
+    dirty: set = set()
+    order: list = []
+    _seen_stmts: set = set()
+    for m in re.finditer(
+            r"(?is):?([A-Za-z_][A-Za-z0-9_]*)\s*:=\s*([^;]{1,1200});", plsql):
+        tgt, rhs = m.group(1).upper(), m.group(2).strip()
+        _sk = (tgt, re.sub(r"\s+", " ", rhs).lower())
+        if _sk in _seen_stmts:
+            continue
+        _seen_stmts.add(_sk)
+        order.append(tgt)
+        self_ref = re.match(r"(?is)^:?" + re.escape(m.group(1))
+                            + r"\s*(\|\|)?\s*(.*)$", rhs)
+        body = self_ref.group(2) if self_ref and self_ref.group(1) else rhs
+        # a plain re-assignment that is just another accumulator chain
+        # (:P_LEX := vA || vB) resolves each var's folded fragments
+        var_parts = re.fullmatch(
+            r"(?is)\s*([A-Za-z_][A-Za-z0-9_]*"
+            r"(?:\s*\|\|\s*[A-Za-z_][A-Za-z0-9_]*)*)\s*", body)
+        if var_parts and not body.strip().startswith("'"):
+            names = [v.strip().upper()
+                     for v in re.split(r"\|\|", var_parts.group(1))]
+            _multi = any(len(frags.get(n, [])) > 1 for n in names)
+            # LIST inheritance only when a named local truly ACCUMULATED
+            # several exclusive branch fragments (the _fold splice would
+            # merge them into nonsense). Single-fragment vars fall through
+            # to _fold, which splices them inline — the path the
+            # EXISTS-prefix staging and mixed literal/var bodies rely on
+            # (loosening this unconditionally broke a report that
+            # translated before it, A/B-measured).
+            if _multi and all(n in frags or n in consts for n in names):
+                for n in names:
+                    if n in dirty:
+                        dirty.add(tgt)
+                    frags.setdefault(tgt, []).extend(
+                        frags.get(n, [])
+                        or ([consts[n]] if n in consts else []))
+                continue
+        folded = _fold(body, frags, dirty)
+        if folded is None:
+            dirty.add(tgt)
+        else:
+            frags.setdefault(tgt, []).append(folded)
+
+    def _predicates_for(fragments):
+        """NULL-safe union + range-triad enumeration; None = decline."""
+        preds, seen = [], set()
+        singles = []      # (bind, body)
+        multis = []       # (binds, body)
+        for f in fragments:
+            f = f.strip()
+            if not f:
+                continue
+            conn_m = re.match(r"(?i)^(AND|OR)\b", f)
+            if not conn_m:
+                return None            # non-predicate content (ORDER BY etc.)
+            conn = conn_m.group(1).upper()
+            body = re.sub(r"(?i)^(AND|OR)\s+", "", f).strip()
+            # RUNTIME ID-LIST SPLICE: "col IN (<spliced bind>)" — the bind
+            # holds a comma-separated value list Oracle pasted into the SQL
+            # text. The static equivalent is the csv-membership test
+            # (',' || :B || ',' LIKE '%,' || col || ',%'), exact for
+            # comma-separated lists including the single-value case.
+            def _splice_sub(m2):
+                col, b = m2.group(1), m2.group(2)
+                return (f"(',' || REPLACE(:{b}, ' ', '') || ',' LIKE "
+                        f"'%,' || {col} || ',%')")
+            body = re.sub(r"(?i)([A-Za-z_][\w.]*)\s+IN\s*\(\s*\x01:(\w+)"
+                          r"\x01\s*\)", _splice_sub, body)
+            if "\x01" in body:
+                return None            # any other bind splice: decline
+            binds = [b.upper() for b in
+                     re.findall(r":([A-Za-z_][A-Za-z0-9_]*)", body)]
+            if not binds:
+                return None            # constant fragment: cannot NULL-safe
+            if conn == "OR":
+                # an OR-fragment EXTENDS the preceding predicate's
+                # alternatives; empty prompt must contribute FALSE, so the
+                # gate inverts: OR (:B IS NOT NULL AND body)
+                if len(set(binds)) != 1:
+                    return None
+                _orig = re.search(r":([A-Za-z_][A-Za-z0-9_]*)", body)
+                _nm = _orig.group(1) if _orig else binds[0]
+                preds.append(f"OR (:{_nm} IS NOT NULL AND ({body}))")
+                continue
+            if len(set(binds)) == 1:
+                singles.append((binds[0], body))
+            else:
+                multis.append((sorted(set(binds)), body))
+        # BIND-STATE FAMILY over TWO binds: fragments whose bind sets are
+        # {A,B}, {A}, {B} are the classic IF/ELSIF prompt-state chain
+        # (both prompts / only first / only second) regardless of each
+        # body's internal shape — plain ranges, EXISTS-wrapped ranges,
+        # anything. The exact static translation gates each VERBATIM body
+        # on its prompt state via CASE (which matches PL/SQL IF-chain
+        # order and NULL handling precisely). A naive union of the singles
+        # instead demanded col = :A AND col = :B when both prompts were
+        # set — zero rows where Oracle returned the range.
+        def _balanced(s2):
+            d = 0
+            for ch in s2:
+                if ch == "(":
+                    d += 1
+                elif ch == ")":
+                    d -= 1
+                    if d < 0:
+                        return False
+            return d == 0
+        if multis:
+            fams = {}
+            for binds, body in multis:
+                if len(binds) != 2 or not _balanced(body):
+                    return None          # >2-bind chains: decline honestly
+                fams.setdefault(tuple(binds), []).append(body)
+            for (a, b), both_bodies in fams.items():
+                a_sing = [s2 for s2 in singles if s2[0] == a]
+                b_sing = [s2 for s2 in singles if s2[0] == b]
+                if not all(_balanced(s2[1]) for s2 in a_sing + b_sing):
+                    return None
+                for s2 in a_sing + b_sing:
+                    singles.remove(s2)
+
+                def _gate(bodies):
+                    inner = " AND ".join(f"({x})" for x in bodies)
+                    return f"CASE WHEN {inner} THEN 1 ELSE 0 END"
+                whens = [f"WHEN :{a} IS NOT NULL AND :{b} IS NOT NULL "
+                         f"THEN {_gate(both_bodies)}"]
+                if a_sing:
+                    whens.append(f"WHEN :{a} IS NOT NULL "
+                                 f"THEN {_gate([s2[1] for s2 in a_sing])}")
+                if b_sing:
+                    whens.append(f"WHEN :{b} IS NOT NULL "
+                                 f"THEN {_gate([s2[1] for s2 in b_sing])}")
+                preds.append("AND (CASE " + " ".join(whens)
+                             + " ELSE 1 END) = 1")
+        for bind, body in singles:
+            key = (bind, re.sub(r"\s+", " ", body).lower())
+            if key in seen:
+                continue
+            seen.add(key)
+            # reuse the body's own bind spelling (Oracle binds are
+            # case-insensitive, but a mixed-case predicate reads wrong)
+            _orig = re.search(r":([A-Za-z_][A-Za-z0-9_]*)", body)
+            _nm = _orig.group(1) if _orig else bind
+            preds.append(f"AND (:{_nm} IS NULL OR {body})")
+        return preds or None
+
+    for tgt in dict.fromkeys(order):
+        if not tgt.startswith("P_") or tgt in dirty:
+            continue
+        fragments = frags.get(tgt) or []
+        if not fragments:
+            continue
+        preds = _predicates_for(fragments)
+        if preds:
+            out[tgt] = "\n\t" + "\n\t".join(preds)
+    return out
+
+
 def _inline_local_accumulators(plsql: str) -> str:
     """Rewrite ``:P_LEX := :P_LEX || vLocal ;`` into the local's own last
     assigned expression, so criteria reached through a LOCAL variable are
@@ -1188,6 +1432,15 @@ def _reconstruct_lexical_criteria(report) -> dict:
     # are inlined first, so the builder scan below sees the real call.
     plsql = _inline_local_accumulators(plsql)
     literal_map = _literal_lexical_predicates(plsql)
+    # Inline ||-concat builders (literals + cv-constants) — the third and
+    # largest criteria idiom. More generic than the literal branch, less
+    # specific than the F_Criteria vocabulary: it fills the map first and
+    # both later stages override on collision.
+    try:
+        for _k, _v in _folded_lexical_predicates(plsql).items():
+            literal_map.setdefault(_k, _v)
+    except Exception:  # noqa: BLE001 - reconstruction must never sink convert
+        pass
     if "F_Criteria" not in plsql and "P_Criteria" not in plsql:
         return literal_map
     # cv* CONSTANT column expressions (single-quoted literal; '' -> ')
@@ -1238,14 +1491,22 @@ def _reconstruct_lexical_criteria(report) -> dict:
         for _lm in re.finditer(r"&([A-Za-z_][A-Za-z0-9_]*)", _qsql):
             _lex_query_sql.setdefault(_lm.group(1).upper(), []).append(_qsql)
 
-    def _from_clause(sql: str) -> str:
-        m = re.search(r"(?is)\bFROM\b(.*?)(?:\bWHERE\b|\bGROUP\s+BY\b|"
-                      r"\bORDER\s+BY\b|\bCONNECT\s+BY\b|$)", sql or "")
-        return m.group(1) if m else ""
+    def _from_clauses(sql: str) -> str:
+        """EVERY FROM segment of the SQL, concatenated. The first-FROM-only
+        version broke on nested SQL: converter-side restructuring (join-key
+        injection, derived-table wraps) can put an inline view's FROM ahead
+        of the outer one, so the outer query's aliases were invisible and a
+        provably-valid criteria predicate was silently dropped — the query
+        ran UNFILTERED (measured on a permit report: fresh parse resolved,
+        the convert-time report did not)."""
+        segs = re.findall(r"(?is)\bFROM\b(.*?)(?:\bWHERE\b|\bGROUP\s+BY\b|"
+                          r"\bORDER\s+BY\b|\bCONNECT\s+BY\b|\bSELECT\b|$)",
+                          sql or "")
+        return "\n".join(segs)
 
     def _cv_resolves_in(lex: str, cv: str) -> bool:
-        """True when the cv-constant's table alias is present in the FROM
-        clause of every query this lexical is spliced into."""
+        """True when the cv-constant's table alias is present among the FROM
+        clauses of every query this lexical is spliced into."""
         col = (consts.get(cv) or "").strip()
         am = re.search(r"([A-Za-z_][A-Za-z0-9_]*)\s*\.", col)
         if not am:
@@ -1255,7 +1516,7 @@ def _reconstruct_lexical_criteria(report) -> dict:
         if not sqls:
             return False                     # never spliced -> can't verify
         return all(re.search(r"(?i)(?:^|[\s,(])" + re.escape(alias)
-                             + r"(?:\s|,|$)", _from_clause(s))
+                             + r"(?:\s|,|$)", _from_clauses(s))
                    for s in sqls)
     for lex in lexnames:
         preds, seen = [], set()
@@ -5475,6 +5736,166 @@ def _widen_clipped_constant_labels(root) -> None:
                 le.text = f"{max(0.0, new_l):.2f}in"
 
 
+def _clamp_body_items_to_printable_width(root) -> None:
+    """Clamp every body item's right edge to the printable page width.
+
+    Printable = PageWidth − LeftMargin − RightMargin (read from the emitted
+    <Page>). The walk tracks each item's ABSOLUTE left (containers nest);
+    an item protruding past the printable edge gets its Width reduced to
+    fit — position is never touched. The root <Width> is clamped the same
+    way. This is the general form of the packet branch's root-Width lesson:
+    horizontal overflow paginates into a blank companion page after every
+    content page, which at production data volume doubles the report
+    (5,758 pages, every other one blank, work-server verified)."""
+    page = root.find(_q("Page"))
+    if page is None:
+        return
+
+    def _in(v, default=0.0):
+        try:
+            return float((v or "").replace("in", ""))
+        except (TypeError, ValueError):
+            return default
+
+    pw = _in(page.findtext(_q("PageWidth")), 8.5)
+    lm = _in(page.findtext(_q("LeftMargin")), _PAGE_HMARGIN_IN)
+    rm = _in(page.findtext(_q("RightMargin")), _PAGE_HMARGIN_IN)
+    printable = pw - lm - rm - 0.02
+    if printable <= 1.0:
+        return
+
+    w_el = root.find(_q("Width"))
+    if w_el is not None and _in(w_el.text) > printable:
+        w_el.text = f"{printable:.2f}in"
+
+    def clamp(el, abs_left):
+        tag = el.tag.split("}")[-1]
+        if tag in ("Rectangle", "Textbox", "Tablix", "Image", "Line",
+                   "Subreport"):
+            left = _in(el.findtext(_q("Left")))
+            abs_left = abs_left + left
+            w_child = el.find(_q("Width"))
+            if w_child is not None:
+                w = _in(w_child.text)
+                if w > 0 and abs_left + w > printable:
+                    new_w = max(0.1, printable - abs_left)
+                    if new_w < w - 0.001:
+                        w_child.text = f"{new_w:.2f}in"
+        for c in el:
+            clamp(c, abs_left)
+
+    body = root.find(_q("Body"))
+    if body is not None:
+        clamp(body, 0.0)
+
+
+def _repair_misscoped_aggregate_refs(root) -> None:
+    """Retarget ``Agg(Fields!X.Value, "DS")`` when DS doesn't declare X.
+
+    Link/drill-through resolution can pick the wrong owner for a scoped
+    aggregate (production: a child-report parameter shipped
+    ``First(Fields!CONTACT_ORG_ID.Value, "Q_PERMITTEE")`` while the field
+    lives in Q_CONTACT — the value silently evaluates to Nothing and the
+    drill-through filters on nothing). When exactly ONE dataset declares
+    the field, the scope provably belongs to it; ambiguous refs are left
+    for the preflight RED to disclose."""
+    ds_fields: dict = {}
+    for ds in root.iter(_q("DataSet")):
+        ds_fields[ds.get("Name") or ""] = {
+            f.get("Name") or "" for f in ds.iter(_q("Field"))}
+
+    def owner_of(field):
+        owners = [n for n, fl in ds_fields.items() if field in fl]
+        return owners[0] if len(owners) == 1 else None
+
+    pat = re.compile(
+        r"\b(First|Last|Sum|Min|Max|Count|Avg|LookupSet|Lookup)"
+        r"(\((?:[^()\"]|\"[^\"]*\")*?Fields!(\w+)\.Value\s*,\s*)"
+        r"\"(\w+)\"\s*\)")
+
+    def fix_text(txt):
+        def sub(m):
+            fn, mid, fld, scope = (m.group(1), m.group(2), m.group(3),
+                                   m.group(4))
+            if fld in ds_fields.get(scope, set()):
+                return m.group(0)
+            own = owner_of(fld)
+            if own is None:
+                return m.group(0)
+            return f'{fn}{mid}"{own}")'
+        return pat.sub(sub, txt)
+
+    for el in root.iter():
+        tag = el.tag.split("}")[-1]
+        if tag in ("Value", "Hidden") and (el.text or "").startswith("="):
+            new = fix_text(el.text)
+            if new != el.text:
+                el.text = new
+
+
+def _scope_hidden_cross_dataset_refs(root) -> None:
+    """Make every <Hidden> expression legal under the server's scope rule.
+
+    Walk the finished tree tracking the enclosing data region's dataset.
+    For each expression Hidden: a bare Fields!X ref whose field is NOT in
+    the region's dataset is rewritten to ``First(Fields!X.Value, "D")``
+    where D is the dataset that declares X (an aggregate with an explicit
+    scope is legal in any context). A ref no dataset declares — or a bare
+    ref OUTSIDE any region — that cannot be scoped drops the whole
+    Visibility: the item stays visible, which is honest; an RDL the server
+    refuses at upload is not. (Production-verified failure: 'The Hidden
+    expression for the rectangle ... refers to the field ... Report item
+    expressions can only refer to fields within the current dataset
+    scope'.)"""
+    ds_fields: dict = {}
+    for ds in root.iter(_q("DataSet")):
+        ds_fields[ds.get("Name") or ""] = {
+            f.get("Name") or "" for f in ds.iter(_q("Field"))}
+
+    def owner_of(field: str):
+        for name, fields in ds_fields.items():
+            if field in fields:
+                return name
+        return None
+
+    def fix(el, region_ds):
+        tag = el.tag.split("}")[-1]
+        if tag == "Tablix":
+            region_ds = el.findtext(_q("DataSetName")) or region_ds
+        vis = el.find(_q("Visibility"))
+        if vis is not None:
+            hid_el = vis.find(_q("Hidden"))
+            expr = (hid_el.text or "") if hid_el is not None else ""
+            if expr.startswith("="):
+                region_fields = ds_fields.get(region_ds or "", set())
+                ok = True
+                new = expr
+                for ref in sorted(set(re.findall(r"Fields!(\w+)\.Value",
+                                                 expr))):
+                    if ref in region_fields:
+                        continue
+                    # already scope-qualified for this ref? (inside an
+                    # aggregate carrying an explicit dataset scope)
+                    if re.search(rf"Fields!{re.escape(ref)}\.Value\s*,"
+                                 rf"\s*\"[^\"]+\"", new):
+                        continue
+                    own = owner_of(ref)
+                    if own is None:
+                        ok = False
+                        break
+                    new = re.sub(
+                        rf"Fields!{re.escape(ref)}\.Value",
+                        f'First(Fields!{ref}.Value, "{own}")', new)
+                if not ok:
+                    el.remove(vis)
+                elif new != expr:
+                    hid_el.text = new
+        for c in list(el):
+            fix(c, region_ds)
+
+    fix(root, None)
+
+
 def _scope_body_direct_field_refs(root, report) -> None:
     """Upload-safety net for ANY report shape: a Textbox <Value> that
     references Fields!X.Value while NOT inside a data region (Tablix/List/
@@ -6306,7 +6727,7 @@ def _grouped_tabular_spec(report):
     (CS_/CF_/Sum) below the detail (the "= Total ... / - Crushed" totals stack).
 
     Returns:
-        {"grp_key", "group_header":[(kind,src_or_text,x,w)],
+        {"grp_key", "group_header":[(kind,src_or_text,x,w,y)],
          "col_headers":[(x,label)], "detail_cols":[(x,w,src)],
          "footers":[[(kind,src_or_text,x,w)] per line top->bottom],
          "themed":bool}
@@ -6415,7 +6836,8 @@ def _grouped_tabular_spec(report):
                 grp_key = src.upper()
             group_header.append((k, src if k == "field" else txt,
                                  float(getattr(f, "x", 0) or 0),
-                                 float(getattr(f, "width", 0) or 0)))
+                                 float(getattr(f, "width", 0) or 0),
+                                 float(getattr(f, "y", 0) or 0)))
         if grp_key is None:
             return None
         group_header.sort(key=lambda z: z[2])
@@ -8004,7 +8426,7 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
 
     # Master dataset = the OTHER query that owns the group-header field(s).
     master_ds = None
-    for k, v, _x, _w in spec["group_header"]:
+    for k, v, _x, _w, *_gh_rest in spec["group_header"]:
         if k == "field":
             ds = src2ds.get((v or "").upper())
             if ds and ds != main_ds:
@@ -8133,7 +8555,12 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
 
     GLINE_H = 0.22
     FLINE_H = 0.28   # footer lines: roomier so a long placeholder doesn't collide
-    hdr_h = GLINE_H * 2 + 0.06
+    # The band reproduces the SOURCE's line structure: one band line per
+    # distinct declared y (engine-render verified on a receipts log — all
+    # header items flattened to one line painted over each other; the
+    # Oracle truth prints a two-line header block).
+    _gh_ys = sorted({round(g[4], 2) for g in ghdr}) or [0.0]
+    hdr_h = GLINE_H * (len(_gh_ys) + 1) + 0.06
     det_h = 0.20
     ftr_h = max(0.20, FLINE_H * len(footers) + 0.04)
 
@@ -8145,7 +8572,20 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
     _hbb = _sub(hst, "BottomBorder")
     _sub(_hbb, "Style", "Solid"); _sub(_hbb, "Color", "#444444"); _sub(_hbb, "Width", "1pt")
     hri = _sub(hrect, "ReportItems")
-    for gi, (k, v, x, w) in enumerate(ghdr):
+    # Neighbour-clamped widths, exactly like the detail columns: a header
+    # item with no declared width defaulted to 2.0in while the band packs
+    # items ~0.5in apart, so every label painted across the next two
+    # (engine-render verified on a receipts log: 8 painted-over pairs in
+    # the band; the Oracle truth prints them cleanly inline).
+    _line_of = {y: i for i, y in enumerate(_gh_ys)}
+    for gi, (k, v, x, w, gy) in enumerate(ghdr):
+        _line = _line_of.get(round(gy, 2), 0)
+        # neighbour clamp WITHIN the same band line only
+        _line_xs = sorted({ox for (_k2, _v2, ox, _w2, oy2) in ghdr
+                           if round(oy2, 2) == round(gy, 2)})
+        _nxt = next((nx for nx in _line_xs if nx > x + 0.02), None)
+        _cap = (_nxt - x - 0.04) if _nxt is not None else (BODY_W - x)
+        _cap = max(0.4, _cap)
         val = _master_expr(v) if k == "field" else _label_expr(k, v)
         ta = "Right" if x > BODY_W * 0.6 else "Left"
         _build_textbox(hri, f"Tb_GH_{gi}", val, bold=True, font_size="11pt",
@@ -8153,8 +8593,9 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
                        vertical_align="Middle", border_color="#ffffff",
                        padding="2pt", can_grow=False)
         _t = hri[-1]
-        _sub(_t, "Top", "0in"); _sub(_t, "Left", f"{max(0.02, x):.2f}in")
-        _sub(_t, "Width", f"{max(0.5, min(w or 2.0, BODY_W - x)):.2f}in")
+        _sub(_t, "Top", f"{_line * GLINE_H:.2f}in")
+        _sub(_t, "Left", f"{max(0.02, x):.2f}in")
+        _sub(_t, "Width", f"{max(0.4, min(w or _cap, _cap)):.2f}in")
         _sub(_t, "Height", f"{GLINE_H:.2f}in")
     col_xs = [c[0] for c in cols]
     for ci, (cx, label) in enumerate(cols):
@@ -8163,7 +8604,8 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
                        vertical_align="Middle", border_color=HDR_BG,
                        padding="2pt", can_grow=False)
         _t = hri[-1]
-        _sub(_t, "Top", f"{GLINE_H:.2f}in"); _sub(_t, "Left", f"{max(0.02, cx):.2f}in")
+        _sub(_t, "Top", f"{GLINE_H * len(_gh_ys):.2f}in")
+        _sub(_t, "Left", f"{max(0.02, cx):.2f}in")
         _sub(_t, "Width", f"{_col_w(ci, col_xs, BODY_W):.2f}in")
         _sub(_t, "Height", f"{GLINE_H:.2f}in")
 
@@ -9412,6 +9854,155 @@ def _layer_images_behind_text(container):
             _set_zindex(k, "0" if k.tag == _q("Image") else "1")
 
 
+def _flow_frame_elasticity(group) -> None:
+    """ORACLE ELASTICITY FLOW, computed POST-ORDER over a frame subtree.
+
+    The general rule, driven entirely by each report's own declarations:
+    an elastic unit (verticalElasticity expand/variable, or a frame whose
+    elastic member sits at its bottom edge) pushes the first overlapping/
+    abutting unit below it, and everything from that unit down shifts by
+    the same delta (BAND SHIFT — relative layout below is preserved, so a
+    push can never manufacture a new collision; per-pair pushes did
+    exactly that on a clean report, A/B-measured). SSRS's native reflow
+    handles the runtime growth from there; this pass only guarantees the
+    STRICT POSITIVE GAPS reflow needs, because at a hairline intersection
+    or exact abutment the engine paints straight through (bisect-verified
+    at 4.58in/4.58in on two inspection letters).
+
+    POST-ORDER matters: a child frame's interior shift grows its
+    effective bottom; the parent walk must see the GROWN bottom or the
+    frame's shifted content escapes into unshifted siblings (measured: a
+    certificate's pushed bottom line painted into the wallet cards below
+    it). Results land as unit._flow_y — placement-only; a frame's
+    interior keeps its declared origin. Idempotent via group._flow_done.
+    """
+    if getattr(group, "_flow_done", False):
+        return
+    group._flow_done = True
+
+    kids = [c for c in (getattr(group, "children", None) or [])
+            if "frame" in (getattr(c, "kind", "") or "").lower()]
+    for c in kids:
+        _flow_frame_elasticity(c)
+
+    def _geom(o):
+        return (float(getattr(o, "x", 0.0) or 0.0),
+                float(getattr(o, "y", 0.0) or 0.0),
+                float(getattr(o, "width", 0.0) or 0.0),
+                float(getattr(o, "height", 0.0) or 0.0))
+
+    def _eff_bottom(o, kind):
+        """EMITTED bottom in flowed space — the EXACT mirror of the rect
+        stamping: final_h = max(declared_h, content_rel_bottom + 0.10),
+        applied recursively so a child frame contributes ITS emitted
+        height. A cruder estimate added +0.10 per nesting level and the
+        compounded inflation manufactured intersections (and pushes) for
+        frames that merely sit near each other (A/B-measured: a clean
+        form report gained 24 pairs from phantom pushes)."""
+        x, y, w, h = _geom(o)
+        top = float(getattr(o, "_flow_y", None) or y)
+        if kind != "g":
+            return top + h
+
+        def _eff_h(g):
+            gx0, gy0, gw0, gh0 = _geom(g)
+            used = 0.0
+            for f2 in (getattr(g, "fields", None) or []):
+                fy = float(getattr(f2, "_flow_y", None)
+                           or getattr(f2, "y", 0) or 0)
+                used = max(used, (fy - gy0)
+                           + float(getattr(f2, "height", 0) or 0))
+            for c2 in (getattr(g, "children", None) or []):
+                if "frame" not in (getattr(c2, "kind", "") or "").lower():
+                    continue
+                cy = float(getattr(c2, "_flow_y", None)
+                           or getattr(c2, "y", 0) or 0)
+                used = max(used, (cy - gy0) + _eff_h(c2))
+            return max(gh0, used + 0.10) if used > 0 else max(gh0, 0.0)
+
+        return top + _eff_h(o)
+
+    def _members_below(o, holder):
+        """Anything in ``holder`` declared below-overlapping ``o``?"""
+        ox0 = float(getattr(o, "x", 0) or 0)
+        ox1 = ox0 + float(getattr(o, "width", 0) or 0)
+        ob = (float(getattr(o, "y", 0) or 0)
+              + float(getattr(o, "height", 0) or 0))
+        for other in (list(getattr(holder, "fields", None) or [])
+                      + list(getattr(holder, "children", None) or [])):
+            if other is o:
+                continue
+            oy = float(getattr(other, "y", 0) or 0)
+            hx0 = float(getattr(other, "x", 0) or 0)
+            hx1 = hx0 + float(getattr(other, "width", 0) or 0)
+            if oy >= ob - 0.02 and hx0 < ox1 and hx1 > ox0:
+                return True
+        return False
+
+    def _is_elastic(kind, o):
+        # RUNTIME GROWTH exists only where the emitter grants CanGrow:
+        # elastic AND nothing below within the same frame (the exact
+        # _cangrow_safe rule). An elastic heading mid-stack never grows at
+        # render time, so opening gaps under it "fixed" declared overlaps
+        # the engine painted fine and pushed content into page furniture
+        # (A/B-measured: two clean reports gained 24 pairs each).
+        if (getattr(o, "vertical_elasticity", "") or "").lower()                 in ("expand", "variable")                 and not _members_below(o, group):
+            return True
+        if kind == "g":
+            _, oy0, _, oh0 = _geom(o)
+            edge = oy0 + oh0 - 0.10
+            stack = [o]
+            while stack:
+                g2 = stack.pop()
+                for f2 in (getattr(g2, "fields", None) or []):
+                    if (getattr(f2, "vertical_elasticity", "") or "")                             .lower() in ("expand", "variable"):
+                        fb = (float(getattr(f2, "y", 0) or 0)
+                              + float(getattr(f2, "height", 0) or 0))
+                        if fb >= edge:
+                            return True
+                stack.extend(getattr(g2, "children", None) or [])
+        return False
+
+    # EVERYTHING SHIFTS; ONLY FRAMES PUSH. Both halves are A/B-measured:
+    # a FIELD frontier pushed a form row into its neighbour on a clean
+    # report (fields can't overflow their emitted box the way a frame's
+    # bottom-edge CanGrow prose does), while dropping fields from the
+    # WALK left them behind when sibling frames shifted and the frames
+    # landed on them. So fields ride the band shift like any unit, but
+    # never open gaps of their own.
+    units = [("f", m) for m in (getattr(group, "fields", None) or [])]
+    units += [("g", c) for c in kids]
+    frontiers = []  # (bottom, x0, x1) of elastic units, flowed space
+    shift = 0.0
+    for k, o in sorted(units, key=lambda u: (_geom(u[1])[1],
+                                             _geom(u[1])[0])):
+        mx, my, mw, mh = _geom(o)
+        top = my + shift
+        for fb, fx0, fx1 in frontiers:
+            ox = min(mx + mw, fx1) - max(mx, fx0)
+            narrow = min(mw, fx1 - fx0)
+            if narrow <= 0 or ox < 0.5 * narrow:
+                continue
+            if top < fb + 0.008:
+                top = fb + 0.03
+        if top > my + shift + 0.001:
+            shift = top - my
+        if shift > 0.001:
+            o._flow_y = my + shift
+        if k == "g":
+            eb = _eff_bottom(o, k)
+            # A frontier exists for (a) POTENTIAL growth — an elastic
+            # bottom-edge member SSRS will grow at runtime — and (b)
+            # REALIZED growth: this frame's own interior flow already
+            # extends its emitted body past its declared box, a hard
+            # geometric fact that must gap the next sibling regardless of
+            # elasticity (bisect-verified: two static form rows painted
+            # onto each other because the grown frame above one of them
+            # carried no elastic member and opened no gap).
+            if _is_elastic(k, o) or eb > my + shift + mh + 0.005:
+                frontiers.append((eb, mx, mx + mw))
+
+
 def _lf_y(lf) -> float:
     """A member's emission y: the ELASTICITY-FLOWED position when the frame
     walker computed one (see the push-down block in _emit_frame_rect),
@@ -9976,7 +10567,15 @@ def _emit_frame_rect(
         gh = 1.0
 
     rect_left = max(0.02, gx - parent_x)
-    rect_top = max(0.02, gy - parent_y)
+    # PLACEMENT honors the parent's elasticity flow (see the push-down pass:
+    # an elastic sibling above pushed this frame to _flow_y), while every
+    # INTERIOR offset keeps the DECLARED origin `gy` — the frame's members
+    # are laid out relative to where Oracle declared the frame, and shifting
+    # the origin they subtract from would drag the whole interior up and out
+    # of the rect.
+    _gy_flow = getattr(group, "_flow_y", None)
+    rect_top = max(0.02, (float(_gy_flow) if _gy_flow is not None else gy)
+                   - parent_y)
     rect_w = max(0.5, min(gw, parent_w - rect_left - 0.02))
     rect_h = max(0.5, gh)
 
@@ -10047,32 +10646,8 @@ def _emit_frame_rect(
     #   * only MATERIAL overlap (> 0.03in AND >=40% of the shorter height);
     #   * only when the UPPER member is declared elastic by the source.
     try:
-        _placed = []  # (final_top, bottom, x0, x1, elastic)
-        for _m in sorted((group.fields or []),
-                         key=lambda f: (float(getattr(f, "y", 0) or 0),
-                                        float(getattr(f, "x", 0) or 0))):
-            _my = float(getattr(_m, "y", 0.0) or 0.0)
-            _mx = float(getattr(_m, "x", 0.0) or 0.0)
-            _mw = float(getattr(_m, "width", 0.0) or 0.0)
-            _mh = float(getattr(_m, "height", 0.0) or 0.0)
-            _new_top = _my
-            for _pt, _pb, _px0, _px1, _pel in _placed:
-                if not _pel:
-                    continue
-                _ox = min(_mx + _mw, _px1) - max(_mx, _px0)
-                _narrow = min(_mw, _px1 - _px0)
-                if _narrow <= 0 or _ox < 0.5 * _narrow:
-                    continue
-                _oy = min(_new_top + _mh, _pb) - max(_new_top, _pt)
-                if _oy > 0.03 and _mh > 0 \
-                        and _oy >= 0.4 * min(_mh, _pb - _pt):
-                    _new_top = max(_new_top, _pb + 0.02)
-            if _new_top > _my + 0.001:
-                _m._flow_y = _new_top
-            _mel = (getattr(_m, "vertical_elasticity", "") or "").lower() \
-                in ("expand", "variable")
-            _placed.append((_new_top, _new_top + _mh,
-                            _mx, _mx + _mw, _mel))
+        if not getattr(group, "_flow_done", False):
+            _flow_frame_elasticity(group)
     except Exception:  # noqa: BLE001 - flow layout must never sink a convert
         pass
 
@@ -10643,6 +11218,20 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
         # (like the main cert) keep their Oracle position (already centered
         # by the Oracle designer).
         center_deltas = _center_sibling_frame_rows(frame_children, BODY_W)
+        # The RECORD-level siblings (certificate + wallet cards) get the
+        # same elasticity band walk their interiors get — without it, a
+        # frame whose interior flow grew its emitted height intersects the
+        # unshifted sibling declared below and paints through it
+        # (measured: the certificate's pushed bottom line landed on the
+        # wallet-card headers). The synthetic wrapper is walk-only; the
+        # emission loop below is unchanged.
+        try:
+            import types as _types
+            _flow_frame_elasticity(_types.SimpleNamespace(
+                name="_record_flow", kind="frame",
+                children=list(frame_children), fields=[]))
+        except Exception:  # noqa: BLE001 - flow must never sink a convert
+            pass
         for child in frame_children:
             delta = center_deltas.get(id(child), 0.0)
             by = _emit_frame_rect(
@@ -13745,6 +14334,16 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
         cols = _sub(tb, "TablixColumns")
         _sub(_sub(cols, "TablixColumn"), "Width", f"{width:.2f}in")
         rows = _sub(tb, "TablixRows")
+        # One ROW LINE per distinct declared member y — the frame's members
+        # form a multi-line block (name above address, email above phones)
+        # and flattening them to a single line painted same-column members
+        # onto each other (engine-render verified on a permit list; the
+        # exact defect the group-header band had).
+        _bd_line_h = 0.20
+        _bd_ys = sorted({round(float(getattr(f, "y", 0) or 0), 2)
+                         for f in members})
+        _bd_line_of = {y: i for i, y in enumerate(_bd_ys)}
+        row_h = max(row_h, _bd_line_h * max(1, len(_bd_ys)) + 0.02)
         trow = _sub(rows, "TablixRow")
         _sub(trow, "Height", f"{row_h:.2f}in")
         cell = _sub(_sub(_sub(trow, "TablixCells"), "TablixCell"),
@@ -13775,10 +14374,25 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
                 vertical_align="Middle", border_color="#ffffff",
                 padding="1pt", can_grow=False)
             tbx = rri[-1]
-            _sub(tbx, "Top", "0.00in")
-            _sub(tbx, "Left", f"{max(0.0, float(f.x or 0) - fx):.2f}in")
-            _sub(tbx, "Width", f"{max(0.3, float(f.width or 0.5)):.2f}in")
-            _sub(tbx, "Height", f"{min(row_h, 0.22):.2f}in")
+            # Neighbour width clamp within the row: declared member widths
+            # overlap the next member's x on some frames (a permit-list
+            # label painted across its value, engine-render verified) —
+            # clip at the next member's start, exactly like the tabular
+            # column and group-band clamps.
+            _mx0 = float(f.x or 0)
+            _nxt_x = min((float(m2.x or 0) for m2 in members
+                          if float(m2.x or 0) > _mx0 + 0.02
+                          and abs(float(m2.y or 0) - float(f.y or 0)) < 0.1),
+                         default=None)
+            _wcap = (_nxt_x - _mx0 - 0.04) if _nxt_x is not None else None
+            _w = max(0.3, float(f.width or 0.5))
+            if _wcap is not None:
+                _w = max(0.3, min(_w, _wcap))
+            _line = _bd_line_of.get(round(float(f.y or 0), 2), 0)
+            _sub(tbx, "Top", f"{_line * _bd_line_h:.2f}in")
+            _sub(tbx, "Left", f"{max(0.0, _mx0 - fx):.2f}in")
+            _sub(tbx, "Width", f"{_w:.2f}in")
+            _sub(tbx, "Height", f"{_bd_line_h:.2f}in")
         # Every member may decline (unmappable sources, empty labels) —
         # an EMPTY <ReportItems> is schema-invalid ("has incomplete
         # content") and kills the whole report at load. Emit nothing
@@ -14947,6 +15561,32 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     _repair_dangling_field_refs(root, report)
     _repair_misscoped_field_refs(root)
     _scope_body_direct_field_refs(root, report)
+    # HORIZONTAL OVERFLOW KILLER, all archetypes: any body item whose
+    # absolute right edge passes the PRINTABLE width (PageWidth minus side
+    # margins) makes SSRS paginate the excess into a near-blank companion
+    # page after EVERY content page. The packet branch learned this the
+    # hard way (blank [2,4,6] cadence) and clamps its ROOT Width — but a
+    # single item 0.2in past the edge re-creates the defect on any family
+    # (work-server verified: a per-record form printed 5,758 pages,
+    # alternating content/blank, one stray box on each blank). Clamp
+    # WIDTHS only — nothing ever moves, and what is narrowed could never
+    # print anyway.
+    _clamp_body_items_to_printable_width(root)
+    # HIDDEN expressions must obey the SERVER's dataset-scope rule: a
+    # Fields!X ref inside a data region resolves ONLY against that region's
+    # dataset. A format-trigger Hidden built from another query's column
+    # (an address-type variant frame inside the invoice's record tablix)
+    # uploads-FAILS with rsFieldReference — production-verified: the state's
+    # server refused the report at the Report Manager UI. Cross-dataset refs
+    # rewrite to First(Fields!X.Value, "OwnerDS") (legal anywhere);
+    # unresolvable refs drop the Visibility entirely — VISIBLE is honest,
+    # broken-at-upload is not.
+    _scope_hidden_cross_dataset_refs(root)
+    # Misscoped aggregate refs: a scope naming a dataset that lacks the
+    # field silently evaluates to Nothing (a drill-through parameter
+    # filtered on nothing, production-verified). Retarget to the provable
+    # unique owner; ambiguous cases stay for the preflight RED.
+    _repair_misscoped_aggregate_refs(root)
     # Fidelity: widen positional CONSTANT-string labels whose Oracle-sized box
     # clips under SSRS's wider Times metrics -- but ONLY into provably free space
     # (capped at the nearest right-neighbour / container edge), so no overlap or
