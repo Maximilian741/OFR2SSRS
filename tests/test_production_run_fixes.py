@@ -349,6 +349,200 @@ def test_grouped_subtotal_builder_contracts():
     assert "SortExpression" in src, "query ORDER BY must survive SSRS grouping"
 
 
+def test_stat_section_groups_by_computed_dimension_and_bolds_rollup_rows():
+    """A multi-section stat report whose section TITLE is a `*_Group` data
+    column must emit a REAL row group over the section dimension (Oracle's
+    break-group repeating frame), bind the band header to the computed
+    per-row expression — NEVER the NULL formula-dataset stub — and bold the
+    ROLLUP subtotal rows via a FontWeight IIf keyed on the CF's own
+    translated condition."""
+    from converter.generators.rdl import (
+        _build_multi_section_body, _build_section_tablix,
+        _iif_top_args, _rollup_subtotal_fontweight, _resolve_palette)
+    from converter.models import (DataQuery, DataItem, FormulaColumn,
+                                  ParsedReport)
+
+    def _mkq(name):
+        q = DataQuery(name=name)
+        q.items = [DataItem(name="Sec_Group"), DataItem(name="Sec_Type"),
+                   DataItem(name="Sec_Count")]
+        q.sql = ("SELECT DECODE(t, 'a', 'A Bucket', 'B Bucket') Sec_Group, "
+                 "NVL(t, 'Z-Subtotal') Sec_Type, COUNT(*) Sec_Count FROM x "
+                 "GROUP BY ROLLUP(DECODE(t, 'a', 'A Bucket', 'B Bucket'), t)")
+        return q
+
+    rep = ParsedReport(name="SYNTH")
+    q1, q2 = _mkq("Q_S1"), _mkq("Q_S2")
+    rep.queries = [q1, q2]
+    rep.formulas = [
+        FormulaColumn(
+            name="CF_Sec_Group",
+            plsql_body=("FUNCTION F_CF_Sec_Group RETURN VARCHAR2 IS BEGIN "
+                        "IF :Sec_Group IS NULL THEN "
+                        "RETURN('Total Received') ; "
+                        "ELSE RETURN(:Sec_Group) ; END IF ; END ;")),
+        FormulaColumn(
+            name="CF_Sec_Type",
+            plsql_body=("FUNCTION F_CF_Sec_Type RETURN VARCHAR2 IS BEGIN "
+                        "IF :Sec_Type = 'Z-Subtotal' THEN "
+                        "RETURN('Subtotal ' || :Sec_Group) ; "
+                        "ELSE RETURN(:Sec_Type) ; END IF ; END ;"))]
+    sections = [
+        {"header": "", "y": 0.0, "totals": [], "has_total": True,
+         "tables": [(q1, ["CF_Sec_Group"]),
+                    (q1, ["CF_Sec_Type", "Sec_Count"])]},
+        {"header": "", "y": 1.0, "totals": [], "has_total": True,
+         "tables": [(q2, ["Sec_Group"]),
+                    (q2, ["CF_Sec_Type", "Sec_Count"])]},
+    ]
+    body = _build_multi_section_body(rep, sections)
+    xml = ET.tostring(body, encoding="unicode")
+
+    # 1) NEVER the NULL formula-dataset stub for the section header.
+    assert "DS_REPORT_FORMULAS" not in xml
+    # 2) A real row group over the section dimension, computed inline for
+    #    the CF-titled section and by the column for the plain one.
+    grp_exprs = [m for m in xml.split("<GroupExpression>")[1:]]
+    assert any("IsNothing(Fields!Sec_Group.Value)" in g.split("</GroupExpression>")[0]
+               for g in grp_exprs), xml[:900]
+    assert any(g.split("</GroupExpression>")[0].strip() ==
+               "=Fields!Sec_Group.Value" for g in grp_exprs)
+    assert "_Sect" in xml  # the named section row group exists
+    # 3) ROLLUP subtotal rows print bold via the CF's own condition.
+    assert 'IIf(((Fields!Sec_Type.Value = "Z-Subtotal")), "Bold", "Normal")' \
+        in xml.replace("&quot;", '"')
+
+    # PROVE THE GATE CAN FAIL — the pre-fix shapes stay refused:
+    # (a) an ungrouped section tablix has no _Sect row group;
+    tx = _build_section_tablix(rep, "Tbx_NEG", q1,
+                               ["CF_Sec_Type", "Sec_Count"],
+                               "Hdr", _resolve_palette(rep))
+    assert "_Sect" not in ET.tostring(tx, encoding="unicode")
+    # (b) a non-IIf label formula yields NO conditional bolding;
+    assert _rollup_subtotal_fontweight("=Fields!X.Value") is None
+    # (c) an IIf whose branches are BOTH bare passthroughs is ambiguous ->
+    #     honest decline;
+    assert _rollup_subtotal_fontweight(
+        "=IIf((Fields!A.Value = 1), (Fields!B.Value), (Fields!C.Value))") is None
+    # (d) the inverted idiom (passthrough in the TRUE branch) bolds the
+    #     FALSE branch.
+    inv = _rollup_subtotal_fontweight(
+        '=IIf((Fields!A.Value = 1), (Fields!B.Value), ("Subtotal " & Fields!C.Value))')
+    assert inv == '=IIf((Fields!A.Value = 1), "Normal", "Bold")'
+    # (e) the argument splitter respects strings with commas/parens.
+    assert _iif_top_args('=IIf(F(a, b), "x,(y", z)') == ['F(a, b)', '"x,(y"', 'z']
+
+
+def test_section_totals_follow_source_geometry_and_cells_are_borderless():
+    """(a) A multi-table stat section whose declared total labels ALL sit
+    BELOW every detail band prints the tables footer-less and BOTH gray
+    total rows TOGETHER after them (source y-order) — not one footer
+    sandwiched between the tables. (b) Stat detail/total cells carry NO
+    invented border (dialect: only declared borders paint) and the detail
+    label cell keeps the repeating frame's declared left indent."""
+    from converter.generators.rdl import _build_multi_section_body
+    from converter.models import DataQuery, DataItem, ParsedReport
+
+    def _mkq(name, d, n):
+        q = DataQuery(name=name)
+        q.items = [DataItem(name=d), DataItem(name=n)]
+        q.sql = f"select {d}, {n} from t"
+        return q
+
+    rep = ParsedReport(name="SYNTH")
+    q1 = _mkq("Q_CLOSED", "Row_Desc_1", "Row_Cnt_1")
+    q2 = _mkq("Q_OPEN", "Row_Desc_2", "Row_Cnt_2")
+    rep.queries = [q1, q2]
+    base = {
+        "header": "Section One", "y": 0.0, "x": 0.0,
+        "tables": [(q1, ["Row_Desc_1", "Row_Cnt_1"]),
+                   (q2, ["Row_Desc_2", "Row_Cnt_2"])],
+        "totals": ["Total One Closed", "Total One Active"],
+        "col_headers": ["Number"], "has_total": True,
+    }
+    other = {"header": "Section Two", "y": 2.0, "x": 0.0,
+             "tables": [(q2, ["Row_Desc_2", "Row_Cnt_2"])],
+             "totals": [], "col_headers": ["Number"], "has_total": False}
+
+    # TRAILING geometry: totals below BOTH detail bands.
+    sec = dict(base, totals_y=[0.62, 0.85],
+               table_geo=[(0.25, 0.25), (0.44, 0.25)])
+    xml = ET.tostring(_build_multi_section_body(rep, [sec, other]),
+                      encoding="unicode")
+    assert "_Ftr_" not in xml, "per-table footer must not sandwich the tables"
+    assert "Tot0" in xml and "Tot1" in xml, "both trailing total rows emitted"
+    assert xml.find("Total One Closed") < xml.find("Total One Active")
+    # each total sums ITS OWN table's dataset, canonical scoped form
+    assert 'Sum(Fields!Row_Cnt_1.Value, "Q_CLOSED")' in xml.replace("&quot;", '"')
+    assert 'Sum(Fields!Row_Cnt_2.Value, "Q_OPEN")' in xml.replace("&quot;", '"')
+    # both trailing rows come AFTER both detail tables
+    assert xml.find("Total One Closed") > xml.find("Row_Desc_2")
+    # (b) no invented borders on stat cells; declared 0.25in indent kept
+    assert "#d0d0d0" not in xml
+    assert "<PaddingLeft>0.25in</PaddingLeft>" in xml
+
+    # PROVE THE GATE CAN FAIL — totals declared BETWEEN the bands (above
+    # the second table) keep the historic per-table footer pairing.
+    sec2 = dict(base, totals_y=[0.30, 0.85],
+                table_geo=[(0.25, 0.25), (0.44, 0.25)])
+    xml2 = ET.tostring(_build_multi_section_body(rep, [sec2, other]),
+                       encoding="unicode")
+    assert "_Ftr_" in xml2 and "Tot0" not in xml2
+
+
+def test_summary_net_skips_totals_consumed_by_section_rows():
+    """A report-level summary whose aggregate ALREADY renders inside an
+    ungrouped data region bound to its own dataset (a section footer /
+    trailing total row) must NOT be re-emitted as the humanized
+    summary-name dump block."""
+    from converter.generators.rdl import _ensure_summary_totals_emitted, _q
+    from converter.models import (DataQuery, DataItem, FormulaColumn,
+                                  LayoutField, LayoutGroup, ParsedReport)
+
+    def _mk_root(with_consuming_tablix):
+        root = ET.Element(_q("Report"))
+        body = ET.SubElement(root, _q("Body"))
+        ri = ET.SubElement(body, _q("ReportItems"))
+        ET.SubElement(body, _q("Height")).text = "2.00in"
+        if with_consuming_tablix:
+            tx = ET.SubElement(ri, _q("Tablix"))
+            tx.set("Name", "Tbx_S0")
+            tr = ET.SubElement(ET.SubElement(ET.SubElement(ET.SubElement(
+                tx, _q("Paragraphs")), _q("Paragraph")), _q("TextRuns")),
+                _q("TextRun"))
+            ET.SubElement(tr, _q("Value")).text = \
+                '=Sum(Fields!Row_Cnt.Value, "Q_S")'
+            rh = ET.SubElement(tx, _q("TablixRowHierarchy"))
+            ET.SubElement(ET.SubElement(rh, _q("TablixMembers")),
+                          _q("TablixMember"))
+            ET.SubElement(tx, _q("DataSetName")).text = "Q_S"
+        return root
+
+    q = DataQuery(name="Q_S")
+    q.items = [DataItem(name="Row_Desc"), DataItem(name="Row_Cnt")]
+    rep = ParsedReport(name="SYNTH")
+    rep.queries = [q]
+    rep.formulas = [FormulaColumn(
+        name="SumRow_CntPerReport", agg_function="sum",
+        agg_source="Row_Cnt", agg_scope="report")]
+    g = LayoutGroup(name="G", kind="frame")
+    g.fields = [LayoutField(name="F_T", kind="field",
+                            source="SumRow_CntPerReport")]
+    rep.layout = [g]
+
+    root = _mk_root(with_consuming_tablix=True)
+    _ensure_summary_totals_emitted(root, rep)
+    xml = ET.tostring(root, encoding="unicode")
+    assert "Sumrow Cntperreport" not in xml and "GrandTotal" not in xml, xml
+
+    # PROVE THE GATE CAN FAIL — with no consuming section row, the
+    # report-level total is genuinely missing and the net must emit it.
+    root2 = _mk_root(with_consuming_tablix=False)
+    _ensure_summary_totals_emitted(root2, rep)
+    xml2 = ET.tostring(root2, encoding="unicode")
+    assert 'Sum(Fields!Row_Cnt.Value, "Q_S")' in xml2.replace("&quot;", '"')
+
+
 def test_rollup_sections_get_no_synthetic_total_footer():
     """GROUP BY ROLLUP / CUBE / GROUPING SETS resultsets CARRY their own
     subtotal/total rows as data — a synthetic Sum() footer double/triple-counts
@@ -2812,6 +3006,73 @@ _MARGINF_XML = (
 ).encode()
 
 
+def _percert_xml(loose_chrome: bool) -> bytes:
+    """A per-record certificate whose every object lives INSIDE its record
+    frames (no <margin>, no loose section items) — Oracle prints NO page
+    header band for it. ``loose_chrome=True`` adds a section-level title
+    text OUTSIDE every frame (the authored-page-chrome dialect)."""
+    chrome = (
+        '<text name="B_ChromeTitle"><geometryInfo x="0.2" y="0.05" width="7" '
+        'height="0.3"/><textSegment><font face="Arial" size="14" bold="yes"/>'
+        '<string><![CDATA[STATE LICENSE ROSTER]]></string></textSegment>'
+        '</text>') if loose_chrome else ''
+    return (
+        '<?xml version="1.0"?><report name="PERCERT_T" DTDVersion="9.0.2.0.10">'
+        '<data>'
+        '<dataSource name="Q_C"><select><![CDATA[select holder_nm from lic]]>'
+        '</select><group name="G_C"><dataItem name="HOLDER_NM" '
+        'datatype="vchar2"/></group></dataSource>'
+        '</data>'
+        '<layout><section name="main">' + chrome +
+        '<frame name="M_Cert"><geometryInfo x="0" y="0.5" width="7.5" '
+        'height="5"/>'
+        '<repeatingFrame name="R_C" source="G_C" printDirection="down" '
+        'maxRecordsPerPage="1"><geometryInfo x="0" y="0.5" width="7.5" '
+        'height="4.5"/>'
+        '<text name="B_T1"><geometryInfo x="0.5" y="0.6" width="6.5" '
+        'height="0.4"/><textSegment><font face="Arial" size="14" bold="yes"/>'
+        '<string><![CDATA[STATE LICENSE CERTIFICATE\nOFFICE OF RECORDS]]>'
+        '</string></textSegment></text>'
+        '<field name="F_H" source="HOLDER_NM"><geometryInfo x="0.5" y="1.2" '
+        'width="4" height="0.25"/></field>'
+        '</repeatingFrame></frame>'
+        '<frame name="M_Foot"><geometryInfo x="0" y="5.6" width="7.5" '
+        'height="1"/>'
+        '<text name="B_T2"><geometryInfo x="0.5" y="5.7" width="6.5" '
+        'height="0.6"/><textSegment><font face="Arial" size="10"/>'
+        '<string><![CDATA[This document certifies the holder named above.\n'
+        'It is not transferable to any other party or service.]]></string>'
+        '</textSegment></text></frame>'
+        '</section></layout></report>'
+    ).encode()
+
+
+def test_per_record_page_chrome_is_declaration_driven():
+    """A certificate/letter source that declares NO page chrome (no <margin>
+    band, no loose section-level objects — everything inside its record
+    frames) must NOT get the synthesized title/run-on/page-number header
+    band: Oracle prints none, the title belongs where the BODY declares it
+    (adversarial-sweep finding on the permit family)."""
+    import xml.etree.ElementTree as _ET
+    from converter import convert
+
+    rdl = convert(_percert_xml(loose_chrome=False))["rdl_xml"]
+    for tb in ("Tb_PageTitle", "Tb_RunOn", "Tb_PageNum"):
+        assert tb not in rdl, f"synthesized {tb} invented on chrome-less per-record report"
+    # The title still renders — from the BODY, at its declared spot.
+    assert "STATE LICENSE CERTIFICATE" in rdl
+
+    # PROVE THE GATE CAN FAIL: the SAME report WITH an authored section-level
+    # chrome object keeps its page-header band (declared chrome, not gated).
+    rdl2 = convert(_percert_xml(loose_chrome=True))["rdl_xml"]
+    root2 = _ET.fromstring(rdl2.encode("utf-8"))
+    ns = root2.tag.split("}")[0][1:]
+    ph2 = root2.find(f"{{{ns}}}Page").find(f"{{{ns}}}PageHeader")
+    assert ph2 is not None
+    ph2_txt = _ET.tostring(ph2, encoding="unicode")
+    assert "Tb_PageTitle" in ph2_txt
+
+
 def test_margin_parameter_field_reaches_the_page_header():
     """Oracle prints margin-resident FIELDS (a parameter echo, a run-date
     stamp) on every page. The page-header pass only accepted text items, so
@@ -3777,3 +4038,1958 @@ def test_server_publish_rules_hold_structurally():
             assert (sr.findtext(q("ReportName")) or "").strip(), (
                 f"{f.name}: Subreport without ReportName")
     assert checked, "no sample converted"
+
+
+_CHROME_XML = (
+    '<?xml version="1.0"?><report name="CHROME_T" DTDVersion="9.0.2.0.10">'
+    '<data><dataSource name="Q_Main">'
+    '<select><![CDATA[select item_nm, amt from t]]></select>'
+    '<group name="G_Main"><dataItem name="ITEM_NM" datatype="vchar2"/>'
+    '<dataItem name="AMT" datatype="number"/></group></dataSource></data>'
+    '<layout><section name="main" width="10.00000" height="11.00000">'
+    '<body><frame name="M_ALL"><geometryInfo x="0" y="0" width="7.5" '
+    'height="3"/>'
+    '<repeatingFrame name="R_Main" source="G_Main" printDirection="down">'
+    '<geometryInfo x="0" y="0.5" width="7.5" height="0.4"/>'
+    '<field name="F_ITEM" source="ITEM_NM">'
+    '<geometryInfo x="0.1" y="0.55" width="2.0" height="0.2"/></field>'
+    '<field name="F_AMT" source="AMT">'
+    '<geometryInfo x="3.0" y="0.55" width="1.0" height="0.2"/></field>'
+    '</repeatingFrame>'
+    '<text name="B_KEEP"><visualSettings fillPattern="transparent" '
+    'fillBackgroundColor="gray16"/>'
+    '<geometryInfo x="0.1" y="0.1" width="1.0" height="0.2"/>'
+    '<textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[Kept Fill]]></string></textSegment></text>'
+    '<text name="B_DROP"><visualSettings fillBackgroundColor="r0g0b88"/>'
+    '<geometryInfo x="2.1" y="0.1" width="1.0" height="0.2"/>'
+    '<textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[Template Blue]]></string></textSegment></text>'
+    '</frame></body>'
+    '<margin>'
+    '<text name="B_TITLE"><geometryInfo x="3.0" y="0.5" width="3.0" '
+    'height="0.4"/><textSegment><font face="Times New Roman" size="24"/>'
+    '<string><![CDATA[Chrome Test Title]]></string></textSegment></text>'
+    '<text name="B_RUNON"><geometryInfo x="6.0" y="0.12" width="1.2" '
+    'height="0.19"/><textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[Report run on:]]></string></textSegment></text>'
+    '<text name="B_PGNUM"><textSettings justify="center"/>'
+    '<geometryInfo x="3.4" y="10.4" width="2.0" height="0.17"/>'
+    '<textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[Page &<PhysicalPageNumber>]]></string>'
+    '</textSegment></text>'
+    '</margin></section></layout></report>'
+)
+
+
+def test_fill_dialect_paints_only_pattern_marked_backgrounds():
+    """Measured against the Oracle-rendered truth PDFs corpus-wide: a
+    fillBackgroundColor PAINTS only when the <visualSettings> also
+    carries a fillPattern attribute (even "transparent" — it marks the
+    fill dialog as author-touched). Without it the color is an unpainted
+    template leftover (the blue r0g0b88 family). Decisive source case:
+    one report declares the same gray on 44 objects and the Oracle
+    render paints exactly the 7 that carry the attribute."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    rep = parse_oracle_xml(_CHROME_XML.encode())
+
+    def find(name):
+        def walk(g):
+            for f in g.fields:
+                if f.name == name:
+                    return f
+            for c in g.children:
+                r = walk(c)
+                if r is not None:
+                    return r
+            return None
+        for g in rep.layout:
+            r = walk(g)
+            if r is not None:
+                return r
+        raise AssertionError(f"{name} not parsed")
+
+    assert find("B_KEEP").background_color == "#D6D6D6", (
+        "pattern-marked gray16 background must survive parsing")
+    assert find("B_DROP").background_color == "", (
+        "template blue without a fillPattern attribute must NOT paint")
+
+
+def test_declared_margin_chrome_builds_the_page_header():
+    """A source-authored <margin> band (title / run-date / page number at
+    geometry) must become the PageHeader/PageFooter 1:1 — the synthesized
+    centered-title header threw the declared arrangement away (truth PDF:
+    logo top-left, title beside it, page number in the BOTTOM margin).
+    Also: the declared section width IS the paper width (the truth PDF
+    measures exactly it), and margin objects are tagged in_margin so
+    emitters can tell page chrome from body content."""
+    import re
+    from converter import convert
+    rdl = convert(_CHROME_XML.encode())["rdl_xml"]
+    assert re.search(r"<PageWidth>10(\.0+)?in</PageWidth>", rdl), (
+        "declared section width must become the paper width")
+    ph = re.search(r"<PageHeader>(.*?)</PageHeader>", rdl, re.S)
+    assert ph and "Chrome Test Title" in ph.group(1), (
+        "declared margin title must render in the page header")
+    assert "Report run on:" in ph.group(1), (
+        "declared run-on stamp must render in the page header")
+    pf = re.search(r"<PageFooter>(.*?)</PageFooter>", rdl, re.S)
+    assert pf and "Globals!PageNumber" in pf.group(1), (
+        "the bottom-margin page number must render in the page FOOTER "
+        "with the report's own wording")
+    assert "Tb_PageTitle" not in rdl, (
+        "declared chrome must replace the synthesized title header")
+    # PROVE THE GATE CAN FAIL: strip the margin band -> the converter
+    # must fall back to the synthesized header (no declared chrome).
+    no_margin = re.sub(r"<margin>.*?</margin>", "", _CHROME_XML,
+                       flags=re.S)
+    rdl2 = convert(no_margin.encode())["rdl_xml"]
+    assert "MChrome_" not in rdl2, (
+        "without a margin band there must be no declared-chrome items")
+
+
+def test_undeclared_rule_width_emits_hairline_not_heavy_black():
+    """Truth-measured dialect rule: a drawn <line> with linePattern="solid"
+    and NO lineWidth attribute renders as the DEVICE HAIRLINE in Oracle's
+    own PDFs (0-width strokes, rasterizing light gray) — every no-width
+    truth rule across the corpus measures stroke width 0.0, while declared
+    lineWidth maps 1:1 to stroke points (a lineWidth="1" report measures
+    1.0-pt strokes). Emitting the old 0.5pt/1pt black bars painted heavy
+    near-black rules where the truth shows light hairlines."""
+    import re
+    from converter import convert
+    xml = _CHROME_XML.replace(
+        '</margin>',
+        '<line name="B_HAIR" arrow="none">'
+        '<geometryInfo x="0.5" y="10.2" width="9.0" height="0.001"/>'
+        '<visualSettings linePattern="solid"/></line>'
+        '<line name="B_HEAVY" arrow="none">'
+        '<geometryInfo x="0.5" y="10.3" width="9.0" height="0.001"/>'
+        '<visualSettings lineWidth="2" linePattern="solid"/></line>'
+        '</margin>')
+    rdl = convert(xml.encode())["rdl_xml"]
+
+    def line_block(name):
+        m = re.search(rf'<Line Name="[^"]*{name}[^"]*">(.*?)</Line>', rdl, re.S)
+        assert m, f"margin line {name} must emit"
+        return m.group(1)
+
+    hair = line_block("B_HAIR")
+    assert "<Width>0.25pt</Width>" in hair, (
+        "an UNDECLARED-width rule must emit the thinnest stroke (0.25pt), "
+        "matching Oracle's device hairline")
+    heavy = line_block("B_HEAVY")
+    assert "<Width>2pt</Width>" in heavy, (
+        "a DECLARED lineWidth must map 1:1 to stroke points")
+
+    # The PARSER must preserve "undeclared" (0.0) on <line> objects so the
+    # body-rule emitter can pick the hairline — collapsing it to 1.0 was
+    # what painted the 0.72pt near-black separator bars.
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    body_xml = _CHROME_XML.replace(
+        '</frame></body>',
+        '<line name="B_SEP" arrow="none">'
+        '<geometryInfo x="0.0" y="2.5" width="7.4" height="0.0"/>'
+        '<visualSettings linePattern="solid"/></line>'
+        '<line name="B_SEP2" arrow="none">'
+        '<geometryInfo x="0.0" y="2.7" width="7.4" height="0.0"/>'
+        '<visualSettings lineWidth="3" linePattern="solid"/></line>'
+        '</frame></body>')
+    rep = parse_oracle_xml(body_xml.encode())
+
+    def _find(name):
+        def walk(g):
+            for f in g.fields:
+                if f.name == name:
+                    return f
+            for c in g.children:
+                r = walk(c)
+                if r is not None:
+                    return r
+        for g in rep.layout:
+            r = walk(g)
+            if r is not None:
+                return r
+        raise AssertionError(f"{name} not parsed")
+
+    assert _find("B_SEP").border_width == 0.0, (
+        "an undeclared line width must parse as 0.0 (hairline marker)")
+    assert _find("B_SEP2").border_width == 3.0, (
+        "a declared lineWidth must parse 1:1")
+    # Source-lock the body rule branch: undeclared -> hairline thickness
+    # (0.25pt / 0.003in floor), never the old 0.01in slab.
+    import inspect
+    from converter.generators import rdl as _rdlmod
+    src = inspect.getsource(_rdlmod._emit_field_textbox)
+    assert "bw_decl if bw_decl > 0 else 0.25" in src and "0.003" in src, (
+        "the body rule emitter must derive hairline thickness from the "
+        "DECLARED width, defaulting to the device hairline")
+
+
+def test_single_query_reports_bind_layout_columns_regardless_of_names():
+    """A single-query report's repeating frames belong to its only data
+    source no matter what the group is named — a "Q_1" query with
+    "G_PERSON" break groups defeated the Q_/G_ suffix convention and the
+    tablix fell back to raw query items, dropping the parameter-fed
+    layout columns AND the nested break group's detail columns that the
+    Oracle truth PDF prints (accreditation summary: Address/City/Phone
+    gone). Columns must follow the LAYOUT (x-ordered), including
+    parameter-bound sources."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.generators.rdl import _collect_layout_columns
+    xml = (
+        '<?xml version="1.0"?><report name="SQ_T" DTDVersion="9.0.2.0.10">'
+        '<data><userParameter name="P_ADDR" datatype="character"/>'
+        '<dataSource name="Q_1"><select><![CDATA[select person, exp_dt, '
+        'kind from t]]></select>'
+        '<group name="G_PERSON"><dataItem name="PERSON" datatype="vchar2"/>'
+        '</group><group name="G_EXP"><dataItem name="EXP_DT" '
+        'datatype="date"/><dataItem name="KIND" datatype="vchar2"/>'
+        '</group></dataSource></data>'
+        '<layout><section name="main"><body>'
+        '<repeatingFrame name="R_Person" source="G_PERSON" '
+        'printDirection="down">'
+        '<geometryInfo x="0" y="0" width="10" height="0.5"/>'
+        '<field name="F_PERSON" source="PERSON">'
+        '<geometryInfo x="0.0" y="0.05" width="1.8" height="0.2"/></field>'
+        '<field name="F_ADDR" source="P_ADDR">'
+        '<geometryInfo x="2.0" y="0.05" width="2.4" height="0.2"/></field>'
+        '<repeatingFrame name="R_Exp" source="G_EXP" printDirection="down">'
+        '<geometryInfo x="4.6" y="0.02" width="4.0" height="0.4"/>'
+        '<field name="F_EXP" source="EXP_DT">'
+        '<geometryInfo x="4.6" y="0.05" width="0.9" height="0.2"/></field>'
+        '<field name="F_KIND" source="KIND">'
+        '<geometryInfo x="5.6" y="0.05" width="0.9" height="0.2"/></field>'
+        '</repeatingFrame></repeatingFrame>'
+        '</body></section></layout></report>'
+    )
+    rep = parse_oracle_xml(xml.encode())
+    cols = _collect_layout_columns(rep, "Q_1")
+    assert cols == ["PERSON", "P_ADDR", "EXP_DT", "KIND"], cols
+    # PROVE THE GATE CAN FAIL: with a SECOND query the convention applies
+    # and the unmatched frames contribute nothing.
+    xml2 = xml.replace(
+        '</data>',
+        '<dataSource name="Q_Other"><select><![CDATA[select z from o]]>'
+        '</select><group name="G_Z"><dataItem name="Z" datatype="vchar2"/>'
+        '</group></dataSource></data>')
+    rep2 = parse_oracle_xml(xml2.encode())
+    assert _collect_layout_columns(rep2, "Q_1") == [], (
+        "with two queries the name convention must gate matching again")
+
+
+def test_inline_role_list_folds_into_parent_breakdown_row():
+    """A nested repeating frame carrying exactly ONE data field of the
+    SAME secondary dataset is Oracle's inline ROLE-LIST idiom (a stacked
+    "PERMITTEE,/OWNER,/OPERATOR," beside the org block). Detaching it as
+    its own breakdown tablix printed dangling label fragments (permit
+    list, screenshot-truth verified); it must fold into the parent's row
+    as a Join(LookupSet(...)) at its declared spot."""
+    import re
+    from converter import convert
+    xml = (
+        '<?xml version="1.0"?><report name="RL_T" DTDVersion="9.0.2.0.10">'
+        '<data><dataSource name="Q_Main"><select><![CDATA[select cnty, '
+        'site_nm from s]]></select><group name="G_County">'
+        '<dataItem name="CNTY" datatype="vchar2"/></group>'
+        '<group name="G_Site"><dataItem name="SITE_NM" datatype="vchar2"/>'
+        '<dataItem name="SITE_ADDR" datatype="vchar2"/>'
+        '<dataItem name="PERMIT" datatype="vchar2"/>'
+        '<dataItem name="STATUS" datatype="vchar2"/>'
+        '</group></dataSource>'
+        '<dataSource name="Q_Org"><select><![CDATA[select org_nm, org_id, '
+        'role_desc from o]]></select>'
+        '<group name="G_Org"><dataItem name="ORG_NM" datatype="vchar2"/>'
+        '<dataItem name="ORG_ID" datatype="number"/></group>'
+        '<group name="G_Role"><dataItem name="ROLE_DESC" '
+        'datatype="vchar2"/></group></dataSource></data>'
+        '<layout><section name="main"><body>'
+        '<repeatingFrame name="R_County" source="G_County" '
+        'printDirection="down">'
+        '<geometryInfo x="0" y="0" width="7.5" height="1.7"/>'
+        '<field name="F_CNTY" source="CNTY">'
+        '<geometryInfo x="0.0" y="0.05" width="2.0" height="0.2"/></field>'
+        '<repeatingFrame name="R_Site" source="G_Site" '
+        'printDirection="down">'
+        '<geometryInfo x="0.1" y="0.3" width="7.4" height="1.4"/>'
+        '<field name="F_SITE" source="SITE_NM">'
+        '<geometryInfo x="0.15" y="0.35" width="3.0" height="0.2"/></field>'
+        '<field name="F_ADDR" source="SITE_ADDR">'
+        '<geometryInfo x="0.15" y="0.6" width="3.0" height="0.2"/></field>'
+        '<field name="F_PERMIT" source="PERMIT">'
+        '<geometryInfo x="4.5" y="0.35" width="0.8" height="0.2"/></field>'
+        '<field name="F_STATUS" source="STATUS">'
+        '<geometryInfo x="5.5" y="0.35" width="1.9" height="0.2"/></field>'
+        '<repeatingFrame name="R_Org" source="G_Org" '
+        'printDirection="down">'
+        '<geometryInfo x="0.2" y="1.0" width="7.2" height="0.6"/>'
+        '<field name="F_ORG" source="ORG_NM">'
+        '<geometryInfo x="1.3" y="1.05" width="3.0" height="0.2"/></field>'
+        '<repeatingFrame name="R_Role" source="G_Role" '
+        'printDirection="down">'
+        '<geometryInfo x="0.3" y="1.05" width="0.9" height="0.19"/>'
+        '<field name="F_ROLE" source="ROLE_DESC">'
+        '<geometryInfo x="0.3" y="1.05" width="0.85" height="0.19"/>'
+        '</field></repeatingFrame></repeatingFrame>'
+        '</repeatingFrame></repeatingFrame>'
+        '</body></section></layout></report>'
+    )
+    rdl = convert(xml.encode())["rdl_xml"]
+    assert re.search(
+        r"Join\(LookupSet\(Fields!ORG_ID\.Value, Fields!ORG_ID\.Value, "
+        r"Fields!ROLE_DESC\.Value", rdl), (
+        "the role list must fold to a keyed Join(LookupSet(...)) member")
+    # PROVE THE GATE CAN FAIL: the role frame must NOT also detach as its
+    # own breakdown tablix (that was the fragment defect).
+    bds = re.findall(r'Tablix_Breakdown_\d+', rdl)
+    assert len(set(bds)) <= 1, f"role frame detached separately: {bds}"
+
+
+def test_stem_alias_declines_lookup_and_garbage_formula_bodies():
+    """The uncomputable-formula stem alias (CF_X -> column X) must NOT
+    fire when the body shows X is not what the formula RETURNS: a
+    cursor-lookup body (FETCH..INTO local; RETURN local — X is only the
+    key) or a non-PL/SQL body (this export dialect can write stray QUERY
+    TEXT into a formula's function slot). Aliasing printed a raw numeric
+    ID where the looked-up NAME belongs (screenshot-truth verified)."""
+    import re
+    from converter import convert
+
+    def mk(body):
+        return (
+            '<?xml version="1.0"?><report name="SA_T" '
+            'DTDVersion="9.0.2.0.10"><data>'
+            '<dataSource name="Q_1"><select><![CDATA[select person, '
+            'thing from t]]></select>'
+            '<group name="G_1"><dataItem name="PERSON" datatype="number"/>'
+            '<dataItem name="THING" datatype="vchar2"/>'
+            '<formula name="CF_PERSON" source="fx" datatype="character"/>'
+            '</group></dataSource>'
+            '<programUnits><function name="fx"><textSource><![CDATA['
+            + body +
+            ']]></textSource></function></programUnits></data>'
+            '<layout><section name="main"><body>'
+            '<repeatingFrame name="R_1" source="G_1" printDirection="down">'
+            '<geometryInfo x="0" y="0" width="7.5" height="0.3"/>'
+            '<field name="F_CF" source="CF_PERSON">'
+            '<geometryInfo x="0.1" y="0.05" width="2.0" height="0.2"/>'
+            '</field>'
+            '<field name="F_T" source="THING">'
+            '<geometryInfo x="3.0" y="0.05" width="2.0" height="0.2"/>'
+            '</field></repeatingFrame>'
+            '</body></section></layout></report>'
+        )
+    # cursor-lookup body: stem PERSON is only the WHERE key
+    lookup = ("function fx return Char is CURSOR C IS SELECT NM FROM V_P "
+              "WHERE ID = :PERSON; L_NM VARCHAR2(85); begin OPEN C; "
+              "FETCH C INTO L_NM; CLOSE C; RETURN (L_NM); end;")
+    rdl = convert(mk(lookup).encode())["rdl_xml"]
+    assert not re.search(r"<Value>=Fields!PERSON\.Value</Value>", rdl), (
+        "cursor-lookup formula must not alias to its key column")
+    # garbage body (query text in the function slot)
+    rdl2 = convert(mk("SELECT X FROM Y WHERE Z = 1 ORDER BY X").encode())[
+        "rdl_xml"]
+    assert not re.search(r"<Value>=Fields!PERSON\.Value</Value>", rdl2), (
+        "non-PL/SQL body must not alias")
+    # PROVE THE GATE STILL PASSES the legit case: a passthrough body DOES
+    # alias (the CF_PERMITTEES-wraps-PERMITTEE win stays).
+    ok = ("function fx return Char is begin RETURN(INITCAP(:PERSON)); "
+          "end;")
+    rdl3 = convert(mk(ok).encode())["rdl_xml"]
+    assert ("Fields!PERSON.Value" in rdl3
+            or "CF_PERSON" in rdl3), "legit passthrough must still resolve"
+
+
+# ---------------------------------------------------------------------------
+# Constant-label HEIGHT fidelity: an Oracle-sized heading box that clips its
+# descenders under SSRS padding/metrics must deepen into free space (or shed
+# its vertical paddings when a sibling sits right below); a WIDTH-clipped
+# label must stay untouched (deepening would wrap it and hide the tail word).
+# ---------------------------------------------------------------------------
+_LABEL_H_XML = (
+    '<?xml version="1.0"?><report name="LABH_T" DTDVersion="9.0.2.0.10">'
+    '<data><dataSource name="Q_Main">'
+    '<select><![CDATA[select item_nm, amt from t]]></select>'
+    '<group name="G_Main"><dataItem name="ITEM_NM" datatype="vchar2"/>'
+    '<dataItem name="AMT" datatype="number"/></group></dataSource></data>'
+    '<layout><section name="main" width="8.50000" height="11.00000">'
+    '<body><frame name="M_ALL"><geometryInfo x="0" y="0" width="7.5" '
+    'height="6"/>'
+    '<repeatingFrame name="R_Main" source="G_Main" printDirection="down">'
+    '<geometryInfo x="0" y="0.5" width="7.5" height="0.4"/>'
+    '<field name="F_ITEM" source="ITEM_NM">'
+    '<geometryInfo x="0.1" y="0.55" width="2.0" height="0.2"/></field>'
+    '</repeatingFrame>'
+    '<text name="B_HA"><geometryInfo x="0.1" y="3.0" width="3.0" '
+    'height="0.1666"/><textSegment>'
+    '<font face="Times New Roman" size="12" bold="yes"/>'
+    '<string><![CDATA[Heading Alpha]]></string></textSegment></text>'
+    '<text name="B_HB"><geometryInfo x="4.0" y="3.0" width="3.0" '
+    'height="0.1666"/><textSegment>'
+    '<font face="Times New Roman" size="12" bold="yes"/>'
+    '<string><![CDATA[Heading Bravo]]></string></textSegment></text>'
+    '<text name="B_UNDER"><geometryInfo x="4.0" y="3.18" width="3.0" '
+    'height="0.2"/><textSegment><font face="Times New Roman" size="10"/>'
+    '<string><![CDATA[Blocking sibling line]]></string></textSegment></text>'
+    '<text name="B_NARROW"><geometryInfo x="0.1" y="4.5" width="0.6" '
+    'height="0.1666"/><textSegment>'
+    '<font face="Times New Roman" size="12" bold="yes"/>'
+    '<string><![CDATA[Narrow Label Overflowing]]></string></textSegment>'
+    '</text>'
+    '<text name="B_RBLOCK"><geometryInfo x="0.75" y="4.5" width="2.0" '
+    'height="0.2"/><textSegment><font face="Times New Roman" size="10"/>'
+    '<string><![CDATA[Right neighbour value box]]></string></textSegment>'
+    '</text>'
+    '</frame></body></section></layout></report>'
+)
+
+
+def _find_textbox_by_literal(rdl_xml, literal):
+    import re
+    import xml.etree.ElementTree as ET
+    t = re.sub(r'xmlns="[^"]+"', "", rdl_xml, count=1)
+    root = ET.fromstring(t)
+    for tb in root.iter("Textbox"):
+        vals = [v.text or "" for v in tb.iter("Value")]
+        if vals == ['="' + literal + '"']:
+            return tb
+    return None
+
+
+def test_constant_label_heights_fit_their_font():
+    """A 12pt bold constant label in a 0.17in Oracle box clips its
+    descenders under SSRS's line metrics (a bold two-word section heading
+    with the g/p tails cut -- truth-verified on the emissions summary
+    form). The box must deepen to exactly one full text line and no
+    further, and a width-clipped label must stay at one line (deepening
+    makes the engine WRAP it, hiding the tail word).
+
+    Every bound below is the FONT'S OWN line box, not a rule of thumb.
+    The old bounds carried 4pt of emitter padding inside them (a full
+    12pt line "needed" 0.25in); an Oracle box has no inset, so the same
+    line needs only its 0.1846in metric -- and a box inflated to 0.25in
+    now FAILS the upper bound, which the old behaviour could not clear."""
+    from converter import convert
+    from converter.generators import rdl as R
+    rdl = convert(_LABEL_H_XML.encode())["rdl_xml"]
+
+    def _num(el, tag):
+        return float((el.findtext(tag) or "0").replace("in", ""))
+
+    # one full 12pt Times (serif) line, in inches -- the real face metric
+    _line = R._font_line_box_pt(12, sans=False) / 72.0
+    _ROUND = 0.02          # the deepen pass writes 2 decimals
+
+    def _pads(el):
+        """The three paddings that would MOVE a top-left anchored glyph.
+
+        The fourth (bottom, under top-anchored text) is the one-line ceiling
+        that keeps the engine from reserving an invisible second line; it
+        displaces nothing, so it is not part of this assertion."""
+        st = el.find("Style")
+        return tuple(st.findtext("Padding" + s)
+                     for s in ("Left", "Right", "Top"))
+
+    ha = _find_textbox_by_literal(rdl, "Heading Alpha")
+    assert ha is not None, "Heading Alpha label must emit"
+    assert _num(ha, "Height") >= _line - 0.002, (
+        "free space below -> the heading must deepen to a full text line")
+    assert _num(ha, "Height") <= _line + _ROUND, (
+        "...and no further: a declared box may not be inflated to hold an "
+        "inset the emitter no longer adds")
+
+    hb = _find_textbox_by_literal(rdl, "Heading Bravo")
+    assert hb is not None
+    assert _num(hb, "Height") < 0.24, (
+        "a blocked heading must NOT deepen into its sibling below")
+    assert _num(hb, "Height") >= _line - 0.002, (
+        "a blocked heading still reaches a whole line box")
+    assert _pads(hb) == ("0pt", "0pt", "0pt"), (
+        "a declared box carries NO inset that moves a glyph -- a horizontal "
+        "one shifts every left-anchored glyph off its declared x, a top one "
+        "drops every top-anchored line below its declared top")
+
+    nw = _find_textbox_by_literal(rdl, "Narrow Label Overflowing")
+    assert nw is not None
+    assert _num(nw, "Height") < 0.24, (
+        "a WIDTH-clipped label must not deepen (wrap hides the tail word)")
+    assert _num(nw, "Height") <= _line + _ROUND, (
+        "a WIDTH-clipped label stays at ONE line -- any extra height lets "
+        "the engine wrap it and hide the tail word")
+    assert (nw.findtext("CanGrow") or "").lower() != "true", (
+        "a WIDTH-clipped label must stay fixed, never auto-grown")
+    assert _pads(nw) == ("0pt", "0pt", "0pt"), (
+        "a WIDTH-clipped label is a declared box too: no displacing inset")
+
+    # the two ordinary siblings declare 0.2in and must render 0.2in exactly
+    for _lit in ("Blocking sibling line", "Right neighbour value box"):
+        _tb = _find_textbox_by_literal(rdl, _lit)
+        assert _tb is not None, _lit
+        assert abs(_num(_tb, "Height") - 0.20) < 1e-6, (
+            f"{_lit}: a declared 0.2in box must render 0.2in, not be padded "
+            f"outward")
+        assert _pads(_tb) == ("0pt", "0pt", "0pt"), _lit
+
+
+# ---------------------------------------------------------------------------
+# Page-header internal dedupe: the title block resolves display-constant
+# parameter fields into SUBTITLE lines and the criteria banner emits its own
+# run-date -- the same margin fields must not print a second copy.
+# ---------------------------------------------------------------------------
+_BANNER_DUP_XML = (
+    '<?xml version="1.0"?><report name="BANNER_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<userParameter name="P_DIVISION" datatype="character" width="100" '
+    'initialValue="Test Bureau Line" defaultWidth="0" defaultHeight="0"/>'
+    '<userParameter name="P_YEAR" datatype="number" width="4" '
+    'defaultWidth="0" defaultHeight="0"/>'
+    '<dataSource name="Q_Main">'
+    '<select><![CDATA[select item_nm, amt from t]]></select>'
+    '<group name="G_Main"><dataItem name="ITEM_NM" datatype="vchar2"/>'
+    '<dataItem name="AMT" datatype="number"/></group></dataSource></data>'
+    '<layout><section name="main" width="11.00000" height="8.50000">'
+    '<body>'
+    '<repeatingFrame name="R_Main" source="G_Main" printDirection="down">'
+    '<geometryInfo x="0" y="0" width="7.5" height="0.4"/>'
+    '<field name="F_ITEM" source="ITEM_NM">'
+    '<geometryInfo x="0.1" y="0.05" width="2.0" height="0.2"/></field>'
+    '</repeatingFrame></body>'
+    '<margin>'
+    '<text name="B_4"><textSettings justify="center"/>'
+    '<geometryInfo x="3.75" y="0.0625" width="2.9" height="0.23"/>'
+    '<textSegment><font face="Times New Roman" size="12" bold="yes"/>'
+    '<string><![CDATA[BANNER DUP TITLE]]></string></textSegment></text>'
+    '<field name="F_DIVISION" source="P_DIVISION" alignment="center">'
+    '<font face="Times New Roman" size="12" bold="yes"/>'
+    '<geometryInfo x="2.75" y="0.3125" width="5.06" height="0.25"/></field>'
+    '<text name="B_1"><textSettings justify="center"/>'
+    '<geometryInfo x="0.09" y="0.6875" width="10.8" height="0.1666"/>'
+    '<textSegment><font face="Times New Roman" size="10"/>'
+    '<string><![CDATA[Year of Emissions:]]></string></textSegment></text>'
+    '<field name="f_year" source="P_YEAR">'
+    '<font face="Times New Roman" size="10"/>'
+    '<geometryInfo x="5.81" y="0.6875" width="0.56" height="0.1875"/>'
+    '</field>'
+    '<field name="f_date" source="CurrentDate" formatMask="MM/DD/YYYY">'
+    '<font face="Times New Roman" size="10"/>'
+    '<geometryInfo x="0.215" y="0.6875" width="0.6875" height="0.1875"/>'
+    '</field>'
+    '<line name="B_2"><geometryInfo x="0.09" y="0.9375" width="10.8" '
+    'height="0"/><visualSettings lineWidth="2" linePattern="solid"/>'
+    '<points><point x="0.09" y="0.9375"/><point x="10.9" y="0.9375"/>'
+    '</points></line>'
+    '</margin></section></layout></report>'
+)
+
+
+def test_banner_header_never_duplicates_title_or_date():
+    """AIR-style criteria-banner header: the division display constant is
+    already a SUBTITLE line in the title block and the banner prints its
+    own run-date -- the margin-extra path must not emit either a second
+    time (truth PDF: one title stack, one date, one Year row above the
+    rule; ours printed the division and the date twice)."""
+    import re
+    from converter import convert
+    rdl = convert(_BANNER_DUP_XML.encode())["rdl_xml"]
+    ph = re.search(r"<PageHeader>(.*?)</PageHeader>", rdl, re.S)
+    assert ph is not None, "banner report must build a page header"
+    hdr = ph.group(1)
+    assert hdr.count("Test Bureau Line") == 1, (
+        "the division subtitle must print exactly once in the header")
+    assert "Parameters!P_DIVISION.Value" not in hdr, (
+        "the division margin field duplicates the title subtitle line")
+    assert hdr.count("Globals!ExecutionTime") == 1, (
+        "the run-date must print exactly once (banner owns it)")
+    assert hdr.count("Parameters!P_YEAR.Value") == 1, (
+        "the criteria value must print exactly once (banner owns it)")
+
+
+# ---------------------------------------------------------------------------
+# Declared cover frame: a header-section roundedRectangle with a solid
+# linePattern enclosing the criteria form must give the emitted cover rect
+# a border; without the declared frame the cover stays borderless.
+# ---------------------------------------------------------------------------
+_COVER_FRAME_XML = (
+    '<?xml version="1.0"?><report name="COVB_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<userParameter name="P_OWNER" datatype="character" width="40" '
+    'defaultWidth="0" defaultHeight="0"/>'
+    '<dataSource name="Q_Main">'
+    '<select><![CDATA[select item_nm, amt from t]]></select>'
+    '<group name="G_Main"><dataItem name="ITEM_NM" datatype="vchar2"/>'
+    '<dataItem name="AMT" datatype="number"/></group></dataSource></data>'
+    '<layout>'
+    '<section name="header" orientation="portrait"><body>'
+    '<roundedRectangle name="B_3">'
+    '<geometryInfo x="0.5" y="0.1" width="6.0" height="5.0"/>'
+    '<visualSettings fillBackgroundColor="gray" linePattern="solid"/>'
+    '<points><point x="0.5" y="0.1"/><point x="6.0" y="5.0"/></points>'
+    '</roundedRectangle>'
+    '<text name="B_L1"><geometryInfo x="0.7" y="0.5" width="1.5" '
+    'height="0.2"/><textSegment><font face="Arial" size="10" bold="yes"/>'
+    '<string><![CDATA[Owner:]]></string></textSegment></text>'
+    '<field name="F_OWNER" source="P_OWNER">'
+    '<font face="Arial" size="10"/>'
+    '<geometryInfo x="2.4" y="0.5" width="2.0" height="0.2"/></field>'
+    '<text name="B_L2"><geometryInfo x="0.7" y="1.0" width="1.5" '
+    'height="0.2"/><textSegment><font face="Arial" size="10" bold="yes"/>'
+    '<string><![CDATA[Run Date:]]></string></textSegment></text>'
+    '<field name="F_DATE" source="CurrentDate" formatMask="MM/DD/YYYY">'
+    '<font face="Arial" size="10"/>'
+    '<geometryInfo x="2.4" y="1.0" width="2.0" height="0.2"/></field>'
+    '</body></section>'
+    '<section name="main"><body>'
+    '<repeatingFrame name="R_Main" source="G_Main" printDirection="down">'
+    '<geometryInfo x="0" y="0" width="7.5" height="0.4"/>'
+    '<field name="F_ITEM" source="ITEM_NM">'
+    '<geometryInfo x="0.1" y="0.05" width="2.0" height="0.2"/></field>'
+    '</repeatingFrame></body></section>'
+    '</layout></report>'
+)
+
+
+def _cover_border_style(rdl_xml):
+    import re as _re
+    import xml.etree.ElementTree as ET
+    t = _re.sub(r'xmlns="[^"]+"', "", rdl_xml, count=1)
+    root = ET.fromstring(t)
+    for rect in root.iter("Rectangle"):
+        if rect.get("Name") in ("Rect_CoverPage", "Rect_SummaryHeader"):
+            st = rect.find("Style")
+            if st is None:
+                return None
+            b = st.find("Border")
+            return b.findtext("Style") if b is not None else None
+    return None
+
+
+def test_declared_cover_frame_draws_the_cover_border():
+    """Truth PDF: some criteria covers sit inside a drawn rounded box
+    (a header-section roundedRectangle with linePattern=solid enclosing
+    the form); ours emitted every cover borderless by design. The border
+    must be DECLARED-driven: solid when the source draws the frame,
+    none when it does not (the letter-corpus default)."""
+    import re
+    from converter import convert
+    rdl = convert(_COVER_FRAME_XML.encode())["rdl_xml"]
+    assert _cover_border_style(rdl) == "Solid", (
+        "a declared solid-linePattern frame around the criteria form "
+        "must give the cover rect a border")
+    # PROVE THE GATE CAN FAIL: strip the declared frame -> borderless.
+    no_frame = re.sub(r"<roundedRectangle.*?</roundedRectangle>", "",
+                      _COVER_FRAME_XML, flags=re.S)
+    rdl2 = convert(no_frame.encode())["rdl_xml"]
+    assert _cover_border_style(rdl2) == "None", (
+        "without a declared frame the cover must stay borderless")
+
+
+# ---------------------------------------------------------------------------
+# Title scavenging fidelity: a right-column stub text must never become a
+# page-title line, and a scavenged title line the record BODY also renders
+# (the letterhead) must not print twice.
+# ---------------------------------------------------------------------------
+_RIGHT_STUB_XML = (
+    '<?xml version="1.0"?><report name="STUB_T" DTDVersion="9.0.2.0.10">'
+    '<data><dataSource name="Q_1">'
+    '<select><![CDATA[select lic_no, holder from t]]></select>'
+    '<group name="G_1"><dataItem name="LIC_NO" datatype="number"/>'
+    '<dataItem name="HOLDER" datatype="vchar2"/></group></dataSource></data>'
+    '<layout><section name="main" width="11.00000" height="7.00000"><body>'
+    '<repeatingFrame name="R_1" source="G_1" printDirection="down">'
+    '<geometryInfo x="0.1" y="0.1" width="10.8" height="6.7"/>'
+    # centered license title: scavenged as the page title (top band, left)
+    '<text name="B_T"><textSettings justify="center"/>'
+    '<geometryInfo x="0.31" y="0.31" width="7.1" height="0.17"/>'
+    '<textSegment><font face="Arial" size="12" bold="yes"/>'
+    '<string><![CDATA[DISPLAY THIS LICENSE PROMINENTLY]]></string>'
+    '</textSegment></text>'
+    # the record letterhead: top band AND rendered inside the record body
+    '<text name="B_LH"><textSettings justify="center"/>'
+    '<geometryInfo x="2.0" y="0.9" width="5.0" height="0.34"/>'
+    '<textSegment><font face="Arial" size="11" bold="yes"/>'
+    '<string><![CDATA[STATE AGENCY LETTERHEAD LINE]]></string>'
+    '</textSegment></text>'
+    # right-column wallet stub text (x far right of the 11in page)
+    '<text name="B_STUB"><geometryInfo x="7.94" y="0.44" width="2.81" '
+    'height="0.50"/><textSegment><font face="Arial" size="10"/>'
+    '<string><![CDATA[Holder is an authorized representative of]]></string>'
+    '</textSegment></text>'
+    '<field name="F_LIC" source="LIC_NO">'
+    '<geometryInfo x="0.5" y="2.0" width="2.0" height="0.2"/></field>'
+    '<field name="F_HOLDER" source="HOLDER">'
+    '<geometryInfo x="0.5" y="2.4" width="3.0" height="0.2"/></field>'
+    '</repeatingFrame></body></section></layout></report>'
+)
+
+
+def test_right_column_stub_never_becomes_a_title_line():
+    """License-form truth: the wallet-stub column at the far right edge
+    (x=7.94 on an 11in page) is record content â€” ours scavenged its text
+    into the synthesized page banner, painting it top-center on every
+    page. Titles are position-gated (centered/left anchored); and a
+    scavenged title line the record body ALSO renders (the letterhead)
+    must be dropped from the banner so it prints once."""
+    import re
+    from converter import convert
+    rdl = convert(_RIGHT_STUB_XML.encode())["rdl_xml"]
+    ph = re.search(r"<PageHeader>(.*?)</PageHeader>", rdl, re.S)
+    hdr = ph.group(1) if ph else ""
+    assert "Holder is an authorized" not in hdr, (
+        "a far-right stub text must never ride into the page banner")
+    body = re.search(r"<Body>(.*?)</Body>", rdl, re.S).group(1)
+    if "STATE AGENCY LETTERHEAD LINE" in body:
+        assert "STATE AGENCY LETTERHEAD LINE" not in hdr, (
+            "a title line the record body already renders must not "
+            "print a second time in the banner")
+
+
+def test_declared_paper_height_becomes_the_page_height():
+    """An 11x8.5 landscape section IS the paper (truth PDFs measure
+    612pt tall); emitting Letter-portrait 11in made pagination diverge
+    from the truth on every page. Only paper-sized declared heights
+    (>= 8in) qualify â€” a short BODY band (a 7in license form) keeps the
+    11in default."""
+    import re
+    from converter import convert
+    landscape = (
+        '<?xml version="1.0"?><report name="LSC_T" DTDVersion="9.0.2.0.10">'
+        '<data><dataSource name="Q_Main">'
+        '<select><![CDATA[select item_nm, amt from t]]></select>'
+        '<group name="G_Main"><dataItem name="ITEM_NM" datatype="vchar2"/>'
+        '<dataItem name="AMT" datatype="number"/></group></dataSource>'
+        '</data>'
+        '<layout><section name="main" width="11.00000" height="8.50000">'
+        '<body>'
+        '<repeatingFrame name="R_Main" source="G_Main" '
+        'printDirection="down">'
+        '<geometryInfo x="0" y="0.3" width="10.5" height="0.3"/>'
+        '<field name="F_ITEM" source="ITEM_NM">'
+        '<geometryInfo x="0.1" y="0.32" width="2.0" height="0.2"/></field>'
+        '<field name="F_AMT" source="AMT">'
+        '<geometryInfo x="6.0" y="0.32" width="1.0" height="0.2"/></field>'
+        '</repeatingFrame></body></section></layout></report>'
+    )
+    rdl = convert(landscape.encode())["rdl_xml"]
+    assert re.search(r"<PageHeight>8\.50?in</PageHeight>", rdl), (
+        "a declared 8.5in-tall landscape section must become the paper "
+        "height")
+    # short BODY band -> not a paper height -> 11in default holds
+    short = landscape.replace('height="8.50000"', 'height="7.00000"')
+    rdl2 = convert(short.encode())["rdl_xml"]
+    assert re.search(r"<PageHeight>11(\.0+)?in</PageHeight>", rdl2), (
+        "a short declared body band must keep the 11in default")
+
+
+def test_no_invented_zebra_striping_anywhere():
+    """The Oracle truth PDFs paint detail rows plain (white or a
+    SOURCE-declared band); a RowNumber-Mod-2 alternating BackgroundColor
+    is a converter invention hidden by layout-mode staticization but
+    painted on a real deploy (measured on the wide accreditation
+    summary). No emitted RDL may carry one."""
+    from converter import convert
+    flat = (
+        '<?xml version="1.0"?><report name="FLAT_T" DTDVersion="9.0.2.0.10">'
+        '<data><dataSource name="Q_Main">'
+        '<select><![CDATA[select item_nm, amt, kind from t]]></select>'
+        '<group name="G_Main"><dataItem name="ITEM_NM" datatype="vchar2"/>'
+        '<dataItem name="AMT" datatype="number"/>'
+        '<dataItem name="KIND" datatype="vchar2"/></group></dataSource>'
+        '</data></report>'
+    )
+    rdl = convert(flat.encode())["rdl_xml"]
+    assert "Tablix" in rdl, "flat report must emit a tablix"
+    assert "RowNumber(Nothing) Mod 2" not in rdl, (
+        "no invented zebra striping on detail rows")
+    rdl2 = convert(_LABEL_H_XML.encode())["rdl_xml"]
+    assert "RowNumber(Nothing) Mod 2" not in rdl2
+
+
+def test_margin_chrome_carries_declared_fill_and_text_color():
+    """The declared-margin chrome path emitted every band black-on-white:
+    the source's gray band fill (fillPattern attr present -> paints, the
+    corpus-wide dialect gate) and darkblue title color were dropped â€”
+    truth prints blue-on-gray. The chrome textboxes must carry the
+    declared style; an unstyled margin stays black-on-white."""
+    import re
+    from converter import convert
+    plain = ('<text name="B_RUNON"><geometryInfo x="6.0" y="0.12" '
+             'width="1.2" height="0.19"/><textSegment>'
+             '<font face="Arial" size="10"/>')
+    styled_frag = ('<text name="B_RUNON">'
+                   '<visualSettings fillPattern="transparent" '
+                   'fillBackgroundColor="gray"/>'
+                   '<geometryInfo x="6.0" y="0.12" '
+                   'width="1.2" height="0.19"/><textSegment>'
+                   '<font face="Arial" size="10" textColor="darkblue"/>')
+    assert plain in _CHROME_XML, "fixture drifted â€” update this test"
+    styled = _CHROME_XML.replace(plain, styled_frag)
+    rdl = convert(styled.encode())["rdl_xml"]
+    ph = re.search(r"<PageHeader>(.*?)</PageHeader>", rdl, re.S).group(1)
+    m = re.search(r"<Textbox Name=\"MChrome_H_B_RUNON\">(.*?)</Textbox>",
+                  ph, re.S)
+    assert m, "the styled run-on chrome textbox must emit"
+    tb = m.group(1)
+    assert "#BFBFBF" in tb, (
+        "a pattern-marked gray margin fill must paint on the chrome box")
+    assert "#000080" in tb, (
+        "the declared darkblue text color must survive into the chrome")
+    # unstyled margin keeps black-on-white (no invented fills/colors)
+    rdl2 = convert(_CHROME_XML.encode())["rdl_xml"]
+    ph2 = re.search(r"<PageHeader>(.*?)</PageHeader>", rdl2, re.S).group(1)
+    m2 = re.search(r"<Textbox Name=\"MChrome_H_B_RUNON\">(.*?)</Textbox>",
+                   ph2, re.S)
+    assert m2 and "BackgroundColor" not in m2.group(1), (
+        "an unstyled margin text must not gain a fill")
+
+
+def test_parameter_only_trigger_hides_cover_note_outside_regions():
+    """A criteria-cover note gated by a PARAMETER-ONLY format trigger
+    ("show only when a filter is chosen") lost its visibility logic â€”
+    the region-aware pass skipped every textbox outside a data region,
+    so the note printed unconditionally where the truth run hides it.
+    Fields!-referencing triggers must stay region-gated (fire-140).
+    Unit-level on the pass itself: the summary-header cover emits its
+    tagged textboxes body-direct, outside any Tablix scope."""
+    import xml.etree.ElementTree as ET
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.generators import rdl as R
+    xml = (
+        '<?xml version="1.0"?><report name="TRIGU_T" DTDVersion="9.0.2.0.10">'
+        '<data>'
+        '<userParameter name="P_FILTER" datatype="character" width="20" '
+        'defaultWidth="0" defaultHeight="0"/>'
+        '<dataSource name="Q_Main">'
+        '<select><![CDATA[select item_nm, amt from t]]></select>'
+        '<group name="G_Main"><dataItem name="ITEM_NM" datatype="vchar2"/>'
+        '<dataItem name="AMT" datatype="number"/></group></dataSource>'
+        '</data>'
+        '<programUnits>'
+        '<function name="note_ft" returnType="boolean">'
+        '<textSource><![CDATA[function note_ft return boolean is begin '
+        'IF :P_FILTER IS NOT NULL THEN RETURN (TRUE); END IF; '
+        'RETURN (FALSE); end;]]></textSource></function>'
+        '<function name="col_ft" returnType="boolean">'
+        '<textSource><![CDATA[function col_ft return boolean is begin '
+        'IF :ITEM_NM IS NOT NULL THEN RETURN (TRUE); END IF; '
+        'RETURN (FALSE); end;]]></textSource></function>'
+        '</programUnits></report>'
+    )
+    rep = parse_oracle_xml(xml.encode())
+    root = ET.Element(R._q("Report"))
+    body = ET.SubElement(root, R._q("Body"))
+    ri = ET.SubElement(body, R._q("ReportItems"))
+    tb1 = ET.SubElement(ri, R._q("Textbox"))
+    tb1.set("Name", "T_ParamNote")
+    tb1.set("data-ft", "note_ft")
+    tb2 = ET.SubElement(ri, R._q("Textbox"))
+    tb2.set("Name", "T_ColNote")
+    tb2.set("data-ft", "col_ft")
+    R._apply_region_aware_trigger_props(root, rep)
+    vis = tb1.find(R._q("Visibility"))
+    assert vis is not None and "P_FILTER" in (
+        vis.findtext(R._q("Hidden")) or ""), (
+        "a parameter-only trigger must become a real Hidden even "
+        "OUTSIDE any data region")
+    assert tb2.find(R._q("Visibility")) is None, (
+        "a Fields!-referencing trigger outside a region must stay "
+        "unapplied (fire-140 region gate)")
+    assert "data-ft" not in tb1.attrib and "data-ft" not in tb2.attrib, (
+        "the pass must always strip the non-schema data-ft tags")
+
+
+
+_RULED_LEDGER_XML = (
+    '<?xml version="1.0"?><report name="LEDG_T" DTDVersion="9.0.2.0.10">'
+    '<data><dataSource name="Q_Main">'
+    '<select><![CDATA[select log_key, item_no, payor, amt from t]]>'
+    '</select>'
+    '<group name="G_Main"><dataItem name="LOG_KEY" datatype="number"/>'
+    '</group>'
+    '<group name="G_Det"><dataItem name="ITEM_NO" datatype="number"/>'
+    '<dataItem name="PAYOR" datatype="vchar2"/>'
+    '<dataItem name="AMT" datatype="number"/></group>'
+    '<summary name="CS_TOTAL" function="sum" source="AMT"/>'
+    '</dataSource></data>'
+    '<layout><section name="main" width="8.50000" height="11.00000"><body>'
+    '<frame name="M_G_GRP"><geometryInfo x="0" y="0" width="8.2" '
+    'height="2.4"/>'
+    '<repeatingFrame name="R_OUTER" source="G_Main" '
+    'printDirection="down">'
+    '<geometryInfo x="0" y="0" width="8.0" height="2.2"/>'
+    '<field name="F_KEY" source="LOG_KEY">'
+    '<geometryInfo x="0.3" y="0.05" width="1.2" height="0.2"/></field>'
+    '<text name="B_C1"><geometryInfo x="0.1" y="0.6" width="0.8" '
+    'height="0.2"/><textSegment><font face="Arial" size="9" bold="yes"/>'
+    '<string><![CDATA[Item]]></string></textSegment></text>'
+    '<text name="B_C2"><geometryInfo x="1.2" y="0.6" width="1.2" '
+    'height="0.2"/><textSegment><font face="Arial" size="9" bold="yes"/>'
+    '<string><![CDATA[Payor]]></string></textSegment></text>'
+    '<text name="B_C3"><geometryInfo x="3.0" y="0.6" width="1.2" '
+    'height="0.2"/><textSegment><font face="Arial" size="9" bold="yes"/>'
+    '<string><![CDATA[Amount]]></string></textSegment></text>'
+    '<repeatingFrame name="R_DET" source="G_Det" printDirection="down">'
+    '<geometryInfo x="0.05" y="0.9" width="8.0" height="0.375"/>'
+    '<field name="F_D1" source="ITEM_NO">'
+    '<geometryInfo x="0.1" y="0.95" width="0.8" height="0.2"/></field>'
+    '<field name="F_D2" source="PAYOR">'
+    '<geometryInfo x="1.2" y="0.95" width="1.6" height="0.2"/></field>'
+    '<field name="F_D3" source="AMT">'
+    '<geometryInfo x="3.0" y="0.95" width="1.0" height="0.2"/></field>'
+    '</repeatingFrame>'
+    '<line name="B_RULE"><geometryInfo x="0.05" y="1.3" width="7.9" '
+    'height="0.0"/><visualSettings linePattern="solid"/>'
+    '<points><point x="0.05" y="1.3"/><point x="7.95" y="1.3"/></points>'
+    '</line>'
+    '<frame name="M_TOTALS">'
+    '<geometryInfo x="1.5" y="1.6" width="3.0" height="0.4"/>'
+    '<field name="F_TOT" source="CS_TOTAL">'
+    '<geometryInfo x="3.0" y="1.7" width="1.0" height="0.2"/></field>'
+    '<text name="B_TOTL"><geometryInfo x="1.8" y="1.7" width="1.1" '
+    'height="0.2"/><textSegment><font face="Arial" size="9" bold="yes"/>'
+    '<string><![CDATA[Total]]></string></textSegment></text>'
+    '</frame>'
+    '</repeatingFrame></frame>'
+    '</body></section></layout></report>'
+)
+
+
+def test_declared_group_rule_prints_once_at_its_declared_extent():
+    """A <line> declared OUTSIDE the detail repeating frame belongs to the
+    GROUP, not to the row: Oracle repeats an object with its own enclosing
+    repeating frame, so such a rule prints ONCE per group at its declared
+    endpoints (truth-PDF measured on a grouped logsheet: the group's rules
+    print once per group block, never once per detail row).
+
+    It must therefore emit as a real <Line> at its declared x/width — a
+    BottomBorder on the detail band would both repeat it under every row
+    and stretch it across the whole band whatever the declaration says.
+    The per-ROW rule is the OTHER declaration: a <line> INSIDE the
+    repeating frame (guarded below).
+    """
+    import re
+    from converter import convert
+    rdl = convert(_RULED_LEDGER_XML.encode())["rdl_xml"]
+    m = re.search(r'<Rectangle Name="GTS_Detail">.{0,600}?<ReportItems>',
+                  rdl, re.S)
+    assert m, "grouped-tabular route must emit the GTS detail band"
+    assert "<BottomBorder>" not in m.group(0), (
+        "a group-scope declared rule must NOT become a per-row band border")
+    ln = re.search(r'<Line Name="Rule_B_RULE">.*?</Line>', rdl, re.S)
+    assert ln, "the declared group rule must print as a real <Line>"
+    # NUMERIC, not a formatted string: a declared quantity is emitted at
+    # full precision, and a text match on "0.05in" would also pass for any
+    # value that merely rounds to it.
+    _lx = float(re.search(r"<Left>([\d.]+)in</Left>", ln.group(0)).group(1))
+    assert abs(_lx - 0.05) < 1e-9, (
+        "the rule must start at its DECLARED x, not at the band's edge", _lx)
+    # the row-INTERNAL declaration is what repeats with every row
+    inside = _RULED_LEDGER_XML.replace(
+        '</repeatingFrame>',
+        '<line name="B_ROWRULE"><geometryInfo x="0.05" y="0.95" width="7.9" '
+        'height="0.0"/><visualSettings linePattern="solid"/></line>'
+        '</repeatingFrame>', 1)
+    det = re.search(r'<Rectangle Name="GTS_Detail">.*?</Rectangle>',
+                    convert(inside.encode())["rdl_xml"], re.S)
+    assert det and '<Line Name="GTS_RowRule">' in det.group(0), (
+        "a line declared INSIDE the repeating frame repeats with every row")
+    # prove-the-gate: strip the declaration -> the rule disappears entirely
+    no_rule = re.sub(r"<line name=\"B_RULE\">.*?</line>", "",
+                     _RULED_LEDGER_XML, flags=re.S)
+    rdl2 = convert(no_rule.encode())["rdl_xml"]
+    m2 = re.search(r'<Rectangle Name="GTS_Detail">.{0,600}?<ReportItems>',
+                   rdl2, re.S)
+    assert m2, "route must hold without the rule"
+    assert '<Line Name="Rule_B_RULE">' not in rdl2, (
+        "no declared line -> no invented rule")
+    assert "<BottomBorder>" not in m2.group(0), (
+        "no declared line -> no invented row border")
+
+
+_PAPER_FORM_XML = (
+    '<?xml version="1.0"?><report name="FORMFLOW_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<dataSource name="Q_FORM">'
+    '<select><![CDATA[select vend_nm, req_no from t1]]></select>'
+    '<group name="G_FORM"><dataItem name="VEND_NM" datatype="vchar2"/>'
+    '<dataItem name="REQ_NO" datatype="number"/></group></dataSource>'
+    '<dataSource name="Q_ITEM">'
+    '<select><![CDATA[select item_nm, qty, amt from t2]]></select>'
+    '<group name="G_ITEM"><dataItem name="ITEM_NM" datatype="vchar2"/>'
+    '<dataItem name="QTY" datatype="number"/>'
+    '<dataItem name="AMT" datatype="number"/></group></dataSource>'
+    '<link parentGroup="G_FORM" childQuery="Q_ITEM" condition="eq" '
+    'sqlClause="where"/>'
+    '</data>'
+    '<layout><section name="main">'
+    '<body height="9.75000">'
+    '<repeatingFrame name="R_FORM" source="G_FORM" printDirection="down" '
+    'maxRecordsPerPage="1" minWidowRecords="1" columnMode="no">'
+    '<geometryInfo x="0.00000" y="0.00000" width="7.50000" height="9.75000"/>'
+    '<generalLayout verticalElasticity="variable"/>'
+    '<text name="B_Vend"><geometryInfo x="0.00000" y="0.10000" '
+    'width="1.00000" height="0.20000"/><textSegment>'
+    '<font face="Arial" size="9"/><string><![CDATA[Vendor:]]></string>'
+    '</textSegment></text>'
+    '<field name="F_VEND" source="VEND_NM">'
+    '<geometryInfo x="1.10000" y="0.10000" width="2.00000" height="0.20000"/>'
+    '</field>'
+    '<field name="F_REQ" source="REQ_NO">'
+    '<geometryInfo x="1.10000" y="0.60000" width="2.00000" height="0.20000"/>'
+    '</field>'
+    '<frame name="M_ITEM_GRPFR">'
+    '<geometryInfo x="0.00000" y="1.50000" width="7.50000" height="6.40000"/>'
+    '<generalLayout verticalElasticity="variable"/>'
+    '<repeatingFrame name="R_ITEM" source="G_ITEM" printDirection="down">'
+    '<geometryInfo x="0.00000" y="1.70000" width="7.50000" height="0.20000"/>'
+    '<field name="F_ITEM" source="ITEM_NM">'
+    '<geometryInfo x="0.20000" y="1.70000" width="3.00000" height="0.18000"/>'
+    '</field>'
+    '<field name="F_QTY" source="QTY">'
+    '<geometryInfo x="3.50000" y="1.70000" width="1.00000" height="0.18000"/>'
+    '</field>'
+    '<field name="F_AMT" source="AMT">'
+    '<geometryInfo x="5.00000" y="1.70000" width="1.00000" height="0.18000"/>'
+    '</field></repeatingFrame></frame>'
+    '<frame name="M_FOOT">'
+    '<geometryInfo x="0.00000" y="8.20000" width="7.50000" height="1.50000"/>'
+    '<visualSettings lineWidth="1" linePattern="solid"/>'
+    '<text name="B_Sig"><geometryInfo x="0.20000" y="8.40000" '
+    'width="2.00000" height="0.20000"/><textSegment>'
+    '<font face="Arial" size="9"/><string><![CDATA[Signature:]]></string>'
+    '</textSegment></text></frame>'
+    '</repeatingFrame>'
+    '</body></section></layout></report>'
+)
+
+
+def test_paper_declared_form_record_flows_across_pages():
+    """A per-record FORM whose section declares a PAPER-sized body must keep
+    the paper at its real size and let the record PAGINATE across pages (the
+    Oracle-rendered truth paginates the same form at 8.5x11) -- the grow-the-
+    paper budget produced a 20in+ sheet no printer owns. Oversize record rects
+    get KeepTogether=false so the engine splits them in place instead of
+    pushing them whole to a fresh page (the blank-leader-page failure mode).
+    Differential: WITHOUT the paper-sized body declaration the grow budget
+    must still hold (it is load-bearing for records that must stay whole)."""
+    import re
+    from converter import convert
+    rdl = convert(_PAPER_FORM_XML.encode())["rdl_xml"]
+    assert re.search(r"<PageHeight>11(\.0+)?in</PageHeight>", rdl), (
+        "paper-declared form must keep Letter paper, not grow the sheet")
+    # This record's content is SHORTER than the declared sheet, so it prints
+    # one per sheet and keeps its KeepTogether -- only a record that genuinely
+    # outgrows the sheet may be split (the OVERSIZE leg below carries that
+    # proof). Both legs keep the declared Letter paper.
+    m_fit = re.search(r'<Rectangle Name="Rect_RecordPage">.{0,200}?'
+                      r'<KeepTogether>(\w+)</KeepTogether>', rdl, re.S)
+    assert m_fit and m_fit.group(1) == "true", (
+        "a record that fits the declared sheet stays whole on one sheet")
+    # OVERSIZE leg: push the closing frame far past the declared sheet so ONE
+    # record cannot fit it however much synthesized chrome is reclaimed.
+    big = (_PAPER_FORM_XML
+           .replace('x="0.00000" y="8.20000" width="7.50000" height="1.50000"',
+                    'x="0.00000" y="16.00000" width="7.50000" height="1.50000"')
+           .replace('x="0.20000" y="8.40000" '
+                    'width="2.00000" height="0.20000"',
+                    'x="0.20000" y="16.20000" '
+                    'width="2.00000" height="0.20000"'))
+    assert big != _PAPER_FORM_XML
+    rdl_big = convert(big.encode())["rdl_xml"]
+    assert re.search(r"<PageHeight>11(\.0+)?in</PageHeight>", rdl_big), (
+        "paper-declared form must keep Letter paper, not grow the sheet")
+    m = re.search(r'<Rectangle Name="Rect_RecordPage">.{0,200}?'
+                  r'<KeepTogether>(\w+)</KeepTogether>', rdl_big, re.S)
+    assert m and m.group(1) == "false", (
+        "an oversize record rect must be allowed to split across pages")
+    # Negative leg: strip the paper-sized body declaration -> the per-record
+    # growth budget stays (one record kept whole on one grown sheet).
+    no_paper = _PAPER_FORM_XML.replace('<body height="9.75000">', '<body>')
+    rdl2 = convert(no_paper.encode())["rdl_xml"]
+    m2 = re.search(r"<PageHeight>([0-9.]+)in</PageHeight>", rdl2)
+    assert m2 and float(m2.group(1)) > 11.05, (
+        "without a paper-sized declaration the grow-the-page budget must "
+        "hold (load-bearing for whole-record sheets)")
+    m3 = re.search(r'<Rectangle Name="Rect_RecordPage">.{0,200}?'
+                   r'<KeepTogether>(\w+)</KeepTogether>', rdl2, re.S)
+    assert m3 and m3.group(1) == "true", (
+        "grow-budget records keep KeepTogether (record stays whole)")
+
+
+def test_inert_wrapper_frames_never_inflate_the_record():
+    """An EMPTY, INVISIBLE wrapper frame (no fields, no children, no painted
+    border or fill) renders nothing in Oracle -- emitting it let the record-
+    level elasticity walk stack a full-record-sized empty rect below the real
+    content, doubling the record height (one content-free page per record,
+    measured on a requisition form). The record geometry must be IDENTICAL
+    with and without the wrapper. Differential: a BORDERED empty frame is a
+    real write-in box and must still emit (and inflate)."""
+    import re
+    from converter import convert
+
+    def record_row_height(rdl):
+        m = re.search(r'<TablixRow>\s*<Height>([0-9.]+)in</Height>', rdl)
+        assert m, "per-record tablix row must exist"
+        return float(m.group(1))
+
+    base = convert(_PAPER_FORM_XML.encode())["rdl_xml"]
+    wrapper = ('<frame name="M_FORM_GRPFR">'
+               '<geometryInfo x="0.00000" y="0.03000" width="7.50000" '
+               'height="9.72000"/>'
+               '<generalLayout verticalElasticity="variable"/></frame>')
+    with_inert = _PAPER_FORM_XML.replace(
+        '<repeatingFrame name="R_FORM"',
+        wrapper + '<repeatingFrame name="R_FORM"')
+    rdl_inert = convert(with_inert.encode())["rdl_xml"]
+    assert record_row_height(rdl_inert) == record_row_height(base), (
+        "an empty invisible wrapper frame must not change the record height")
+    # Negative leg: the SAME empty frame WITH a painted border is a real
+    # write-in box -- it must emit and therefore grow the record.
+    bordered = wrapper.replace(
+        '</frame>',
+        '<visualSettings lineWidth="1" linePattern="solid"/></frame>')
+    with_box = _PAPER_FORM_XML.replace(
+        '<repeatingFrame name="R_FORM"',
+        bordered + '<repeatingFrame name="R_FORM"')
+    rdl_box = convert(with_box.encode())["rdl_xml"]
+    assert record_row_height(rdl_box) > record_row_height(base), (
+        "a bordered empty frame is a real box and must still emit")
+
+
+def test_detail_row_indent_follows_declared_field_geometry():
+    """The row indent the truth prints is DECLARATION-driven, two dialect
+    subtleties included: (a) field x is ABSOLUTE in section space, so a
+    detail repeating frame at x=0 whose fields sit at x>0 still indents
+    its rows (frame-x-only read rendered them flush); (b) the group-title
+    collapse (2 same-query tables -> 1) must keep the geometry list
+    parallel, or the parallelism gate silently drops the detail indent."""
+    import re
+    from converter.generators.rdl import (
+        _detect_multi_section, _build_multi_section_body)
+    from converter.models import (DataQuery, DataItem, LayoutField,
+                                  LayoutGroup, ParsedReport)
+
+    def _mkq(n):
+        q = DataQuery(name=f"Q_{n}")
+        q.items = [DataItem(name=f"{n}_DESC"), DataItem(name=f"{n}_CNT")]
+        q.sql = f"SELECT {n}_DESC, {n}_CNT FROM x"
+        return q
+
+    def _sec_frame(n, frame_x, label_x, count_x):
+        rf = LayoutGroup(
+            name=f"R_G_{n}", kind="repeating_frame", source_query=f"G_{n}",
+            x=frame_x, y=0.25, width=4.3,
+            fields=[
+                LayoutField(name=f"F_{n}_DESC", source=f"{n}_DESC",
+                            kind="field", x=label_x, y=0.25, width=3.0),
+                LayoutField(name=f"F_{n}_CNT", source=f"{n}_CNT",
+                            kind="field", x=count_x, y=0.25, width=0.8),
+            ])
+        return LayoutGroup(name=f"M_G_{n}", kind="frame", x=0.0, y=0.0,
+                           width=4.5, children=[rf])
+
+    rep = ParsedReport(name="SYNTH")
+    rep.queries = [_mkq("S1"), _mkq("S2")]
+    sm = LayoutGroup(name="main", kind="section_main", children=[
+        # (a) frame flush at x=0 -- the FIELDS carry the 0.1875 indent
+        _sec_frame("S1", 0.0, 0.1875, 3.6875),
+        # control: frame and fields flush together at 0.25
+        _sec_frame("S2", 0.25, 0.25, 3.75),
+    ])
+    rep.layout = [sm]
+
+    sections = _detect_multi_section(rep)
+    assert sections and len(sections) == 2
+    geo = [s["table_geo"][0] for s in sections]
+    assert abs(geo[0][1] - 0.1875) < 1e-6, (
+        "leftmost FIELD x must drive the detail indent when the frame "
+        "sits flush at x=0")
+    assert abs(geo[1][1] - 0.25) < 1e-6
+
+    body = _build_multi_section_body(rep, sections)
+    xml = ET.tostring(body, encoding="unicode")
+
+    def _padding_left(cell_name):
+        m = re.search(
+            r'<Textbox Name="%s">.*?<PaddingLeft>([^<]+)</PaddingLeft>'
+            % cell_name, xml, re.S)
+        assert m, f"{cell_name} must exist with a PaddingLeft"
+        return m.group(1)
+
+    assert _padding_left("Tbx_S0_Cell_S1_DESC") == "0.19in"
+    assert _padding_left("Tbx_S1_Cell_S2_DESC") == "0.25in"
+
+    # NEGATIVE (declaration-driven, not invented): fields flush with a
+    # frame at x=0 -> stock 3pt padding, no indent appears from thin air.
+    rep2 = ParsedReport(name="SYNTH2")
+    rep2.queries = [_mkq("S1"), _mkq("S2")]
+    rep2.layout = [LayoutGroup(name="main", kind="section_main", children=[
+        _sec_frame("S1", 0.0, 0.0, 3.5),
+        _sec_frame("S2", 0.0, 0.0, 3.5),
+    ])]
+    secs2 = _detect_multi_section(rep2)
+    xml2 = ET.tostring(_build_multi_section_body(rep2, secs2),
+                       encoding="unicode")
+    m = re.search(r'<Textbox Name="Tbx_S0_Cell_S1_DESC">.*?'
+                  r'<PaddingLeft>([^<]+)</PaddingLeft>', xml2, re.S)
+    assert m and m.group(1) == "3pt"
+
+    # (b) group-title collapse keeps geometry parallel: 2 same-query
+    # tables fold into one detail table and the DETAIL band's declared
+    # x offset survives as the label cell's indent.
+    q = DataQuery(name="Q_B")
+    q.items = [DataItem(name="B_GROUP"), DataItem(name="B_TYPE"),
+               DataItem(name="B_CNT")]
+    q.sql = "SELECT B_GROUP, B_TYPE, B_CNT FROM x"
+    repb = ParsedReport(name="SYNTHB")
+    repb.queries = [q]
+    secb = [{"header": "", "y": 0.0, "x": 0.0, "totals": [],
+             "has_total": True,
+             "tables": [(q, ["B_GROUP"]), (q, ["B_TYPE", "B_CNT"])],
+             "table_geo": [(0.0, 0.0), (0.25, 0.26)]}]
+    xmlb = ET.tostring(_build_multi_section_body(repb, secb),
+                       encoding="unicode")
+    mb = re.search(r'<Textbox Name="Tbx_S0_Cell_B_TYPE">.*?'
+                   r'<PaddingLeft>([^<]+)</PaddingLeft>', xmlb, re.S)
+    assert mb and mb.group(1) == "0.26in", (
+        "collapse must keep table_geo parallel so the declared detail "
+        "indent survives")
+
+
+def test_declared_band_edge_rules_and_box_stroke_color():
+    """The truth PDF draws the column band's edge lines from the DECLARED
+    solid <line>s at the band's top/bottom edges, repeats the row-internal
+    <line> with every detail row (forming the double rule under the band),
+    draws the once-per-group line after the last row, and strokes the
+    totals box in its DECLARED lineForegroundColor (navy) -- ours
+    synthesized a single gray band rule and a #333333 box border.
+
+    Those declared lines carry no lineWidth, so their ink is Oracle's
+    DEVICE HAIRLINE: the truth exports measure (204,204,204) for them at
+    every rendering resolution (three exports sampled), NOT black -- a
+    flat black default printed them near-black at print resolution.
+
+    Each of them prints as a REAL rule at its declared endpoints. Folding a
+    band-edge rule into the band's border discarded its declared x/width
+    AND -- because the border was emitted whether or not a line was
+    declared -- painted a full-width rule across bands the source draws
+    nothing on (truth-PDF measured: ZERO drawings across that band)."""
+    import re
+    from converter import convert
+    from converter.parsers.oracle_colors import (
+        DEVICE_HAIRLINE_COLOR as _HAIRLINE_INK)
+
+    ruled = _RULED_LEDGER_XML
+    # declared band edges + row-internal rule + navy-stroked totals box
+    ruled = ruled.replace(
+        '<repeatingFrame name="R_DET"',
+        '<line name="B_TOPEDGE"><geometryInfo x="0.05" y="0.30" '
+        'width="7.9" height="0.0"/><visualSettings linePattern="solid"/>'
+        '</line>'
+        '<line name="B_EDGE"><geometryInfo x="0.05" y="0.9" width="7.9" '
+        'height="0.0"/><visualSettings linePattern="solid"/></line>'
+        '<repeatingFrame name="R_DET"')
+    ruled = ruled.replace(
+        '</repeatingFrame>',
+        '<line name="B_ROWRULE"><geometryInfo x="0.05" y="0.95" '
+        'width="7.9" height="0.0"/><visualSettings linePattern="solid"/>'
+        '</line></repeatingFrame>', 1)
+    ruled = ruled.replace(
+        '<frame name="M_TOTALS">'
+        '<geometryInfo x="1.5" y="1.6" width="3.0" height="0.4"/>',
+        '<frame name="M_TOTALS">'
+        '<geometryInfo x="1.5" y="1.6" width="3.0" height="0.4"/>'
+        '<rectangle name="B_BOX">'
+        '<geometryInfo x="1.5" y="1.6" width="3.0" height="0.4"/>'
+        '<visualSettings linePattern="solid" '
+        'lineForegroundColor="darkblue"/></rectangle>')
+    rdl = convert(ruled.encode())["rdl_xml"]
+
+    hdr = re.search(r'<Rectangle Name="GTS_Hdr">.*?<Rectangle '
+                    r'Name="GTS_ColBand">', rdl, re.S)
+    assert hdr and "<BottomBorder>" not in hdr.group(0), (
+        "a declared band-edge line is a RULE, never the band's border")
+    for _rn in ("Rule_B_TOPEDGE", "Rule_B_EDGE"):
+        _ln = re.search(r'<Line Name="%s">.*?</Line>' % _rn, rdl, re.S)
+        assert _ln, f"the declared band-edge line {_rn} must print as a rule"
+        assert _HAIRLINE_INK in _ln.group(0), (
+            "a rule with no declared lineWidth inks as the device hairline")
+        _lx = float(
+            re.search(r"<Left>([\d.]+)in</Left>", _ln.group(0)).group(1))
+        assert abs(_lx - 0.05) < 1e-9, (
+            "the rule must start at its DECLARED x", _lx)
+    det = re.search(r'<Rectangle Name="GTS_Detail">.*?</Rectangle>',
+                    rdl, re.S)
+    assert det and '<Line Name="GTS_RowRule">' in det.group(0), (
+        "the row-internal declared line must repeat with every row")
+    assert "<BottomBorder>" not in re.search(
+        r'<Rectangle Name="GTS_Detail">.{0,600}?<ReportItems>',
+        rdl, re.S).group(0), (
+        "with a row-internal rule the once-per-group line must NOT "
+        "double as a per-row border")
+    assert '<Line Name="Rule_B_RULE">' in rdl, (
+        "the once-per-group line must print after the last row")
+    box = re.search(r'<Rectangle Name="GTS_TotalsBox">.{0,500}?</Border>',
+                    rdl, re.S)
+    assert box and "#000080" in box.group(0), (
+        "the totals box must stroke in its DECLARED navy, not #333333")
+
+    # prove-the-gate: the base fixture declares NO band-edge line, so the
+    # band must carry NO rule and NO synthesized border at all.
+    rdl2 = convert(_RULED_LEDGER_XML.encode())["rdl_xml"]
+    hdr2 = re.search(r'<Rectangle Name="GTS_Hdr">.*?<Rectangle '
+                     r'Name="GTS_ColBand">', rdl2, re.S)
+    assert hdr2 and "<BottomBorder>" not in hdr2.group(0) \
+        and "#444444" not in rdl2, (
+        "no declared edge line -> nothing is painted under the band")
+    assert "Rule_B_TOPEDGE" not in rdl2 and "Rule_B_EDGE" not in rdl2
+    assert '<Line Name="GTS_RowRule">' not in rdl2
+
+
+def test_declared_margin_geometry_drives_page_margins():
+    """Oracle margin ys are PAPER-relative: the declared run-on at
+    y=0.12 must print 0.12in from the paper top (TopMargin = the chrome
+    band's own top) and the declared page number at y=10.4 must print at
+    10.4in (BottomMargin + footer height derived from the declared
+    geometry). The fixed 0.5in/0.6in chrome printed the title ~28pt low
+    and the page number ~39pt high (truth-PDF measured)."""
+    import re
+    from converter import convert
+
+    rdl = convert(_CHROME_XML.encode())["rdl_xml"]
+
+    def _v(tag):
+        return float(re.search(
+            r"<%s>([0-9.]+)in</%s>" % (tag, tag), rdl).group(1))
+
+    assert abs(_v("TopMargin") - 0.12) < 0.011, (
+        "TopMargin must equal the declared chrome band top")
+    pf = re.search(r"<PageFooter>.{0,200}?<Height>([0-9.]+)in</Height>",
+                   rdl, re.S)
+    ftr_top = 11.0 - _v("BottomMargin") - float(pf.group(1))
+    assert abs(ftr_top - 10.4) < 0.02, (
+        "footer band top must land at the declared bottom-chrome y")
+
+    # prove-the-gate: without a margin band the defaults stay
+    plain = re.sub(r"<margin>.*?</margin>", "", _CHROME_XML, flags=re.S)
+    rdl2 = convert(plain.encode())["rdl_xml"]
+    assert "<TopMargin>0.50in</TopMargin>" in rdl2
+    assert "<BottomMargin>0.50in</BottomMargin>" in rdl2
+
+
+_BOXED_ND_XML = (
+    '<?xml version="1.0"?><report name="NDBOX_T" DTDVersion="9.0.2.0.10">'
+    '<data><dataSource name="Q_Main">'
+    '<select><![CDATA[select site_id, act_date, act_type, act_by, act_own,'
+    ' act_note from t]]></select>'
+    '<group name="G_Site"><dataItem name="SITE_ID" datatype="number"/>'
+    '</group>'
+    '<group name="G_Act"><dataItem name="ACT_DATE" datatype="date"/>'
+    '<dataItem name="ACT_TYPE" datatype="vchar2"/>'
+    '<dataItem name="ACT_BY" datatype="vchar2"/>'
+    '<dataItem name="ACT_OWN" datatype="vchar2"/>'
+    '<dataItem name="ACT_NOTE" datatype="vchar2"/></group>'
+    '</dataSource></data>'
+    '<layout><section name="main" width="8.50000" height="11.00000"><body>'
+    '<frame name="M_G_SITE_GRPFR"><geometryInfo x="0" y="0" width="8.2" '
+    'height="2.5"/>'
+    '<repeatingFrame name="R_SITE" source="G_Site" printDirection="down">'
+    '<geometryInfo x="0" y="0" width="8.2" height="2.4"/>'
+    '<field name="F_SITE" source="SITE_ID">'
+    '<geometryInfo x="0.3" y="0.1" width="1.2" height="0.2"/></field>'
+    '<frame name="M_HDRBAND">'
+    '<geometryInfo x="0.19" y="1.31" width="8.0" height="0.19"/>'
+    '<text name="B_H1"><geometryInfo x="1.0" y="1.31" width="2.3" '
+    'height="0.19"/><visualSettings linePattern="solid"/><textSegment>'
+    '<font face="Times New Roman" size="10" bold="yes" textColor="white"/>'
+    '<string><![CDATA[ Kind]]></string></textSegment></text>'
+    '<text name="B_H2"><geometryInfo x="3.31" y="1.31" width="2.4" '
+    'height="0.19"/><textSegment>'
+    '<font face="Times New Roman" size="10" bold="yes" textColor="white"/>'
+    '<string><![CDATA[ Person]]></string></textSegment></text>'
+    '<text name="B_H3"><geometryInfo x="5.75" y="1.31" width="2.4" '
+    'height="0.19"/><textSegment>'
+    '<font face="Times New Roman" size="10" bold="yes" textColor="white"/>'
+    '<string><![CDATA[ Holder]]></string></textSegment></text>'
+    '</frame>'
+    '<repeatingFrame name="R_ACT" source="G_Act" printDirection="down">'
+    '<geometryInfo x="1.0" y="1.5" width="7.19" height="0.44"/>'
+    '<generalLayout verticalElasticity="expand"/>'
+    '<visualSettings fillPattern="transparent" linePattern="solid"/>'
+    '<frame name="M_ROW">'
+    '<geometryInfo x="1.0" y="1.5" width="7.19" height="0.19"/>'
+    '<generalLayout verticalElasticity="expand"/>'
+    '<visualSettings linePattern="solid"/>'
+    '<field name="F_TYPE" source="ACT_TYPE" alignment="start">'
+    '<font face="Times New Roman" size="10"/>'
+    '<geometryInfo x="1.0" y="1.5" width="2.31" height="0.19"/></field>'
+    '<field name="F_BY" source="ACT_BY" alignment="start">'
+    '<font face="Times New Roman" size="10"/>'
+    '<geometryInfo x="3.31" y="1.5" width="2.44" height="0.19"/></field>'
+    '<field name="F_OWN" source="ACT_OWN" alignment="start">'
+    '<font face="Times New Roman" size="10"/>'
+    '<geometryInfo x="5.75" y="1.5" width="2.44" height="0.19"/></field>'
+    '<line name="B_V1" stretchWithFrame="M_ROW">'
+    '<geometryInfo x="3.31" y="1.5" width="0.0" height="0.19"/>'
+    '<visualSettings fillPattern="transparent" linePattern="solid"/>'
+    '<points><point x="3.31" y="1.5"/><point x="3.31" y="1.69"/></points>'
+    '</line>'
+    '<line name="B_V2" stretchWithFrame="M_ROW">'
+    '<geometryInfo x="5.75" y="1.5" width="0.0" height="0.19"/>'
+    '<visualSettings fillPattern="transparent" linePattern="solid"/>'
+    '<points><point x="5.75" y="1.5"/><point x="5.75" y="1.69"/></points>'
+    '</line>'
+    '</frame>'
+    '<field name="F_NOTE" source="ACT_NOTE" alignment="start">'
+    '<font face="Times New Roman" size="10"/>'
+    '<geometryInfo x="1.0" y="1.69" width="7.19" height="0.25"/>'
+    '<generalLayout verticalElasticity="expand"/></field>'
+    '</repeatingFrame>'
+    '<field name="F_DATE" source="ACT_DATE" alignment="start">'
+    '<font face="Times New Roman" size="10"/>'
+    '<geometryInfo x="0.19" y="1.5" width="0.81" height="0.19"/></field>'
+    '</repeatingFrame></frame>'
+    '</body></section></layout></report>'
+)
+
+
+def test_declared_detail_band_fonts_and_boxes():
+    """The nested-detail band must carry the SOURCE's declared styling:
+    Times faces/sizes on row+wrap fields and captions (ours dropped to
+    9pt Helvetica), the solid-linePattern frame boxes around the record
+    and the row band, and the vertical separator <line>s at their
+    declared x (truth prints boxed detail cells; ours drew nothing)."""
+    import re
+    from converter import convert
+
+    rdl = convert(_BOXED_ND_XML.encode())["rdl_xml"]
+    det = re.search(r'<Textbox Name="Tb_NDDet_[^"]*">.*?</Textbox>',
+                    rdl, re.S)
+    assert det and "Times New Roman" in det.group(0)         and "10pt" in det.group(0), (
+        "detail cells must keep the declared face/size")
+    wrap = re.search(r'<Textbox Name="Tb_NDWrap_[^"]*">.*?</Textbox>',
+                     rdl, re.S)
+    assert wrap and "Times New Roman" in wrap.group(0), (
+        "wrap lines must keep the declared face")
+    assert 'Name="ND_BandBox_0"' in rdl and 'Name="ND_BandBox_1"' in rdl, (
+        "the declared solid frames must draw the record + row boxes")
+    vseps = re.findall(r'<Line Name="ND_VSep_\d">.*?<Left>([0-9.]+)in</Left>',
+                       rdl, re.S)
+    assert sorted(vseps) == ["3.31", "5.75"], (
+        "the vertical separator lines must sit at their declared x")
+
+    # prove-the-gate: strip the declared styling -> defaults, no chrome
+    plain = _BOXED_ND_XML.replace(
+        '<font face="Times New Roman" size="10"/>', "")
+    plain = plain.replace(
+        '<visualSettings fillPattern="transparent" linePattern="solid"/>',
+        "")
+    plain = plain.replace('<visualSettings linePattern="solid"/>', "")
+    plain = re.sub(r'<line name="B_V\d".*?</line>', "", plain, flags=re.S)
+    rdl2 = convert(plain.encode())["rdl_xml"]
+    det2 = re.search(r'<Textbox Name="Tb_NDDet_[^"]*">.*?</Textbox>',
+                     rdl2, re.S)
+    assert det2 and "9pt" in det2.group(0), "undeclared -> 9pt default"
+    assert "ND_BandBox" not in rdl2 and "ND_VSep" not in rdl2, (
+        "no declared boxes/lines -> no invented chrome")
+
+
+def test_margin_chrome_paint_order_is_explicit():
+    """The margin band object painted FIRST in Oracle (a full-width
+    filled band) buried the date/page items drawn on top of it: this
+    ReportViewer build ignores document order for equal-ZIndex overlaps,
+    so every emitted chrome item must carry an explicit ZIndex in
+    declared paint order (truth-render measured: 'Page N of M' vanished
+    under the title band's gray fill)."""
+    import re
+    from converter import convert
+
+    rdl = convert(_CHROME_XML.encode())["rdl_xml"]
+    ph = re.search(r"<PageHeader>(.*?)</PageHeader>", rdl, re.S).group(1)
+    zs = re.findall(r'<Textbox Name="MChrome_H_[^"]*">.*?'
+                    r"<ZIndex>(\d+)</ZIndex>", ph, re.S)
+    assert len(zs) >= 2, "chrome items must carry explicit ZIndex"
+    assert zs == sorted(zs, key=int), (
+        "ZIndex must follow the declared paint order (y,x sort)")
+
+
+def _stacked_list_xml(fonts=True):
+    F = '<font face="Arial" size="10"/>' if fonts else ''
+    FB = '<font face="Arial" size="10" bold="yes"/>' if fonts else ''
+    hdrs = ''.join(
+        '<text name="B_H%d"><geometryInfo x="%s" y="%s" width="1.5" '
+        'height="0.18"/><textSegment>%s'
+        '<string><![CDATA[%s]]></string></textSegment></text>'
+        % (i, x, y, FB, t)
+        for i, (x, y, t) in enumerate([
+            (0.3, 0.8, 'Permit'), (0.3, 0.98, 'Permit Dates'),
+            (4.0, 0.8, 'City'), (4.0, 0.98, 'Type of Operation'),
+            (7.5, 0.8, 'Site'), (7.5, 0.98, 'Visited'),
+        ]))
+    flds = ''.join(
+        '<field name="F_%s" source="%s" alignment="start">%s'
+        '<geometryInfo x="%s" y="%s" width="1.5" height="0.18"/></field>'
+        % (s, s, F, x, y)
+        for s, x, y in [
+            ('PERM_NO', 0.3, 1.2), ('PERM_DATES', 0.3, 1.38),
+            ('CITY_NM', 4.0, 1.2), ('OP_TYPE', 4.0, 1.38),
+            ('SITE_NM', 7.5, 1.2), ('VIS_FL', 7.5, 1.38),
+        ])
+    return (
+        '<?xml version="1.0"?>'
+        '<report name="SLIST_T" DTDVersion="9.0.2.0.10">'
+        '<data><dataSource name="Q_Main">'
+        '<select><![CDATA[select perm_no, perm_dates, city_nm, op_type,'
+        ' site_nm, vis_fl from t]]></select>'
+        '<group name="G_Main"><dataItem name="PERM_NO" datatype="vchar2"/>'
+        '<dataItem name="PERM_DATES" datatype="vchar2"/>'
+        '<dataItem name="CITY_NM" datatype="vchar2"/>'
+        '<dataItem name="OP_TYPE" datatype="vchar2"/>'
+        '<dataItem name="SITE_NM" datatype="vchar2"/>'
+        '<dataItem name="VIS_FL" datatype="vchar2"/></group>'
+        '</dataSource></data>'
+        '<layout><section name="main" width="11.00000" height="8.50000">'
+        '<body>' + hdrs +
+        '<repeatingFrame name="R_Main" source="G_Main" '
+        'printDirection="down">'
+        '<geometryInfo x="0.3" y="1.2" width="10.0" height="0.4"/>'
+        + flds + '</repeatingFrame>'
+        '</body></section></layout></report>')
+
+
+def test_stacked_list_keeps_declared_font_sizes():
+    """The stacked-list table hardcoded 8pt on captions AND data cells
+    where the source declares 10pt faces (truth-PDF span-measured: the
+    inspections list prints 10pt). Declared face/size must pass through;
+    an undeclared source keeps the 8pt default."""
+    import re
+    from converter import convert
+
+    rdl = convert(_stacked_list_xml(fonts=True).encode())["rdl_xml"]
+    assert "Tablix_StackedList" in rdl, "fixture must route stacked"
+    det = re.search(r'<Textbox Name="Tb_SLDet_[^"]*">.*?</Textbox>',
+                    rdl, re.S)
+    assert det and "<FontSize>10pt</FontSize>" in det.group(0) \
+        and "<FontFamily>Arial</FontFamily>" in det.group(0), (
+        "detail cells must keep the declared 10pt Arial")
+    hdr = re.search(r'<Textbox Name="Tb_SLHdr_[^"]*">.*?</Textbox>',
+                    rdl, re.S)
+    assert hdr and "<FontSize>10pt</FontSize>" in hdr.group(0), (
+        "header captions must keep the declared 10pt")
+
+    # prove-the-gate: no declared fonts -> the 8pt default stays
+    rdl2 = convert(_stacked_list_xml(fonts=False).encode())["rdl_xml"]
+    assert "Tablix_StackedList" in rdl2
+    det2 = re.search(r'<Textbox Name="Tb_SLDet_[^"]*">.*?</Textbox>',
+                     rdl2, re.S)
+    assert det2 and "<FontSize>8pt</FontSize>" in det2.group(0)
+
+
+def test_inter_token_literal_space_survives():
+    """A title line of two adjacent tokens separated by ONE literal space
+    ("&A &B") lost the separator: the whitespace-only chunk between the
+    tokens was stripped to nothing, gluing the resolved values together.
+    The declared space must survive as a literal atom."""
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.generators.rdl import _resolve_text_expression
+
+    xml = (
+        '<?xml version="1.0"?><report name="TOKSP_T" DTDVersion="9.0.2.0.10">'
+        '<data>'
+        '<userParameter name="P_A" datatype="character" width="10"/>'
+        '<userParameter name="P_B" datatype="character" width="10"/>'
+        '<dataSource name="Q_Main">'
+        '<select><![CDATA[select c1 from t]]></select>'
+        '<group name="G_Main"><dataItem name="C1" datatype="vchar2"/>'
+        '</group></dataSource></data></report>'
+    )
+    rep = parse_oracle_xml(xml.encode())
+    val, is_expr = _resolve_text_expression("&P_A &P_B", rep)
+    assert is_expr
+    assert '& " " &' in val, (
+        "the literal single space between two tokens must survive: %r"
+        % val)
+    # sanity: no space declared -> none invented
+    val2, _ = _resolve_text_expression("&P_A&P_B", rep)
+    assert '" "' not in val2
+
+
+_ALLPAGE_HDR_XML = (
+    '<?xml version="1.0"?><report name="APHDR_T" DTDVersion="9.0.2.0.10">'
+    '<data><dataSource name="Q_Main">'
+    '<select><![CDATA[select site_col, site_addr, site_dt from t]]>'
+    '</select>'
+    '<group name="G_Col"><dataItem name="SITE_COL" datatype="vchar2"/>'
+    '</group>'
+    '<group name="G_Site"><dataItem name="SITE_ADDR" datatype="vchar2"/>'
+    '<dataItem name="SITE_DT" datatype="vchar2"/></group>'
+    '</dataSource></data>'
+    '<layout><section name="main" width="8.50000" height="11.00000"><body>'
+    '<frame name="M_HDR">'
+    '<geometryInfo x="0.0" y="0.0" width="7.5" height="0.19"/>'
+    '<advancedLayout printObjectOnPage="allPage" '
+    'basePrintingOn="enclosingObject"/>'
+    '<text name="B_LOC"><geometryInfo x="0.5" y="0.0" width="1.5" '
+    'height="0.18"/><textSegment><font face="Arial" size="10" bold="yes"/>'
+    '<string><![CDATA[Location]]></string></textSegment></text>'
+    '<text name="B_DT"><geometryInfo x="5.5" y="0.0" width="1.5" '
+    'height="0.18"/><textSegment><font face="Arial" size="10" bold="yes"/>'
+    '<string><![CDATA[Incident Dates]]></string></textSegment></text>'
+    '</frame>'
+    '<frame name="M_GRPFR">'
+    '<geometryInfo x="0.0" y="0.25" width="7.5" height="0.8"/>'
+    '<repeatingFrame name="R_COL" source="G_Col" printDirection="down">'
+    '<geometryInfo x="0.0" y="0.25" width="7.5" height="0.75"/>'
+    '<text name="B_CAP"><geometryInfo x="0.1" y="0.25" width="3.0" '
+    'height="0.18"/><textSegment><font face="Arial" size="10" bold="yes"/>'
+    '<string><![CDATA[&SITE_COL : sites]]></string></textSegment></text>'
+    '<repeatingFrame name="R_SITE" source="G_Site" printDirection="down">'
+    '<geometryInfo x="0.0" y="0.5" width="7.5" height="0.3"/>'
+    '<field name="F_ADDR" source="SITE_ADDR">'
+    '<geometryInfo x="0.5" y="0.5" width="3.0" height="0.18"/></field>'
+    '<field name="F_DT" source="SITE_DT">'
+    '<geometryInfo x="5.5" y="0.5" width="1.8" height="0.18"/></field>'
+    '</repeatingFrame></repeatingFrame></frame>'
+    '</body></section></layout></report>'
+)
+
+
+def test_allpage_header_repeats_at_page_top():
+    """A column-header frame declared printObjectOnPage="allPage" ABOVE
+    the group band must render as the tablix's TOP static member with
+    RepeatOnNewPage (SSRS's page-repeating header machinery) — ours
+    printed it once, UNDER the first group band."""
+    import re
+    from converter import convert
+
+    rdl = convert(_ALLPAGE_HDR_XML.encode())["rdl_xml"]
+    assert 'Name="ND_ColHdr"' in rdl and 'Name="ND_Band"' in rdl
+    assert rdl.index('Name="ND_ColHdr"') < rdl.index('Name="ND_Band"'), (
+        "the allPage header row must precede the group band row")
+    rh = re.search(r"<TablixRowHierarchy>\s*<TablixMembers>(.*?)"
+                   r"</TablixRowHierarchy>", rdl, re.S).group(1)
+    first = re.search(r"<TablixMember>(.*?)</TablixMember>", rh, re.S)
+    assert first and "<RepeatOnNewPage>true</RepeatOnNewPage>" \
+        in first.group(1) and "<Group" not in first.group(1), (
+        "first row member must be the page-repeating static header")
+
+    # prove-the-gate: without the allPage declaration the header stays
+    # in its synthesized in-group spot (after the band row)
+    plain = _ALLPAGE_HDR_XML.replace(
+        '<advancedLayout printObjectOnPage="allPage" '
+        'basePrintingOn="enclosingObject"/>', "")
+    rdl2 = convert(plain.encode())["rdl_xml"]
+    assert 'Name="ND_ColHdr"' in rdl2 and 'Name="ND_Band"' in rdl2
+    assert rdl2.index('Name="ND_ColHdr"') > rdl2.index('Name="ND_Band"')
+
+
+_ALLPAGE_HDR_BELOW_BAND_XML = (
+    '<?xml version="1.0"?><report name="APHDR_B" DTDVersion="9.0.2.0.10">'
+    '<data><dataSource name="Q_Main">'
+    '<select><![CDATA[select cmp_id, site_nm, act_dt, act_tp from t]]>'
+    '</select>'
+    '<group name="G_Cmp"><dataItem name="CMP_ID" datatype="vchar2"/>'
+    '<dataItem name="SITE_NM" datatype="vchar2"/></group>'
+    '<group name="G_Act"><dataItem name="ACT_DT" datatype="vchar2"/>'
+    '<dataItem name="ACT_TP" datatype="vchar2"/></group>'
+    '</dataSource></data>'
+    '<layout><section name="main" width="8.50000" height="11.00000"><body>'
+    '<frame name="M_GRPFR">'
+    '<geometryInfo x="0.0" y="0.0" width="7.5" height="2.2"/>'
+    '<repeatingFrame name="R_CMP" source="G_Cmp" printDirection="down">'
+    '<geometryInfo x="0.0" y="0.0" width="7.5" height="2.1"/>'
+    '<frame name="M_BAND">'
+    '<geometryInfo x="0.0" y="0.0" width="7.5" height="1.1"/>'
+    '<visualSettings fillPattern="solid" fillBackgroundColor="darkgreen"/>'
+    '<text name="B_CASE"><geometryInfo x="0.3" y="0.06" width="1.2" '
+    'height="0.2"/><textSegment><font face="Arial" size="10" bold="yes"/>'
+    '<string><![CDATA[Case No:]]></string></textSegment></text>'
+    '<field name="F_CMP" source="CMP_ID">'
+    '<geometryInfo x="1.6" y="0.06" width="1.5" height="0.2"/></field>'
+    '<field name="F_SITE" source="SITE_NM">'
+    '<geometryInfo x="1.6" y="0.62" width="3.0" height="0.2"/></field>'
+    '</frame>'
+    '<frame name="M_HDR">'
+    '<geometryInfo x="0.0" y="1.31" width="7.5" height="0.19"/>'
+    '<advancedLayout printObjectOnPage="allPage" '
+    'basePrintingOn="enclosingObject"/>'
+    '<text name="B_AD"><geometryInfo x="0.1" y="1.31" width="1.2" '
+    'height="0.18"/><textSegment><font face="Arial" size="10" bold="yes"/>'
+    '<string><![CDATA[Row Date]]></string></textSegment></text>'
+    '<text name="B_AT"><geometryInfo x="1.5" y="1.31" width="1.8" '
+    'height="0.18"/><textSegment><font face="Arial" size="10" bold="yes"/>'
+    '<string><![CDATA[Row Kind]]></string></textSegment></text>'
+    '</frame>'
+    '<repeatingFrame name="R_ACT" source="G_Act" printDirection="down">'
+    '<geometryInfo x="0.0" y="1.55" width="7.5" height="0.3"/>'
+    '<field name="F_AD" source="ACT_DT">'
+    '<geometryInfo x="0.1" y="1.55" width="1.2" height="0.18"/></field>'
+    '<field name="F_AT" source="ACT_TP">'
+    '<geometryInfo x="1.5" y="1.55" width="1.8" height="0.18"/></field>'
+    '</repeatingFrame></repeatingFrame></frame>'
+    '</body></section></layout></report>'
+)
+
+
+def test_allpage_header_below_geo_band_stays_in_place():
+    """An allPage column-header frame whose DECLARED y sits BELOW the
+    outer group's geometry band must NOT hoist to the tablix top: the
+    truth prints the colored group band first, then the caption row,
+    then the detail rows (page-top hoisting inverted that order on a
+    master-detail report whose band is positioned fields, not a lexical
+    caption — the caption-text demotion was blind to geometry bands)."""
+    import re
+    from converter import convert
+
+    rdl = convert(_ALLPAGE_HDR_BELOW_BAND_XML.encode())["rdl_xml"]
+    assert 'Name="ND_ColHdr"' in rdl and 'Name="ND_Band"' in rdl, (
+        "fixture must route through the nested builder with a header row")
+    assert rdl.index('Name="ND_Band"') < rdl.index('Name="ND_ColHdr"'), (
+        "a below-band allPage header must stay under the group band")
+    # the FIRST direct row-hierarchy member must be the band GROUP, not a
+    # page-repeating static (that is the page-top hoist)
+    import xml.etree.ElementTree as ET
+    root = ET.fromstring(rdl)
+    ns = root.tag.split("}")[0].strip("{")
+
+    def q(t):
+        return "{%s}%s" % (ns, t)
+
+    rh = next(root.iter(q("TablixRowHierarchy")))
+    first = rh.find(q("TablixMembers")).find(q("TablixMember"))
+    assert first.find(q("Group")) is not None, (
+        "below-band header must not become the page-top repeating static")
+
+
+def _linked_notes_letter_xml(with_repeating=True):
+    notes_open = (
+        '<repeatingFrame name="R_G_Notes" source="G_Notes" '
+        'printDirection="acrossDown" minWidowRecords="1" columnMode="no">'
+        '<geometryInfo x="0.25" y="3.6" width="7.5" height="0.44"/>'
+        '<generalLayout verticalElasticity="variable"/>'
+        if with_repeating else "")
+    notes_close = '</repeatingFrame>' if with_repeating else ""
+    return (
+        '<?xml version="1.0"?><report name="LTRN_T" DTDVersion="9.0.2.0.10">'
+        '<data><dataSource name="Q_Main">'
+        '<select><![CDATA[select perm_no, app_id, perm_nm from t]]>'
+        '</select>'
+        '<group name="G_PERMIT"><dataItem name="PERM_NO" datatype="vchar2"/>'
+        '<dataItem name="APP_ID" datatype="number"/>'
+        '<dataItem name="PERM_NM" datatype="vchar2"/></group></dataSource>'
+        '<dataSource name="Q_Notes">'
+        '<select><![CDATA[select note_txt, app_id from n '
+        'where app_id = :APP_ID]]></select>'
+        '<group name="G_Notes"><dataItem name="NOTE_TXT" datatype="vchar2"/>'
+        '<dataItem name="APP_ID" datatype="number"/></group></dataSource>'
+        '<link parentGroup="G_PERMIT" childQuery="Q_Notes" condition="eq" '
+        'sqlClause="where"/></data>'
+        '<layout><section name="main" width="8.50000" height="11.00000">'
+        '<body width="8.0" height="10.5">'
+        '<frame name="M_G_PERMIT">'
+        '<geometryInfo x="0" y="0" width="7.75" height="10.26"/>'
+        '<repeatingFrame name="R_G_PERMIT" source="G_PERMIT" '
+        'printDirection="down" maxRecordsPerPage="1" minWidowRecords="1" '
+        'columnMode="no">'
+        '<geometryInfo x="0" y="0" width="7.75" height="10.2"/>'
+        '<field name="F_NM" source="PERM_NM">'
+        '<geometryInfo x="0.5" y="0.5" width="4.0" height="0.25"/></field>'
+        '<field name="F_NO" source="PERM_NO">'
+        '<geometryInfo x="0.5" y="1.0" width="2.0" height="0.25"/></field>'
+        + notes_open +
+        '<text name="B_Notes"><geometryInfo x="0.25" y="3.6" width="7.25" '
+        'height="0.38"/><textSegment><font face="Arial" size="10" '
+        'bold="yes"/><string><![CDATA[Site Notes:]]></string></textSegment>'
+        '<textSegment><font face="Arial" size="10"/>'
+        '<string><![CDATA[&NOTE_TXT]]></string></textSegment></text>'
+        + notes_close +
+        '</repeatingFrame></frame>'
+        '</body></section></layout></report>')
+
+
+def test_repeating_comments_block_lists_all_rows_and_collapses_empty():
+    """A per-record letter's repeating sub-block bound to a linked child
+    (the comments idiom: ONE token text inside a repeating frame) must
+    print EVERY child row (=Join(LookupSet(...))) and COLLAPSE entirely
+    (label included) when the child has no rows for this record — the
+    scalar Lookup() kept only the first comment and the caption printed
+    orphaned on zero-comment records (truth-measured)."""
+    import re
+    from converter import convert
+
+    rdl = convert(_linked_notes_letter_xml(True).encode())["rdl_xml"]
+    assert re.search(
+        r'Join\(LookupSet\([^<]*"Q_Notes"\), vbCrLf\)', rdl), (
+        "the repeating block must list ALL child rows via LookupSet")
+    assert re.search(
+        r'<Hidden>=\(Join\(LookupSet\([^<]*"Q_Notes"\), vbCrLf\)\) '
+        r'= ""</Hidden>', rdl), (
+        "the block must hide when the child has no rows for this record")
+    # the child's link correlation must not hard-filter the dataset to one
+    # master row: either the ``AND col = :bind`` predicate is STRIPPED, or
+    # the bind is null-safe (``:bind IS NULL OR``) with a Nothing default —
+    # both leave the dataset carrying EVERY row so LookupSet can join per
+    # master record in SSRS.
+    ct = re.search(r'<DataSet Name="Q_Notes">.*?<CommandText>(.*?)'
+                   r'</CommandText>', rdl, re.S).group(1)
+    assert (":APP_ID" not in ct) or re.search(
+        r":APP_ID\s+IS\s+NULL\s+OR", ct, re.I), ct
+
+    # prove-the-gate: the same text NOT inside a repeating frame is a 1:1
+    # child -> scalar Lookup, no hide gate (unchanged behavior)
+    rdl2 = convert(_linked_notes_letter_xml(False).encode())["rdl_xml"]
+    assert "Join(LookupSet" not in rdl2
+    assert re.search(r'Lookup\([^<]*"Q_Notes"\)', rdl2), (
+        "a non-repeating linked text keeps its scalar Lookup")
+    assert '<Hidden>=(Join' not in rdl2
+
+
+def _cover_note_xml(note_h="0.65", maroon=True, bold_mid=True):
+    seg_font_note = ('<font face="Arial" size="12" bold="yes" italic="yes" '
+                     'textColor="r50g0b0"/>' if maroon
+                     else '<font face="Arial" size="12"/>')
+    mid_font = ('<font face="Arial" size="12" bold="yes"/>' if bold_mid
+                else '<font face="Arial" size="12" italic="yes"/>')
+    hdr = (
+        '<section name="header"><body>'
+        '<frame name="M_COVER_FORM">'
+        '<geometryInfo x="0.25" y="0.25" width="7.5" height="3.5"/>'
+        '<text name="B_L1"><geometryInfo x="0.25" y="0.5" width="1.75" '
+        'height="0.25"/><textSegment><font face="Arial" size="12" '
+        'bold="yes"/><string><![CDATA[Report:]]></string></textSegment>'
+        '</text>'
+        '<text name="B_V1"><geometryInfo x="2.25" y="0.5" width="4.0" '
+        'height="0.25"/><textSegment><font face="Arial" size="12"/>'
+        '<string><![CDATA[Sample Cover Form]]></string></textSegment>'
+        '</text>'
+        '<text name="B_SEGNOTE"><geometryInfo x="2.25" y="1.0" width="5.0" '
+        'height="0.5"/><generalLayout verticalElasticity="variable"/>'
+        '<textSegment><font face="Arial" size="12" italic="yes"/>'
+        '<string><![CDATA[Reminder:  Pick ]]></string></textSegment>'
+        '<textSegment>' + mid_font +
+        '<string><![CDATA[Yard]]></string></textSegment>'
+        '<textSegment><font face="Arial" size="12" italic="yes"/>'
+        '<string><![CDATA[ for the sort order to match.]]></string>'
+        '</textSegment></text>'
+        '<text name="B_MAROON"><geometryInfo x="2.25" y="1.8" width="5.0" '
+        'height="' + note_h + '"/>'
+        '<generalLayout verticalElasticity="variable"/>'
+        '<textSegment>' + seg_font_note +
+        '<string><![CDATA[This caution note explains the form behavior '
+        'in detail.]]></string></textSegment></text>'
+        '<text name="B_L2"><geometryInfo x="0.25" y="2.0" width="1.75" '
+        'height="0.25"/><textSegment><font face="Arial" size="12"/>'
+        '<string><![CDATA[Cautions:]]></string></textSegment></text>'
+        '</frame></body></section>'
+    )
+    return (
+        '<?xml version="1.0"?><report name="COVN_T" '
+        'DTDVersion="9.0.2.0.10">'
+        '<data><dataSource name="Q_Main">'
+        '<select><![CDATA[select perm_no, perm_nm from t]]></select>'
+        '<group name="G_PERMIT"><dataItem name="PERM_NO" '
+        'datatype="vchar2"/><dataItem name="PERM_NM" datatype="vchar2"/>'
+        '</group></dataSource></data>'
+        '<layout>' + hdr +
+        '<section name="main" repeatOn="G_PERMIT">'
+        '<body width="8.0" height="10.5">'
+        '<frame name="M_PERMIT">'
+        '<geometryInfo x="0.15" y="0.125" width="7.7" height="8.2"/>'
+        '<repeatingFrame name="R_PERMIT" source="G_PERMIT" '
+        'printDirection="down" maxRecordsPerPage="1">'
+        '<geometryInfo x="0.15" y="0.125" width="7.7" height="8.0"/>'
+        '<field name="F_NM" source="PERM_NM">'
+        '<geometryInfo x="0.5" y="0.5" width="4.0" height="0.25"/>'
+        '</field></repeatingFrame></frame>'
+        '</body></section></layout></report>')
+
+
+def test_cover_note_pairs_with_label_and_keeps_declared_style():
+    """A cover label anchored beside a TALLER multi-line note (different
+    declared y, note SPAN covers the label) must pair as label:value —
+    ours orphaned the label and chained the note into the previous
+    paragraph — and the note must keep its declared maroon bold-italic
+    12pt (the cover emitter forced 10pt gray). Inline styled segments
+    must emit as MULTI-TextRun paragraphs, not vbCrLf-joined lines."""
+    import re
+    from converter import convert
+
+    rdl = convert(_cover_note_xml().encode())["rdl_xml"]
+    # label paired, not orphaned as a full-width note
+    lbl = re.search(r'<Textbox Name="LcCov_Lbl_(\d+)">(?:(?!</Textbox>).)*?Cautions:',
+                    rdl, re.S)
+    assert lbl, "the spanned label must pair as a normal cover label"
+    val = re.search(r'<Textbox Name="LcCov_Val_%s">.*?</Textbox>'
+                    % lbl.group(1), rdl, re.S)
+    assert val and "caution note explains" in val.group(0), (
+        "the note must be THAT label's value")
+    v = val.group(0)
+    assert "<FontWeight>Bold</FontWeight>" in v \
+        and "<FontSize>12pt</FontSize>" in v \
+        and "#7F0000" in v, (
+        "the declared maroon bold 12pt must survive")
+    # ...but the declared SLANT must NOT be painted. TRUTH (2026-08-08,
+    # whole truth corpus): 16 Oracle-driver PDFs / 142,831 non-blank spans
+    # carry ZERO italic-flagged spans and reference no *-Oblique font
+    # resource, while 32,604 spans are bold -- the export dialect honours
+    # weight and drops slant. All 16 declared-italic objects locatable in a
+    # truth PDF print upright Helvetica / Helvetica-Bold. Stricter than the
+    # old per-box presence check: no slant anywhere in the document.
+    assert "<FontStyle>Italic</FontStyle>" not in rdl, (
+        "Oracle never paints an oblique face -- see models."
+        "ORACLE_RENDERS_ITALIC")
+    # inline styled runs: one Paragraph, >=2 TextRuns, mid-sentence bold,
+    # with the run-boundary space preserved. Name-agnostic on purpose: the
+    # cover is emitted from the DECLARATION, so a note the source does not
+    # author beside a label is its own object, not a synthesized "value".
+    seg = re.search(r'<Textbox Name="LcCov_\w+">(?:(?!</Textbox>).)*'
+                    r'Reminder:(?:(?!</Textbox>).)*</Textbox>', rdl, re.S)
+    assert seg, "the multi-segment note must emit"
+    para = re.search(r"<Paragraph>(?:(?!</Paragraph>).)*Reminder:"
+                     r"(?:(?!</Paragraph>).)*</Paragraph>",
+                     seg.group(0), re.S).group(0)
+    assert para.count("<TextRun>") >= 3, (
+        "styled segments must be TextRuns INSIDE one Paragraph")
+    assert '="Reminder:  Pick "' in para and '="Yard "' in para, (
+        "run-boundary spaces must survive")
+    assert "vbCrLf" not in para, "inline runs must not line-break"
+
+    # prove-the-gate 1: a SHORT note (span does not reach the label) keeps
+    # the old behavior (label emits, but NOT paired to the note value)
+    rdl2 = convert(_cover_note_xml(note_h="0.20").encode())["rdl_xml"]
+    lbl2 = re.search(r'<Textbox Name="LcCov_Lbl_(\d+)">(?:(?!</Textbox>).)*?Cautions:',
+                     rdl2, re.S)
+    if lbl2:
+        val2 = re.search(r'<Textbox Name="LcCov_Val_%s">.*?</Textbox>'
+                         % lbl2.group(1), rdl2, re.S)
+        assert not (val2 and "caution note explains" in val2.group(0))
+    # prove-the-gate 2: uniform segments (no style mix) stay ONE TextRun
+    rdl3 = convert(_cover_note_xml(bold_mid=False).encode())["rdl_xml"]
+    seg3 = re.search(r'<Textbox Name="LcCov_\w+">(?:(?!</Textbox>).)*'
+                     r'Reminder:(?:(?!</Textbox>).)*</Textbox>',
+                     rdl3, re.S)
+    assert seg3 and seg3.group(0).count("<TextRun>") == 1
+
+    # STRICTER than the wording-only checks above: both the label and its
+    # note print at their DECLARED geometry, not on a synthesized grid.
+    # Declared (frame at x=0.25/y=0.25): label B_L2 x=0.25 y=2.0 w=1.75
+    # h=0.25; note B_MAROON x=2.25 y=1.8 w=5.0 h=0.65. The cover rect's own
+    # origin is subtracted from each, so the DIFFERENCES are exact.
+    def _geom(block):
+        return tuple(
+            float(re.search("<%s>([-\\d.]+)in</%s>" % (t, t), block).group(1))
+            for t in ("Top", "Left", "Width", "Height"))
+
+    l_top, l_left, l_w, l_h = _geom(
+        re.search(r'<Textbox Name="LcCov_\w+">(?:(?!</Textbox>).)*?Cautions:'
+                  r'(?:(?!</Textbox>).)*</Textbox>', rdl, re.S).group(0))
+    n_top, n_left, n_w, n_h = _geom(v)
+    assert abs(l_w - 1.75) <= 0.01 and abs(l_h - 0.25) <= 0.01, (
+        f"label box {l_w}x{l_h} is not its declared 1.75x0.25")
+    assert abs(n_w - 5.0) <= 0.01 and abs(n_h - 0.65) <= 0.01, (
+        f"note box {n_w}x{n_h} is not its declared 5.0x0.65")
+    assert abs((n_left - l_left) - 2.0) <= 0.02, (
+        f"declared 2.00in label->note column gap emitted as "
+        f"{n_left - l_left:.2f}in")
+    assert abs((l_top - n_top) - 0.20) <= 0.02, (
+        f"declared 0.20in label->note row offset emitted as "
+        f"{l_top - n_top:.2f}in")

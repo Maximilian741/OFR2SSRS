@@ -12,11 +12,15 @@ from __future__ import annotations
 
 import base64
 import binascii
+import copy
+import itertools
+import math
 import re
 import xml.etree.ElementTree as ET
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 from converter.models import (
+    ORACLE_RENDERS_ITALIC,
     DataItem,
     DataQuery,
     LayoutField,
@@ -35,6 +39,13 @@ from converter.preview.html_mockup import (
 from converter.translators.plsql_formula import (
     translate_formula_to_vb, translate_expr as _translate_oracle_expr,
     extract_placeholder_assignments as _extract_cp_assignments)
+from converter.parsers.oracle_colors import (
+    DEVICE_HAIRLINE_COLOR as _HAIRLINE_INK,
+    DEFAULT_TEXT_COLOR as _BODY_INK,
+    rule_color as _rule_color,
+    text_color as _text_color,
+    resolve_color as _resolve_color_token,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +698,153 @@ def _ssrs_text_align(align: str):
     return None
 
 
+# Oracle horizontal-elasticity values that make the box's WIDTH a run-time
+# property (sized to the formatted content) rather than the declared design
+# width. "expand" is NOT one of them: an expand box keeps its declared width
+# as a floor, so a declared justification still has a box to justify against.
+_FLUID_WIDTH = ("variable", "contract")
+
+
+def _declared_align(lf) -> str:
+    """The layout object's EFFECTIVE declared alignment, lower-cased.
+
+    Oracle justifies text inside the object's *formatted* box. A fluid
+    horizontal elasticity re-sizes that box at run time, and WHICH EDGE the
+    box keeps depends on the justification it is asked to honor -- so the two
+    declarations interact, and only for the one-sided justifications:
+
+      * END/RIGHT + fluid -- the box contracts onto the formatted text while
+        keeping its declared LEFT edge, so the right edge the text would be
+        flush against no longer exists and the glyphs print at the declared x.
+        Truth-PDF measured: a footer date declared alignment="right"
+        horizontalElasticity="variable" at x=7.139in prints its glyphs
+        starting at exactly 7.139in (514.00pt), not flush with the box's
+        7.95in right edge, while a fixed-width sibling declared end does
+        print flush right.
+      * CENTER + fluid -- the contraction happens too, so the centre line
+        the glyphs would sit on is the centre of the CONTRACTED box, i.e.
+        the declared left edge again. But the box can only contract onto a
+        width Oracle knows while it formats the object, and a PAGE built-in
+        (&PageNumber / &TotalPages) is substituted AFTER pagination, so such
+        a box keeps its declared design width and its centre survives.
+        Both halves are truth-PDF measured:
+          - static centred boilerplate: a landscape list title declared
+            justify="center" horizontalElasticity="variable" at x=3.31970in
+            w=4.37061in (box 239.02..553.70pt, centre 396.36pt) prints its
+            272.03pt of glyphs at 239.00..511.03pt -- flush with the
+            DECLARED LEFT EDGE (dLeft = -0.02pt), 21.35pt left of where
+            centring in the declared box would put them;
+          - page-counter boilerplate: a footer counter declared
+            justify="center" horizontalElasticity="variable" at x=3.4917in
+            w=1.5137in (box 251.40..360.39pt, centre 305.90pt) prints its
+            glyphs at 293.52..317.98pt -- centre 305.75pt, i.e. the
+            DECLARED box centre (measured on two separate reports).
+
+    So end/start always follow the elasticity rule; centre follows it too
+    unless the object's formatted width is unknowable at layout time.
+
+    Returns "" when nothing is declared, so callers keep their own default.
+    """
+    a = (getattr(lf, "align", "") or "").strip().lower()
+    he = (getattr(lf, "horizontal_elasticity", "") or "").strip().lower()
+    if a in ("center", "centre", "middle"):
+        return "start" if (he in _FLUID_WIDTH
+                           and _design_time_measurable(lf)) else a
+    if a not in ("end", "right"):
+        # start/undeclared and anything RDL cannot express have nothing
+        # to re-anchor.
+        return a
+    return "start" if he in _FLUID_WIDTH else a
+
+
+# Oracle page built-ins: substituted after the page is composed, so a box
+# holding one cannot be contracted onto its formatted width at layout time.
+_PAGE_BUILTIN_RE = re.compile(
+    r"&\s*<?\s*(?:Physical|Logical)?(?:PageNumber|TotalPages)\b", re.I)
+
+
+def _design_time_measurable(lf) -> bool:
+    """True when the DECLARATION alone fixes the object's formatted width.
+
+    A fluid-width box contracts onto what Oracle formats into it. That width
+    is known while the object is laid out only for a STATIC boilerplate text:
+    a data/parameter-bound field carries a run-time value, and a page
+    built-in is filled in after pagination. Both of those keep the declared
+    design width (and therefore the declared centre line).
+    """
+    if (getattr(lf, "kind", "") or "") != "text":
+        return False
+    t = getattr(lf, "text", "") or ""
+    if not t.strip():
+        return False
+    return "&" not in t and not _PAGE_BUILTIN_RE.search(t)
+
+
+def _declared_text_align(lf, default=None):
+    """The SSRS <TextAlign> a layout object DECLARES, or ``default``.
+
+    THE single alignment mapping: it reads both declarations Oracle makes about
+    horizontal placement and combines them the way Oracle's formatter does.
+
+      * FIXED box (no fluid horizontal elasticity) -- the declared width is the
+        box the text is justified inside, so the declaration applies verbatim:
+        end -> Right, center -> Center, start -> Left.
+      * FLUID box (horizontalElasticity variable/contract) -- the box shrinks
+        to the formatted text and keeps its left edge at the declared x, so the
+        anchor IS the declared left edge whatever the justification says;
+        _declared_align re-anchors those to "start" (truth-PDF measured).
+
+    Returns ``default`` when the object declares nothing this mapping can honor
+    (no justification at all, or Oracle's "flush" full-justify which RDL's
+    TextAlign enum cannot express), so every caller keeps its own fallback --
+    an archetype default, a positional guess, or None for SSRS "General".
+    """
+    if lf is None:
+        return default
+    return _ssrs_text_align(_declared_align(lf)) or default
+
+
+# Oracle vertical-anchor spellings -> the SSRS <VerticalAlign> enum. Only
+# used when a declaration actually carries one (see _declared_vertical_align).
+_VERTICAL_ANCHOR = {
+    "top": "Top", "start": "Top", "above": "Top",
+    "middle": "Middle", "center": "Middle", "centre": "Middle",
+    "bottom": "Bottom", "end": "Bottom", "below": "Bottom",
+}
+
+
+def _declared_vertical_align(lf=None, default: str = "Top") -> str:
+    """The SSRS <VerticalAlign> a layout object DECLARES -- ``Top`` otherwise.
+
+    ORACLE TOP-ANCHORS TEXT IN ITS DECLARED BOX. The first line's ascent sits
+    at the declared box top and whatever height is left over is slack BELOW
+    the text; a taller box does not push its own first line down. Truth-
+    measured on the declared page-chrome title/subtitle pair of two reports:
+    the declared top-to-top distance (title y 0.23938 -> subtitle y 0.49976 =
+    0.2604in) prints as 0.2607in in the truth, i.e. both boxes anchor at their
+    own declared top even though the subtitle box is 0.427in tall and holds
+    one 10pt line. Emitting <VerticalAlign>Middle</VerticalAlign> centres the
+    line in that slack instead and drops the ink (H - lineheight)/2 lower --
+    engine-measured +0.167in / +0.113in / +0.097in below the declared top on
+    0.515in / 0.427in / 0.396in subtitle boxes.
+
+    The paper-layout dialect declares NO vertical justification (census of 314
+    real exports: verticalElasticity only, which is a GROWTH rule; the
+    ``valign`` hits all sit inside <webSource> HTML templates, a different
+    renderer). So this returns ``Top`` for every real object today. It is read
+    from the model anyway -- a dialect that DOES declare an anchor is honored
+    instead of overridden.
+
+    ``lf`` may be None (a synthesized box that declares nothing): synthesized
+    furniture follows the same dialect as the declarations it is built from.
+    """
+    if lf is not None:
+        declared = (getattr(lf, "vertical_align", "") or "").strip().lower()
+        if declared in _VERTICAL_ANCHOR:
+            return _VERTICAL_ANCHOR[declared]
+    return default
+
+
 def _collect_layout_columns(report: ParsedReport, query_name: str) -> List[str]:
     """Walk the layout tree, return ordered column names bound to query_name.
 
@@ -698,10 +856,19 @@ def _collect_layout_columns(report: ParsedReport, query_name: str) -> List[str]:
     seen: Set[str] = set()
     # Build a stub DataQuery so we can reuse the suffix-matching helper.
     target_stub = DataQuery(name=query_name or "")
+    # A SINGLE-query report binds unambiguously: every repeating frame's
+    # break group belongs to the only data source, whatever the names
+    # (a "Q_1" query with "G_PERMITTEE" groups defeated the Q_/G_ suffix
+    # convention, dropping the whole layout column set — the truth PDF
+    # prints the LAYOUT's columns, including parameter-fed ones, not the
+    # raw query item list).
+    _single_q = len(getattr(report, "queries", None) or []) == 1
 
     def walk(group: LayoutGroup, matched: bool = False) -> None:
-        if group.source_query and _query_matches_layout_ref(
-            target_stub, group.source_query
+        if group.source_query and (
+            _query_matches_layout_ref(target_stub, group.source_query)
+            or (_single_q
+                and (getattr(group, "kind", "") or "") == "repeating_frame")
         ):
             matched = True
         if matched:
@@ -718,7 +885,11 @@ def _collect_layout_columns(report: ParsedReport, query_name: str) -> List[str]:
             ckind = (getattr(child, "kind", "") or "").lower()
             # Do NOT pull a DIFFERENT query's nested repeating sub-list into this
             # record's columns (that's a separate detail band / linked child).
+            # A SINGLE-query report has no other query to belong to: its
+            # nested repeating frame is the same query's lower break group,
+            # and skipping it dropped the whole detail column set.
             if (matched and ckind == "repeating_frame" and child.source_query
+                    and not _single_q
                     and not _query_matches_layout_ref(target_stub, child.source_query)):
                 continue
             walk(child, matched)
@@ -1700,8 +1871,22 @@ def _apply_region_aware_trigger_props(root, report) -> None:
         ds_decl[ds.get("Name") or ""] = {
             (f.get("Name") or "") for f in ds.iter(_q("Field"))}
 
+    _SCOPED_AGG_RE = re.compile(
+        r"\b(?:First|Last|Sum|Avg|Min|Max|Count|CountDistinct|StDev|Var)"
+        r"\s*\(\s*Fields!([A-Za-z0-9_]+)\.Value\s*,\s*\"([A-Za-z0-9_]+)\""
+        r"\s*\)")
+
     def _refs_ok(expr, cur_ds):
-        refs = re.findall(r"Fields!([A-Za-z0-9_]+)", expr or "")
+        # A dataset-SCOPED aggregate ref validates against ITS named
+        # dataset (a report-level summary count in a trigger is legal in
+        # any region); only BARE refs must live in the enclosing region's
+        # dataset.
+        rest = expr or ""
+        for m in _SCOPED_AGG_RE.finditer(rest):
+            if m.group(1) not in ds_decl.get(m.group(2), set()):
+                return False
+        rest = _SCOPED_AGG_RE.sub("", rest)
+        refs = re.findall(r"Fields!([A-Za-z0-9_]+)", rest)
         flds = ds_decl.get(cur_ds or "", set())
         return all(r in flds for r in refs)
 
@@ -1742,7 +1927,20 @@ def _apply_region_aware_trigger_props(root, report) -> None:
                     _apply_conditional_format(el, _ok)
         if el.tag == _q("Textbox") and "data-ft" in el.attrib:
             ft = (el.attrib.pop("data-ft") or "").strip().lower()
-            if not ft or not cur_ds:
+            if not ft:
+                return
+            if not cur_ds:
+                # OUTSIDE any data region (a criteria-cover note): a
+                # translated Hidden with no Fields! refs at all (a
+                # parameter-only visibility trigger — "show this note only
+                # when a filter is set") is region-independent and safe to
+                # apply; the truth run hides the note and ours printed it
+                # unconditionally. Anything referencing Fields! keeps the
+                # fire-140 region gate.
+                h = hmap.get(ft)
+                if h is not None and h != "false" and "Fields!" not in h \
+                        and el.find(_q("Visibility")) is None:
+                    _sub(_sub(el, "Visibility"), "Hidden", h)
                 return
             h = hmap.get(ft)
             if h is not None and _refs_ok(h, cur_ds):
@@ -1939,20 +2137,41 @@ def _apply_conditional_format(tb, entries) -> None:
 
 
 def _strict_trigger_resolve(report):
-    """Resolver for trigger-body names: declared parameters and dataset
-    columns ONLY, in their DECLARED casing (SSRS refs are case-sensitive;
-    a body's :status_code casing published as-is broke 9 corpus reports
-    the moment the expression host returned). Unknown names raise -> the
-    trigger translation DECLINES and the object keeps today's behavior."""
+    """Resolver for trigger-body names: declared parameters, dataset
+    columns, and REPORT-scoped <summary> aggregates ONLY, in their
+    DECLARED casing (SSRS refs are case-sensitive; a body's :status_code
+    casing published as-is broke 9 corpus reports the moment the
+    expression host returned). A :CS_X summary reference resolves to its
+    scoped aggregate re-implementation (Count(Fields!SRC.Value, "Q")) —
+    the address-error trigger class gates on such counts and silently
+    never translated. Unknown names raise -> the trigger translation
+    DECLINES and the object keeps today's behavior."""
     pmap = {}
     for p in (getattr(report, "parameters", None) or []):
         if getattr(p, "name", ""):
             pmap.setdefault(p.name.upper(), p.name)
     cmap = {}
+    col_owner = {}
     for q in (getattr(report, "queries", None) or []):
         for it in (getattr(q, "items", None) or []):
             if getattr(it, "name", ""):
                 cmap.setdefault(it.name.upper(), it.name)
+                col_owner.setdefault(it.name.upper(), q.name)
+    _SSMAP = {"count": "Count", "sum": "Sum", "avg": "Avg",
+              "average": "Avg", "min": "Min", "max": "Max",
+              "first": "First", "last": "Last"}
+    smap = {}
+    for f in (getattr(report, "formulas", None) or []):
+        fn = _SSMAP.get((getattr(f, "agg_function", "") or "").lower())
+        src = (getattr(f, "agg_source", "") or "").strip()
+        own = col_owner.get(src.upper())
+        scope = (getattr(f, "agg_scope", "") or "").strip().lower()
+        # report-scoped only: a group-scoped subtotal has no faithful
+        # dataset-wide expression at trigger scope — decline those.
+        if fn and src and own and getattr(f, "name", "") \
+                and scope in ("", "report"):
+            smap[f.name.upper()] = (
+                f'{fn}(Fields!{cmap[src.upper()]}.Value, "{own}")')
 
     def resolve(name):
         u = (name or "").upper()
@@ -1960,6 +2179,8 @@ def _strict_trigger_resolve(report):
             return f"Parameters!{pmap[u]}.Value"
         if u in cmap:
             return f"Fields!{cmap[u]}.Value"
+        if u in smap:
+            return smap[u]
         raise KeyError(name)
     return resolve
 
@@ -1991,9 +2212,73 @@ def _format_trigger_style_map(report) -> dict:
     return m
 
 
+def _row_alternation_bg_expr(report) -> str:
+    """DECLARED banded-record fill -> an SSRS BackgroundColor expression.
+
+    Fires ONLY when a repeating record frame of the main section carries a
+    format trigger whose body is the row-alternation shape (a MOD-2 parity
+    test guarding SRW fill calls -- see
+    ``plsql_formula.translate_row_alternation_fill``).  Returns "" for
+    every source that declares no such trigger, so nothing here can invent
+    striping.
+
+    Parity: Oracle's record counter is a 1-based running count, so its
+    ``MOD 2 = 0`` branch paints the SECOND record and every other one
+    after it.  ``RowNumber(Nothing)`` is the same 1-based running count
+    over the data region, so the comparison maps across unchanged
+    (truth-verified against an exported banded list: header band, then
+    record 1 unpainted and record 2 tinted, alternating from there).
+    """
+    cached = getattr(report, "_row_alt_bg_expr", None)
+    if cached is not None:
+        return cached
+    expr = ""
+    try:
+        from ..translators.plsql_formula import translate_row_alternation_fill
+        bodies = {}
+        for t in (getattr(report, "triggers", None) or []):
+            nm = (getattr(t, "name", "") or "").strip().lower()
+            if nm and (getattr(t, "body", "") or "").strip():
+                bodies[nm] = t.body
+        main = _section_by_kind(report, "section_main")
+
+        def _walk(g):
+            # Pre-order: the OUTERMOST repeating frame is the record block.
+            for c in (getattr(g, "children", None) or []):
+                nm = (getattr(c, "format_trigger", "") or "").strip().lower()
+                if ((getattr(c, "kind", "") or "").lower()
+                        == "repeating_frame" and nm in bodies):
+                    r = translate_row_alternation_fill(bodies[nm])
+                    if r:
+                        return r
+                r = _walk(c)
+                if r:
+                    return r
+            return None
+
+        found = _walk(main) if main is not None else None
+        if found:
+            def _css(tok):
+                if not tok:
+                    return "Transparent"
+                return _resolve_color_token(tok) or "Transparent"
+            even, odd = _css(found.get("even")), _css(found.get("odd"))
+            if even != odd:
+                expr = ('=IIf(RowNumber(Nothing) Mod 2 = 0, "%s", "%s")'
+                        % (even, odd))
+    except Exception:  # noqa: BLE001 -- a band must never break the build
+        expr = ""
+    try:
+        report._row_alt_bg_expr = expr
+    except Exception:  # noqa: BLE001
+        pass
+    return expr
+
+
 _FT_STYLE_DEFAULTS = {"FontWeight": "Normal", "FontStyle": "Normal",
                       "FontFamily": "Arial", "FontSize": "10pt",
-                      "Color": "#111111", "BackgroundColor": "Transparent"}
+                      # Undeclared text ink is BLACK, never a house tone.
+                      "Color": _BODY_INK, "BackgroundColor": "Transparent"}
 
 
 def _apply_format_trigger_style(tb, report, trigger_name) -> bool:
@@ -3361,13 +3646,230 @@ def _drillthrough_for(report, lf):
     return None
 
 
+def _emit_rule_line(parent: ET.Element, name: str, top: float, left: float,
+                    width: float, color: str, weight: str = "0.25pt",
+                    zindex: int = 2, dash: str = "") -> ET.Element:
+    """A horizontal hairline <Line> at container-relative geometry — the
+    faithful mapping for a declared Oracle rule <line>. ZIndex lifts it
+    above white-filled sibling textboxes (this engine ignores document
+    order for equal-ZIndex overlaps).
+
+    Default weight is the thinnest RDL stroke (0.25pt): Oracle renders a
+    rule with NO declared lineWidth as the device hairline (truth PDFs
+    measure 0-width strokes), so anything heavier paints visibly darker
+    than the report it mirrors. Callers with a DECLARED lineWidth pass it
+    (1:1 points).
+
+    Default INK matches that same hairline: the truth PDFs' zero-width
+    strokes measure ~20% ink (#CCCCCC) at every resolution, so a rule with
+    no declared color must not fall back to black.
+
+    ``dash`` is the object's DECLARED <visualSettings dash="..."> token; it
+    picks the stroke PATTERN, which is half of this rule's rendered ink
+    weight (see _declared_dash_style)."""
+    ln = _sub(parent, "Line")
+    ln.set("Name", _safe(name))
+    st = _sub(ln, "Style")
+    bd = _sub(st, "Border")
+    _sub(bd, "Style", _declared_dash_style(dash))
+    _sub(bd, "Color", (color or "").strip() or _HAIRLINE_INK)
+    _sub(bd, "Width", weight)
+    _sub(ln, "Top", f"{max(0.0, top):.3f}in")
+    # 4dp, not 2dp: a rule's left edge and length are DECLARED quantities
+    # and a declared width is the width -- 2dp threw away up to 0.36pt of
+    # each (visible where a rule is meant to stop on a column edge).
+    _sub(ln, "Left", f"{max(0.0, left):.4f}in")
+    _sub(ln, "Height", "0in")
+    _sub(ln, "Width", f"{max(0.1, width):.4f}in")
+    _sub(ln, "ZIndex", str(zindex))
+    return ln
+
+
+def _is_declared_rule(lf) -> bool:
+    """True when a layout object is a DECLARED horizontal RULE that draws.
+
+    Structural only: an Oracle ``<line>`` object whose linePattern says
+    paint (the same draw gate the page-band chrome uses), lying flat, with
+    a real span. Margin-band lines are page chrome and belong to the page
+    band, not the body."""
+    if (getattr(lf, "kind", "") or "") != "line":
+        return False
+    if getattr(lf, "in_margin", False):
+        return False
+    if not getattr(lf, "visible", True):
+        return False
+    lp = (getattr(lf, "line_pattern", "") or "").strip().lower()
+    if not lp or lp in ("transparent", "none"):
+        return False
+    try:
+        w = abs(float(getattr(lf, "width", 0) or 0))
+        h = abs(float(getattr(lf, "height", 0) or 0))
+    except (TypeError, ValueError):
+        return False
+    return w > 0.05 and h <= 0.03
+
+
+def _declared_rule_stroke(lf):
+    """``(ink, weight)`` for a declared rule. A declared lineWidth maps 1:1
+    to points; an UNDECLARED width is Oracle's device hairline — the
+    thinnest RDL stroke, in the ~20% ink the truth exports measure."""
+    try:
+        bw = float(getattr(lf, "border_width", 0) or 0)
+    except (TypeError, ValueError):
+        bw = 0.0
+    return (_rule_color(getattr(lf, "border_color", ""),
+                        width_declared=bw > 0),
+            f"{bw:g}pt" if bw > 0 else "0.25pt")
+
+
+# The thinnest stroke RDL can express. Oracle's device hairline is a
+# ZERO-width stroke (truth PDFs measure width 0.0 on every edge whose
+# <visualSettings> carries linePattern but no lineWidth); SSRS has no
+# zero-width border, so the hairline maps to the minimum instead of to a
+# heavier house weight.
+_HAIRLINE_WEIGHT = "0.25pt"
+# Same weight as a number, for the per-edge rule dicts that carry points.
+_HAIRLINE_WEIGHT_PT = float(_HAIRLINE_WEIGHT[:-2])
+
+
+def _declared_edge_weight(lw) -> str:
+    """SSRS stroke weight for one DECLARED box/cell EDGE.
+
+    Same dialect as ``_declared_rule_stroke`` applies to standalone rules,
+    lifted to the cell level: a declared ``lineWidth`` maps 1:1 to points,
+    an UNDECLARED width is Oracle's device hairline. Truth-measured on an
+    exported landscape summary: its ten column-header cells each declare
+    ``linePattern="solid" lineForegroundColor="white"`` and NO lineWidth,
+    and the Oracle PDF strokes all ten at width 0.0 — so a house 0.5pt
+    weight prints those white separators as visibly thick gaps.
+    """
+    try:
+        w = float(lw or 0)
+    except (TypeError, ValueError):
+        w = 0.0
+    return f"{w:g}pt" if w > 0 else _HAIRLINE_WEIGHT
+
+
+def _declared_dash_style(dash) -> str:
+    """RDL ``BorderStyle`` for a DECLARED ``<visualSettings dash="...">``.
+
+    Oracle's dash declaration is part of a rule's INK WEIGHT, not decoration:
+    the export strokes it with a real PDF dash array, so the rule paints
+    roughly half the ink of the solid bar a dash-blind emitter draws.
+    Truth-measured on two independent exports — one declares
+    ``lineWidth="2" dash="dot"`` and its PDF strokes ``[ 1 ] 0`` at 2.0pt
+    (72 occurrences), another declares ``lineWidth="1" dash="dot"`` and its
+    PDF strokes ``[ 1 ] 0`` at 1.0pt. Rendered and rasterized, the solid bar
+    measured 3.36 ink-px at 150 dpi against the truth stroke's 1.77 — a
+    2x-heavy rule that the dash declaration alone accounts for.
+
+    Token-structural only (no report knowledge): Oracle's family is
+    solid / dot / dash / longDash / dashDot / dashDotDot / doubleDot, and
+    RDL offers Dotted and Dashed. Anything naming a dash strokes Dashed
+    (dashDot is mostly dashes), anything naming only dots strokes Dotted,
+    everything else is a continuous Solid stroke.
+    """
+    tok = (dash or "").strip().lower() if isinstance(dash, str) else ""
+    if not tok or tok in ("solid", "none", "transparent"):
+        return "Solid"
+    if "dash" in tok:
+        return "Dashed"
+    if "dot" in tok:
+        return "Dotted"
+    return "Solid"
+
+
+def _declared_rule_name(lf, seq=0) -> str:
+    """Stable RDL item name for a declared rule, so a later pass can tell
+    an already-emitted rule from one still owed."""
+    return _safe(f"Rule_{(getattr(lf, 'name', '') or '').strip() or seq}")
+
+
+def _emit_declared_rule(items_parent: ET.Element, lf, y_origin: float = 0.0,
+                        x_origin: float = 0.0, max_w=None, zindex: int = 3,
+                        seq: int = 0, name: str = "", top=None):
+    """Emit ONE declared body ``<line>`` as a real rule at its DECLARED
+    endpoints, its y translated into the containing region's coordinate
+    space.
+
+    Routes through the SAME emitter (and therefore the same ink/weight
+    dialect) the page-band chrome rule uses — a declared rule must start
+    and end where the source says, not at the width of whatever band
+    happens to enclose it. Returns the ``<Line>``, or None when the
+    declaration does not draw."""
+    if not _is_declared_rule(lf):
+        return None
+    ink, weight = _declared_rule_stroke(lf)
+    left = max(0.0, float(getattr(lf, "x", 0) or 0) - x_origin)
+    if top is None:
+        # a region that re-flows its declared stack passes the placed top
+        top = max(0.0, float(getattr(lf, "y", 0) or 0) - y_origin)
+    w = float(getattr(lf, "width", 0) or 0)
+    if max_w:
+        w = min(w, max(0.1, float(max_w) - left))
+    return _emit_rule_line(items_parent, name or _declared_rule_name(lf, seq),
+                           top, left, w, ink, weight=weight, zindex=zindex,
+                           dash=getattr(lf, "line_dash", ""))
+
+
+def _apply_italic(style: ET.Element, italic) -> None:
+    """Emit <FontStyle>Italic</FontStyle> ONLY if the export dialect paints an
+    oblique face. It does not -- see models.ORACLE_RENDERS_ITALIC for the
+    measurement (16 Oracle truth PDFs, 142,831 spans, ZERO italic-flagged and
+    no *-Oblique face in any font resource; the 16 locatable declared-italic
+    objects all print upright Helvetica / Helvetica-Bold while bold IS
+    honoured). Emitting Italic made OUR render paint Helvetica-Oblique /
+    Helvetica-BoldOblique on exactly the strings the truth prints upright
+    (A/B: 37 oblique spans over 5 truth-paired reports, truth 0).
+
+    The declaration is still parsed and carried on the model; only the paint
+    is suppressed, so flipping the flag restores it in one place."""
+    if italic and ORACLE_RENDERS_ITALIC:
+        _sub(style, "FontStyle", "Italic")
+
+
 def _build_textbox(parent: ET.Element, name: str, value: str,
                    bold: bool = False, font_size: str = "10pt",
                    bg: Optional[str] = None, fg: Optional[str] = None,
                    text_align: Optional[str] = None,
                    vertical_align: Optional[str] = None,
-                   border_color: str = "#d0d0d0",
-                   padding: str = "4pt",
+                   # DEFAULT = no border. A house-gray default painted a
+                   # grid on every caller that had nothing to declare; a
+                   # border must be asked for (and only a declaration asks).
+                   border_color: Optional[str] = None,
+                   # DEFAULT = the emitter's house weight, for callers whose
+                   # border is SYNTHESIZED (a card outline, a chip edge) and
+                   # therefore has no declared width to honor. A caller that
+                   # is reproducing a DECLARED edge passes the dialect weight
+                   # from _declared_edge_weight() instead, so a no-lineWidth
+                   # declaration strokes as Oracle's device hairline.
+                   border_weight: Optional[str] = None,
+                   # DEFAULT = all four edges (the plain box). A DECLARED
+                   # box can stroke a SUBSET of its edges -- Oracle's
+                   # hideXBorder dialect -- and then only those edges may
+                   # paint. Pass the surviving subset of
+                   # ("top","bottom","left","right"); an empty list means
+                   # the declaration hides the whole box.
+                   border_edges: Optional[list] = None,
+                   # DEFAULT = NO INSET. An Oracle box has no padding: the
+                   # declared width IS the usable text width and the declared
+                   # top IS the first baseline's box edge. A house default
+                   # here shifted every left-anchored label right by its own
+                   # value (truth-measured: a 1pt inset put a whole header row
+                   # +0.0139in off its declared x) and stole the horizontal
+                   # room a declared title needs, wrapping a one-line title
+                   # onto two and pushing everything under it down. A padding
+                   # must be ASKED for, and only a declaration asks (an Oracle
+                   # detail-frame indent is the one that does).
+                   padding: str = "0pt",
+                   # A box whose SLOT is wider than its declaration (a tablix
+                   # column carries the declared inter-column gutter as well
+                   # as the declared box) reserves that surplus on the RIGHT,
+                   # so the usable text width stays the DECLARED width and a
+                   # centred/right-anchored value stays on its declared box
+                   # instead of drifting into the gutter. Declared quantity
+                   # only -- None keeps ``padding`` on all four edges.
+                   padding_right: Optional[str] = None,
                    can_grow: bool = True,
                    font_family: Optional[str] = None,
                    italic: bool = False,
@@ -3375,7 +3877,13 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
                    writing_mode: Optional[str] = None,
                    drillthrough: Optional[dict] = None,
                    hyperlink_expr: Optional[str] = None,
-                   segments_spec: Optional[list] = None) -> ET.Element:
+                   runs_spec: Optional[list] = None,
+                   # The fill a CONTAINER already paints behind this box (a
+                   # declared band rectangle). Never emitted -- it only tells
+                   # the white-hairline rule below what the box really sits
+                   # on, so a declared white gridline over a navy band keeps
+                   # painting once the band moved off the cell onto the frame.
+                   bg_context: Optional[str] = None) -> ET.Element:
     """Emit a styled Textbox.
 
     The optional kwargs let _build_tablix dial in mockup-matching styling
@@ -3383,34 +3891,45 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
     background expression, centered headers, etc.) without forking the
     function. All new kwargs default to backwards-compatible values.
 
-    ``segments_spec`` (optional): a list of per-LINE runs for a MIXED-font
-    Oracle <text> (e.g. an unbold caption then a BOLD value beneath). Each entry
-    is {"value": rdl_value, "bold": bool, "italic": bool, "underline": bool,
-    "font_size": "18pt", "color": str}. Emitted as one Paragraph per entry so
-    each line carries its own weight/size; ``value``/``bold``/``font_size`` are
-    ignored when this is given.
+    ``runs_spec`` (optional): the rich-text form for a MIXED-font Oracle
+    <text>. A LIST OF PARAGRAPHS, each a list of run dicts {"value":
+    rdl_value, "bold": bool, "italic": bool, "underline": bool, "font_size":
+    "18pt", "color": str}; ``value``/``bold``/``font_size`` are ignored when
+    this is given. Oracle <textSegment>s FLOW INLINE, so the caller groups
+    them into paragraphs by the breaks the DECLARATION carries -- one
+    Paragraph per SEGMENT (the shape this parameter replaced) put every
+    mid-sentence styled phrase on a line of its own.
     """
     tb = _sub(parent, "Textbox")
     tb.set("Name", name)
     paragraphs = _sub(tb, "Paragraphs")
-    if segments_spec:
-        for seg in segments_spec:
+    if runs_spec:
+        # TRUE INLINE runs: each entry is one Paragraph given as a LIST of
+        # run dicts ({"value","bold","italic","underline","font_size",
+        # "color"}) — the faithful mapping for Oracle's mid-sentence styled
+        # textSegments, which flow INLINE (truth-measured: a bold run opens
+        # at x=4.9310in on the same baseline the plain run before it ends
+        # on). There is deliberately NO one-Paragraph-per-segment mode: that
+        # was the defect, and re-adding it would break every styled sentence
+        # across lines again.
+        for para_runs in runs_spec:
             para = _sub(paragraphs, "Paragraph")
             if text_align:
                 _sub(_sub(para, "Style"), "TextAlign", text_align)
-            run = _sub(_sub(para, "TextRuns"), "TextRun")
-            _sub(run, "Value", seg.get("value", ""))
-            sstyle = _sub(run, "Style")
-            _sub(sstyle, "FontSize", seg.get("font_size") or font_size)
-            if font_family:
-                _sub(sstyle, "FontFamily", font_family)
-            if seg.get("bold"):
-                _sub(sstyle, "FontWeight", "Bold")
-            if seg.get("italic"):
-                _sub(sstyle, "FontStyle", "Italic")
-            if seg.get("underline"):
-                _sub(sstyle, "TextDecoration", "Underline")
-            _sub(sstyle, "Color", seg.get("color") or fg or "#111111")
+            truns = _sub(para, "TextRuns")
+            for seg in para_runs:
+                run = _sub(truns, "TextRun")
+                _sub(run, "Value", seg.get("value", ""))
+                sstyle = _sub(run, "Style")
+                _sub(sstyle, "FontSize", seg.get("font_size") or font_size)
+                if font_family:
+                    _sub(sstyle, "FontFamily", font_family)
+                if seg.get("bold"):
+                    _sub(sstyle, "FontWeight", "Bold")
+                _apply_italic(sstyle, seg.get("italic"))
+                if seg.get("underline"):
+                    _sub(sstyle, "TextDecoration", "Underline")
+                _sub(sstyle, "Color", seg.get("color") or fg or _BODY_INK)
     else:
         para = _sub(paragraphs, "Paragraph")
         if text_align:
@@ -3429,8 +3948,7 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
             _sub(style, "FontFamily", font_family)
         if bold:
             _sub(style, "FontWeight", "Bold")
-        if italic:
-            _sub(style, "FontStyle", "Italic")
+        _apply_italic(style, italic)
         if underline:
             _sub(style, "TextDecoration", "Underline")
         if fg:
@@ -3443,19 +3961,42 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
     # neutral on a white page). Keep a white border only where it's a real
     # gridline, i.e. over a COLORED background (e.g. a navy column header).
     _b_white = str(border_color or "").strip().lower() in ("#ffffff", "#fff", "white", "")
-    _bg_white = str(bg or "").strip().lower() in ("", "#ffffff", "#fff", "white")
-    if _b_white and _bg_white:
+    _bg_white = str(bg or bg_context or "").strip().lower() in (
+        "", "#ffffff", "#fff", "white")
+    # border_color=None = NO border at all, regardless of background —
+    # dialect rule: only DECLARED borders paint (a gray-chip total row or a
+    # stat detail cell has no border in the Oracle truth).
+    if border_color is None or (_b_white and _bg_white):
         _sub(border, "Style", "None")
+    elif border_edges is not None and len(border_edges) < 4:
+        # DECLARED PER-EDGE BOX (Oracle hideXBorder). A linePattern names
+        # the box; hideLeft/Right/Top/BottomBorder name which of its four
+        # edges actually strokes. Painting all four turns a hidden edge
+        # into a divider standing inside the NEIGHBOURING cell -- a
+        # voucher grid declares each value box's LEFT edge hidden exactly
+        # because it is stacked against its caption, and stroking it
+        # anyway drove a rule through the caption's last glyphs
+        # (engine-render measured). The base <Border> stays None so an
+        # edge the declaration hides paints nothing; the surviving edges
+        # are written in the RDL Style sequence's own order.
+        _sub(border, "Style", "None")
+        for _edge in ("top", "bottom", "left", "right"):
+            if _edge not in border_edges:
+                continue
+            _eb = _sub(tb_style, _edge.capitalize() + "Border")
+            _sub(_eb, "Style", "Solid")
+            _sub(_eb, "Color", border_color)
+            _sub(_eb, "Width", (border_weight or "").strip() or "0.5pt")
     else:
         _sub(border, "Style", "Solid")
         _sub(border, "Color", border_color)
-        _sub(border, "Width", "0.5pt")
+        _sub(border, "Width", (border_weight or "").strip() or "0.5pt")
     if bg:
         _sub(tb_style, "BackgroundColor", bg)
     if vertical_align:
         _sub(tb_style, "VerticalAlign", vertical_align)
     _sub(tb_style, "PaddingLeft", padding)
-    _sub(tb_style, "PaddingRight", padding)
+    _sub(tb_style, "PaddingRight", (padding_right or "").strip() or padding)
     _sub(tb_style, "PaddingTop", padding)
     _sub(tb_style, "PaddingBottom", padding)
     # WritingMode follows the Padding* elements in the SSRS Style sequence; a
@@ -3466,6 +4007,44 @@ def _build_textbox(parent: ET.Element, name: str, value: str,
     _sub(tb, "CanGrow", "true" if can_grow else "false")
     _sub(tb, "KeepTogether", "true")
     return tb
+
+
+def _declared_font_style(lf, default_size: str = "10pt",
+                         default_bold: bool = False) -> dict:
+    """The DECLARED font of a layout object, as ``_build_textbox`` kwargs.
+
+    Oracle writes face, size, weight, slant AND underline on the object's
+    own ``<font>``; the shared style path must reproduce exactly what the
+    source declares and invent nothing:
+
+    * no weight attribute -> the text is NOT bold (a synthesized ``Bold``
+      printed whole column strips and caption stacks heavy where the
+      truth prints them plain),
+    * ``underline="yes"`` -> a real rule under the glyphs
+      (``<TextDecoration>Underline</TextDecoration>``), which the truth
+      draws under every underlined column caption,
+    * ``size="10"`` -> 10pt, not whatever house size the emitter prefers.
+
+    ``default_size``/``default_bold`` apply ONLY where there is no
+    declaration to read (``lf is None``), so a purely synthesized band
+    keeps its own house style. Splat the result into ``_build_textbox``:
+    every emitter that does so inherits the whole dialect at once.
+    """
+    if lf is None:
+        return {"font_family": None, "font_size": default_size,
+                "bold": bool(default_bold), "italic": False,
+                "underline": False}
+    try:
+        size = int(float(getattr(lf, "font_size", 0) or 0)) or None
+    except (TypeError, ValueError):
+        size = None
+    return {
+        "font_family": (getattr(lf, "font_family", "") or "").strip() or None,
+        "font_size": f"{size}pt" if size else default_size,
+        "bold": bool(getattr(lf, "bold", False)),
+        "italic": bool(getattr(lf, "italic", False)),
+        "underline": bool(getattr(lf, "underline", False)),
+    }
 
 
 def _pick_group_key(query: DataQuery, candidates: Iterable[str]) -> Optional[str]:
@@ -3599,6 +4178,516 @@ def _is_neutral_dark(c):
     return (max(r, g, b) - min(r, g, b)) <= 28 and lum < 90
 
 
+# ---------------------------------------------------------------------------
+# DECLARED band geometry: row pitch, inter-record gutter, column-header band
+#
+# Oracle states the detail row's real geometry on the record's repeating
+# frame -- its own declared height plus ``vertSpaceBetweenFrames``, the blank
+# gutter it leaves between two consecutive instances. Truth-PDF measured: the
+# painted swatch is exactly the frame height and the pitch is height+gutter,
+# so a synthesized row height inflates (or shrinks) every page count. These
+# helpers read the declaration; the emitters below use it instead of guessing.
+# ---------------------------------------------------------------------------
+
+def _declared_record_band(report, main=None):
+    """The section_main repeating frame that IS the report's record band.
+
+    The OUTERMOST repeating frame wins, so a nested child frame (a
+    master-detail inner list) never displaces its master. When ``main`` is
+    given the frame must bind to one of that query's groups. Returns the
+    LayoutGroup or None when the source declares no record frame."""
+    try:
+        sec = _section_by_kind(report, "section_main")
+        if sec is None:
+            return None
+        best = None
+
+        def _walk(g, depth):
+            nonlocal best
+            if "repeating" in (getattr(g, "kind", "") or "").lower() \
+                    and float(getattr(g, "height", 0) or 0) > 0:
+                ref = (getattr(g, "source_query", "") or "").strip()
+                ok = True
+                if main is not None:
+                    ok = bool(ref) and _query_matches_layout_ref(main, ref)
+                if ok and (best is None or depth < best[0]):
+                    best = (depth, g)
+            for c in (getattr(g, "children", None) or []):
+                _walk(c, depth + 1)
+
+        _walk(sec, 0)
+        return best[1] if best else None
+    except Exception:  # noqa: BLE001 -- geometry must never break the build
+        return None
+
+
+def _declared_row_gutter_in(report, main=None) -> float:
+    """The declared blank gutter (inches) between two record instances."""
+    g = _declared_record_band(report, main)
+    if g is None:
+        return 0.0
+    return max(0.0, float(getattr(g, "vert_space", 0) or 0))
+
+
+def _declared_row_pitch_in(report, main=None):
+    """Oracle's DECLARED detail-row pitch in inches -- the record frame's
+    declared height PLUS its declared inter-frame gutter. None when the
+    source declares no usable record-frame geometry."""
+    g = _declared_record_band(report, main)
+    if g is None:
+        return None
+    h = float(getattr(g, "height", 0) or 0)
+    if h <= 0:
+        return None
+    return h + max(0.0, float(getattr(g, "vert_space", 0) or 0))
+
+
+def _declared_column_header_band(report, main=None):
+    """The static caption frame that heads the record band.
+
+    Structural: a NON-repeating frame sharing the record band's parent,
+    ending at or above where the record band starts, carrying boilerplate
+    texts and no repeating descendant -- Oracle's page-repeating
+    column-header idiom. Returns (y, height) in body coordinates, or None."""
+    frm = _declared_column_header_frame(report, main)
+    if frm is None:
+        return None
+    return (float(getattr(frm, "y", 0) or 0),
+            float(getattr(frm, "height", 0) or 0))
+
+
+def _declared_column_header_frame(report, main=None):
+    """The frame OBJECT ``_declared_column_header_band`` measures.
+
+    Same structural rule; returned as the layout group itself so callers can
+    read what it DECLARES about itself -- notably its printObjectOnPage
+    scope, which is what decides whether its captions reprint at the top of
+    every page (SSRS ``RepeatOnNewPage``)."""
+    try:
+        band = _declared_record_band(report, main)
+        sec = _section_by_kind(report, "section_main")
+        if band is None or sec is None:
+            return None
+        parent = None
+
+        def _find_parent(g):
+            nonlocal parent
+            for c in (getattr(g, "children", None) or []):
+                if c is band:
+                    parent = g
+                    return True
+                if _find_parent(c):
+                    return True
+            return False
+
+        _find_parent(sec)
+        if parent is None:
+            return None
+
+        def _has_repeating(g):
+            for c in (getattr(g, "children", None) or []):
+                if "repeating" in (getattr(c, "kind", "") or "").lower():
+                    return True
+                if _has_repeating(c):
+                    return True
+            return False
+
+        def _text_count(g):
+            n = sum(1 for f in (getattr(g, "fields", None) or [])
+                    if (getattr(f, "kind", "") or "") == "text"
+                    and (getattr(f, "text", "") or "").strip())
+            for c in (getattr(g, "children", None) or []):
+                n += _text_count(c)
+            return n
+
+        band_y = float(getattr(band, "y", 0) or 0)
+        best = None
+        for c in (getattr(parent, "children", None) or []):
+            if c is band or (getattr(c, "kind", "") or "").lower() != "frame":
+                continue
+            h = float(getattr(c, "height", 0) or 0)
+            y = float(getattr(c, "y", 0) or 0)
+            if h <= 0 or y + h > band_y + 0.02:
+                continue
+            if _has_repeating(c) or _text_count(c) < 1:
+                continue
+            if best is None or y < best[0][0]:
+                best = ((y, h), c)
+        return best[1] if best else None
+    except Exception:  # noqa: BLE001 -- geometry must never break the build
+        return None
+
+
+def _declared_header_band_slack_in(report, main=None) -> float:
+    """The DECLARED blank slack (inches) between the bottom edge of the
+    column-header band and the top edge of the first record band.
+
+    Oracle states both boxes absolutely, so the gap between them is a
+    declaration in its own right -- the same kind of inter-frame slack
+    ``vertSpaceBetweenFrames`` states between two record instances, just
+    stated by geometry instead of by attribute. Stacking the detail rows
+    straight onto the header row silently drops it and prints the first
+    fill flush against the band (truth-measured on a landscape summary:
+    header frame y 0.00525 + height 0.19263 = 0.19788, record band y
+    0.20288, body origin y 0.5 -> the truth's first fill starts at 0.703
+    while a flush stack starts at 0.698).
+
+    Returns 0.0 when either box is undeclared, or when they abut/overlap.
+    """
+    band = _declared_record_band(report, main)
+    hdr = _declared_column_header_band(report, main)
+    if band is None or not hdr:
+        return 0.0
+    try:
+        gap = float(getattr(band, "y", 0) or 0) - (float(hdr[0])
+                                                   + float(hdr[1]))
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, gap)
+
+
+def _declared_fill_frames(report, main=None):
+    """Every section_main FRAME that declares a painted fill of its own.
+
+    Oracle declares a band fill on the FRAME, never on the cells the frame
+    holds: one ``<visualSettings fillPattern="solid">`` paints ONE
+    rectangle across the frame's declared extents, behind every child.
+    Painting each child box instead tiles the band into per-child swatches
+    separated by the declared inter-box gutters, and stops the band at the
+    LAST CHILD's right edge instead of the frame's own -- both measured
+    against the engine PDF and the truth PDF of a landscape summary report
+    (four swatches + three 0.72pt white gutters where the truth prints one
+    2.70483in band; a ten-cell tile ending 18.5pt short of the frame).
+
+    Returns a list of dicts in outermost-first document order:
+
+        {"bg":     "#rrggbb",          # the declared, pattern-gated fill
+         "x", "width", "height":       # the frame's DECLARED extents (in)
+         "sources": {UPPER source: (x, width, height, own_bg)},  # fields
+         "texts":   {caption.lower(): (x, width, height, own_bg)}}
+
+    ``own_bg`` is the CHILD's own declared (pattern-gated) fill, "" when
+    the child declares none -- only a child that declares its own fill
+    keeps a per-cell paint on top of the frame's band.
+
+    Frames with no painted fill, no declared width, or no children are
+    skipped -- there is nothing for them to band.
+    """
+    out: list = []
+    try:
+        sec = _section_by_kind(report, "section_main")
+        if sec is None:
+            return out
+
+        def _kids(g, srcs, txts):
+            for f in (getattr(g, "fields", None) or []):
+                if not getattr(f, "visible", True):
+                    continue
+                w = float(getattr(f, "width", 0) or 0)
+                if w <= 0:
+                    continue
+                _own = (getattr(f, "background_color", "") or "").strip() \
+                    if (getattr(f, "fill_pattern", "") or "").strip() else ""
+                box = (float(getattr(f, "x", 0) or 0), w,
+                       float(getattr(f, "height", 0) or 0), _own)
+                if (getattr(f, "kind", "") or "") == "text":
+                    t = " ".join((getattr(f, "text", "") or "").split())
+                    if t:
+                        txts.setdefault(t.strip().lower(), box)
+                else:
+                    s = (getattr(f, "source", "") or "").upper()
+                    if s:
+                        srcs.setdefault(s, box)
+            for c in (getattr(g, "children", None) or []):
+                _kids(c, srcs, txts)
+
+        def _walk(g):
+            # ``background_color`` is ALREADY the pattern-gated fill: the
+            # parser leaves it "" unless the <visualSettings> carried a
+            # fillPattern attribute, and resolves the foreground for
+            # fillPattern="solid". So a non-empty bg here IS a fill the
+            # Oracle driver paints -- re-testing the pattern VALUE and
+            # excluding "transparent" contradicted the measured dialect
+            # and silently dropped the band.
+            #
+            # TRUTH MEASUREMENT (2026-08-08, per-declaration, whole
+            # truth-paired corpus, all pages, filled BOXES only -- images
+            # and lines excluded, format-trigger-gated variants excluded):
+            #     fillPattern="solid"       34 declared -> 34 painted (100%)
+            #     fillPattern="transparent" 73 declared -> 73 painted (100%)
+            #     no fillPattern attribute 165 declared ->  0 painted (0%)
+            # A declared "transparent" pattern paints exactly as reliably
+            # as "solid": e.g. a header frame declaring
+            # fillPattern="transparent" fillBackgroundColor=gray16 across
+            # its declared 7.57in prints one continuous #D6D6D6 band
+            # 545.4pt wide in the Oracle render. The attribute's PRESENCE
+            # is the gate, never its value.
+            bg = (getattr(g, "background_color", "") or "").strip()
+            w = float(getattr(g, "width", 0) or 0)
+            if (bg and not _is_designer_fill_hex(bg)
+                    and bg.lower() not in ("#ffffff", "white") and w > 0):
+                srcs: dict = {}
+                txts: dict = {}
+                _kids(g, srcs, txts)
+                if srcs or txts:
+                    out.append({
+                        "bg": bg,
+                        "x": float(getattr(g, "x", 0) or 0),
+                        "width": w,
+                        "height": float(getattr(g, "height", 0) or 0),
+                        "sources": srcs,
+                        "texts": txts,
+                    })
+            for c in (getattr(g, "children", None) or []):
+                _walk(c)
+
+        _walk(sec)
+    except Exception:  # noqa: BLE001 -- fills must never break the build
+        return []
+    return out
+
+
+def _contiguous_run(keys, table):
+    """Longest CONTIGUOUS (start, length) run of ``keys`` present in
+    ``table``. (0, 0) when nothing matches."""
+    best = (0, 0)
+    i, n = 0, len(keys)
+    while i < n:
+        if keys[i] in table:
+            j = i
+            while j < n and keys[j] in table:
+                j += 1
+            if j - i > best[1]:
+                best = (i, j - i)
+            i = j
+        else:
+            i += 1
+    return best
+
+
+def _enclosing_frame(report, target):
+    """The layout frame that directly CONTAINS ``target``, or None when the
+    target is a top-level section. Structural walk, no names."""
+    if target is None:
+        return None
+    found = [None]
+
+    def _walk(g, parent):
+        if g is target:
+            found[0] = parent
+            return True
+        for c in (getattr(g, "children", None) or []):
+            if _walk(c, g):
+                return True
+        return False
+
+    for root in (getattr(report, "layout", None) or []):
+        if _walk(root, None):
+            break
+    return found[0]
+
+
+def _declared_box_edges(owner):
+    """The DECLARED box of one layout object, per edge, or None.
+
+    Oracle's ``linePattern`` is the paint gate -- absent / ``transparent`` /
+    ``none`` means the object draws no box, and then NOTHING may be emitted
+    for it. ``hideXBorder`` suppresses individual edges of a box that does
+    draw. Ink and weight come from the object's own declaration (an
+    undeclared width falls back to the dialect's hairline rules in
+    ``rule_color``).
+
+    Returns ``{"edges": [...], "color": str, "width_pt": float}`` or None.
+    """
+    if owner is None:
+        return None
+    pat = ((getattr(owner, "border_pattern", "") or "")
+           or (getattr(owner, "line_pattern", "") or "")).strip().lower()
+    if not pat or pat in ("transparent", "none"):
+        return None
+    hidden = {e.strip().lower()
+              for e in (getattr(owner, "hidden_edges", "") or "").split(",")
+              if e.strip()}
+    edges = [e for e in ("top", "bottom", "left", "right") if e not in hidden]
+    if not edges:
+        return None
+    try:
+        bw = float(getattr(owner, "border_width", 0) or 0)
+    except (TypeError, ValueError):
+        bw = 0.0
+    return {
+        "edges": edges,
+        "color": _rule_color(getattr(owner, "border_color", ""),
+                             width_declared=bw > 0),
+        "width_pt": bw if bw > 0 else 1.0,
+    }
+
+
+def _declared_paint_edges(owner):
+    """The subset of ("top", "bottom", "left", "right") a layout object's
+    DECLARATION actually strokes, in RDL Style-sequence order.
+
+    Same two-step dialect ``_declared_box_edges`` reads, exposed for the
+    positioned-object emitter: ``linePattern`` is the paint gate (absent /
+    ``transparent`` / ``none`` -> the object draws no box, so nothing may
+    stroke), then ``hideXBorder`` removes individual edges from the box
+    that does draw. ``[]`` means "paints nothing", which is also what a
+    box with all four edges hidden means.
+    """
+    if owner is None:
+        return []
+    pat = ((getattr(owner, "line_pattern", "") or "")
+           or (getattr(owner, "border_pattern", "") or "")).strip().lower()
+    if not pat or pat in ("transparent", "none"):
+        return []
+    hidden = {e.strip().lower()
+              for e in (getattr(owner, "hidden_edges", "") or "").split(",")
+              if e.strip()}
+    return [e for e in ("top", "bottom", "left", "right") if e not in hidden]
+
+
+def _apply_declared_box_edges(el, rule):
+    """Write ``rule`` (from ``_declared_box_edges``) onto an item's Style.
+
+    No rule == no ``<Style>`` element at all, so no invented chrome can ride
+    along on a source that declared nothing."""
+    if not rule:
+        return None
+    style = el.find(_q("Style"))
+    if style is None:
+        style = _sub(el, "Style")
+    if len(rule["edges"]) == 4:
+        border = _sub(style, "Border")
+        _sub(border, "Style", "Solid")
+        _sub(border, "Color", rule["color"])
+        _sub(border, "Width", f"{rule['width_pt']:g}pt")
+    else:
+        for e in rule["edges"]:
+            eb = _sub(style, e.capitalize() + "Border")
+            _sub(eb, "Style", "Solid")
+            _sub(eb, "Color", rule["color"])
+            _sub(eb, "Width", f"{rule['width_pt']:g}pt")
+    return style
+
+
+def _declared_frame_box(frame):
+    """The DECLARED box of ONE layout frame, in the settled stroke dialect.
+
+    ``_declared_box_edges`` supplies the paint gate (``linePattern``) and
+    the surviving edges (``hideXBorder``).  This adds the settled WIDTH
+    rule on top: a declared ``lineWidth`` is honored 1:1, and a box that
+    declares NONE is Oracle's device hairline (the truth PDFs stroke those
+    at width 0, ~20% ink).  ``LayoutGroup.border_width`` cannot answer
+    "was a width declared?" -- the parser sets it to 1.0 purely as a "this
+    edge draws" flag -- so the raw declaration is read from
+    ``line_width``.  Without this a frame carrying only ``linePattern``
+    printed a solid BLACK 1pt band edge where Oracle prints a hairline.
+    """
+    rule = _declared_box_edges(frame)
+    if not rule:
+        return None
+    try:
+        _lw = float(getattr(frame, "line_width", 0) or 0)
+    except (TypeError, ValueError):
+        _lw = 0.0
+    if _lw <= 0:
+        rule = dict(rule)
+        rule["color"] = _rule_color(getattr(frame, "border_color", ""),
+                                    width_declared=False)
+        rule["width_pt"] = _HAIRLINE_WEIGHT_PT
+    return rule
+
+
+def _declared_group_box(report, group):
+    """The DECLARED box of the layout frame bound to one DATA group, or None.
+
+    A synthesized card / record rectangle stands for that group's repeating
+    frame, so the only honest border it may carry is the one THAT frame
+    declares: ``linePattern`` gates the paint and ``hideXBorder`` names
+    which of the four edges survive. None when the source binds no frame to
+    the group, when the frame draws no box, or when every edge is hidden --
+    and then the rectangle carries no border at all.
+    """
+    name = (getattr(group, "name", "") or "").strip()
+    if not name:
+        return None
+    try:
+        frame = _find_group_for_query(report, name)
+    except Exception:  # noqa: BLE001 -- styling must never break the build
+        return None
+    return _declared_frame_box(frame)
+
+
+def _apply_edge_subset(style, rule, edges):
+    """Stroke the requested ``edges`` of a rectangle from a DECLARED box.
+
+    ``rule`` comes from ``_declared_box_edges`` / ``_declared_group_box``.
+    An edge the declaration HIDES (hideXBorder="yes"), and every edge of a
+    source that declares no box at all, is written as nothing: a
+    synthesized separator in an invented house colour prints a rule the
+    truth export has no stroke for (measured: a full-width #777777 band
+    edge on a frame declaring hideLeft/Right/Top/BottomBorder).
+    """
+    if not rule:
+        return
+    for e in edges:
+        if e not in rule["edges"]:
+            continue
+        eb = _sub(style, e.capitalize() + "Border")
+        _sub(eb, "Style", "Solid")
+        _sub(eb, "Color", rule["color"])
+        _sub(eb, "Width", f"{rule['width_pt']:g}pt")
+
+
+def _synth_edge_stroke(rule):
+    """``(ink, weight)`` for a SYNTHESIZED rectangle edge.
+
+    A border colour or weight may never be a house literal. When the
+    source declares the box, its own edge ink/width is used; with nothing
+    declared the stroke falls back to the settled device-hairline dialect
+    (``rule_color`` with no declared width + ``_HAIRLINE_WEIGHT``), never
+    to an invented mid-gray."""
+    if rule:
+        return rule["color"], f"{rule['width_pt']:g}pt"
+    return _rule_color("", width_declared=False), _HAIRLINE_WEIGHT
+
+
+def _declared_tablix_border(report, main):
+    """The DECLARED box around a columnar table's detail region, or None.
+
+    The Tablix stands for the whole detail REGION, so the only honest source
+    for its frame is the box the layout draws around that region: the master
+    frame that encloses the repeating frame bound to this query (or, when the
+    repeating frame is not nested in one, that frame itself).
+
+    Oracle's ``linePattern`` is the paint gate -- absent / ``transparent`` /
+    ``none`` means the source draws nothing, and then the Tablix carries NO
+    border at all. The ``hideXBorder`` dialect can suppress individual edges,
+    so the result is per-edge. A repeating frame's OWN box is a per-ROW rule
+    and belongs to the row-edge path (``_declared_row_edge_rule``), not here.
+
+    Returns ``{"edges": [...], "color": str, "width_pt": float}`` or None.
+    """
+    grp = _find_group_for_query(report, getattr(main, "name", "") or "")
+    if grp is None:
+        return None
+    owner = _enclosing_frame(report, grp)
+    if owner is None or "section" in (getattr(owner, "kind", "") or "").lower():
+        # not nested in a frame of its own -> the repeating frame is the region
+        owner = grp
+    return _declared_box_edges(owner)
+
+
+def _apply_declared_tablix_border(tablix, report, main):
+    """Give a columnar Tablix the border its source declares -- and nothing
+    when the source declares none."""
+    try:
+        rule = _declared_tablix_border(report, main)
+    except Exception:  # noqa: BLE001 -- styling must never break the build
+        rule = None
+    return _apply_declared_box_edges(tablix, rule)
+
+
 def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     columns = _column_names_for_main(report, main)
     if not columns:
@@ -3621,21 +4710,21 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     _pal = _resolve_palette(report)
     header_bg = _pal.get("band_bg") or "#4a6a8a"
     header_fg = _pal.get("band_fg") or "#ffffff"
-    detail_bg = "#ffffff"
-    alt_row_bg = "#f5f7fa"
     if main_group is not None:
         gb = getattr(main_group, "background_color", "")
-        fg = getattr(main_group, "foreground_color", "")
         if gb:
             header_bg = gb
-        if fg:
-            header_fg = fg
+        # NB: main_group.foreground_color is Oracle's FILL channel
+        # (fillForegroundColor), never a text ink — routing it into
+        # header_fg painted caption text in the row-band's fill color
+        # (truth-measured: captions are white on the header frame's own
+        # solid fill).
     # A PLAIN report (no real source band) OR a near-neutral dark-gray fill (an
     # Oracle row-striping/design artifact, not a real header band) renders a plain
     # black-on-white header -- never an invented or near-black band.
     if (not _pal.get("themed", True)) or _is_neutral_dark(header_bg):
         header_bg = "#ffffff"
-        header_fg = "#111111"
+        header_fg = _BODY_INK
 
     # Determine if a master-detail nested group should be emitted.
     detail_query = _pick_detail_query(report, main.name)
@@ -3657,7 +4746,12 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     # Subtract the tablix's own 0.25in Left indent (set below) + a small safety
     # so columns + indent fit inside the report body width and the last column
     # doesn't spill onto a horizontal-continuation page.
-    _target_w = max(9.0, _page_width_for(report) - 2 * _PAGE_HMARGIN_IN - 0.30)
+    # Small stock (declared card/label paper) has no 9in floor — the table
+    # target is the stock's own usable width.
+    _usable_tw = (_page_width_for(report)
+                  - 2 * _page_hmargin_for(report) - 0.30)
+    _target_w = (_usable_tw if _small_paper_for(report)
+                 else max(9.0, _usable_tw))
     if _ncol <= 6:
         _colw = max(1.5, round(_target_w / _ncol, 2)) if _target_w > 9.0 else 1.5
     else:
@@ -3670,6 +4764,7 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     # when ANY column has no layout field width (mixed/synthetic columns).
     _ora_w = {}
     _ora_h = {}
+    _ora_x = {}
     try:
         for _y, _x, _d, _lf in _layout_fields_in_order(report):
             _s = (getattr(_lf, "source", "") or "").upper()
@@ -3677,18 +4772,61 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             _h = float(getattr(_lf, "height", 0) or 0)
             if _s and _s not in _ora_w and _w > 0:
                 _ora_w[_s] = _w
+                # The SAME object's declared left edge -- paired with the
+                # width so the two can never come from different objects.
+                _ora_x[_s] = float(_x or 0)
             if _s and _s not in _ora_h and _h > 0:
                 _ora_h[_s] = _h
     except Exception:  # noqa: BLE001 -- widths must never break the table
-        _ora_w, _ora_h = {}, {}
-    # Detail row height: the TALLEST Oracle detail field (so a field Oracle drew
-    # 0.6in tall keeps that height) -- floored at the default 0.28in (so the
-    # corpus, whose fields are <=0.28, is UNCHANGED) and capped at 2in to ignore
-    # a stray giant. CanGrow still grows the row for multi-line data beyond this.
-    _detail_h = min(2.0, max(0.28, max(
-        (_ora_h.get(c.upper(), 0.0) for c in columns), default=0.0)))
+        _ora_w, _ora_h, _ora_x = {}, {}, {}
+    # Detail row PITCH. When the source declares its record frame, the pitch
+    # IS the declaration: the frame's own height plus the gutter it declares
+    # between consecutive instances (vertSpaceBetweenFrames). Truth-PDF
+    # measured to 0.01pt; the synthesized height below inflated one report's
+    # rows 26% (and its page count ~29%) and shrank another's 10%.
+    # Fallback (no declared frame): the TALLEST Oracle detail field, floored
+    # at 0.28in and capped at 2in to ignore a stray giant. CanGrow still
+    # grows the row for multi-line data beyond either.
+    _band_h = _declared_row_pitch_in(report, main)
+    _row_gutter = _declared_row_gutter_in(report, main) if _band_h else 0.0
+    if _band_h:
+        _detail_h = min(2.0, _band_h)
+        _row_gutter = min(_row_gutter, max(0.0, _detail_h - 0.05))
+    else:
+        _detail_h = min(2.0, max(0.28, max(
+            (_ora_h.get(c.upper(), 0.0) for c in columns), default=0.0)))
     _widths = [_ora_w.get(c.upper(), 0.0) for c in columns]
-    if all(w > 0 for w in _widths) and _widths:
+    # DECLARED COLUMN GEOMETRY (exact). A tablix column is a SLOT: what the
+    # engine puts at its left edge is the running SUM of the slots before
+    # it. So a slot must be the declared PITCH (this box's left edge to the
+    # next one's), not the declared box width -- packing the boxes edge to
+    # edge swallows every declared inter-column gutter and every column
+    # after the first lands left of its declaration (measured on a
+    # landscape summary: -0.7pt by the 2nd column, -11.8pt by the 9th).
+    # The declared BOX still owns the text: the slot's surplus over it (the
+    # gutter) rides as a RIGHT inset so a centred/right-anchored value is
+    # centred/anchored on its declared box, not on the slot.
+    # Full precision throughout -- a declared width is the width (2dp
+    # quantisation alone cost the same table up to 3pt of cumulative drift).
+    _col_gutter = [0.0] * len(columns)
+    _xs = [_ora_x.get(c.upper()) for c in columns]
+    _pitch = None
+    if (_widths and all(w > 0 for w in _widths)
+            and all(x is not None for x in _xs)
+            # Column order must BE left-to-right declared order, and the
+            # declared boxes must not overlap -- otherwise "pitch" is not a
+            # slot and the packed fallback below is the honest answer.
+            and all(_xs[i] + _widths[i] <= _xs[i + 1] + 1e-6
+                    for i in range(len(_xs) - 1))):
+        _cand = [(_xs[i + 1] - _xs[i]) for i in range(len(_xs) - 1)]
+        _cand.append(_widths[-1])
+        if all(p > 0 for p in _cand) and sum(_cand) <= _target_w + 1e-6:
+            _pitch = _cand
+    if _pitch is not None:
+        _per_col = list(_pitch)
+        _col_gutter = [max(0.0, _pitch[i] - _widths[i])
+                       for i in range(len(_pitch))]
+    elif all(w > 0 for w in _widths) and _widths:
         _sum = sum(_widths)
         if len(columns) * 0.5 > _target_w:
             # IMPOSSIBLE FIT (wild-corpus: a 54-column, 81in-wide report):
@@ -3699,12 +4837,14 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             # horizontal pagination is the honest rendering of a report
             # that is genuinely wider than the page.
             _scale = min(1.0, 0.5 / max(0.01, min(_widths)))
-            _per_col = [max(0.5, round(w * _scale, 2)) for w in _widths]
+            # 4dp, not 2dp: the scaled ratios are all that is left of the
+            # declaration here, so quantising them throws away real width.
+            _per_col = [max(0.5, round(w * _scale, 4)) for w in _widths]
         else:
             _scale = min(1.0, _target_w / _sum) if _sum > 0 else 1.0
-            _per_col = [max(0.5, round(w * _scale, 2)) for w in _widths]
-            # The 0.5in floor + per-column rounding can push the total a hair
-            # past the usable width and spill the last column onto a 2nd page.
+            _per_col = [max(0.5, round(w * _scale, 4)) for w in _widths]
+            # The 0.5in floor can push the total a hair past the usable
+            # width and spill the last column onto a 2nd page.
             # Trim that small overflow from the columns ABOVE the floor,
             # proportionally, NEVER below the floor (a trim larger than the
             # available slack must spill, not go negative).
@@ -3716,45 +4856,305 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
                 if _slack_total > 0:
                     for _i, _s in _slack:
                         _per_col[_i] = max(0.5, round(
-                            _per_col[_i] - _over * (_s / _slack_total), 2))
+                            _per_col[_i] - _over * (_s / _slack_total), 4))
     else:
         _per_col = [_colw] * len(columns)
+
+    # DECLARED BAND FILLS. Oracle paints a frame's fill ONCE across the
+    # frame's declared extents, behind every child it holds. The per-cell
+    # emission below can only tile it (one swatch per child, split by the
+    # declared inter-box gutters, ending at the last child's right edge),
+    # so a frame that declares a fill collapses its covered columns into a
+    # single spanned cell holding ONE fill rectangle at the frame's own
+    # declared geometry. Runs must be CONTIGUOUS in column order -- a
+    # scattered frame has no single band to paint and stays per-cell.
+    _caps = _column_captions(report, columns)
+    _fill_frames = _declared_fill_frames(report, main)
+    _cap_keys = [(_caps.get(c.upper(), c.replace("_", " ")) or "")
+                 .strip().lower() for c in columns]
+    _src_keys = [c.upper() for c in columns]
+    _hdr_ff = None
+    _hdr_run = (0, 0)
+    _det_ff = None
+    _det_run = (0, 0)
+    for _ff in _fill_frames:
+        _r = _contiguous_run(_cap_keys, _ff["texts"])
+        if _r[1] >= 2 and _r[1] > _hdr_run[1]:
+            _hdr_ff, _hdr_run = _ff, _r
+        _r = _contiguous_run(_src_keys, _ff["sources"])
+        if _r[1] >= 2 and _r[1] > _det_run[1]:
+            _det_ff, _det_run = _ff, _r
+    # The band must REACH its declared right edge: when the packed columns
+    # stop short of it, the run's LAST column carries the shortfall (the
+    # same declared-width principle, applied to fills). Never past the
+    # printable target -- a wider table would paginate horizontally.
+    for _ff, (_r0, _rn) in ((_hdr_ff, _hdr_run), (_det_ff, _det_run)):
+        if _ff is None or _rn <= 0:
+            continue
+        _org = sum(_per_col[:_r0])
+        _need = (_ff["x"] + _ff["width"]) - _org
+        _have = sum(_per_col[_r0:_r0 + _rn])
+        _grow = min(_need - _have, max(0.0, _target_w - sum(_per_col)))
+        if _grow > 0.005:
+            _per_col[_r0 + _rn - 1] = round(
+                _per_col[_r0 + _rn - 1] + _grow, 4)
+            # The SLOT grew to reach the band's declared edge; the declared
+            # BOX inside it did not, so the surplus joins that column's
+            # reserved gutter instead of stretching the value's box.
+            _col_gutter[_r0 + _rn - 1] = round(
+                _col_gutter[_r0 + _rn - 1] + _grow, 4)
+
     for _w in _per_col:
         c = _sub(cols_el, "TablixColumn")
-        _sub(c, "Width", f"{_w}in")
+        _sub(c, "Width", f"{_w:.4f}in")
 
     rows_el = _sub(body, "TablixRows")
 
-    # Header row -- band background, white bold text, centered.
+    # Header row -- band background, centered, styled like the DECLARED
+    # band labels (the truth prints captions in the label's own face/
+    # size; a uniform bold 10pt wrapped "Release" out of its narrow
+    # declared column). Its HEIGHT is the declared caption frame's own
+    # height when the source declares one (a fixed 0.30in printed the band
+    # 7.7pt taller than the truth, which matches the declaration to 0.01pt).
+    _hdr_band = _declared_column_header_band(report, main)
+    # ...plus the DECLARED slack below it. Tablix rows stack edge to edge,
+    # so the blank the source declares between the header frame's bottom
+    # and the record band's top has nowhere else to live; carrying it on
+    # the header row's height puts the first detail band back on its
+    # declared y (truth-measured: the flush stack started the first record
+    # fill 0.005in high, hard against the band).
+    _hdr_slack = _declared_header_band_slack_in(report, main)
     header_row = _sub(rows_el, "TablixRow")
-    _sub(header_row, "Height", "0.30in")
+    _sub(header_row, "Height",
+         f"{_hdr_band[1] + _hdr_slack:.4f}in"
+         if _hdr_band and _hdr_band[1] > 0.05
+         else "0.30in")
     header_cells = _sub(header_row, "TablixCells")
-    _caps = _column_captions(report, columns)
-    for col in columns:
-        cell = _sub(header_cells, "TablixCell")
-        contents = _sub(cell, "CellContents")
+    _cap_style: dict = {}
+    _hdr_frame_bg = ""
+    try:
+        _cap_texts = {c.strip().lower() for c in _caps.values()}
+        _band_votes: dict = {}
+
+        def _walk_capstyle(g, painted_bg=""):
+            # innermost PAINTED ancestor fill (pattern-gated by the parser)
+            # -- the frame that owns the captions IS the header band.
+            _bgp = (getattr(g, "background_color", "") or "").strip() \
+                or painted_bg
+            for f in (getattr(g, "fields", None) or []):
+                if (getattr(f, "kind", "") or "") != "text":
+                    continue
+                t = " ".join((getattr(f, "text", "") or "").split())
+                if t and t.lower() in _cap_texts \
+                        and t.lower() not in _cap_style:
+                    _lpat = (getattr(f, "line_pattern", "") or "").lower()
+                    _cap_style[t.lower()] = (
+                        (getattr(f, "font_family", "") or "").strip() or None,
+                        int(getattr(f, "font_size", 0) or 0) or 10,
+                        bool(getattr(f, "bold", False)),
+                        (getattr(f, "color", "") or "").strip(),
+                        _declared_align(f),
+                        (((getattr(f, "border_color", "") or "").strip()
+                          or "#000000")
+                         if _lpat and _lpat not in ("transparent", "none")
+                         else None),
+                        # The caption cell's DECLARED stroke weight. An
+                        # undeclared lineWidth is the device hairline, not
+                        # the emitter's house weight (see
+                        # _declared_edge_weight).
+                        _declared_edge_weight(getattr(f, "line_width", 0)),
+                    )
+                    if _bgp:
+                        _band_votes[_bgp] = _band_votes.get(_bgp, 0) + 1
+            for c in (getattr(g, "children", None) or []):
+                _walk_capstyle(c, _bgp)
+        for _lg in (getattr(report, "layout", None) or []):
+            _walk_capstyle(_lg)
+        if _band_votes:
+            _hdr_frame_bg = max(_band_votes.items(), key=lambda kv: kv[1])[0]
+    except Exception:  # noqa: BLE001 - style lookup must never break the table
+        _cap_style = {}
+        _hdr_frame_bg = ""
+    # DECLARED header band: the painted fill of the frame that holds the
+    # caption text objects wins over any palette heuristic (truth-measured:
+    # the column-header frame declares its own solid fill).
+    if _hdr_frame_bg and not _is_designer_fill_hex(_hdr_frame_bg) \
+            and _hdr_frame_bg.lower() not in ("#ffffff", "white"):
+        header_bg = _hdr_frame_bg
+
+    def _ssrs_justify(j):
+        j = (j or "").strip().lower()
+        if j in ("center", "centre"):
+            return "Center"
+        if j in ("right", "end", "flushright"):
+            return "Right"
+        return "Left"
+
+    def _band_cell(cells, name, ff, run, hgt, gutter=0.0):
+        """One SPANNED TablixCell carrying the DECLARED band fill.
+
+        The frame's fill is a single rectangle at the frame's own declared
+        geometry, and the covered children are its CONTENTS -- not its
+        siblings. That nesting is what makes the fill FOLLOW ITS ROW: an
+        RDL rectangle's declared height is a MINIMUM, and the engine grows
+        the container when a child grows, so a record whose data wraps onto
+        a second line stays painted edge to edge. Siblings cannot do that
+        (their height is final), which left the bottom of every grown row
+        unpainted while the row itself stretched.
+
+        ``gutter`` is the declared inter-record slack. It rides as an
+        unpainted spacer BELOW the fill so it survives growth too: the
+        engine pushes items below a growing one down, so the white gap
+        between two record swatches stays exactly as declared instead of
+        being eaten by the taller row.
+
+        Returns (report_items_of_the_fill, origin_x_of_that_container).
+        """
+        _r0, _rn = run
+        _org = sum(_per_col[:_r0])
+        _span_w = sum(_per_col[_r0:_r0 + _rn])
+        _left = max(0.0, float(ff["x"]) - _org)
+        _w = min(float(ff["width"]), max(0.05, _span_w - _left))
+        _gut = max(0.0, float(gutter or 0.0))
+        _cell = _sub(cells, "TablixCell")
+        _cc = _sub(_cell, "CellContents")
+        _wrap = _sub(_cc, "Rectangle")
+        _wrap.set("Name", _safe(f"{name}_Wrap"))
+        _items = _sub(_wrap, "ReportItems")
+        _fill = _sub(_items, "Rectangle")
+        _fill.set("Name", _safe(name))
+        # The band's children live HERE, so the painted box is their
+        # container and grows with them. Declared first: RDL puts a
+        # rectangle's ReportItems ahead of its style/geometry.
+        _kids = _sub(_fill, "ReportItems")
+        _sub(_sub(_fill, "Style"), "BackgroundColor", ff["bg"])
+        _sub(_fill, "Top", "0in")
+        _sub(_fill, "Left", f"{_left:.4f}in")
+        # DECLARED height = the MINIMUM the band paints; growth is on top.
+        _sub(_fill, "Height", f"{hgt:.4f}in")
+        _sub(_fill, "Width", f"{_w:.4f}in")
+        # BEHIND anything the wrap may hold. Document order is NOT paint
+        # order for overlapping items in a Rectangle -- without an explicit
+        # ZIndex the engine painted the opaque band ON TOP, burying every
+        # caption (render-measured: the paint gate went 0 -> 8 buried words).
+        _sub(_fill, "ZIndex", "0")
+        if _gut > 0:
+            # Unpainted spacer holding the DECLARED inter-record gutter open
+            # under the fill (truth-PDF: discrete per-record swatches
+            # separated by a white gap, never one continuous block).
+            _gap = _sub(_items, "Rectangle")
+            _gap.set("Name", _safe(f"{name}_Gutter"))
+            _sub(_gap, "Top", f"{hgt:.4f}in")
+            _sub(_gap, "Left", "0in")
+            _sub(_gap, "Height", f"{_gut:.4f}in")
+            _sub(_gap, "Width", f"{_span_w:.4f}in")
+            _sub(_gap, "ZIndex", "1")
+        _sub(_wrap, "Top", "0in")
+        _sub(_wrap, "Left", "0in")
+        _sub(_wrap, "Height", f"{hgt + _gut:.4f}in")
+        _sub(_wrap, "Width", f"{_span_w:.4f}in")
+        _sub(_cc, "ColSpan", str(_rn))
+        return _kids, _org + _left
+
+    def _place_declared(host, box, org, fallback_h):
+        """Position the last-built child inside a band rectangle at its
+        own DECLARED offset/size (relative to the band container's own
+        left edge -- ``org`` already carries it)."""
+        _tb = host[-1]
+        _sub(_tb, "Top", "0in")
+        _sub(_tb, "Left", f"{max(0.0, float(box[0]) - org):.4f}in")
+        _sub(_tb, "Height", f"{(float(box[2]) or fallback_h):.4f}in")
+        _sub(_tb, "Width", f"{max(0.05, float(box[1])):.4f}in")
+        # Distinct paint order among the band's own children (the painted
+        # box is now their CONTAINER, so nothing has to out-rank it).
+        _sub(_tb, "ZIndex", str(len(host)))
+
+    # The header band frame declares the fill: paint it ONCE across the
+    # frame's declared extents rather than once per caption cell. Gated on
+    # a real painted band -- a white/neutralised header has no band.
+    _hdr_h = (_hdr_band[1] if _hdr_band and _hdr_band[1] > 0.05 else 0.30)
+    if _hdr_ff is not None and float(_hdr_ff["height"] or 0) > 0.02:
+        _hdr_h = float(_hdr_ff["height"])
+    _hdr_span = (_hdr_ff if (_hdr_ff is not None and _cap_style
+                             and (header_bg or "").lower()
+                             not in ("", "#ffffff", "white")) else None)
+    _hdr_items = None
+    _hdr_org = 0.0
+    for _hi, col in enumerate(columns):
+        _in_span = (_hdr_span is not None
+                    and _hdr_run[0] <= _hi < _hdr_run[0] + _hdr_run[1])
+        if _in_span and _hi == _hdr_run[0]:
+            _hdr_items, _hdr_org = _band_cell(
+                header_cells, "HdrBand_0", _hdr_span, _hdr_run, _hdr_h)
+        elif _in_span:
+            _sub(header_cells, "TablixCell")  # covered by the span
+        if _in_span:
+            contents = _hdr_items
+        else:
+            cell = _sub(header_cells, "TablixCell")
+            contents = _sub(cell, "CellContents")
+        _cap = _caps.get(col.upper(), col.replace("_", " "))
+        if _cap_style:
+            # DECLARATION-DRIVEN header: caption objects exist in the source
+            # layout, so every style channel is the declared one -- ink,
+            # alignment (Oracle default justify = start of the box), and
+            # ONLY declared borders paint (no invented cell grid).
+            (_face, _csz, _cbold, _cink, _calign, _cborder,
+             _cbweight) = _cap_style.get(
+                _cap.strip().lower(),
+                (None, 10, False, "", "", None, None))
+            _align = _ssrs_justify(_calign)
+            _ink = _cink or header_fg
+        else:
+            _face, _csz, _cbold = None, 10, True
+            # No caption objects in the source == no declared cell grid.
+            # A literal gray outline here painted a header grid the source
+            # never asked for; None means the cell carries no border.
+            _cborder = None
+            _cbweight = None
+            _align = "Center"
+            _ink = header_fg
+        # Inside the band the FRAME paints; a caption keeps a fill of its
+        # own only when the caption itself declares one.
+        _cbox = (_hdr_span["texts"].get(_cap.strip().lower())
+                 if _in_span else None)
         _build_textbox(
             contents,
             f"Hdr_{_safe(col)}",
-            _caps.get(col.upper(), col.replace("_", " ")),
-            bold=True,
-            bg=header_bg,
-            fg=header_fg,
-            text_align="Center",
-            vertical_align="Middle",
-            border_color="#a0a0a0",
-            padding="5pt",
+            _cap,
+            bold=_cbold or not _cap_style,
+            font_family=_face,
+            font_size=f"{_csz}pt",
+            bg=((_cbox[3] or None) if _cbox else
+                (None if _in_span else header_bg)),
+            bg_context=(_hdr_span["bg"] if _in_span else None),
+            fg=_ink,
+            text_align=_align,
+            vertical_align=_declared_vertical_align(),
+            border_color=_cborder,
+            # A DECLARED cell edge carries the DECLARED weight; with no
+            # lineWidth that is the device hairline the truth strokes at 0.
+            border_weight=_cbweight,
+            # NO INSET: the caption cell is the DECLARED column box. The 1pt
+            # that used to sit here put every left-anchored caption exactly
+            # +0.0139in right of the truth's glyph x, right across a header
+            # row (truth-PDF measured).
+            padding="0pt",
         )
+        if _cbox:
+            _place_declared(contents, _cbox, _hdr_org, _hdr_h)
 
-    # Detail row -- alternating bg via row-number expression so output
-    # mirrors the banded look in the in-app mockup.
+    # Detail row. NO invented zebra striping: the Oracle truth PDFs paint
+    # detail rows plain (white, or a SOURCE-declared band fill) — a
+    # RowNumber-Mod-2 alternating BackgroundColor is a converter invention
+    # that the layout-mode preview hides (it staticizes white) but a real
+    # SSRS deploy paints, diverging from the truth on every page.
     detail_row = _sub(rows_el, "TablixRow")
-    _sub(detail_row, "Height", f"{_detail_h:.2f}in")
+    # 4 decimals when the pitch is DECLARED: rounding 0.22212in to 0.22in
+    # loses 0.15pt per row, which is a whole row every ~100 rows.
+    _sub(detail_row, "Height",
+         f"{_detail_h:.4f}in" if _band_h else f"{_detail_h:.2f}in")
     detail_cells = _sub(detail_row, "TablixCells")
-    alt_expr = (
-        '=IIf(RowNumber(Nothing) Mod 2 = 0, "'
-        + alt_row_bg + '", "' + detail_bg + '")'
-    )
     # Sub-report links on tabular reports: an Oracle column rendered
     # through a layout field carrying <webSettings hyperlink="&CF_URL_X">
     # must stay clickable in the SSRS table — the same Drillthrough the
@@ -3772,7 +5172,7 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
                 if dt:
                     col_dt[src] = dt
             if src and src not in col_align:
-                ta = _ssrs_text_align(getattr(lf, "align", ""))
+                ta = _ssrs_text_align(_declared_align(lf))
                 if ta:
                     col_align[src] = ta
             if src and src not in col_font:
@@ -3795,19 +5195,120 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
                 col_cf[src] = lf.conditional_formats
     except Exception:  # noqa: BLE001 -- links must never break the table
         col_dt = {}
-    for col in columns:
-        cell = _sub(detail_cells, "TablixCell")
-        contents = _sub(cell, "CellContents")
+    # Painted DETAIL band fills + declared cell borders (dialect rule): a
+    # repeating frame carrying a painted fill bands exactly the columns
+    # whose fields it contains (truth-measured: a solid-fill inner frame
+    # paints its band across HALF of every data row -- the covered
+    # columns -- while sibling columns stay white). Borders on data cells
+    # paint only when the field itself declares a linePattern; the
+    # #d0d0d0 grid is an invention the truth does not show, so it is kept
+    # ONLY for sources with no declared caption layout at all.
+    col_bg: dict = {}
+    col_border: dict = {}
+    # Declared stroke WEIGHT per column, parallel to col_border (the
+    # no-lineWidth device hairline unless the field declares a width).
+    col_bweight: dict = {}
+    try:
+        def _walk_detailfill(g, painted=""):
+            _bgp = (getattr(g, "background_color", "") or "").strip() \
+                or painted
+            for f in (getattr(g, "fields", None) or []):
+                src = (getattr(f, "source", "") or "").upper()
+                if not src:
+                    continue
+                if src not in col_bg:
+                    _eff = (getattr(f, "background_color", "") or "").strip()\
+                        or _bgp
+                    if _eff and not _is_designer_fill_hex(_eff) \
+                            and _eff.lower() not in ("#ffffff", "white"):
+                        col_bg[src] = _eff
+                if src not in col_border:
+                    _lp = (getattr(f, "line_pattern", "") or "").lower()
+                    if _lp and _lp not in ("transparent", "none"):
+                        col_border[src] = (
+                            (getattr(f, "border_color", "") or "").strip()
+                            or "#000000")
+                        col_bweight[src] = _declared_edge_weight(
+                            getattr(f, "line_width", 0))
+            for c in (getattr(g, "children", None) or []):
+                _walk_detailfill(c, _bgp)
+        for _lg in (getattr(report, "layout", None) or []):
+            _walk_detailfill(_lg)
+    except Exception:  # noqa: BLE001 -- fills must never break the table
+        col_bg, col_border, col_bweight = {}, {}, {}
+    # A DECLARED banded fill paints the RECORD's own height and leaves the
+    # declared inter-record gutter WHITE (truth-PDF: discrete per-record
+    # swatches separated by a 3.6pt white gap, not one continuous block).
+    # A cell BackgroundColor would paint the whole pitch, so a banded cell
+    # nests its tinted box inside an unpainted rectangle sized to the record.
+    _swatch_h = max(0.05, _detail_h - _row_gutter)
+    _band_swatch = _row_gutter > 0.005
+    # NO CELL INSET. An Oracle detail box carries no padding at all, so the
+    # declared column width IS the usable text width and the declared record
+    # height IS the line box. The old fitted inset (a leftover slice of the
+    # declared height, e.g. 0.26pt) still cost real interior on both axes and
+    # still slid every left-anchored value right of its declared column x --
+    # the same defect as a fixed 4pt inset, just smaller. Nothing is bought
+    # back here: the declared-line-box rescue (_unclip_short_line_boxes) and
+    # CanGrow own the fit.
+    _cell_pad = "0pt"
+    # The record band's fill is DECLARED on the frame: paint it once, at
+    # the frame's declared extents, behind the columns it covers.
+    _det_items = None
+    _det_org = 0.0
+    for _ci, col in enumerate(columns):
+        _in_band = (_det_ff is not None
+                    and _det_run[0] <= _ci < _det_run[0] + _det_run[1])
+        if _in_band and _ci == _det_run[0]:
+            _det_items, _det_org = _band_cell(
+                detail_cells, "Band_0", _det_ff, _det_run, _swatch_h,
+                # The DECLARED inter-record gutter travels with the band so
+                # it survives a grown row instead of being swallowed by it.
+                gutter=(_detail_h - _swatch_h) if _band_swatch else 0.0)
+        elif _in_band:
+            _sub(detail_cells, "TablixCell")  # covered by the span
+        if _in_band:
+            contents = _det_items
+            cell = None
+        else:
+            cell = _sub(detail_cells, "TablixCell")
+            contents = _sub(cell, "CellContents")
         dt = col_dt.get(col.upper())
         fam, sz, bld, ital = col_font.get(col.upper(), (None, None, False, False))
+        _dbox = (_det_ff["sources"].get(col.upper()) if _in_band else None)
+        # Inside the band only a CHILD-declared fill still paints per cell.
+        _cell_bg = ((_dbox[3] or None) if _dbox
+                    else (None if _in_band else col_bg.get(col.upper())))
+        _host = contents
+        if _cell_bg and _band_swatch and not _in_band:
+            _rect = _sub(contents, "Rectangle")
+            _rect.set("Name", _safe(f"Band_{col}"))
+            _sub(_sub(_rect, "Style"), "BackgroundColor", "#ffffff")
+            _host = _sub(_rect, "ReportItems")
         _build_textbox(
-            contents,
+            _host,
             f"Cell_{_safe(col)}",
             f"=Fields!{_safe(col)}.Value",
-            bg=alt_expr,
-            vertical_align="Middle",
-            border_color="#d0d0d0",
-            padding="4pt",
+            vertical_align=_declared_vertical_align(),
+            # Detail-cell grid is DECLARED or absent: the literal gray
+            # fallback drew a full cell grid on sources that declare none.
+            border_color=col_border.get(col.upper()),
+            border_weight=col_bweight.get(col.upper()),
+            bg=_cell_bg,
+            bg_context=(_det_ff["bg"] if _in_band else None),
+            padding=_cell_pad,
+            # The DECLARED inter-column gutter this slot carries beyond the
+            # declared box, reserved on the right so a CENTRED / RIGHT-
+            # anchored value stays anchored on its declared box instead of
+            # drifting half a gutter (resp. a whole one) into the gutter.
+            # A LEFT-anchored value is already on its declared x, so it
+            # gets nothing -- reserving there would only change where the
+            # text wraps, which no declaration asks for.
+            padding_right=(f"{_col_gutter[_ci] * 72.0:.4f}pt"
+                           if (_dbox is None
+                               and _col_gutter[_ci] > 0.0005
+                               and col_align.get(col.upper())
+                               in ("Center", "Right")) else None),
             fg="#0b5cad" if dt else None,
             underline=bool(dt),
             drillthrough=dt,
@@ -3817,14 +5318,23 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             bold=bld,
             italic=ital,
         )
+        if _dbox is not None:
+            _place_declared(_host, _dbox, _det_org, _swatch_h)
+        elif _host is not contents:
+            _swtb = _host[-1]
+            _sub(_swtb, "Top", "0in")
+            _sub(_swtb, "Left", "0in")
+            _sub(_swtb, "Height", f"{_swatch_h:.4f}in")
+            _sub(_swtb, "Width",
+                 f"{max(0.1, float(_per_col[_ci]) - 0.01):.4f}in")
         # Conditional print/styling from the column's format trigger
         # (bold-the-subtotal-row etc. — wild-corpus dominant pattern).
         _ftn = col_ft.get(col.upper())
         if _ftn:
-            contents[-1].set("data-ft", _ftn)
+            _host[-1].set("data-ft", _ftn)
         _cfn = col_cf.get(col.upper())
         if _cfn:
-            contents[-1].set("data-cf", str(_cf_register(report, _cfn)))
+            _host[-1].set("data-cf", str(_cf_register(report, _cfn)))
 
     # Report-level <summary> grand totals -> a static FOOTER total row, so a
     # flat report's "Total: N" line actually renders (the summary tokens
@@ -3854,9 +5364,14 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
             contents = _sub(cell, "CellContents")
             expr = summ_aggs.get(col.upper())
             val = expr if expr else ('="Total"' if i == 0 else '=""')
+            # The synthesized grand-total row is OURS, not the layout's --
+            # so it gets no chrome of its own. The invented tint + gray
+            # grid here shipped a banded footer no source declared; bold
+            # (which the summary declaration itself implies) is the only
+            # styling that stays.
             _build_textbox(contents, f"Foot_{_safe(col)}", val, bold=True,
-                           bg="#eef2f6", vertical_align="Middle",
-                           border_color="#d0d0d0", padding="4pt")
+                           vertical_align="Middle",
+                           border_color=None, padding="4pt")
 
     # TablixColumnHierarchy
     col_hier = _sub(tablix, "TablixColumnHierarchy")
@@ -3867,9 +5382,17 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     # TablixRowHierarchy
     row_hier = _sub(tablix, "TablixRowHierarchy")
     row_members = _sub(row_hier, "TablixMembers")
-    # Header member (static)
+    # Header member (static). A caption frame that DECLARES
+    # printObjectOnPage="allPage" reprints at the top of every page its
+    # enclosing object spans — SSRS's page-repeating header machinery. This is
+    # the tablix's TOP-LEVEL static member, where the engine honours the flag
+    # on its own (measured on a 37-page landscape summary: the declared column
+    # band printed on page 1 only until this attribute was emitted, and on
+    # 4/4 rendered pages after — with or without a trailing total member).
     hdr_mem = _sub(row_members, "TablixMember")
     _sub(hdr_mem, "KeepWithGroup", "After")
+    if _declares_page_repeat(_declared_column_header_frame(report, main)):
+        _sub(hdr_mem, "RepeatOnNewPage", "true")
 
     # Master-detail nested group pattern when a secondary query exists.
     if detail_query is not None:
@@ -3934,15 +5457,24 @@ def _build_tablix(report: ParsedReport, main: DataQuery) -> ET.Element:
     # DataSet binding
     _sub(tablix, "DataSetName", _safe(main.name))
 
-    # Position / size
+    # Position / size. The left inset is a GUESS at the sheet's margin only
+    # while the source keeps that to itself; once it declares its body origin
+    # the page margin already carries it, and indenting again pushes the whole
+    # table a quarter inch right of the truth. Then the only honest indent is
+    # the one the source declares inside its body.
+    # ...at FULL precision: this indent is a declared quantity and it moves
+    # the WHOLE table, so 2dp put every column off its declared x together.
     _sub(tablix, "Top", "0.5in")
-    _sub(tablix, "Left", "0.25in")
+    _sub(tablix, "Left",
+         f"{_declared_body_left_in(report):.4f}in"
+         if _declared_body_origin_x(report) is not None
+         else f"{_PAGE_HMARGIN_IN}in")
     _sub(tablix, "Height", "0.5in")
     _sub(tablix, "Width", f"{1.5 * len(columns)}in")
-    style = _sub(tablix, "Style")
-    border = _sub(style, "Border")
-    _sub(border, "Style", "Solid")
-    _sub(border, "Color", "LightGrey")
+    # Frame: DECLARATION-DRIVEN ONLY. A source that draws no box around its
+    # detail region gets no box -- an unconditional Border here shipped four
+    # strokes the source never declared.
+    _apply_declared_tablix_border(tablix, report, main)
     return tablix
 
 
@@ -3968,6 +5500,7 @@ def _one_to_many_link_children(report) -> set:
     (the layout shape decides), never keyed on a report name."""
     # repeating frames keyed by the GROUP they bind to (source_query = group name)
     rep_cols: dict = {}
+    rep_bound: dict = {}
     def _walk(g):
         if "repeating" in (getattr(g, "kind", "") or "").lower():
             sq = (getattr(g, "source_query", "") or "").upper()
@@ -3976,6 +5509,22 @@ def _one_to_many_link_children(report) -> set:
                       for f in (getattr(g, "fields", None) or [])
                       if (getattr(f, "kind", "") or "") == "field"}
                 rep_cols[sq] = max(rep_cols.get(sq, 0), len(xs))
+                # THE COMMENTS IDIOM: a repeating frame whose printable
+                # content is ONLY token-carrying TEXT (no fields, no
+                # static label texts) is a genuine 1:many region — Oracle
+                # repeats the text per child row, so a scalar Lookup()
+                # loses every row but the first (truth-measured on a
+                # comments block). Frames carrying static labels or
+                # fields are full FORM sections — flipping those
+                # regressed verified corpus renders (measured), so they
+                # keep the old >=2-x rule.
+                _texts = [f for f in (getattr(g, "fields", None) or [])
+                          if (getattr(f, "kind", "") or "") == "text"
+                          and (getattr(f, "text", "") or "").strip()]
+                if (not xs and _texts
+                        and all("&" in (getattr(f, "text", "") or "")
+                                for f in _texts)):
+                    rep_bound[sq] = True
         for c in (getattr(g, "children", None) or []):
             _walk(c)
     for g in (getattr(report, "layout", None) or []):
@@ -3985,9 +5534,12 @@ def _one_to_many_link_children(report) -> set:
         if not (getattr(q, "parent_group", "") or "").strip():
             continue
         for gn in (getattr(q, "group_names", None) or []):
-            # >=2 distinct field x-positions in the bound repeating frame = a
-            # columnar detail TABLE (many rows), not a single positional field.
-            if rep_cols.get((gn or "").upper(), 0) >= 2:
+            # A bound repeating frame with columnar fields (>=2 x-positions)
+            # OR any repeating printable content = a 1:many detail region.
+            # A 1:1 linked child (a lone signature/contact field with NO
+            # repeating frame) stays scalar-Lookup as before.
+            if (rep_cols.get((gn or "").upper(), 0) >= 2
+                    or rep_bound.get((gn or "").upper())):
                 out.add((q.name or "").upper())
                 break
     return out
@@ -4183,6 +5735,50 @@ def _build_token_resolver(report: ParsedReport):
         return (
             f'=Lookup({src}, {dst}, '
             f'Fields!{_safe(result_col)}.Value, "{_safe(child_ds)}")'
+        )
+
+    def _lookup_for_parent(result_col, parent_ds, bound_ds):
+        """The MIRROR of ``_lookup_for_child``: the bound dataset is the
+        Oracle <link> CHILD and the wanted column lives in its MASTER.
+
+        Oracle's group-scope lexical idiom (``&MASTER_COL`` in a boilerplate
+        text inside a detail band) reads the master row that owns the
+        current detail row. Only the child direction was resolvable, so such
+        a reference fell through to ``=Nothing`` and printed blank at run
+        time — while its REPORT-scope twin (a ``<summary reset="report">``
+        over the same column) resolved through the aggregate path. Same
+        correlation key, same structural derivation, opposite direction."""
+        bq = query_by_name.get((bound_ds or "").upper())
+        if bq is None or not getattr(bq, "parent_group", ""):
+            return None
+        pq = query_by_name.get((parent_ds or "").upper())
+        if pq is None:
+            return None
+        # the bound dataset must be a linked child OF THIS parent
+        if (getattr(bq, "parent_group", "") or "").upper() not in {
+                (g or "").upper()
+                for g in (getattr(pq, "group_names", None) or [])}:
+            return None
+        parent_cols = dataset_fields.get((parent_ds or "").upper(), {})
+        bound_cols = dataset_fields.get((bound_ds or "").upper(), {})
+        if not parent_cols or not bound_cols:
+            return None
+        pairs = _link_key_pairs(bq, parent_cols, bound_cols)
+        if not pairs:
+            return None
+        # key expressions: the CHILD side is evaluated in the bound scope,
+        # the PARENT side inside the master dataset.
+        if len(pairs) == 1:
+            src = f"Fields!{_safe(pairs[0][1])}.Value"
+            dst = f"Fields!{_safe(pairs[0][0])}.Value"
+        else:
+            src = ' & "|" & '.join(
+                f"Fields!{_safe(c)}.Value" for _m, c in pairs)
+            dst = ' & "|" & '.join(
+                f"Fields!{_safe(m)}.Value" for m, _c in pairs)
+        return (
+            f'=Lookup({src}, {dst}, '
+            f'Fields!{_safe(result_col)}.Value, "{_safe(parent_ds)}")'
         )
 
     def _lookup_via_chain(result_col, child_ds, bound_ds):
@@ -4569,7 +6165,24 @@ def _build_token_resolver(report: ParsedReport):
                 # renderable (never downgrade to =Nothing). Otherwise fall through
                 # to the placeholder below unchanged.
                 _stem = re.sub(r"^(CF|CP|CS|CG|CT)_", "", u)
-                if _stem and _stem != u:
+                # A CURSOR-LOOKUP formula (FETCH ... INTO local; RETURN
+                # local) does NOT format its stem column — the stem is at
+                # most the lookup KEY, and aliasing prints the raw ID
+                # where the looked-up NAME belongs (a responsible-party
+                # column rendered "1,234", screenshot-truth verified).
+                # Those decline the alias and fall to the honest stub.
+                _fbody = getattr(f, "plsql_body", "") or ""
+                _fetch_ret = re.search(
+                    r"(?is)FETCH\s+\w+\s+INTO\s+(\w+)\s*;.*?"
+                    r"RETURN\s*\(?\s*\1\b", _fbody)
+                # A body that is not PL/SQL at all (this export dialect can
+                # write a stray QUERY TEXT into a formula's function slot)
+                # tells us NOTHING about what the formula computes — the
+                # alias would be a blind guess (it printed a numeric ID
+                # where the looked-up NAME belongs).
+                _not_plsql = bool(_fbody) and not _fbody.lstrip()[:12].upper() \
+                    .startswith(("FUNCTION", "PROCEDURE", "BEGIN", "DECLARE"))
+                if _stem and _stem != u and not _fetch_ret and not _not_plsql:
                     def _np(s):  # plural-insensitive normalize
                         return s[:-1] if s.endswith("S") else s
                     _cands = [fu for fu in all_field_owner
@@ -4630,7 +6243,12 @@ def _build_token_resolver(report: ParsedReport):
         # "<X -- from dataset Q -- rewire at deploy time>" strings).
         if u in all_field_owner:
             canonical, owner_ds = all_field_owner[u]
-            _lk = _lookup_for_child(canonical, owner_ds, dataset_name)
+            _lk = (_lookup_for_child(canonical, owner_ds, dataset_name)
+                   # ...or the MASTER of the bound detail: a GROUP-scope
+                   # lexical (&MASTER_COL inside a detail band) reads the
+                   # master row owning the current row, exactly as its
+                   # report-scope summary twin does.
+                   or _lookup_for_parent(canonical, owner_ds, dataset_name))
             if _lk:
                 return ("field_other_ds", _lk,
                         f"master-detail Lookup: {canonical} pulled from "
@@ -4723,8 +6341,14 @@ def _resolve_text_expression(
         r"(?P<amp>&[A-Za-z_][A-Za-z0-9_]*)|(?P<bind>:[A-Za-z_][A-Za-z0-9_]*)"
     )
 
-    def _chunk_atoms(chunk: str) -> List[str]:
+    def _chunk_atoms(chunk: str, token_precedes: bool = False,
+                     token_follows: bool = False) -> List[str]:
         """Turn a literal text chunk into VB expression atoms.
+
+        ``token_precedes`` / ``token_follows`` say whether a resolved token
+        sits immediately before / after this chunk in the declaration, i.e.
+        whether the chunk's edge whitespace is INTERIOR spacing (kept
+        verbatim) or the value's own outer edge (collapsed to one space).
 
         A RAW newline inside a VB string literal is silently swallowed by
         the report expression compiler (verified by rendering through the
@@ -4733,23 +6357,44 @@ def _resolve_text_expression(
         whitespace-only lines collapse to a single vbCrLf — that matches
         what Oracle's own renderer produces for these pretty-printed
         CDATA text blocks (ground truth: the Oracle PDF stacks the lines
-        directly). Lines are stripped of XML indentation, EXCEPT that a
-        single space is preserved where the chunk abuts a token on the
-        same line ("... IS DUE " & Fields!X — the space matters).
+        directly). A single space is preserved where the chunk abuts a token
+        on the same line ("... IS DUE " & Fields!X — the space matters).
+
+        A CONTINUATION line keeps its DECLARED leading indentation. The
+        exporter's pretty-print frame is stripped at parse time (see
+        _strip_export_indent_frame), so horizontal whitespace still standing
+        at the head of a continuation line was written INSIDE the CDATA and
+        is the author's ink: the truth PDF prints a letter's lettered clauses
+        5 and 10 space-widths in from the box's left edge, and the engine
+        advances by every one of those spaces (probe-measured). Stripping
+        them printed the whole clause list flush left.
         """
+        # An inter-token gap on ONE line ("&A &B") is pure whitespace —
+        # stripping it glued the two tokens together ("128Sites..."); the
+        # declared separator must survive verbatim between two tokens and
+        # as a single space at the value's own edge.
+        if chunk and "\n" not in chunk and not chunk.strip():
+            return ['"' + chunk + '"'] if (token_precedes and token_follows) \
+                else ['" "']
         lines = chunk.split("\n")
         atoms: List[str] = []
         pending_break = False
         for i, ln in enumerate(lines):
             s = ln.strip()
-            # Preserve token-adjacent single spaces on the SAME line:
-            #  * first line, chunk follows a token -> keep one leading space
-            #  * last line, a token follows the chunk -> keep one trailing
+            # Token-adjacent whitespace on the SAME line is DECLARED spacing
+            # and survives in full; at the value's own outer edge (no token
+            # on that side) one space is enough, the rest is invisible ink.
+            # A CONTINUATION line's leading whitespace is DECLARED
+            # indentation (the exporter's frame is gone by now).
             if s:
                 if i == 0 and ln[:1].isspace():
-                    s = " " + s
+                    _lead = ln[:len(ln) - len(ln.lstrip(" \t"))]
+                    s = (_lead if token_precedes else " ") + s
+                elif i > 0:
+                    s = ln[:len(ln) - len(ln.lstrip(" \t"))] + s
                 if i == len(lines) - 1 and ln[-1:].isspace():
-                    s = s + " "
+                    _tail = ln[len(ln.rstrip(" \t")):]
+                    s = s + (_tail if token_follows else " ")
             if i > 0:
                 pending_break = True
             if s:
@@ -4768,7 +6413,9 @@ def _resolve_text_expression(
         any_token = True
         literal_chunk = text[last:m.start()]
         if literal_chunk:
-            parts.extend(_chunk_atoms(literal_chunk))
+            parts.extend(_chunk_atoms(literal_chunk,
+                                      token_precedes=last > 0,
+                                      token_follows=True))
         token = (m.group("amp") or m.group("bind"))[1:]
         kind, name, note = resolver(token, dataset_name)
         if kind == "param":
@@ -4794,7 +6441,7 @@ def _resolve_text_expression(
         last = m.end()
     tail = text[last:]
     if tail:
-        parts.extend(_chunk_atoms(tail))
+        parts.extend(_chunk_atoms(tail, token_precedes=last > 0))
     if not any_token or not parts:
         return text, False
     # Drop leading/trailing line breaks so boxes don't grow blank lines.
@@ -4995,22 +6642,48 @@ _ORACLE_DATE_TOKENS = [
     ("MM", "MM"), ("DD", "dd"),
 ]
 
+# The same date elements while Oracle FILL MODE is ON: FM/FX suppresses the
+# leading zero of every NUMERIC date element that follows it (the spelled
+# ones -- MONTH/MON/DAY/DY -- lose blank PADDING instead, which a .NET
+# spelled name never has, so those are unchanged).
+_ORACLE_DATE_TOKENS_FILL = {
+    "HH24": "H", "HH12": "h", "HH": "h",
+    "MI": "m", "SS": "s", "MM": "M", "DD": "d",
+}
+
 
 def _oracle_date_to_net(mu: str) -> str:
     """Translate an Oracle date mask (uppercased) to a .NET date format,
-    matching the longest token first; separators (/ - : . , space) pass through."""
+    matching the longest token first; separators (/ - : . , space) pass through.
+
+    Oracle's FM/FX modifier is a TOGGLE, not a prefix: each occurrence flips
+    fill mode for the REST of the mask, so ``fmMonth DD, RRRR HH:fmMI AM``
+    turns padding suppression ON at the first ``fm`` (DD and HH drop their
+    leading zeros) and OFF again at the second (MI keeps its "00"). Truth-
+    measured on the Oracle-rendered page chrome of a report carrying exactly
+    that mask: it prints "November 13, 2025 1:00 PM" -- a one-digit hour
+    beside a two-digit minute, which only the toggle explains."""
     out = []
     i, n = 0, len(mu)
+    fill = False
     while i < n:
+        if mu.startswith("FM", i) or mu.startswith("FX", i):
+            fill = not fill
+            i += 2
+            continue
         for tok, net in _ORACLE_DATE_TOKENS:
             if mu.startswith(tok, i):
-                out.append(net)
+                out.append(_ORACLE_DATE_TOKENS_FILL[tok] if fill
+                           and tok in _ORACLE_DATE_TOKENS_FILL else net)
                 i += len(tok)
                 break
         else:
             out.append(mu[i])
             i += 1
-    return "".join(out)
+    net = "".join(out)
+    # A ONE-character .NET format string is a STANDARD specifier ("d" = short
+    # date), not the custom element the mask means; "%" forces custom parsing.
+    return ("%" + net) if len(net) == 1 else net
 
 
 def _oracle_number_to_net(m: str, fill_mode: bool = False) -> str:
@@ -5209,12 +6882,14 @@ def _oracle_mask_to_net(mask: str) -> str:
     Generic -- pattern-driven, no per-report logic."""
     if not mask:
         return ""
-    m = mask.strip()
+    raw = mask.strip()
     # Oracle fill-mode modifier FM/FX suppresses padding. It has no .NET token,
-    # but it DOES change numeric output (suppresses trailing-fraction zeros), so
-    # remember it before stripping and thread it into the numeric translator.
-    fill_mode = bool(re.search(r"(?i)F[MX]", m))
-    m = re.sub(r"(?i)F[MX]", "", m).strip()
+    # but it DOES change output, so keep BOTH forms: the stripped mask decides
+    # what KIND of mask this is (and drives the numeric translator's one
+    # fill flag), while the date translator needs the modifiers left IN PLACE
+    # -- each occurrence TOGGLES fill mode for the rest of the mask.
+    fill_mode = bool(re.search(r"(?i)F[MX]", raw))
+    m = re.sub(r"(?i)F[MX]", "", raw).strip()
     if not m:
         return ""
     mu = m.upper()
@@ -5225,7 +6900,7 @@ def _oracle_mask_to_net(mask: str) -> str:
         or ("YY" in mu and ("/" in mu or "-" in mu))
     )
     if is_date:
-        net = _oracle_date_to_net(mu)
+        net = _oracle_date_to_net(raw.upper())
         return net if any(c in net for c in "yMdHhms") else ""
     if any(c in m for c in "09N$%"):
         return _oracle_number_to_net(m, fill_mode)
@@ -5600,6 +7275,67 @@ _AFM_HELVETICA_BOLD = (
     556, 278, 889, 611, 611, 611, 611, 389, 556, 333, 611, 556, 778, 556, 556,
     500, 389, 280, 389, 584)
 
+# RDL's own default when a Textbox declares no <FontFamily> is the sans face
+# (Arial); the engine substitutes Helvetica for it in PDF output. Any pass that
+# estimates an UNDECLARED-family box must therefore measure with the sans table.
+_RDL_DEFAULT_FONT_IS_SANS = True
+
+
+def _afm_text_width(s: str, size_pt: float, bold: bool, sans: bool) -> float:
+    """Advance-width of ``s`` at ``size_pt``, in INCHES, from the Standard-14
+    AFM tables above. Single shared estimator: every clip/overflow pass measures
+    text the same way (no per-pass metric drift). Unmapped code points count as
+    a 500/1000-em average glyph."""
+    if sans:
+        tbl = _AFM_HELVETICA_BOLD if bold else _AFM_HELVETICA
+    else:
+        tbl = _AFM_TIMES_BOLD if bold else _AFM_TIMES_ROMAN
+    u = sum((tbl[ord(c) - 32] if 32 <= ord(c) <= 126 else 500) for c in s)
+    return u / 1000.0 * size_pt / 72.0
+
+
+# VERTICAL metrics of the same two faces the width tables model, in font design
+# units per em (the faces' own hhea/OS-2 ascent + descent; the win* pair is
+# identical on both). GDI -- and therefore the SSRS renderer -- reserves
+# ascent+descent for ONE line of text and clips whatever falls outside, so this
+# sum IS the minimum interior a single-line textbox needs before the glyphs'
+# descenders get sliced. Render-calibrated at 600 dpi against the real engine
+# over a 8/9/10/11/12/14pt x 0.10..0.29in ladder: every measured clip threshold
+# lands inside (size*(asc+desc)/upem, +0.72in-grid step], and a 1.18em rule of
+# thumb over-shoots at 12pt and 14pt.
+_TT_UPEM = 2048
+_TT_VMETRICS = {
+    # face          (ascent, descent)
+    "sans": (1854, 434),    # Arial (the Helvetica-metric face)
+    "serif": (1825, 443),   # Times New Roman
+}
+_SERIF_FAMILY_KEYS = ("times new roman", "times", "times-roman", "timesnewroman",
+                      "serif", "georgia", "garamond", "book antiqua",
+                      "palatino", "palatino linotype", "cambria",
+                      "century schoolbook")
+
+
+def _family_is_sans(family: str) -> bool:
+    """Which of the two metric families a declared <FontFamily> belongs to.
+
+    An undeclared family is the RDL default (sans) -- see
+    ``_RDL_DEFAULT_FONT_IS_SANS``."""
+    key = (family or "").split(",")[0].strip().lower()
+    if not key:
+        return _RDL_DEFAULT_FONT_IS_SANS
+    return key not in _SERIF_FAMILY_KEYS
+
+
+def _font_line_box_pt(size_pt: float, sans: bool = True) -> float:
+    """Full line box (ascent + descent) of ``size_pt`` text, in POINTS.
+
+    The single shared vertical estimator, mirroring ``_afm_text_width`` on the
+    horizontal axis: every pass that asks "is this box tall enough for one line
+    of text?" measures it the same way, from real font metrics rather than a
+    per-pass magic ratio."""
+    asc, desc = _TT_VMETRICS["sans" if sans else "serif"]
+    return float(size_pt) * (asc + desc) / _TT_UPEM
+
 
 def _widen_clipped_constant_labels(root) -> None:
     """Fidelity net for positional FORM/letter layouts: Oracle sizes a constant
@@ -5612,6 +7348,7 @@ def _widen_clipped_constant_labels(root) -> None:
     The faithful fix is to WIDEN the box just enough to fit the label on one
     line -- but ONLY where there is provably free horizontal space before the
     next sibling box, so overlap is never introduced.
+    (Width estimates come from the shared _afm_text_width helper.)
 
     Conservative on every axis: only single-line pure string literals, only the
     Times family (the metrics we have), only left/general aligned, only widen
@@ -5619,13 +7356,7 @@ def _widen_clipped_constant_labels(root) -> None:
     right-neighbour (capped at the container's right edge). Anything uncertain is
     left exactly as-is -- still clipping is no worse than before, and zero risk
     of a new overlap or page-spill (height is untouched)."""
-    def _text_w(s, size_pt, bold, sans):
-        if sans:
-            tbl = _AFM_HELVETICA_BOLD if bold else _AFM_HELVETICA
-        else:
-            tbl = _AFM_TIMES_BOLD if bold else _AFM_TIMES_ROMAN
-        u = sum((tbl[ord(c) - 32] if 32 <= ord(c) <= 126 else 500) for c in s)
-        return u / 1000.0 * size_pt / 72.0  # inches
+    _text_w = _afm_text_width          # shared Standard-14 estimator (inches)
 
     def _fin(el, tag):
         c = el.find(_q(tag))
@@ -5642,7 +7373,30 @@ def _widen_clipped_constant_labels(root) -> None:
                 return x.text.strip()
         return None
 
-    PAD = 2 * 2 / 72.0   # textbox padding (2pt L + 2pt R) reserved from the box
+    def _hpad(el) -> float:
+        """Horizontal inset THIS box actually carries, in inches.
+
+        Read, never assumed: a declared box carries no inset at all (its
+        declared width is the usable text width), while a box whose source
+        DECLARES an indent carries exactly that. A hard-coded 4pt reserve
+        made every label ask for 0.056in it did not need and widened boxes
+        that already fit."""
+        st = el.find(_q("Style"))
+        if st is None:
+            return 0.0
+        total = 0.0
+        for _tag in ("PaddingLeft", "PaddingRight"):
+            t = (st.findtext(_q(_tag)) or "").strip().lower()
+            for unit, per_in in (("pt", 1.0 / 72.0), ("in", 1.0),
+                                 ("cm", 1.0 / 2.54), ("mm", 1.0 / 25.4)):
+                if t.endswith(unit):
+                    try:
+                        total += float(t[:-len(unit)]) * per_in
+                    except ValueError:
+                        pass
+                    break
+        return total
+
     GAP = 0.04           # min clear gap kept before a right-neighbour
     SAFE = 0.02          # round-up cushion so the one-line fit isn't pixel-tight
     root_w = _fin(root, "Width") or 8.5
@@ -5702,7 +7456,7 @@ def _widen_clipped_constant_labels(root) -> None:
             except ValueError:
                 continue
             bold = "bold" in (_first(it, "FontWeight") or "").lower()
-            need = _text_w(text, size, bold, _sans) + PAD
+            need = _text_w(text, size, bold, _sans) + _hpad(it)
             if W >= need:
                 continue  # already fits -> not clipping -> leave alone
             target = need + SAFE
@@ -5726,6 +7480,49 @@ def _widen_clipped_constant_labels(root) -> None:
                 c = L + W / 2.0
                 new_l, new_r = c - target / 2.0, c + target / 2.0
             if new_l < max(left_lim, 0.0) - 1e-6 or new_r > right_lim + 1e-6:
+                # No room for the full padded target (a value box sits close
+                # against the label). Two zero-overlap-risk fallbacks:
+                bare = _text_w(text, size, bold, _sans)
+                # (1) PARTIAL widen + padding strip: Oracle sized the box
+                #     EXACTLY to the label (e.g. an 89.96pt box for a 90pt
+                #     string), so the 4pt of SSRS padding alone clips the
+                #     final glyph and the free gap to the neighbour, while
+                #     smaller than the padded target, still fits the bare
+                #     text. Grow only inside the anchor-respecting free span
+                #     (right_lim already reserves GAP), drop the paddings.
+                if align == "left":
+                    _al, _ar = L, right_lim
+                elif align == "right":
+                    _al, _ar = max(left_lim, 0.0), L + W
+                else:  # center — symmetric growth about the fixed centre
+                    _c = L + W / 2.0
+                    _half = min(_c - max(left_lim, 0.0), right_lim - _c)
+                    _al, _ar = _c - _half, _c + _half
+                _avail = _ar - _al
+                if _avail > W + 1e-6 and _avail + 1e-6 >= bare:
+                    _neww = min(bare + SAFE, _avail)
+                    if _neww > W + 1e-6:
+                        we = it.find(_q("Width"))
+                        le = it.find(_q("Left"))
+                        if we is not None:
+                            we.text = f"{_neww:.2f}in"
+                            if le is not None and align == "right":
+                                le.text = f"{max(0.0, (L + W) - _neww):.2f}in"
+                            elif le is not None and align == "center":
+                                le.text = (f"{max(0.0, L + W / 2.0 - _neww / 2.0):.2f}in")
+                            for _pt in it.iter():
+                                if _pt.tag in (_q("PaddingLeft"),
+                                               _q("PaddingRight")):
+                                    _pt.text = "0pt"
+                            continue
+                # (2) If the text fits the DECLARED width once the 2pt
+                #     paddings go, strip them instead — zero geometry
+                #     change ("Decision Date" clipped its final glyph
+                #     against an adjacent value box).
+                if W + 1e-6 >= bare + SAFE:
+                    for _pt in it.iter():
+                        if _pt.tag in (_q("PaddingLeft"), _q("PaddingRight")):
+                            _pt.text = "0pt"
                 continue                # would overlap / overflow -> leave as-is
             we = it.find(_q("Width"))
             le = it.find(_q("Left"))
@@ -5734,6 +7531,826 @@ def _widen_clipped_constant_labels(root) -> None:
             we.text = f"{target:.2f}in"
             if le is not None and align != "left":
                 le.text = f"{max(0.0, new_l):.2f}in"
+
+
+def _deepen_clipped_label_heights(root) -> None:
+    """Height companion to _widen_clipped_constant_labels: Oracle sizes a
+    constant label's box to its OWN renderer (a 12pt bold section heading in a
+    0.17in cell), but the SSRS textbox adds 2pt top/bottom padding and GDI
+    line metrics, so the same box clips the label's DESCENDERS (a bold
+    two-word heading renders with the tails of g/p and any underline cut).
+    The faithful fix is to DEEPEN the box just enough for one full text line
+    -- but ONLY into provably free vertical space (bounded by the nearest
+    sibling BELOW in the same horizontal band and the container's bottom
+    edge), so overlap or page growth is never introduced.
+
+    Conservative on every axis: only single-line pure string literals, only
+    CanGrow=false top-anchored boxes with no visible fill or border (an
+    invisible label box can grow without changing any painted geometry),
+    and only grow (never shrink or move). When there is no room below, the
+    vertical paddings are stripped instead -- 4pt of interior regained with
+    zero geometry change.
+
+    Width-clipped labels are explicitly SKIPPED: giving a box whose text
+    overflows horizontally more height makes the engine WRAP it, hiding the
+    tail word entirely (worse than the original right-edge clip). Those are
+    _widen_clipped_constant_labels' problem, not this pass's."""
+    _text_w = _afm_text_width          # shared Standard-14 estimator (inches)
+
+    def _fin(el, tag):
+        c = el.find(_q(tag))
+        if c is None or not (c.text or "").strip():
+            return None
+        try:
+            return float((c.text or "").replace("in", "").strip())
+        except ValueError:
+            return None
+
+    def _first(el, tag):
+        for x in el.iter(_q(tag)):
+            if (x.text or "").strip():
+                return x.text.strip()
+        return None
+
+    GAP = 0.03           # min clear gap kept before a sibling below
+    LINE = 1.18          # single-line interior need, em (ascent+descent+lead)
+    body_t, rect_t, tb_t, ri_t = (_q("Body"), _q("Rectangle"),
+                                  _q("Textbox"), _q("ReportItems"))
+    for cont in root.iter():
+        if cont.tag not in (body_t, rect_t):
+            continue
+        ri = cont.find(ri_t)
+        if ri is None:
+            continue
+        cont_h = _fin(cont, "Height")
+        sibs = []
+        for it in list(ri):
+            L, T = _fin(it, "Left"), _fin(it, "Top")
+            W, H = _fin(it, "Width"), _fin(it, "Height")
+            if None in (L, T, W, H):
+                continue
+            sibs.append([it, L, T, W, H])
+        for rec in sibs:
+            it, L, T, W, H = rec
+            if it.tag != tb_t:
+                continue
+            if (_first(it, "CanGrow") or "").lower() == "true":
+                continue
+            # Only invisible chrome may grow: a painted fill or drawn border
+            # would visibly change size.
+            style = it.find(_q("Style"))
+            if style is None:
+                continue
+            if (style.findtext(_q("BackgroundColor")) or "").strip():
+                continue
+            border = style.find(_q("Border"))
+            if border is not None and \
+                    (border.findtext(_q("Style")) or "").strip().lower() == "solid":
+                continue
+            va = (style.findtext(_q("VerticalAlign")) or "Top").strip().lower()
+            if va not in ("", "top"):
+                continue
+            vals = [v.text for v in it.iter(_q("Value"))
+                    if (v.text or "").strip()]
+            if len(vals) != 1:
+                continue
+            val = vals[0].strip()
+            if not (val.startswith('="') and val.endswith('"')
+                    and val.count('"') == 2 and "&" not in val):
+                continue
+            try:
+                size = float((_first(it, "FontSize") or "10pt")
+                             .replace("pt", ""))
+            except ValueError:
+                continue
+            # Width-clipped -> deepening would WRAP the text and hide the
+            # tail word; leave those exactly as-is (see docstring).
+            fam = (_first(it, "FontFamily") or "Times New Roman").strip()
+            _famkey = fam.split(",")[0].strip().lower()
+            _sans = _famkey not in ("times new roman", "times",
+                                    "times-roman", "serif")
+            bold = "bold" in (_first(it, "FontWeight") or "").lower()
+            text = val[2:-1]
+            if _text_w(text, size, bold, _sans) \
+                    + (2 * 2 - 0.5) / 72.0 > W:
+                continue
+            def _pad(tag):
+                t = (style.findtext(_q(tag)) or "2pt").replace("pt", "")
+                try:
+                    return float(t)
+                except ValueError:
+                    return 2.0
+            need = (size * LINE + _pad("PaddingTop")
+                    + _pad("PaddingBottom")) / 72.0
+            if H + 1e-6 >= need:
+                continue  # already fits -> leave alone
+            # Free space below: the nearest sibling that overlaps this box's
+            # horizontal range bounds the new bottom edge; so does the
+            # container's own bottom.
+            below = [s[2] for s in sibs if s is not rec
+                     and s[1] < L + W - 0.01 and s[1] + s[3] > L + 0.01
+                     and s[2] >= T + H - 0.01]
+            limit = min(below) - GAP if below else float("inf")
+            if cont_h is not None:
+                limit = min(limit, cont_h)
+            if need > (limit - T) + 1e-6:
+                # No room to deepen. Strip the vertical paddings instead --
+                # the 4pt regained usually uncovers the descenders.
+                if (size * LINE) / 72.0 <= H + 4.0 / 72.0:
+                    for _pt in style.iter():
+                        if _pt.tag in (_q("PaddingTop"), _q("PaddingBottom")):
+                            _pt.text = "0pt"
+                continue
+            he = it.find(_q("Height"))
+            if he is not None:
+                he.text = f"{need:.2f}in"
+
+
+def _unclip_short_line_boxes(root) -> None:
+    """GENERAL descender rescue: no single-line textbox may be shorter than the
+    font's own line box, whatever built it.
+
+    Oracle's renderer lets a glyph OVERFLOW its declared box; SSRS CLIPS at the
+    box's interior edge. So a caption declared 0.18in tall at 10pt (12.96pt of
+    box, 4pt of it eaten by our own top/bottom padding, 8.96pt of interior left)
+    prints with its descenders sliced off, while the sibling declared 0.22in
+    prints the whole glyph -- visible at a glance, and measured at 600 dpi as
+    ~7.2pt of ink where the truth prints the full 9.4pt.
+
+    The requirement comes from ``_font_line_box_pt`` (the face's real
+    ascent+descent), never a rule-of-thumb ratio, and is applied through the
+    LEAST invasive lever that closes the gap:
+
+      A. give back the vertical padding on the side the text is NOT anchored to
+         (bottom padding under top-anchored text, top padding over
+         bottom-anchored text, both halves for centred text) -- that padding is
+         pure loss of interior and nothing on the page moves;
+      B. DEEPEN the box into provably free space (nearest sibling below in the
+         same horizontal band, container bottom) -- the text does not move,
+         only the clip window opens.  Cells of a data region reflow instead of
+         colliding, so their row/container grows with them;
+      C. give back the remaining vertical padding, but only the shortfall that
+         is still open (typically well under a point) -- the box and every
+         neighbour stay exactly where they are.
+
+    Deliberately conservative: single-``Paragraph`` boxes only (a stack of
+    paragraphs is the WRAPPING class, handled elsewhere), never a CanGrow box
+    (render-calibrated: the engine auto-sizes those and they never slice, so
+    touching one would only shrink it and drag the page up), never rotated text
+    (height is the text's advance axis there), never shrink, and a box that
+    paints (fill or drawn border) is never deepened -- its painted rectangle is
+    declared geometry, so only the padding levers apply to it.
+
+    Two homes, one rule: positioned boxes carry their own ``<Height>``, while a
+    data-region cell is clipped by its ``<TablixRow>`` -- the second loop below
+    applies the same ladder there."""
+    tb_t, ri_t = _q("Textbox"), _q("ReportItems")
+    cell_t = _q("CellContents")
+    row_t, tablix_t = _q("TablixRow"), _q("Tablix")
+    # every positioned coordinate space an emitter can put a textbox in
+    cont_tags = {_q("Body"), _q("Rectangle"),
+                 _q("PageHeader"), _q("PageFooter")}
+    parent = {c: p for p in root.iter() for c in p}
+
+    def _fin(el, tag):
+        c = el.find(_q(tag))
+        if c is None or not (c.text or "").strip():
+            return None
+        try:
+            return float((c.text or "").replace("in", "").strip())
+        except ValueError:
+            return None
+
+    def _first(el, tag):
+        for x in el.iter(_q(tag)):
+            if (x.text or "").strip():
+                return x.text.strip()
+        return None
+
+    def _pad(style, tag):
+        """A declared padding in POINTS (RDL sizes may be pt, in, cm or mm)."""
+        if style is None:
+            return 0.0
+        t = (style.findtext(_q(tag)) or "").strip().lower()
+        for unit, per_pt in (("pt", 1.0), ("in", 72.0), ("cm", 72.0 / 2.54),
+                             ("mm", 72.0 / 25.4)):
+            if t.endswith(unit):
+                try:
+                    return float(t[:-len(unit)]) * per_pt
+                except ValueError:
+                    return 0.0
+        return 0.0
+
+    def _set_pad(style, tag, pt):
+        el = style.find(_q(tag))
+        new = "0pt" if pt <= 0.001 else f"{pt:.2f}pt"
+        if el is not None and (el.text or "").strip() != new \
+                and abs(_pad(style, tag) - pt) > 0.005:
+            el.text = new
+
+    def _needs(tb):
+        """Interior POINTS one line of this textbox's text needs, or None when
+        the box is out of scope for this pass."""
+        paras = list(tb.iter(_q("Paragraph")))
+        if len(paras) != 1:
+            return None                      # multi-line stack: not this class
+        if (_first(tb, "CanGrow") or "").lower() == "true":
+            # Render-calibrated: a CanGrow box is auto-sized by the engine and
+            # NEVER slices its line, at any declared height, positioned or in a
+            # data-region cell. Touching it would only shrink an auto-sized box
+            # (less padding -> less content height) and drag the page up.
+            return None
+        if _first(tb, "WritingMode"):
+            return None                      # rotated: height is the advance axis
+        sizes = []
+        for fs in tb.iter(_q("FontSize")):
+            t = (fs.text or "").strip()
+            if t.endswith("pt"):
+                try:
+                    sizes.append(float(t[:-2]))
+                except ValueError:
+                    pass
+        size = max(sizes) if sizes else 10.0
+        return _font_line_box_pt(size, _family_is_sans(_first(tb, "FontFamily")))
+
+    def _paints(tb):
+        style = tb.find(_q("Style"))
+        if style is None:
+            return False
+        if (style.findtext(_q("BackgroundColor")) or "").strip():
+            return True
+        border = style.find(_q("Border"))
+        return border is not None and \
+            (border.findtext(_q("Style")) or "").strip().lower() == "solid"
+
+    def _reflows(cont):
+        """True when this container is a data-region CELL: its rows lay out one
+        after another, so deepening a cell can never overlap a neighbour -- the
+        row (and the region) simply gets taller."""
+        p = cont
+        for _ in range(4):
+            p = parent.get(p)
+            if p is None:
+                return False
+            if p.tag == cell_t:
+                return True
+        return False
+
+    EPS = 1e-6
+    for cont in list(root.iter()):
+        if cont.tag not in cont_tags:
+            continue
+        ri = cont.find(ri_t)
+        if ri is None:
+            continue
+        cont_h = _fin(cont, "Height")
+        reflow = _reflows(cont)
+        sibs = []
+        for it in list(ri):
+            L, T = _fin(it, "Left"), _fin(it, "Top")
+            W, H = _fin(it, "Width"), _fin(it, "Height")
+            if None in (L, T, W, H):
+                continue
+            sibs.append((it, L, T, W, H))
+        grown_to = cont_h
+        for it, L, T, W, H in sibs:
+            if it.tag != tb_t:
+                continue
+            need = _needs(it)
+            if need is None:
+                continue
+            style = it.find(_q("Style"))
+            if style is None:
+                continue
+            pad_t, pad_b = _pad(style, "PaddingTop"), _pad(style, "PaddingBottom")
+            avail = H * 72.0 - pad_t - pad_b
+            if avail + EPS >= need:
+                continue
+            va = (style.findtext(_q("VerticalAlign")) or "Top").strip().lower()
+            # --- lever A: hand back the padding on the NON-anchored side, so
+            # the interior opens up and the glyphs do not move a hair --------
+            if va == "middle":
+                take = min(pad_t, pad_b, (need - avail) / 2.0)
+                if take > 0:
+                    pad_t -= take
+                    pad_b -= take
+                    avail += 2 * take
+            elif va == "bottom":
+                take = min(pad_t, need - avail)
+                if take > 0:
+                    pad_t -= take
+                    avail += take
+            else:
+                take = min(pad_b, need - avail)
+                if take > 0:
+                    pad_b -= take
+                    avail += take
+            _set_pad(style, "PaddingTop", pad_t)
+            _set_pad(style, "PaddingBottom", pad_b)
+            if avail + EPS >= need:
+                continue
+            # --- lever B: deepen into provably free space --------------------
+            if not _paints(it):
+                want_h = (need + pad_t + pad_b) / 72.0
+                if reflow:
+                    room = want_h - H          # the row reflows; always granted
+                else:
+                    below = [t for (o, l, t, w, h) in sibs
+                             if o is not it and l < L + W - 0.01
+                             and l + w > L + 0.01 and t >= T + H - 0.01]
+                    limit = min(below) - 0.03 if below else float("inf")
+                    if cont_h is not None:
+                        limit = min(limit, cont_h)
+                    room = max(0.0, limit - (T + H))
+                if room > 0.0005:
+                    new_h = min(want_h, H + room)
+                    he = it.find(_q("Height"))
+                    if he is not None:
+                        he.text = f"{new_h:.4f}in"
+                        avail += (new_h - H) * 72.0
+                        H = new_h
+                        if grown_to is None or T + H > grown_to:
+                            grown_to = T + H
+                    if avail + EPS >= need:
+                        continue
+            # --- lever C: hand back whatever vertical padding is still there,
+            # and only the shortfall that is still open --------------------
+            for _tag, _cur in (("PaddingTop", pad_t), ("PaddingBottom", pad_b)):
+                if avail + EPS >= need or _cur <= 0:
+                    continue
+                take = min(_cur, need - avail)
+                avail += take
+                _set_pad(style, _tag, _cur - take)
+        # A cell that reflowed may now be taller than its container/row; grow
+        # the enclosing rectangle and data-region row with it so the deepened
+        # box is not clipped by ITS parent instead.
+        if reflow and cont_h is not None and grown_to is not None \
+                and grown_to > cont_h + 0.0005:
+            he = cont.find(_q("Height"))
+            if he is not None:
+                he.text = f"{grown_to:.4f}in"
+            anc = parent.get(cont)
+            while anc is not None and anc.tag != row_t:
+                anc = parent.get(anc)
+            if anc is not None:
+                rh = _fin(anc, "Height")
+                if rh is not None and rh + EPS < grown_to:
+                    anc.find(_q("Height")).text = f"{grown_to:.4f}in"
+                    tx = parent.get(anc)
+                    while tx is not None and tx.tag != tablix_t:
+                        tx = parent.get(tx)
+                    if tx is not None:
+                        th = _fin(tx, "Height")
+                        if th is not None:
+                            tx.find(_q("Height")).text = \
+                                f"{th + (grown_to - rh):.4f}in"
+
+    # ---- data-region rows ------------------------------------------------
+    # A cell textbox usually declares no geometry of its own: the ROW height is
+    # what the engine clips against. Same requirement, same levers -- except
+    # that rows lay out one after another, so deepening one can only make the
+    # region taller, never overlap a neighbour.
+    for row in root.iter(row_t):
+        rh = _fin(row, "Height")
+        if rh is None:
+            continue
+        want = rh
+        for cc in row.iter(cell_t):
+            owner = parent.get(cc)
+            while owner is not None and owner.tag != row_t:
+                owner = parent.get(owner)
+            if owner is not row:
+                continue                    # a nested region's own cell
+            for tb in cc.iter(tb_t):
+                if _fin(tb, "Height") is not None:
+                    continue                # positioned: handled above
+                need = _needs(tb)
+                style = tb.find(_q("Style"))
+                if need is None or style is None:
+                    continue
+                pad_t = _pad(style, "PaddingTop")
+                pad_b = _pad(style, "PaddingBottom")
+                avail = rh * 72.0 - pad_t - pad_b
+                if avail + EPS >= need:
+                    continue
+                # same ladder: reclaim our own padding before moving any row
+                va = (style.findtext(_q("VerticalAlign")) or "Top") \
+                    .strip().lower()
+                if va == "middle":
+                    take = min(pad_t, pad_b, (need - avail) / 2.0)
+                    if take > 0:
+                        pad_t -= take
+                        pad_b -= take
+                        avail += 2 * take
+                elif va == "bottom":
+                    take = min(pad_t, need - avail)
+                    pad_t -= take
+                    avail += take
+                else:
+                    take = min(pad_b, need - avail)
+                    pad_b -= take
+                    avail += take
+                _set_pad(style, "PaddingTop", pad_t)
+                _set_pad(style, "PaddingBottom", pad_b)
+                if avail + EPS >= need:
+                    continue
+                want = max(want, (need + pad_t + pad_b) / 72.0)
+        if want > rh + 0.0005:
+            row.find(_q("Height")).text = f"{want:.4f}in"
+            tx = parent.get(row)
+            while tx is not None and tx.tag != tablix_t:
+                tx = parent.get(tx)
+            if tx is not None:
+                th = _fin(tx, "Height")
+                if th is not None:
+                    tx.find(_q("Height")).text = f"{th + (want - rh):.4f}in"
+
+
+def _cap_fixed_single_line_boxes(root) -> None:
+    """The CEILING that pairs with ``_unclip_short_line_boxes``' floor: a fixed
+    single-line box's interior is EXACTLY one line box -- never less (descenders
+    slice), never more (the engine reserves a second line it cannot show).
+
+    Engine-measured, on a declared 0.1875in box holding a 12pt serif label 0.5pt
+    wider than its declared width:
+
+      * interior 13.29pt (exactly one 12pt serif line box) -> ONE line, the tail
+        glyph clipped at the box edge, which is what Oracle prints;
+      * interior 13.68pt (the same box with no inset) -> the engine WRAPS, moves
+        the whole last word onto a second line that the box is far too short to
+        show, and the label loses that word entirely (crop-verified: a two-word
+        caption printed as one word).
+
+    So a box tall enough to START a second line but too short to PRINT one is a
+    word-eating trap. The excess is taken back on the side the text is NOT
+    anchored to, so not one glyph moves: the box, its fill, its border and its
+    text all stay exactly where the declaration puts them -- only the engine's
+    invisible second line goes away.
+
+    Deliberately narrow: single-``Paragraph`` boxes only, never a CanGrow box
+    (auto-sized, and growing is how a legitimate multi-line value prints),
+    never rotated text, never a value carrying its own line break, and never a
+    box with room for two WHOLE lines (there the second line really prints, so
+    wrapping is the faithful behaviour)."""
+    tb_t = _q("Textbox")
+    _BREAKS = ("vbcrlf", "vbnewline", "vblf", "chr(10)", "chr(13)", "&#xa;",
+               "&#xd;", "environment.newline")
+
+    def _first(el, tag):
+        for x in el.iter(_q(tag)):
+            if (x.text or "").strip():
+                return x.text.strip()
+        return None
+
+    def _pad(style, tag):
+        t = (style.findtext(_q(tag)) or "").strip().lower()
+        for unit, per_pt in (("pt", 1.0), ("in", 72.0), ("cm", 72.0 / 2.54),
+                             ("mm", 72.0 / 25.4)):
+            if t.endswith(unit):
+                try:
+                    return float(t[:-len(unit)]) * per_pt
+                except ValueError:
+                    return 0.0
+        return 0.0
+
+    def _height_pt(tb, parent):
+        h = tb.find(_q("Height"))
+        if h is not None and (h.text or "").strip():
+            try:
+                return float(h.text.replace("in", "").strip()) * 72.0
+            except ValueError:
+                return None
+        row = parent.get(tb)                    # a cell is clipped by its row
+        while row is not None and row.tag != _q("TablixRow"):
+            row = parent.get(row)
+        if row is None:
+            return None
+        rh = row.find(_q("Height"))
+        if rh is None or not (rh.text or "").strip():
+            return None
+        try:
+            return float(rh.text.replace("in", "").strip()) * 72.0
+        except ValueError:
+            return None
+
+    parent = {c: p for p in root.iter() for c in p}
+    EPS = 0.05                                   # points
+    for tb in root.iter(tb_t):
+        if len(list(tb.iter(_q("Paragraph")))) != 1:
+            continue
+        if (_first(tb, "CanGrow") or "").lower() == "true":
+            continue
+        if _first(tb, "WritingMode"):
+            continue
+        style = tb.find(_q("Style"))
+        if style is None:
+            continue
+        vals = " ".join((v.text or "") for v in tb.iter(_q("Value"))).lower()
+        if any(b in vals for b in _BREAKS) or "\n" in vals:
+            continue
+        h_pt = _height_pt(tb, parent)
+        if h_pt is None:
+            continue
+        pad_t = _pad(style, "PaddingTop")
+        pad_b = _pad(style, "PaddingBottom")
+        interior = h_pt - pad_t - pad_b
+        sizes = []
+        for fs in tb.iter(_q("FontSize")):
+            t = (fs.text or "").strip()
+            if t.endswith("pt"):
+                try:
+                    sizes.append(float(t[:-2]))
+                except ValueError:
+                    pass
+        line = _font_line_box_pt(max(sizes) if sizes else 10.0,
+                                 _family_is_sans(_first(tb, "FontFamily")))
+        if line <= 0 or interior <= line + EPS or interior >= 2 * line - EPS:
+            continue
+        excess = interior - line
+        va = (style.findtext(_q("VerticalAlign")) or "Top").strip().lower()
+        if va == "middle":
+            pad_t += excess / 2.0
+            pad_b += excess / 2.0
+        elif va == "bottom":
+            pad_t += excess
+        else:
+            pad_b += excess
+        _added = False
+        for tag, val in (("PaddingTop", pad_t), ("PaddingBottom", pad_b)):
+            el = style.find(_q(tag))
+            new = "0pt" if val <= 0.001 else f"{val:.2f}pt"
+            if el is None:
+                _sub(style, tag, new)
+                _added = True
+            else:
+                el.text = new
+        if _added:
+            # <Style> is a schema SEQUENCE: a padding appended after e.g.
+            # WritingMode would fail deserialization.
+            _reorder_style_children(style)
+
+
+def _body_items_right_edge(root, include_page_bands: bool = True) -> float:
+    """Widest ABSOLUTE right edge (in) reached by any body report item.
+
+    ``include_page_bands`` also measures the PageHeader/PageFooter items.
+    Engine-measured fact: a page band spans the PRINTABLE width
+    (PageWidth - LeftMargin - RightMargin), NOT the report <Width> — a
+    header textbox at Left 8in/Width 1.5in printed its full 9.5in span on
+    a report whose Body Width was 5in. So chrome containment is a margin
+    question, not a body-width one, and the sizing caller passes False
+    (otherwise wide page furniture inflates the body past the width the
+    source declared). See _fit_body_to_page."""
+    body = root.find(_q("Body"))
+    if body is None:
+        return 0.0
+
+    def _in(v, default=0.0):
+        try:
+            return float((v or "").replace("in", ""))
+        except (TypeError, ValueError):
+            return default
+
+    widest = 0.0
+
+    def walk(el, abs_left):
+        nonlocal widest
+        if el.tag.split("}")[-1] in ("Rectangle", "Textbox", "Tablix", "Image",
+                                     "Line", "Subreport", "List", "Chart",
+                                     "CustomReportItem"):
+            abs_left += _in(el.findtext(_q("Left")))
+            widest = max(widest, abs_left + _in(el.findtext(_q("Width"))))
+        for c in el:
+            walk(c, abs_left)
+
+    walk(body, 0.0)
+    # Declared page chrome (a full-width rule, the run-date/page-number row)
+    # is clipped when the PRINTABLE width does not reach it. Band items are
+    # already band-relative, so their edges compare directly.
+    page = root.find(_q("Page"))
+    if include_page_bands and page is not None:
+        for band in ("PageHeader", "PageFooter"):
+            el = page.find(_q(band))
+            if el is not None:
+                walk(el, 0.0)
+    return widest
+
+
+def _page_band_items_right_edge(root) -> float:
+    """Widest band-relative right edge (in) over the PageHeader/PageFooter
+    items — what the PRINTABLE width has to reach for declared page chrome
+    to print unclipped."""
+    page = root.find(_q("Page"))
+    if page is None:
+        return 0.0
+
+    def _in(v, default=0.0):
+        try:
+            return float((v or "").replace("in", ""))
+        except (TypeError, ValueError):
+            return default
+
+    widest = 0.0
+
+    def walk(el, abs_left):
+        nonlocal widest
+        if el.tag.split("}")[-1] in ("Rectangle", "Textbox", "Tablix", "Image",
+                                     "Line", "Subreport", "List", "Chart",
+                                     "CustomReportItem"):
+            abs_left += _in(el.findtext(_q("Left")))
+            widest = max(widest, abs_left + _in(el.findtext(_q("Width"))))
+        for c in el:
+            walk(c, abs_left)
+
+    for band in ("PageHeader", "PageFooter"):
+        el = page.find(_q(band))
+        if el is not None:
+            walk(el, 0.0)
+    return widest
+
+
+def _narrow_item(el, new_w: float) -> None:
+    """Set a report item's Width, keeping a Tablix's COLUMN widths in step.
+
+    The engine lays a Tablix out from the SUM of its TablixColumn widths, not
+    from its declared <Width> (which _reconcile_tablix_widths rewrites from
+    that same sum). Narrowing the Width alone is therefore undone downstream
+    and the region still overflows the page. So a Tablix gives the slack back
+    from its widest columns first — but only SLACK: no column drops below the
+    legibility floor, and a table that cannot pay the whole debt out of slack
+    is left completely alone (an ultra-wide table is meant to paginate ACROSS
+    at readable column widths, not be crushed to threads)."""
+    w_el = el.find(_q("Width"))
+    if w_el is None:
+        return
+    try:
+        old = float((w_el.text or "0").replace("in", ""))
+    except ValueError:
+        return
+    if new_w >= old - 0.001:
+        return
+    if el.tag != _q("Tablix"):
+        w_el.text = f"{new_w:.2f}in"
+        return
+    tb = el.find(_q("TablixBody"))
+    cols = tb.find(_q("TablixColumns")) if tb is not None else None
+    entries = []
+    if cols is not None:
+        for c in cols.findall(_q("TablixColumn")):
+            cw = c.find(_q("Width"))
+            try:
+                entries.append([float((cw.text or "0").replace("in", "")), cw])
+            except (ValueError, AttributeError):
+                pass
+    total = sum(e[0] for e in entries)
+    if not entries or total <= new_w + 0.001:
+        w_el.text = f"{new_w:.2f}in"
+        return
+    debt = total - new_w
+    # Slack = what each column has above the legibility floor (a column
+    # already at or under it contributes nothing).
+    if sum(max(0.0, e[0] - _TABLIX_MIN_COL_W_IN) for e in entries) < debt:
+        return
+    w_el.text = f"{new_w:.2f}in"
+    for e in sorted(entries, key=lambda e: -e[0]):
+        if debt <= 0.001:
+            break
+        give = min(debt, max(0.0, e[0] - _TABLIX_MIN_COL_W_IN))
+        e[0] -= give
+        debt -= give
+        e[1].text = f"{e[0]:.2f}in"
+
+
+def _clamp_body_items_to(root, limit: float) -> None:
+    """Clamp every body item's ABSOLUTE right edge to ``limit`` inches.
+
+    Positions are never touched — only widths shrink, and what is narrowed
+    could not have printed anyway."""
+    body = root.find(_q("Body"))
+    if body is None or limit <= 0.5:
+        return
+
+    def _in(v, default=0.0):
+        try:
+            return float((v or "").replace("in", ""))
+        except (TypeError, ValueError):
+            return default
+
+    def walk(el, abs_left):
+        if el.tag.split("}")[-1] in ("Rectangle", "Textbox", "Tablix", "Image",
+                                     "Line", "Subreport", "List", "Chart",
+                                     "CustomReportItem"):
+            abs_left += _in(el.findtext(_q("Left")))
+            w = _in(el.findtext(_q("Width")))
+            if w > 0 and abs_left + w > limit + 0.005:
+                _narrow_item(el, max(0.1, limit - abs_left))
+        for c in el:
+            walk(c, abs_left)
+
+    walk(body, 0.0)
+
+
+def _fit_body_to_page(root, report=None) -> None:
+    """Reconcile the report BODY width with the sheet it prints on.
+
+    Both directions are real defects seen in the corpus:
+
+    * the body must CONTAIN its own widest item — one report kept the
+      portrait default <Width> while its widest Tablix reached 12.18in, so
+      4.7in of its content hung outside the body and paginated into
+      companion pages;
+    * body + margins must FIT the sheet — a body wider than the printable
+      area is the classic "blank page after every page" defect.
+
+    So: grow <Width> to the widest absolute right edge, cap that at what the
+    sheet can hold at the emitted LeftMargin (clamp, never inflate past the
+    paper), and make RightMargin the residual. Oracle's own side margins are
+    ASYMMETRIC whenever the declared body origin is not centred — a 14in
+    landscape sheet measures 0.54in left / 1.25in right — so mirroring the
+    left margin would either clip the body or overflow the page. Widths and
+    the right margin only; nothing ever moves."""
+    page = root.find(_q("Page"))
+    if page is None:
+        return
+
+    def _in(v, default=0.0):
+        try:
+            return float((v or "").replace("in", ""))
+        except (TypeError, ValueError):
+            return default
+
+    pw = _in(page.findtext(_q("PageWidth")), 8.5)
+    lm = _in(page.findtext(_q("LeftMargin")), _PAGE_HMARGIN_IN)
+    # Keep the STRICT inequality body + margins < PageWidth (see
+    # _PAGE_HMARGIN_IN): equality is what makes SSRS emit the blank
+    # companion page.
+    avail = pw - lm - _BODY_FIT_SLACK_IN
+    if avail <= 0.5:
+        return
+    w_el = root.find(_q("Width"))
+    cur = _in(w_el.text) if w_el is not None else 0.0
+    # The body spans whichever is widest: its own DECLARED width, the source's
+    # declared CONTENT span (late passes still place declared boxes there, so
+    # shrinking below it silently demotes them to a fallback layout), or the
+    # widest item we actually emitted. A default width picked by the body
+    # builder is NOT part of that max — that default is exactly what left a
+    # 12in Tablix hanging outside a 7.5in body.
+    decl_bw = 0.0
+    if report is not None:
+        try:
+            _sec = _section_by_kind(report, "section_main")
+            decl_bw = (float(getattr(_sec, "body_width", 0) or 0)
+                       if _sec is not None else 0.0)
+            decl_bw = max(decl_bw,
+                          _content_span_in(report, exclude_page_chrome=True,
+                                           include_section_shift=True))
+        except Exception:  # noqa: BLE001 -- sizing must never break the RDL
+            decl_bw = 0.0
+    # A DECLARED body width IS the body width. Taking the plain max of the
+    # declaration and the emitted right edge let any emitter that had
+    # synthesized a box wider than the source declared (a per-record frame
+    # sized from a page budget, a column strip padded past its last declared
+    # column) drag the whole report wider: <Width> grew past the declared
+    # body, RightMargin was squeezed toward zero to pay for it, and every
+    # right-aligned column then ended that much right of the Oracle truth.
+    # So the declaration is the target and the overshooting items give the
+    # slack back (_clamp_body_items_to below).
+    target = (decl_bw if decl_bw > 0
+              else _body_items_right_edge(root, include_page_bands=False))
+    target = target or cur
+    target = max(0.5, min(target, avail))
+    # Declared page chrome is a MARGIN question, not a body-width one: the
+    # band spans PageWidth - LeftMargin - RightMargin whatever <Width> says
+    # (engine-measured, see _body_items_right_edge). So the right margin may
+    # never close over the chrome, and the chrome never widens the body.
+    _chrome_right = _page_band_items_right_edge(root)
+
+    def _write(t: float) -> None:
+        if w_el is None:
+            _sub(root, "Width", f"{t:.2f}in")
+        else:
+            w_el.text = f"{t:.2f}in"
+        rm_el = page.find(_q("RightMargin"))
+        rm = max(0.0, pw - lm - t - _BODY_FIT_SLACK_IN)
+        if _chrome_right > 0:
+            rm = min(rm, max(0.0, pw - lm - _chrome_right))
+        if rm_el is None:
+            _sub(page, "RightMargin", f"{rm:.2f}in")
+        else:
+            rm_el.text = f"{rm:.2f}in"
+
+    _write(target)
+    # Both directions asserted: the body now CONTAINS every item (nothing
+    # reaches past the width just written) as well as FITS the sheet.
+    _clamp_body_items_to(root, target)
+    # ...except what genuinely COULD NOT narrow — an ultra-wide Tablix with
+    # no column slack to pay from is left alone by _narrow_item. Re-measure
+    # and grow back for those, so honoring the declaration can never leave
+    # body content hanging outside the body (the horizontal-overflow
+    # blank-page defect).
+    residual = _body_items_right_edge(root, include_page_bands=False)
+    if residual > target + 0.005:
+        _write(max(0.5, min(residual, avail)))
 
 
 def _clamp_body_items_to_printable_width(root) -> None:
@@ -6025,6 +8642,26 @@ def _resolve_band_caption(text, group, main, declared):
     return "=" + " & ".join(out)
 
 
+def _declared_literal(text) -> str:
+    """A declared CDATA literal, normalized for EMISSION.
+
+    Oracle's XML export pretty-prints every ``<string><![CDATA[...]]></string>``
+    onto its own indented line, so the literal arrives wrapped in newline +
+    indentation runs. Those are the exporter's, not the author's, and are
+    normalized away: leading/trailing runs vanish and a run that CONTAINS a
+    newline collapses to one space.
+
+    An INTERIOR run of plain spaces is the author's. Oracle prints it verbatim
+    -- truth-measured: a record caption declared with two consecutive spaces
+    renders a visibly wider gap than its single-spaced siblings on the Oracle
+    page. Collapsing every whitespace run (``" ".join(text.split())``) ate that
+    declared ink, so only newline-bearing runs collapse here.
+    """
+    if not text:
+        return ""
+    return re.sub(r"[^\S\n]*\n\s*", " ", str(text)).strip()
+
+
 def _clean_label(text):
     """Strip trailing colon + whitespace so we never get "Status::"."""
     if not text:
@@ -6300,8 +8937,14 @@ def _resolve_palette(report: "ParsedReport") -> Dict[str, str]:
         "subhdr_bg": "#d6d6d6",
         "subhdr_fg": "#03047e",
         "card_bg":   "#ffffff",
-        "ink":       "#282828",
-        "ink_soft":  "#282828",
+        # BODY TEXT ink. Oracle's device default for glyphs is pure black and
+        # the truth exports print it that way wherever the source declares no
+        # font colour (measured: 100% of the glyph spans at (0,0,0)). The old
+        # house tone (#282828) is 40/255 off black and reads as washed-out
+        # grey, so there is no "soft" body ink -- both slots are BLACK, and a
+        # declared colour always overrides them at the emitter.
+        "ink":       _BODY_INK,
+        "ink_soft":  _BODY_INK,
         "rule":      "#777777",
     }
 
@@ -6548,6 +9191,7 @@ def _detail_band_fields(report):
     if main is None:
         return [], [], None
     fields = []
+    texts = []
     def walk(g):
         for f in (g.fields or []):
             # A BLOB/image-bound field (a logo/seal/photo) is NOT a data column:
@@ -6555,11 +9199,24 @@ def _detail_band_fields(report):
             # belongs AND, when it sits just right of a real column (e.g. a logo
             # field at x0.5 vs an address column at x0.26), squeezes that column
             # to a sliver. Mirrors the mockup _detail_image_srcs skip. Generic.
+            # A MARGIN-declared field is PAGE CHROME, not record content: the
+            # section's <margin> band is the sheet furniture (title, subtitle,
+            # run date, page number) and the margin emitter already prints it
+            # once per page. Collecting it here put a second copy of a margin
+            # subtitle in EVERY body record band — a duplicate box costing a
+            # whole wrap line per record. Same rule the text branch below
+            # already applied; page chrome never belongs to a data band.
             if (f.kind == "field" and f.source
+                    and not getattr(f, "in_margin", False)
                     and not _image_field_binding(f, report)):
                 fields.append((f.source, float(getattr(f, "x", 0.0) or 0.0),
                                float(getattr(f, "y", 0.0) or 0.0),
                                float(getattr(f, "width", 0.0) or 0.0)))
+            elif (f.kind == "text" and (f.text or "").strip()
+                    and not getattr(f, "in_margin", False)):
+                texts.append(((f.text or "").strip(),
+                              float(getattr(f, "x", 0.0) or 0.0),
+                              float(getattr(f, "y", 0.0) or 0.0)))
         for c in (g.children or []):
             walk(c)
     walk(main)
@@ -6579,13 +9236,360 @@ def _detail_band_fields(report):
     if best_y is None or best_n < 2:
         return [], [], None
     row = sorted(by_y[best_y], key=lambda z: z[1])
-    # wrap fields: single-x rows just BELOW the band (y within ~0.4in)
+    # wrap fields: rows just BELOW the band (y within ~0.4in). These are the
+    # record's OWN follow-on lines (an address stack, a directions note) —
+    # dropping them lost declared content the truth prints. A band may carry
+    # SEVERAL fields side by side (multi-x), each emitted at its declared x.
+    # Each field carries its INLINE LABEL when the layout pairs one at the
+    # same y to its left ("Additional Information:  <value>"). Entries are
+    # (source, x, y, w, label_text, label_x); label "" when none.
     wrap = []
     for y, lst in by_y.items():
-        if 0 < (y - best_y) <= 0.4 and len({round(x, 1) for _s, x, _y, _w in lst}) == 1:
-            wrap.extend(lst)
-    wrap.sort(key=lambda z: z[2])
+        if 0 < (y - best_y) <= 0.4:
+            prev_x = None
+            for (s, x, fy, w) in sorted(lst, key=lambda z: z[1]):
+                lbl, lblx = "", 0.0
+                cands = [(tx, lx) for (tx, lx, ly) in texts
+                         if abs(ly - fy) <= 0.06 and lx < x - 0.05
+                         # a label belongs to THIS field only when it sits
+                         # right of the previous field on the same band
+                         and (prev_x is None or lx > prev_x)]
+                if cands:
+                    lbl, lblx = max(cands, key=lambda c: c[1])
+                wrap.append((s, x, fy, w, lbl, lblx))
+                prev_x = x
+    wrap.sort(key=lambda z: (z[2], z[1]))
     return row, wrap, best_y
+
+
+def _detail_band_style(report, row_y):
+    """DECLARED styling of the detail band `_detail_band_fields` found:
+    per-source fonts, caption fonts, and the band's declared box chrome
+    (a solid-linePattern frame around the row + vertical separator
+    <line>s at their declared x). The synthesized 9pt-default band
+    dropped the source's Times faces and never drew the declared boxes
+    (truth-screenshot measured). Geometry/declaration-driven only.
+
+    Returns {"fonts": {SRC: (face, size, bold)},
+             "caption_fonts": {text: (face, size, bold)},
+             "row_box": (x, w, color, weight) | None,
+             "record_box": (x, w, color, weight) | None,
+             "vseps": [(x, color, weight), ...]}
+
+    Ink and weight are DECLARED, never house literals: a declared
+    lineWidth strokes 1:1 and a box that declares none is Oracle's device
+    hairline (``_declared_edge_weight`` / ``rule_color``)."""
+    out = {"fonts": {}, "caption_fonts": {}, "row_box": None,
+           "record_box": None, "vseps": []}
+    if row_y is None:
+        return out
+    main = _section_by_kind(report, "section_main")
+    if main is None:
+        return out
+
+    def _font_of(f):
+        # only an EXPLICITLY declared face counts: the parser defaults
+        # font_size=10 even when the source declares no <font> at all,
+        # so size alone cannot distinguish declared from default
+        face = (getattr(f, "font_family", "") or "").strip()
+        if not face:
+            return None
+        try:
+            size = int(float(getattr(f, "font_size", 0) or 0))
+        except (TypeError, ValueError):
+            size = 0
+        return (face, size or None, bool(getattr(f, "bold", False)))
+
+    def _walk(g):
+        yield g
+        for c in (getattr(g, "children", None) or []):
+            yield from _walk(c)
+
+    def _is_solid(g):
+        # frames carry the linePattern dialect as border_pattern; drawn
+        # graphics carry it as line_pattern
+        return ((getattr(g, "line_pattern", "") or "")
+                or (getattr(g, "border_pattern", "") or "")
+                ).lower() == "solid"
+
+    def _box_of(g):
+        # RAW declared lineWidth (0.0 = undeclared). border_width can't
+        # answer that on a frame -- the parser sets it to 1.0 purely as a
+        # "this edge draws" flag -- so the dialect is read off line_width.
+        try:
+            _lw = float(getattr(g, "line_width", 0) or 0)
+        except (TypeError, ValueError):
+            _lw = 0.0
+        return (float(getattr(g, "x", 0) or 0),
+                float(getattr(g, "width", 0) or 0),
+                _rule_color(getattr(g, "border_color", ""),
+                            width_declared=_lw > 0),
+                _declared_edge_weight(_lw))
+
+    def _band_fields_in_subtree(g):
+        n = 0
+        for k in _walk(g):
+            for f in (getattr(k, "fields", None) or []):
+                if ((getattr(f, "kind", "") or "") == "field"
+                        and (getattr(f, "source", "") or "").strip()
+                        and abs(float(getattr(f, "y", 0) or 0)
+                                - row_y) <= 0.03):
+                    n += 1
+        return n
+
+    # The style window is the RECORD's DECLARED BOX, not a fixed guess. The
+    # record is the tightest repeating frame whose declared y-span straddles
+    # the band and whose subtree owns it; everything Oracle prints per record
+    # lives inside that box -- INCLUDING the items of a NESTED plain <frame>
+    # (a second/third record line, which sits a whole line-height below the
+    # band). A fixed +/-0.45in guess cut those nested lines off (measured: a
+    # nested row frame declared at y=0.948 against a band at y=0.448 is
+    # 0.50in away), so every item in it lost its DECLARED <font size> and
+    # fell back to the synthesized default. The declared box always wins;
+    # the constant only survives as a FLOOR so no report's window shrinks.
+    _rec_lo = row_y - 0.45
+    _rec_hi = row_y + 0.45
+    _tightest = None
+    for g in _walk(main):
+        if (getattr(g, "kind", "") or "") != "repeating_frame":
+            continue
+        gy = float(getattr(g, "y", 0) or 0)
+        gh = float(getattr(g, "height", 0) or 0)
+        if gh <= 0 or not (gy - 0.05 <= row_y <= gy + gh + 0.05):
+            continue
+        if _band_fields_in_subtree(g) < 2:
+            continue
+        if _tightest is None or gh < _tightest[1]:
+            _tightest = (gy, gh)
+    if _tightest is not None:
+        _rec_lo = min(_rec_lo, _tightest[0])
+        _rec_hi = max(_rec_hi, _tightest[0] + _tightest[1])
+
+    band_owner = None
+    for g in _walk(main):
+        owns_band = 0
+        for f in (getattr(g, "fields", None) or []):
+            fy = float(getattr(f, "y", 0) or 0)
+            kind = (getattr(f, "kind", "") or "")
+            if kind == "field" and (getattr(f, "source", "") or "").strip():
+                # window covers the whole stacked record (lines above AND
+                # below the best band -- a 2-line stacked list styles both)
+                near_band = _rec_lo <= fy <= _rec_hi
+                if near_band:
+                    fnt = _font_of(f)
+                    if fnt:
+                        out["fonts"].setdefault(
+                            f.source.strip().upper(), fnt)
+                if abs(fy - row_y) <= 0.03:
+                    owns_band += 1
+            elif kind == "text" and (getattr(f, "text", "") or "").strip():
+                # captions: the band's own column headings sit ABOVE it, the
+                # record's inline label/literal lines inside its declared box
+                if -0.02 <= (row_y - fy) <= 0.6 \
+                        or abs(fy - row_y) <= 0.06 \
+                        or _rec_lo <= fy <= _rec_hi:
+                    fnt = _font_of(f)
+                    if fnt:
+                        _t = "\n".join(s.strip() for s in
+                                       f.text.splitlines() if s.strip())
+                        out["caption_fonts"].setdefault(_t, fnt)
+        if owns_band >= 2:
+            if (_is_solid(g) and float(getattr(g, "width", 0) or 0) > 0.5
+                    and (getattr(g, "kind", "") or "")
+                    != "repeating_frame"):
+                # deepest solid frame directly owning the row = its box
+                out["row_box"] = _box_of(g)
+            band_owner = g  # deepest direct owner wins (document order)
+        elif ((getattr(g, "kind", "") or "") == "repeating_frame"
+                and _is_solid(g)
+                and float(getattr(g, "width", 0) or 0) > 0.5
+                and _band_fields_in_subtree(g) >= 2):
+            # deepest solid repeating frame ENCLOSING the band = the
+            # per-record box the truth draws around row + wrap lines
+            out["record_box"] = _box_of(g)
+    if band_owner is not None:
+        for f in (getattr(band_owner, "fields", None) or []):
+            if (getattr(f, "kind", "") or "") != "line":
+                continue
+            if (getattr(f, "line_pattern", "") or "").lower() != "solid":
+                continue
+            fw = abs(float(getattr(f, "width", 0) or 0))
+            fh = abs(float(getattr(f, "height", 0) or 0))
+            if fw > 0.03 or fh <= 0.02:
+                continue  # not a vertical separator
+            # A separator <line> carries its declared width in
+            # border_width (0.0 = undeclared -> device hairline), the
+            # same dialect _declared_rule_stroke reads for body rules.
+            try:
+                _vw = float(getattr(f, "border_width", 0) or 0)
+            except (TypeError, ValueError):
+                _vw = 0.0
+            out["vseps"].append(
+                (float(getattr(f, "x", 0) or 0),
+                 _rule_color(getattr(f, "border_color", ""),
+                             width_declared=_vw > 0),
+                 _declared_edge_weight(_vw)))
+    return out
+
+
+def _nd_declared_hrules(report, band_y, row_y):
+    """DECLARED full-width horizontal rules around a nested master-detail
+    band, classified by their declared y (geometry-only, no names):
+
+      band_top     -- a solid line just ABOVE the outer group's band field
+                      (the heavy rule Oracle draws over the group caption)
+      detail_top   -- a solid line just above the detail row band (drawn at
+                      the top of every record instance)
+      group_bottom -- a section-level solid line BELOW the whole group frame
+                      (anchored under the master frame; prints after the
+                      group's records)
+
+    Each value is ``(color, width_pt, LayoutField)`` or None; declared
+    lineWidth maps 1:1 to points. linePattern="solid" with NO width =
+    Oracle's device hairline (truth PDFs measure 0-width strokes) -> the
+    thinnest RDL stroke, 0.25pt. The LayoutField carries the rule's OWN
+    declared endpoints, which is what the emitter draws to (a band-wide
+    border starts and ends in the wrong place).
+    Margin-band lines are page chrome, never body rules."""
+    out = {"band_top": None, "detail_top": None, "group_bottom": None}
+    main = _section_by_kind(report, "section_main")
+    if main is None:
+        return out
+
+    def _walk(g, rep_depth):
+        for f in (getattr(g, "fields", None) or []):
+            yield f, rep_depth
+        for c in (getattr(g, "children", None) or []):
+            _d = rep_depth + (1 if (getattr(c, "kind", "") or "").lower()
+                              == "repeating_frame" else 0)
+            yield from _walk(c, _d)
+
+    for f, rep_depth in _walk(main, 0):
+        if (getattr(f, "kind", "") or "") != "line":
+            continue
+        if getattr(f, "in_margin", False):
+            continue
+        if (getattr(f, "line_pattern", "") or "").lower() != "solid":
+            continue
+        fw = abs(float(getattr(f, "width", 0) or 0))
+        fh = abs(float(getattr(f, "height", 0) or 0))
+        if fh > 0.02 or fw < 1.0:
+            continue  # not a full-width horizontal rule
+        y = float(getattr(f, "y", 0) or 0)
+        spec = ((getattr(f, "border_color", "") or "").strip() or "#000000",
+                float(getattr(f, "border_width", 0) or 0) or 0.25, f)
+        if band_y is not None and band_y - 0.15 <= y <= band_y + 0.02:
+            out["band_top"] = spec
+        elif row_y is not None and row_y - 0.15 <= y <= row_y + 0.02:
+            out["detail_top"] = spec
+        elif (row_y is not None and y > row_y + 0.1 and rep_depth == 0):
+            out["group_bottom"] = spec
+    return out
+
+
+def _declared_record_card(report, grp):
+    """The per-record CARD a middle master-detail group declares in the
+    layout: the repeating frame bound to the group, its DIRECT visible
+    fields and label texts at their declared geometry — excluding anything
+    a nested repeating frame's subtree owns (the record's own detail table
+    + that table's header belong to the detail machinery). The synthesized
+    two-column "Label: value" card dropped every field the item-name
+    filters excluded (dates, formula columns) and every declared label.
+    Returns {"fields": [LayoutField...], "texts": [LayoutField...],
+    "y0": float, "y1": float} or None when the layout declares no such
+    labeled form. Geometry/declaration-driven only."""
+    main = _section_by_kind(report, "section_main")
+    if main is None:
+        return None
+    gname = (getattr(grp, "name", "") or "").upper()
+    if not gname:
+        return None
+
+    def _find_frame(g, inherited=""):
+        # carry the innermost PAINTED ancestor fill down (pattern-gated
+        # by the parser) — the record card prints on the fill of the
+        # frame that owns it, exactly like the flat-table header path
+        _bgp = (getattr(g, "background_color", "") or "").strip() \
+            or inherited
+        if ((getattr(g, "kind", "") or "").lower() == "repeating_frame"
+                and (getattr(g, "source_query", "") or "").upper() == gname):
+            return g, _bgp
+        for c in (getattr(g, "children", None) or []):
+            r = _find_frame(c, _bgp)
+            if r is not None:
+                return r
+        return None
+    _found = _find_frame(main)
+    if _found is None:
+        return None
+    frame, _card_bg = _found
+    if _card_bg and (_is_designer_fill_hex(_card_bg)
+                     or _card_bg.lower() in ("#ffffff", "white")):
+        _card_bg = ""
+
+    def _has_rep(g):
+        return any(
+            (getattr(c, "kind", "") or "").lower() == "repeating_frame"
+            or _has_rep(c)
+            for c in (getattr(g, "children", None) or []))
+
+    fields, texts = [], []
+
+    def _collect(g):
+        for f in (getattr(g, "fields", None) or []):
+            if getattr(f, "in_margin", False) or \
+                    not getattr(f, "visible", True):
+                continue
+            k = (getattr(f, "kind", "") or "")
+            if k == "field" and (getattr(f, "source", "") or "").strip():
+                fields.append(f)
+            elif k == "text" and (getattr(f, "text", "") or "").strip():
+                texts.append(f)
+        for c in (getattr(g, "children", None) or []):
+            ck = (getattr(c, "kind", "") or "").lower()
+            if ck == "repeating_frame" or _has_rep(c):
+                continue
+            _collect(c)
+    _collect(frame)
+    # A card is DECLARED as soon as the frame positions its own value
+    # boxes. Requiring separate caption texts as well sent every card whose
+    # values carry their own wording (no standalone <text> labels) to the
+    # synthesized two-column ladder, which throws the declared y/x/width
+    # away and re-stacks the members on a constant step.
+    if not fields:
+        return None
+    ys = [float(getattr(f, "y", 0) or 0) for f in fields + texts]
+    y1 = max(float(getattr(f, "y", 0) or 0)
+             + float(getattr(f, "height", 0) or 0.19)
+             for f in fields + texts)
+    y0 = min(ys)
+    # THE FRAME'S OWN DECLARED BOX, measured from the card's first member.
+    # Oracle states the record frame's height; the members inside it may
+    # stop short of its bottom edge and that remaining slack is DECLARED
+    # blank, not padding to be re-invented. Where the frame also holds the
+    # record's DETAIL (a nested repeating frame), the card's box ends where
+    # that detail is declared to start.
+    _fy = float(getattr(frame, "y", 0) or 0)
+    _fh = float(getattr(frame, "height", 0) or 0)
+    _bottom = (_fy + _fh) if _fh > 0 else None
+
+    def _first_rep_y(g):
+        best = None
+        for c in (getattr(g, "children", None) or []):
+            if (getattr(c, "kind", "") or "").lower() == "repeating_frame":
+                cy = float(getattr(c, "y", 0) or 0)
+                best = cy if best is None else min(best, cy)
+            else:
+                sub = _first_rep_y(c)
+                if sub is not None:
+                    best = sub if best is None else min(best, sub)
+        return best
+    _det_y = _first_rep_y(frame)
+    if _det_y is not None and _det_y > y0 + 0.005:
+        _bottom = _det_y if _bottom is None else min(_bottom, _det_y)
+    frame_h = max(0.0, _bottom - y0) if _bottom is not None else 0.0
+    return {"fields": fields, "texts": texts, "y0": y0, "y1": y1,
+            "frame_h": frame_h, "bg": _card_bg}
 
 
 def _stacked_list_columns(report):
@@ -6630,10 +9634,16 @@ def _stacked_list_columns(report):
                     continue
                 if k == "text" and not txt:
                     continue
+                # The rounded y is the BAND KEY (line-mates are rarely
+                # pixel-aligned); the RAW y + declared height ride along so
+                # the emitters can place each stacked line at the y Oracle
+                # declares instead of flowing it by a synthesized line height.
                 out.append((round(float(getattr(f, "y", 0) or 0), 2),
                             float(getattr(f, "x", 0) or 0),
                             float(getattr(f, "width", 0) or 0),
-                            k, src or txt))
+                            k, src or txt,
+                            float(getattr(f, "y", 0) or 0),
+                            float(getattr(f, "height", 0) or 0)))
             for c in (getattr(n, "children", None) or []):
                 _w(c)
         _w(fr)
@@ -6646,7 +9656,7 @@ def _stacked_list_columns(report):
         if not flds:
             continue
         by = defaultdict(set)
-        for y, x, _w, _k, _s in flds:
+        for y, x, _w, _k, _s, _ry, _h in flds:
             by[y].add(round(x, 1))
         nx = max((len(v) for v in by.values()), default=0)
         if nx > best_cols:
@@ -6656,10 +9666,12 @@ def _stacked_list_columns(report):
         return None
     flds = best_fields
     by_y = defaultdict(list)
-    for y, x, w, k, s in flds:
-        by_y[y].append((x, w, k, s))
-    prim_y = max(by_y, key=lambda y: len({round(x, 1) for x, _w, _k, _s in by_y[y]}))
-    col_xs = sorted({round(x, 1) for x, _w, _k, _s in by_y[prim_y]})
+    for y, x, w, k, s, ry, h in flds:
+        by_y[y].append((x, w, k, s, ry, h))
+    prim_y = max(by_y,
+                 key=lambda y: len({round(x, 1)
+                                    for x, _w, _k, _s, _ry, _h in by_y[y]}))
+    col_xs = sorted({round(x, 1) for x, _w, _k, _s, _ry, _h in by_y[prim_y]})
     if len(col_xs) < 2:
         return None
     # The line-1 (primary) band must be predominantly DATA fields, not static
@@ -6668,12 +9680,12 @@ def _stacked_list_columns(report):
     # stacked list -- keep it on the flat path.
     _prim_field_cols = {
         round(min(col_xs, key=lambda c: abs(c - x)), 1)
-        for x, _w, k, _s in by_y[prim_y] if k == "field"}
+        for x, _w, k, _s, _ry, _h in by_y[prim_y] if k == "field"}
     if len(_prim_field_cols) < len(col_xs) * 0.5:
         return None
 
     def _aligned(y):
-        xs = {round(x, 1) for x, _w, _k, _s in by_y[y]}
+        xs = {round(x, 1) for x, _w, _k, _s, _ry, _h in by_y[y]}
         return sum(1 for cx in col_xs if any(abs(cx - xx) <= 0.3 for xx in xs))
 
     sec_bands = [y for y in by_y if y > prim_y + 0.01
@@ -6681,29 +9693,71 @@ def _stacked_list_columns(report):
     if not sec_bands:
         return None  # single-line list -> keep the flat one-column-per-field grid
 
+    # THE BUCKET KEY IS NOT THE COORDINATE. col_xs rounds x to 0.1in only so
+    # that line-mates a hundredth apart land in the same column; emitting that
+    # key as the box's Left rounds the DECLARATION by up to 0.05in (a declared
+    # 8.39722in printed at 8.40in, 4.29395in at 4.30in -- 0.44pt off, and the
+    # caption above the same column, which keeps its own declared x, no longer
+    # lined up with its values). Resolve each bucket back to the x the source
+    # states: the PRIMARY band's own declared x for that column, falling back
+    # to the leftmost declared x assigned to it.
+    _true_x = {}
+    for _x, _w, _k, _s, _ry, _h in by_y[prim_y]:
+        _near = min(col_xs, key=lambda c: abs(c - _x))
+        if abs(_x - _near) <= 0.6:
+            _true_x[_near] = min(_true_x.get(_near, _x), _x)
+    for _y, _x, _w, _k, _s, _ry, _h in flds:
+        _near = min(col_xs, key=lambda c: abs(c - _x))
+        if abs(_x - _near) <= 0.6 and _near not in _true_x:
+            _true_x[_near] = _x
+
+    def _decl_x(bucket):
+        return _true_x.get(bucket, bucket)
+
     cols = []
     for ci, cx in enumerate(col_xs):
-        nxt = col_xs[ci + 1] if ci + 1 < len(col_xs) else None
+        nxt = (_decl_x(col_xs[ci + 1]) if ci + 1 < len(col_xs) else None)
         lines = []
         for y in sorted(by_y):
-            for x, _w, k, s in by_y[y]:
+            for x, _w, k, s, ry, h in by_y[y]:
                 near = min(col_xs, key=lambda c: abs(c - x))
                 if abs(near - cx) < 1e-6 and abs(x - cx) <= 0.6:
-                    lines.append((y, k, s))
+                    lines.append((y, k, s, ry, h))
         lines.sort(key=lambda z: z[0])
-        cols.append({"x": cx, "next": nxt, "lines": [(k, s) for _y, k, s in lines]})
+        cols.append({"x": _decl_x(cx), "next": nxt,
+                     "lines": [(k, s) for _y, k, s, _ry, _h in lines],
+                     # DECLARED y / height of each stacked line, parallel to
+                     # "lines" -- the emitters place at these, they do not
+                     # flow the stack by a synthesized line height.
+                     "line_ys": [ry for _y, _k, _s, ry, _h in lines],
+                     "line_hs": [h for _y, _k, _s, _ry, h in lines]})
     n_lines = max((len(c["lines"]) for c in cols), default=1)
+    # The record's DECLARED top: the highest declared line in the stack.
+    det_y0 = min((min(c["line_ys"]) for c in cols if c["line_ys"]),
+                 default=0.0)
 
     try:
         _fg, label_geo = _layout_geometry_index(report)
     except Exception:
         label_geo = []
-    hb = defaultdict(list)
-    for t, lx, ly, _bg in (label_geo or []):
-        if t and 0 < (prim_y - ly) <= 0.8 and "&<" not in t:
-            hb[round(ly, 2)].append((lx, t))
-    headers = [sorted(hb[y]) for y in sorted(hb)
-               if len({round(x, 1) for x, _t in hb[y]}) >= 2]
+    # Cluster header labels into y-BANDS with tolerance: authored bands are
+    # rarely pixel-aligned (one caption sits 0.01in below its line-mates),
+    # and exact-y bucketing split such a band, dropping the offset caption
+    # entirely (a second-line header literal vanished from the output).
+    _hcand = sorted((ly, lx, t) for t, lx, ly, _bg in (label_geo or [])
+                    if t and 0 < (prim_y - ly) <= 0.8 and "&<" not in t)
+    _hbands = []  # [anchor_y, [(lx, t), ...]]
+    for ly, lx, t in _hcand:
+        if _hbands and ly - _hbands[-1][0] <= 0.05:
+            _hbands[-1][1].append((lx, t))
+        else:
+            _hbands.append([ly, [(lx, t)]])
+    _hkeep = [(y, entries) for y, entries in _hbands
+              if len({round(x, 1) for x, _t in entries}) >= 2]
+    headers = [sorted(entries) for _y, entries in _hkeep]
+    # DECLARED y of each caption band, parallel to "headers" (the caption
+    # stack is placed at these, not flowed at a synthesized band height).
+    header_ys = [y for y, _entries in _hkeep]
     palette = _resolve_palette(report)
     # Resolve the header band color ONCE here (mirroring _build_tablix's
     # neutralization) so the RDL builder and the mockup render agree exactly: a
@@ -6712,8 +9766,9 @@ def _stacked_list_columns(report):
     hdr_bg = palette.get("band_bg") or "#00008B"
     hdr_fg = palette.get("band_fg") or "#ffffff"
     if (not palette.get("themed", True)) or _is_neutral_dark(hdr_bg):
-        hdr_bg = "#ffffff"; hdr_fg = "#111111"
-    return {"columns": cols, "headers": headers, "n_lines": n_lines,
+        hdr_bg = "#ffffff"; hdr_fg = _BODY_INK
+    return {"columns": cols, "headers": headers, "header_ys": header_ys,
+            "n_lines": n_lines, "det_y0": det_y0,
             "themed": bool(palette.get("themed", True)),
             "header_bg": hdr_bg, "header_fg": hdr_fg}
 
@@ -6774,7 +9829,7 @@ def _grouped_tabular_spec(report):
             return None
         dcols = sorted(((float(getattr(f, "x", 0) or 0),
                          float(getattr(f, "width", 0) or 0),
-                         (getattr(f, "source", "") or "").strip())
+                         (getattr(f, "source", "") or "").strip(), f)
                         for f in _data_fields(detail_rf)), key=lambda z: z[0])
         if len(dcols) < 3:
             return None
@@ -6791,15 +9846,35 @@ def _grouped_tabular_spec(report):
             return None
 
         # COLUMN-HEADER band: >=3 static text labels just ABOVE the detail row.
+        # The band's fill is the OWNING frame's own background (the truth
+        # paints the column strip as one full-width tinted band).
         col_hdr = []
+        col_band_bg = ""
+        # DECLARED page-repeat scope of the COLUMN STRIP: Oracle's
+        # printObjectOnPage on the frame that owns the labels (or on a label
+        # itself). "allPage" is the only value that reprints the strip at the
+        # top of every continuation page; the default reprints nothing.
+        col_band_pop = ""
         for n in _walk(outer_rf):
             for f in (getattr(n, "fields", None) or []):
                 if (getattr(f, "kind", "") or "") != "text":
                     continue
                 t = (getattr(f, "text", "") or "").strip()
+                # pretty-printed CDATA keeps blank lines + indentation
+                # ("Payment\n\n      Amount") — normalize so the second
+                # word lands on line 2, not line 4 (which clipped it)
+                t = "\n".join(s.strip() for s in t.splitlines()
+                              if s.strip())
                 fy = float(getattr(f, "y", 0) or 0)
                 if t and 0.0 < (drow_y - fy) <= 0.5:
-                    col_hdr.append((float(getattr(f, "x", 0) or 0), t))
+                    col_hdr.append((float(getattr(f, "x", 0) or 0), t, f))
+                    if not col_band_bg:
+                        col_band_bg = (getattr(n, "background_color", "")
+                                       or "")
+                    if not col_band_pop:
+                        col_band_pop = ((getattr(n, "print_on_page", "") or "")
+                                        or (getattr(f, "print_on_page", "")
+                                            or ""))
         if len(col_hdr) < 3:
             return None
         col_hdr.sort(key=lambda z: z[0])
@@ -6837,16 +9912,55 @@ def _grouped_tabular_spec(report):
             group_header.append((k, src if k == "field" else txt,
                                  float(getattr(f, "x", 0) or 0),
                                  float(getattr(f, "width", 0) or 0),
-                                 float(getattr(f, "y", 0) or 0)))
+                                 float(getattr(f, "y", 0) or 0), f))
         if grp_key is None:
             return None
         group_header.sort(key=lambda z: z[2])
 
+        # DECLARED page-repeat scope of the GROUP BAND itself. Oracle puts
+        # printObjectOnPage on the band's OWN members -- the break caption,
+        # the status pair beside it, the full-width rule under it -- and
+        # "allPage" there means the band reprints at the top of every page the
+        # group spans (the "(continued)" marker declared beside the caption is
+        # meaningless unless it does). Scanned over every declared object the
+        # outer frame owns above the column strip, whatever its kind, so a
+        # band whose only declaration sits on its drawn rule still counts.
+        band_pop = ""
+        for f in (getattr(outer_rf, "fields", None) or []):
+            if float(getattr(f, "y", 0) or 0) >= chy - 0.001:
+                continue
+            _p = (getattr(f, "print_on_page", "") or "")
+            if _declares_page_repeat(_p):
+                band_pop = _p
+                break
+
         # GROUP FOOTERS: non-repeating sub-frames below the detail row, carrying
-        # the per-group totals. The repeated break-key field (same source as the
-        # group header) is dropped so the totals stack stays clean/right-aligned.
+        # the per-group totals.
+        #
+        # EVERY declared member of those frames is carried, INCLUDING a field
+        # re-declaring the break key. Oracle's break report closes a group by
+        # RE-PRINTING its name on the closing line beside the running total,
+        # and that closing caption is a first-class declaration, not a
+        # duplicate of the group header: it is declared in the FOOTER frame,
+        # at its own x/width/weight, on its own footer line.
+        #
+        # TRUTH MEASUREMENT (2026-08-08, a 70-page Oracle-rendered break
+        # report whose footer frame declares such a field at x=0 w=5.09375,
+        # 10pt bold): the closing caption prints on EVERY group close --
+        # page 1 y=438.14pt x=36.00pt Helvetica-Bold 10 carrying the group's
+        # own name, flush with the sheet's 0.5in left margin (declared x=0 +
+        # the section body origin), on the same line as that group's last
+        # total (x=567.76pt, right-aligned to the declared 8.0in right edge).
+        # 24 such closing captions across the first 20 truth pages; ZERO
+        # pages print the group block without one. The converter used to
+        # DROP it ("keeps the totals stack clean"), losing one bold caption
+        # per group -- pure content loss against the declaration.
         foot_by_y = {}
         has_summary = False
+        # DECLARED bottom edge of the footer band: the lowest (y + height) any
+        # footer member declares. The band is exactly that tall — see
+        # "footer_bottom" below.
+        foot_bottom = 0.0
         for n in _walk(outer_rf):
             if (getattr(n, "kind", "") or "") == "repeating_frame":
                 continue
@@ -6859,8 +9973,6 @@ def _grouped_tabular_spec(report):
                     continue
                 txt = (getattr(f, "text", "") or "").strip()
                 src = (getattr(f, "source", "") or "").strip()
-                if k == "field" and src.upper() == grp_key:
-                    continue
                 if k == "field" and not src:
                     continue
                 if k == "text" and not txt:
@@ -6872,15 +9984,148 @@ def _grouped_tabular_spec(report):
                 foot_by_y.setdefault(round(fy, 2), []).append(
                     (k, src if k == "field" else txt,
                      float(getattr(f, "x", 0) or 0),
-                     float(getattr(f, "width", 0) or 0)))
+                     float(getattr(f, "width", 0) or 0), f))
+                foot_bottom = max(foot_bottom,
+                                  fy + float(getattr(f, "height", 0) or 0))
         if not has_summary:
             return None
         footers = [sorted(foot_by_y[y], key=lambda z: z[2])
                    for y in sorted(foot_by_y)]
+        footer_ys = sorted(foot_by_y)
 
         palette = _resolve_palette(report)
+        # DECLARED band fill: the group/header band's own fillBackgroundColor
+        # from the source (e.g. Oracle gray16 -> light gray). The synthesized
+        # white band threw away the report's actual chrome.
+        # the TOTALS BOX: the bordered sub-frame that encloses the footer
+        # members — the truth prints CK/MO + Cash + Grand totals inside a
+        # visible box with labels and values ADJACENT at declared x; the
+        # synthesized right-stack threw both the box and the adjacency away
+        # (fidelity-diff verified against the truth PDF).
+        totals_box = None
+        for n in _walk(outer_rf):
+            if (getattr(n, "kind", "") or "") == "repeating_frame":
+                continue
+            # candidates: a bordered sub-FRAME, or a drawn <rect> GRAPHIC
+            # (Oracle's usual totals box is a rect field, not a frame).
+            cands = []
+            if float(getattr(n, "border_width", 0) or 0) > 0:
+                cands.append(n)
+            cands.extend(
+                f for f in (getattr(n, "fields", None) or [])
+                if (getattr(f, "kind", "") or "") == "rect"
+                and (float(getattr(f, "border_width", 0) or 0) > 0
+                     or (getattr(f, "background_color", "") or "")))
+            for c in cands:
+                ny = float(getattr(c, "y", 0) or 0)
+                if ny <= drow_y + 0.05:
+                    continue
+                nh = float(getattr(c, "height", 0) or 0)
+                nx = float(getattr(c, "x", 0) or 0)
+                nw = float(getattr(c, "width", 0) or 0)
+                if nw > 0.5 and nh > 0.2:
+                    # index 5 = the box's DECLARED stroke color (the truth
+                    # prints a navy border where the synthesized #333333
+                    # gray printed — lineForegroundColor dialect).
+                    totals_box = (nx, ny, nw, nh,
+                                  getattr(c, "background_color", "") or "",
+                                  (getattr(c, "border_color", "") or "")
+                                  .strip())
+                    break
+            if totals_box:
+                break
+        # GROUP band fill: the outer frame's own background, else the
+        # nearest ANCESTOR frame's (Oracle wraps the repeating group in a
+        # tinted GRPFR master frame — that tint is the band the truth
+        # paints full-width behind the group header).
+        grp_band_bg = (getattr(outer_rf, "background_color", "") or "")
+        if not grp_band_bg:
+            def _path_to(node, target, trail):
+                if node is target:
+                    return list(trail)
+                for c in (getattr(node, "children", None) or []):
+                    r = _path_to(c, target, trail + [node])
+                    if r is not None:
+                        return r
+                return None
+            for anc in reversed(_path_to(main_sec, outer_rf, []) or []):
+                bgc = getattr(anc, "background_color", "") or ""
+                if bgc:
+                    grp_band_bg = bgc
+                    break
+        # DECLARED rules, ALL of them, as REAL rules.
+        #
+        # A rule is an Oracle <line> with its own x/width/ink/weight; it is
+        # NOT the border of whatever band happens to enclose it. Classifying
+        # a rule as a band EDGE and re-emitting it as that band's border
+        # discarded its declared endpoints (a 0.90in subtotal underline
+        # printed 7.5in wide) and — worse — the border was emitted with a
+        # synthesized colour even when the source declared no line at all,
+        # painting a full-width rule across a band the truth leaves empty
+        # (truth-PDF measured: ZERO drawings across that band).
+        #
+        # So every declared <line> is carried through to the emitter tagged
+        # with the region whose declared y-band contains it, and printed at
+        # its own declared endpoints. Nothing declared -> nothing emitted.
+        #
+        # The ONE rule that is not merely placed is a <line> INSIDE the
+        # detail repeating frame: it repeats with every row, and the detail
+        # fields sit below it, so its row-relative offset is kept separately.
+        detail_rule_inset = None
+        body_rules = []
+        _det_y0 = float(getattr(detail_rf, "y", 0) or 0)
+        try:
+            _det_top = float(getattr(detail_rf, "y", 0) or 0)
+            _det_ids = {id(k) for k in _walk(detail_rf)}
+            for n in _walk(outer_rf):
+                _inside_det = id(n) in _det_ids
+                for f in (getattr(n, "fields", None) or []):
+                    if not _is_declared_rule(f):
+                        continue
+                    fy = float(getattr(f, "y", 0) or 0)
+                    if _inside_det:
+                        if detail_rule_inset is None:
+                            detail_rule_inset = (
+                                max(0.0, fy - _det_top), f)
+                            continue
+                        body_rules.append(("detail", f))
+                    elif fy <= _det_top + 0.02:
+                        # at or above the detail frame's top edge: the rule
+                        # belongs to the group-header / column-header band
+                        body_rules.append(("header", f))
+                    else:
+                        body_rules.append(("footer", f))
+        except Exception:  # noqa: BLE001 -- a rule must never sink the spec
+            detail_rule_inset = None
+            body_rules = []
         return {
             "grp_key": grp_key,
+            "grp_band_bg": grp_band_bg,
+            "col_band_bg": col_band_bg,
+            # The detail row's DECLARED PITCH: the frame's own height plus
+            # the gutter it declares between consecutive instances
+            # (vertSpaceBetweenFrames). Truth-PDF measured to 0.01pt.
+            "det_row_h": (float(getattr(detail_rf, "height", 0) or 0)
+                          + max(0.0, float(
+                              getattr(detail_rf, "vert_space", 0) or 0))),
+            "detail_rule_inset": detail_rule_inset,
+            "body_rules": body_rules,
+            "det_y0": _det_y0,
+            "hdr_y0": min((z[4] for z in group_header), default=0.0),
+            "det_field_off": max(
+                0.0,
+                drow_y - float(getattr(detail_rf, "y", 0) or 0)),
+            "totals_box": totals_box,
+            "footer_ys": footer_ys,
+            # DECLARED bottom of the footer band (max y+height of its
+            # members): the band is exactly as tall as the declaration makes
+            # it. The old synthesized "+ one line of slack" inflated the
+            # footer 0.16in on a truth-paired break report and pushed the
+            # report-total rule that much further from the group-subtotal
+            # rule than the declaration puts it.
+            "footer_bottom": foot_bottom,
+            "col_band_pop": col_band_pop,
+            "band_pop": band_pop,
             "group_header": group_header,
             "col_headers": col_hdr,
             "detail_cols": dcols,
@@ -6926,23 +10171,116 @@ def _build_stacked_list_tablix(report, main):
     n_lines = sl["n_lines"]
     main_ds = main.name or ""
     palette = _resolve_palette(report)
-    INK = palette.get("ink", "#282828")
-    RULE = palette.get("rule", "#d0d0d0")
-    _target_w = max(9.0, _page_width_for(report) - 2 * _PAGE_HMARGIN_IN - 0.30)
+    INK = palette.get("ink") or _BODY_INK
+    # (No house "rule" ink: this builder's only separator is the DECLARED
+    # per-row edge rule resolved below via _section_row_edge_rule.)
+    # Small stock (declared card/label paper) has no 9in floor — the table
+    # target is the stock's own usable width.
+    _usable_tw = (_page_width_for(report)
+                  - 2 * _page_hmargin_for(report) - 0.30)
+    _target_w = (_usable_tw if _small_paper_for(report)
+                 else max(9.0, _usable_tw))
     _span = (cols[-1]["x"] + 2.0) if cols else 9.0
     BODY_W = min(_target_w, max(7.0, _span))
+    # THE LIST STARTS AT THE DECLARED ORIGIN — THERE IS NO COSMETIC INDENT.
+    # The section's <body><location x> IS the sheet margin and the RDL page
+    # margin already carries it, so column x=0.00000 belongs at the body's
+    # own left edge. The 0.25in (later 0.06in) indent that used to sit here
+    # slid EVERY column of the list right by that much: truth-PDF measured
+    # on a landscape inspection list whose page margin is 0.302in, the
+    # declared x=0.00000 caption prints at 21.76pt (= the margin) while ours
+    # printed at 27.50pt — 0.08in right, 0.06in of it this indent and
+    # 0.02in the per-box floor removed below. It also pushed the tablix's
+    # right edge past the report body width by the same 0.06in.
+    _sl_left_in = 0.0
+    try:
+        _decl_right = _content_span_in(report)
+    except Exception:  # noqa: BLE001
+        _decl_right = 0.0
+    _usable_full = (_page_width_for(report)
+                    - 2 * _page_hmargin_for(report))
+    # A RIGHT-EDGE declared box (the last column's caption/value at the
+    # paper's right margin) must keep its declared span: a short table
+    # target clipped its final glyphs. Extend to the declared content edge
+    # whenever it fits the printable width.
+    if BODY_W < _decl_right <= _usable_full:
+        BODY_W = _decl_right
 
     def _col_right(ci):
         nxt = cols[ci]["next"]
         return (nxt - 0.05) if nxt is not None else BODY_W
 
     LINE_H = 0.20
-    hdr_h = max(0.22, LINE_H * max(1, len(headers)) + 0.04)
+    # DECLARED band geometry wins over the synthesized line stack: the record
+    # pitch is the repeating frame's own height plus its declared inter-frame
+    # gutter, and the caption band is its own declared height (truth-measured;
+    # the synthesized values ran one report's rows 9.6% short and its caption
+    # band 0.054in tall). Never SHORTER than the stacked lines need, so a
+    # tight declaration can't clip content the source prints.
+    _sl_pitch = _declared_row_pitch_in(report, main)
+    _sl_hdr_band = _declared_column_header_band(report, main)
+    hdr_h = (_sl_hdr_band[1] if _sl_hdr_band and _sl_hdr_band[1] > 0.05
+             else max(0.22, LINE_H * max(1, len(headers)) + 0.04))
     det_h = max(0.24, LINE_H * max(1, n_lines) + 0.06)
+    if _sl_pitch:
+        det_h = min(3.0, max(det_h, _sl_pitch))
+    # --- DECLARED intra-record line pitch -------------------------------
+    # Oracle states each stacked line's own y inside the record frame, and
+    # the truth PDF steps its ink lines by exactly those deltas. Flowing the
+    # stack at a synthesized constant printed one report's second line 1.6pt
+    # (10%) high on every record. ``_sl_y0`` is the record's declared top;
+    # a line's Top is its declared y measured from it.
+    _sl_y0 = float(sl.get("det_y0") or 0.0)
+    _sl_ln_tops = sorted({round(_y - _sl_y0, 5)
+                          for c in cols for _y in (c.get("line_ys") or [])})
+
+    def _sl_line_geom(col, li):
+        """(top, height) for one stacked detail line, from the DECLARATION.
+
+        The height tiles to the NEXT declared line top (Oracle's boxes butt
+        together), never past the row; with nothing declared the caller's
+        synthesized constant stands in."""
+        ys = col.get("line_ys") or []
+        if li >= len(ys):
+            return li * LINE_H, LINE_H
+        top = max(0.0, ys[li] - _sl_y0)
+        nxt = next((t for t in _sl_ln_tops if t > top + 0.005), det_h)
+        h = float((col.get("line_hs") or [0.0])[li]
+                  if li < len(col.get("line_hs") or []) else 0.0)
+        return top, max(0.10, min(max(h, nxt - top), det_h - top))
+    if _sl_ln_tops:
+        # the row must hold every declared line (a declaration taller than
+        # the record frame's own box still has to print in full)
+        _sl_last = _sl_ln_tops[-1]
+        det_h = min(3.0, max(det_h, _sl_last + LINE_H))
     # Header band color resolved once in _stacked_list_columns (so the mockup
     # render agrees exactly).
     hdr_bg = sl.get("header_bg", "#ffffff")
-    hdr_fg = sl.get("header_fg", "#111111")
+    hdr_fg = sl.get("header_fg") or _BODY_INK
+    # DECLARED faces/sizes for the record fields + captions -- the truth
+    # prints this list at its declared 10pt where the synthesized cells
+    # dropped to 8pt (truth-PDF span-measured).
+    try:
+        _, _, _sl_row_y = _detail_band_fields(report)
+    except Exception:  # noqa: BLE001
+        _sl_row_y = None
+    _sl_style = _detail_band_style(report, _sl_row_y)
+
+    def _sl_field_font(src, default="8pt"):
+        fnt = _sl_style["fonts"].get((src or "").strip().upper())
+        if not fnt:
+            return None, default, False
+        face, size, bold = fnt
+        return face, (f"{size}pt" if size else default), bold
+
+    def _sl_cap_font(text, default="8pt"):
+        _t = "\n".join(s.strip() for s in (text or "").splitlines()
+                       if s.strip())
+        fnt = _sl_style["caption_fonts"].get(_t)
+        if not fnt:
+            return None, default
+        face, size, _b = fnt
+        return face, (f"{size}pt" if size else default)
 
     tablix = ET.Element(_q("Tablix"))
     tablix.set("Name", "Tablix_StackedList")
@@ -6952,11 +10290,36 @@ def _build_stacked_list_tablix(report, main):
     trows = _sub(tbody, "TablixRows")
 
     # --- header row: stacked label bands (each column gets its 1..N labels) ---
-    hrow = _sub(trows, "TablixRow"); _sub(hrow, "Height", f"{hdr_h:.2f}in")
+    hrow = _sub(trows, "TablixRow"); _sub(hrow, "Height", f"{hdr_h:.4f}in")
     hcont = _sub(_sub(_sub(hrow, "TablixCells"), "TablixCell"), "CellContents")
     hrect = _sub(hcont, "Rectangle"); hrect.set("Name", "SL_ColHdr")
     hst = _sub(hrect, "Style"); _sub(hst, "BackgroundColor", hdr_bg)
     hri = _sub(hrect, "ReportItems")
+    # Caption lines share the DECLARED band exactly: a fixed 0.20in line
+    # overflowed a 0.386in declared two-line band by 1pt and the engine
+    # grew the whole band. Divide the declared height by the line count.
+    _HLINE_H = (hdr_h / max(1, len(headers))
+                if _sl_hdr_band and _sl_hdr_band[1] > 0.05 else LINE_H)
+    # ...and each caption line sits at its OWN declared y inside that band.
+    # Dividing the band evenly is only a fallback: Oracle's two caption
+    # lines are rarely half the frame apart, so the even split printed the
+    # second caption band 1.5pt (10%) tight against the truth.
+    _hdr_y0 = (_sl_hdr_band[0] if _sl_hdr_band else None)
+    _h_tops = None
+    _h_ys = sl.get("header_ys") or []
+    if _hdr_y0 is not None and len(_h_ys) == len(headers) and headers:
+        _cand = [max(0.0, y - _hdr_y0) for y in _h_ys]
+        if all(_c <= hdr_h + 0.02 for _c in _cand):
+            _h_tops = _cand
+
+    def _sl_hdr_geom(bi):
+        """(top, height) of one caption band -- DECLARED where the source
+        states it, an even split of the declared band otherwise."""
+        if _h_tops is None:
+            return bi * _HLINE_H, _HLINE_H
+        top = _h_tops[bi]
+        nxt = min((t for t in _h_tops if t > top + 0.005), default=hdr_h)
+        return top, max(0.10, min(nxt - top, hdr_h - top))
     for bi, band in enumerate(headers):
         bx = sorted(band)
         for hi, (lx, label) in enumerate(bx):
@@ -6972,24 +10335,51 @@ def _build_stacked_list_tablix(report, main):
             nxt = bx[hi + 1][0] if hi + 1 < len(bx) else next(
                 (_col_right(ci) for ci, c in enumerate(cols)
                  if abs(c["x"] - lx) <= 0.01), BODY_W)
+            _hface, _hfs = _sl_cap_font(label)
             text, _ = _resolve_text_expression(label, report, main_ds)
             _build_textbox(hri, f"Tb_SLHdr_{bi}_{hi}", text, bold=True,
-                           font_size="8pt", bg=hdr_bg, fg=hdr_fg,
+                           font_size=_hfs, font_family=_hface,
+                           bg=hdr_bg, fg=hdr_fg,
                            text_align="Left", vertical_align="Top",
-                           border_color=hdr_bg, padding="2pt", can_grow=False)
+                           # NO INSET: the box below is the DECLARED caption
+                           # box (declared x, declared band top/height).
+                           border_color=hdr_bg, padding="0pt", can_grow=False)
             _tb = hri[-1]
-            _sub(_tb, "Top", f"{bi * LINE_H:.2f}in")
-            _sub(_tb, "Left", f"{max(0.02, lx):.2f}in")
+            _htop, _hh = _sl_hdr_geom(bi)
+            _sub(_tb, "Top", f"{_htop:.4f}in")
+            # A DECLARED x IS THE x — at 4dp, and with no floor. The
+            # 0.02in minimum moved exactly the boxes the source declares
+            # flush with the list's left edge (x=0.00000) and nothing
+            # else, so the leftmost caption printed 0.02in right of its
+            # column while every other caption stayed put; 2dp rounding
+            # cost a further +/-0.36pt per column (declared 4.29395 ->
+            # 4.29in, 8.39722 -> 8.40in).
+            _sub(_tb, "Left", f"{max(0.0, lx):.4f}in")
             _sub(_tb, "Width", f"{max(0.4, nxt - lx - 0.04):.2f}in")
-            _sub(_tb, "Height", f"{LINE_H:.2f}in")
+            _sub(_tb, "Height", f"{_hh:.4f}in")
 
     # --- detail row: each column's fields stacked vertically in ONE cell ---
-    drow = _sub(trows, "TablixRow"); _sub(drow, "Height", f"{det_h:.2f}in")
+    drow = _sub(trows, "TablixRow"); _sub(drow, "Height", f"{det_h:.4f}in")
     dcont = _sub(_sub(_sub(drow, "TablixCells"), "TablixCell"), "CellContents")
     drect = _sub(dcont, "Rectangle"); drect.set("Name", "SL_Detail")
-    dst = _sub(drect, "Style"); _sub(dst, "BackgroundColor", "#ffffff")
-    _db = _sub(dst, "BottomBorder"); _sub(_db, "Style", "Solid")
-    _sub(_db, "Color", RULE); _sub(_db, "Width", "0.25pt")
+    # DECLARED banded-record fill (a MOD-2 parity format trigger on the
+    # record frame) paints the alternating tint; with none declared the
+    # record block stays plain white.
+    _alt_bg = _row_alternation_bg_expr(report)
+    dst = _sub(drect, "Style")
+    _sub(dst, "BackgroundColor", _alt_bg or "#ffffff")
+    # DECLARED per-row edge rule (linePattern=solid + hideXBorder on the
+    # record frame) is the ONLY separator between record blocks. With no
+    # edge declared the source draws none -- an invented hairline printed a
+    # rule the truth export has no stroke for anywhere on the page.
+    _sl_srcs = [s for c in cols for (k, s) in c["lines"] if k == "field"]
+    _sl_edge = _section_row_edge_rule(report, main, _sl_srcs)
+    if _sl_edge:
+        for _e in _sl_edge["edges"]:
+            _eb = _sub(dst, _e.capitalize() + "Border")
+            _sub(_eb, "Style", "Solid")
+            _sub(_eb, "Color", _sl_edge["color"])
+            _sub(_eb, "Width", f"{_sl_edge['width_pt']:g}pt")
     dri = _sub(drect, "ReportItems")
     for ci, col in enumerate(cols):
         cx = col["x"]; cright = _col_right(ci)
@@ -7002,15 +10392,27 @@ def _build_stacked_list_tablix(report, main):
                     report, dataset_name=main_ds)
             if not val:
                 continue
+            _dface, _dfs, _dbold = ((None, "8pt", False) if kind == "text"
+                                    else _sl_field_font(s))
+            if kind == "text":
+                _dface, _dfs = _sl_cap_font(s)
+            # A banded record paints its tint on the RECORD RECT, so the
+            # field boxes must stay unfilled -- an opaque white box punches
+            # the band back out around every value.
+            _dbg = None if _alt_bg else "#ffffff"
             _build_textbox(dri, f"Tb_SLDet_{ci}_{li}_{_safe(s)[:18]}", val,
-                           font_size="8pt", bg="#ffffff", fg=INK,
+                           font_size=_dfs, font_family=_dface, bold=_dbold,
+                           bg=_dbg, fg=INK,
                            text_align="Left", vertical_align="Top",
-                           border_color="#ffffff", padding="2pt", can_grow=False)
+                           # NO INSET: declared column x, declared line box.
+                           border_color=_dbg, padding="0pt", can_grow=False)
             _tb = dri[-1]
-            _sub(_tb, "Top", f"{li * LINE_H:.2f}in")
-            _sub(_tb, "Left", f"{max(0.02, cx):.2f}in")
+            _dtop, _dh = _sl_line_geom(col, li)
+            _sub(_tb, "Top", f"{_dtop:.4f}in")
+            # DECLARED column x, verbatim (see the caption box above).
+            _sub(_tb, "Left", f"{max(0.0, cx):.4f}in")
             _sub(_tb, "Width", f"{max(0.4, cright - cx - 0.04):.2f}in")
-            _sub(_tb, "Height", f"{LINE_H:.2f}in")
+            _sub(_tb, "Height", f"{_dh:.4f}in")
 
     # --- hierarchy: one column, header member (static) + Details group ---
     _sub(_sub(_sub(tablix, "TablixColumnHierarchy"), "TablixMembers"),
@@ -7022,7 +10424,7 @@ def _build_stacked_list_tablix(report, main):
 
     _sub(tablix, "DataSetName", _safe(main_ds))
     _sub(tablix, "Top", "0.5in")
-    _sub(tablix, "Left", "0.25in")
+    _sub(tablix, "Left", f"{_sl_left_in:.4f}in")
     _sub(tablix, "Height", f"{hdr_h + det_h:.2f}in")
     _sub(tablix, "Width", f"{BODY_W:.2f}in")
     style = _sub(tablix, "Style")
@@ -7043,6 +10445,38 @@ def _nearest_label(label_geo, x, y, max_dy=0.18, max_dx=1.4):
                 best_dx = dx
                 best = text
     return (best or "").strip().rstrip(":")
+
+
+def _layout_field_font(report, source):
+    """(face, size, bold, italic, color) declared on the FIRST section_main
+    layout field bound to ``source``, or None when the layout declares no
+    explicit face (the parser defaults sizes, so a face-less font is not
+    'declared')."""
+    main = _section_by_kind(report, "section_main")
+    if main is None or not source:
+        return None
+    su = source.strip().upper()
+
+    def _walk(g):
+        for f in (getattr(g, "fields", None) or []):
+            if ((getattr(f, "kind", "") or "") == "field"
+                    and (getattr(f, "source", "") or "").strip().upper() == su):
+                face = (getattr(f, "font_family", "") or "").strip()
+                if face:
+                    try:
+                        size = int(float(getattr(f, "font_size", 0) or 0))
+                    except (TypeError, ValueError):
+                        size = 0
+                    return (face, size or None,
+                            bool(getattr(f, "bold", False)),
+                            bool(getattr(f, "italic", False)),
+                            (getattr(f, "color", "") or "").strip())
+        for c in (getattr(g, "children", None) or []):
+            r = _walk(c)
+            if r:
+                return r
+        return None
+    return _walk(main)
 
 
 def _flatten_group_chain(groups):
@@ -7215,6 +10649,438 @@ def _is_positional_form_rdl(report):
     return True
 
 
+def _group_owner_queries(report) -> dict:
+    """``{GROUP_NAME_UPPER: DataQuery}`` over every query's whole group tree."""
+    owner: dict = {}
+    for q in (getattr(report, "queries", None) or []):
+        stack = list(getattr(q, "groups", None) or [])
+        while stack:
+            g = stack.pop()
+            if getattr(g, "name", ""):
+                owner.setdefault(g.name.upper(), q)
+            stack.extend(getattr(g, "children", None) or [])
+    return owner
+
+
+def _record_frame_for_band(report, row_layout):
+    """The repeating frame that DECLARES the detail band -- the RECORD frame.
+
+    The band `_detail_band_fields` finds is owned by exactly one repeating
+    frame; anything declared INSIDE that frame belongs to the record, not to
+    the report. Deepest owner wins (an outer group frame also contains the
+    band by descent). None when the layout declares no such frame."""
+    sec = _section_by_kind(report, "section_main")
+    if sec is None or not row_layout:
+        return None
+    want = {(s or "").upper() for s, _x, _y, _w in row_layout}
+    best = (-1, None)
+
+    def _scan(g, depth):
+        nonlocal best
+        if "repeating" in (getattr(g, "kind", "") or "").lower():
+            owns = sum(
+                1 for f in (getattr(g, "fields", None) or [])
+                if (getattr(f, "kind", "") or "") == "field"
+                and (getattr(f, "source", "") or "").upper() in want)
+            if owns >= 2 and depth > best[0]:
+                best = (depth, g)
+        for c in (getattr(g, "children", None) or []):
+            _scan(c, depth + 1)
+
+    _scan(sec, 0)
+    return best[1]
+
+
+def _declared_nested_regions(report, main, record_frame):
+    """Repeating frames DECLARED INSIDE the record frame, bound to a SECONDARY
+    dataset -- Oracle's nested region idiom (an organisation/affiliation block
+    declared inside a site record).
+
+    Such a frame is part of the RECORD: Oracle prints it inside every parent
+    instance, above the rule that closes that instance. Emitting it as a
+    sibling table after the body prints child rows below the closing rule with
+    no link to their parent, which is what the report-end breakdown fallback
+    did before this existed.
+
+    Returns ``[(frame, child_query, [(master_col, child_col), ...]), ...]`` for
+    the OUTERMOST such frames only -- a frame nested deeper inside one of them
+    is part of that region (an inline list) and is emitted with it. A region
+    with no resolvable Oracle <link> correlation is dropped: an uncorrelated
+    child block is wrong data, not misplaced data.
+
+    Structural throughout: frame nesting + the parsed <link> keys decide."""
+    if record_frame is None or main is None:
+        return []
+    owner = _group_owner_queries(report)
+    out = []
+
+    def _scan(node):
+        for c in (getattr(node, "children", None) or []):
+            if "repeating" in (getattr(c, "kind", "") or "").lower():
+                q = owner.get((getattr(c, "source_query", "") or "").upper())
+                if q is not None and q is not main:
+                    mcols = {(it.name or "").upper(): it.name
+                             for it in (getattr(main, "items", None) or [])}
+                    ccols = {(it.name or "").upper(): it.name
+                             for it in (getattr(q, "items", None) or [])}
+                    pairs = (_link_key_pairs(q, mcols, ccols)
+                             if mcols and ccols else [])
+                    if pairs:
+                        out.append((c, q, pairs))
+                    continue        # deeper frames belong to THIS region
+            _scan(c)
+
+    _scan(record_frame)
+    return out
+
+
+def _nested_region_members(region, child_q, pairs, report):
+    """Printable members of a declared nested region, at DECLARED geometry.
+
+    Each entry is ``(layout_field, value_expression, y_relative_to_region)``.
+
+    A data region nested inside another data region CANNOT carry its own
+    dataset: the engine ignores a nested ``<DataSetName>`` and keeps the
+    containing scope. Engine-measured (ReportViewer local processing, a
+    two-dataset probe): an inner Tablix declaring ``<DataSetName>DS2</...>``
+    inside an outer Tablix bound to DS1 fails publishing with *"The Value
+    expression for the text box `TbB' refers to the field `B'. Report item
+    expressions can only refer to fields within the current dataset scope"* --
+    B being a DS2 column -- while the same inner Tablix printing a DS1 column
+    renders. So a nested region's rows arrive through the SAME correlated
+    ``LookupSet`` the generator already uses for Oracle's 1:many linked
+    children, one LINE per child row.
+
+    ONE INSTANCE PER CHILD ROW: Oracle stacks the region's instances at the
+    declared pitch (frame height + vertSpaceBetweenFrames), so every member
+    of an instance must advance by the SAME number of lines. Joining each
+    member with a bare ``vbCrLf`` advanced every member ONE line per child
+    row, which is only right for a single-band region -- a region whose
+    members sit on TWO OR MORE declared y-bands interleaved: instance 2 of
+    the top band printed level with instance 1 of the band below it and the
+    repeating BLOCK disappeared into per-column stacks. Each member's join
+    separator therefore carries the region's declared block pitch, expressed
+    in the declared line unit (the smallest declared member box height), less
+    the lines the member's own declared box already spans.
+
+    A frame nested DEEPER inside the region that repeats a single value is
+    Oracle's inline-list idiom (the affiliation roles stacked beside an
+    organisation); its declared punctuation member is the separator, so the
+    list renders "ROLE,\\nROLE,\\nROLE" instead of a dangling comma column.
+
+    ONE INSTANCE PER DECLARED BREAK GROUP: a child dataSource declares its
+    ``<group>`` chain outermost-first, so a region bound to a group that is
+    NOT the finest one prints once per BREAK of its own group -- the rows of
+    the deeper groups stack INSIDE that one block. Taking the LookupSet row
+    order as the block order printed one block per child ROW instead, with
+    every break-level column repeated verbatim on each (truth-measured: an
+    organisation with four affiliation rows printed four blocks). The fold
+    below hands the block builder the declared break key plus the per-row
+    member set, so the block repeats per break and the deeper frame's rows
+    stack at the deeper frame's own declared pitch."""
+    cols = {(it.name or "").upper(): (it.name or "")
+            for it in (getattr(child_q, "items", None) or [])}
+    blobs = {(it.name or "").upper()
+             for it in (getattr(child_q, "items", None) or [])
+             if (getattr(it, "datatype", "") or "").lower() == "blob"
+             or (getattr(it, "file_format", "") or "").lower()
+             in ("image", "png", "gif", "jpeg", "jpg")}
+    if len(pairs) == 1:
+        src = f"Fields!{_safe(pairs[0][0])}.Value"
+        dst = f"Fields!{_safe(pairs[0][1])}.Value"
+    else:
+        src = ' & "|" & '.join(f"Fields!{_safe(m)}.Value" for m, _c in pairs)
+        dst = ' & "|" & '.join(f"Fields!{_safe(c)}.Value" for _m, c in pairs)
+    ds = _safe(getattr(child_q, "name", "") or "")
+    ry = float(getattr(region, "y", 0.0) or 0.0)
+    # DECLARED BREAK LEVEL. Oracle lists a dataSource's <group> elements
+    # outermost-first; the region binds to one of them by name. Every group
+    # BELOW it is a finer level whose frames repeat inside one block.
+    _cgroups = list(getattr(child_q, "groups", None) or [])
+    _cg_up = [(getattr(g, "name", "") or "").upper() for g in _cgroups]
+    _rg = (getattr(region, "source_query", "") or "").upper()
+    _ri = _cg_up.index(_rg) if _rg in _cg_up else -1
+    _deeper = set(_cg_up[_ri + 1:]) if 0 <= _ri < len(_cg_up) - 1 else set()
+    # The break key is every column declared AT OR ABOVE the region's group:
+    # those are the columns Oracle holds constant across the block, so a
+    # change in any of them IS a new break. Over-keying degrades to the
+    # previous one-block-per-row behaviour; under-keying would merge two
+    # distinct parents, so the whole declared level is used -- MINUS any
+    # column the export ALSO declares in one of the deeper groups, which by
+    # its own declaration varies per row and would break the block on every
+    # single row.
+    _finer = {(getattr(_it, "name", "") or "").upper()
+              for _g in (_cgroups[_ri + 1:] if _deeper else ())
+              for _it in (getattr(_g, "items", None) or [])}
+    _breakcols = []
+    for _g in _cgroups[:_ri + 1] if _deeper else ():
+        for _it in (getattr(_g, "items", None) or []):
+            _nm = (getattr(_it, "name", "") or "").upper()
+            if (_nm in cols and _nm not in blobs and _nm not in _finer
+                    and cols[_nm] not in _breakcols):
+                _breakcols.append(cols[_nm])
+    members = []
+    joins = []          # (index into members, result column, base separator)
+    each = set()        # member indices declared in a DEEPER (per-row) frame
+    inner = []          # the outermost deeper frame = the per-row repeat unit
+
+    def _walk(node, sep, per_row=False):
+        # a punctuation-only text member of a repeating frame IS that frame's
+        # declared row separator -- never a column of its own
+        punct = [f for f in (getattr(node, "fields", None) or [])
+                 if (getattr(f, "kind", "") or "") == "text"
+                 and 0 < len((getattr(f, "text", "") or "").strip()) <= 2
+                 and not (getattr(f, "text", "") or "").strip().isalnum()]
+        if node is not region and punct:
+            sep = '"{}" & vbCrLf'.format(punct[0].text.strip())
+        for f in (getattr(node, "fields", None) or []):
+            if f in punct or not getattr(f, "visible", True):
+                continue
+            kind = (getattr(f, "kind", "") or "")
+            yrel = float(getattr(f, "y", 0.0) or 0.0) - ry
+            if kind == "field":
+                col = cols.get((getattr(f, "source", "") or "").upper())
+                if not col or col.upper() in blobs:
+                    continue
+                joins.append(len(members))
+                if per_row:
+                    each.add(len(members))
+                members.append((f, f"Fields!{_safe(col)}.Value", yrel, sep))
+            elif kind == "text" and (getattr(f, "text", "") or "").strip():
+                txt, _ = _resolve_text_expression(f.text, report, ds)
+                if txt:
+                    if per_row:
+                        each.add(len(members))
+                    members.append((f, txt, yrel, sep))
+        for c in (getattr(node, "children", None) or []):
+            _cr = per_row or (
+                (getattr(c, "source_query", "") or "").upper() in _deeper)
+            if _cr and not per_row and not inner:
+                inner.append(c)
+            _walk(c, sep, _cr)
+
+    _walk(region, "vbCrLf")
+    fold = None
+    if each and _breakcols and inner:
+        _if = inner[0]
+        _ipitch = (float(getattr(_if, "height", 0.0) or 0.0)
+                   + float(getattr(_if, "vert_space", 0.0) or 0.0))
+        if _ipitch > 0.0:
+            fold = {
+                "each": each,
+                "base": max(0.0, float(getattr(_if, "y", 0.0) or 0.0) - ry),
+                "inner": _ipitch,
+                # '&' (never CStr) so a NULL break column contributes an
+                # empty segment instead of throwing an invalid-cast
+                "key": ' & "|" & '.join(
+                    f"Fields!{_safe(c)}.Value" for c in _breakcols)
+                if len(_breakcols) > 1
+                else f'Fields!{_safe(_breakcols[0])}.Value & ""',
+            }
+    return _nested_region_column_blocks(region, members, set(joins), src, dst,
+                                        ds, fold=fold)
+
+
+def _nested_region_column_blocks(region, members, join_idx, src, dst, ds,
+                                 fold=None):
+    """Fold a nested region's members into ONE printable box per declared
+    COLUMN, each carrying the whole per-child-row BLOCK.
+
+    Why a column and not a box per member: SSRS REFLOWS a rectangle. A
+    growing box pushes every box below it down, so the members of a region
+    that arrive as N joined lines cannot keep their declared inch offsets
+    from one another -- engine-measured on a two-band region with three
+    child rows, the lower band's first value printed 138pt below the upper
+    band's first value instead of the declared 17.7pt, i.e. AFTER the whole
+    upper stack. Declared offsets only survive between boxes that do not
+    grow past each other.
+
+    So each declared x-column becomes ONE box anchored at the region's
+    declared top, and the declared inch offsets INSIDE a block become LINE
+    positions in that box -- each column measured on ITS OWN text line, since
+    ``<LineHeight>`` is not honored by this engine (probe-measured: 9pt text
+    keeps a 10.01pt line and 10pt text an 11.16pt line whether the Style
+    declares a line height or not, on the textbox and on the paragraph). A
+    column therefore advances ``round(declared pitch / its line height)``
+    lines per child row, which lands every column within half a line of the
+    DECLARED pitch instead of a single line.
+
+    A single-band region has exactly one line per instance and one box per
+    member already, so it comes out of here byte-identical to the per-member
+    emission it replaces.
+
+    ``fold`` (from the declared child <group> chain, see
+    ``_nested_region_members``) switches the block unit from the child ROW to
+    the region's declared BREAK GROUP: each column then emits
+    ``Code.NDBreakBlock(<break keys>, <break-level lines>, <per-row lines>,
+    ...)``, which walks the correlated set once, starts a new block whenever
+    the declared break key changes, prints the break-level columns ONCE per
+    block and stacks the deeper frame's rows at the deeper frame's own
+    declared pitch. The block grows past the declared pitch only when a break
+    holds more rows than the pitch reserves -- which is exactly the declared
+    ``verticalElasticity="variable"`` on the frame."""
+    if not members:
+        return []
+    unit = _nested_region_line_unit(members)
+    # Declared BANDS: members whose declared y agree to within half a line
+    # print on the SAME line of the block (two boxes declared 0.0009in apart
+    # are one band, not two).
+    tol = max(0.01, unit * 0.5)
+    band_of = {}
+    band_tops = []
+    for i in sorted(range(len(members)), key=lambda i: members[i][2]):
+        y = members[i][2]
+        if band_tops and abs(y - band_tops[-1]) <= tol:
+            band_of[i] = len(band_tops) - 1
+        else:
+            band_tops.append(y)
+            band_of[i] = len(band_tops) - 1
+    multi_band = len(band_tops) > 1
+    # A break fold always needs the block model: a break-level column has to
+    # print ONCE while the per-row column beside it stacks, which a bare
+    # per-member Join cannot express even on a single declared band.
+    block = multi_band or fold is not None
+    pitch = (float(getattr(region, "height", 0.0) or 0.0)
+             + float(getattr(region, "vert_space", 0.0) or 0.0))
+
+    # Declared COLUMNS: members whose declared x agree to within a hair (a
+    # 0.002in difference between two stacked boxes is one column, not two).
+    # Folding only happens for a region that can interleave: a single-band
+    # region keeps ONE BOX PER MEMBER, exactly as before this pass existed.
+    order = sorted(
+        range(len(members)),
+        key=lambda i: (float(getattr(members[i][0], "x", 0.0) or 0.0),
+                       band_of[i]))
+    columns = []            # [([member index, ...], left), ...] left to right
+    for i in order:
+        x = float(getattr(members[i][0], "x", 0.0) or 0.0)
+        if block and columns and abs(x - columns[-1][1]) <= 0.02:
+            columns[-1][0].append(i)
+        else:
+            columns.append(([i], x))
+
+    out = []
+    for idxs, _x in columns:
+        idxs = sorted(idxs, key=lambda i: band_of[i])
+        head = members[idxs[0]][0]
+        lh = _engine_line_height_in(head)
+        top = band_tops[band_of[idxs[0]]]
+
+        def _line(v, _lh=lh):
+            return max(0, int(round(v / _lh))) if _lh > 0.0 else 0
+
+        n_lines = max(1, _line(pitch)) if (block and pitch > 0.0) else 1
+
+        def _slot_expr(sel, nl, base, drop_covered=True, _line=_line):
+            """`sel`'s members as `nl` text lines, line 0 == `base` inches."""
+            slots = [None] * nl
+            covered = set()
+            for i in sel:
+                f = members[i][0]
+                ln = _line(band_tops[band_of[i]] - base) if block else 0
+                if not (0 <= ln < nl):
+                    continue
+                piece = (members[i][1] if i in join_idx
+                         else f"({members[i][1].lstrip('=')})")
+                # An inline list's declared punctuation belongs to the VALUE
+                # it follows, not to the end of the block: appended as the row
+                # separator it landed on the block's trailing blank line and
+                # stretched every instance by one line (engine-measured).
+                _lit = re.match(r'\s*"(.*?)"\s*&\s*vbCrLf\s*$', members[i][3])
+                if _lit:
+                    piece = f'{piece} & "{_lit.group(1)}"'
+                slots[ln] = (f'{slots[ln]} & " " & {piece}'
+                             if slots[ln] else piece)
+                _span = max(1, _line(float(getattr(f, "height", 0.0) or 0.0)))
+                if drop_covered:
+                    covered.update(range(ln + 1, min(nl, ln + _span)))
+            parts = [(s if s is not None else '""')
+                     for k, s in enumerate(slots) if k not in covered]
+            return ' & vbCrLf & '.join(parts) if parts else '""'
+
+        row_expr = _slot_expr(idxs, n_lines, top)
+        sep = "vbCrLf" if n_lines > 1 else members[idxs[0]][3]
+        if fold is not None and any(i in join_idx for i in idxs):
+            _once = [i for i in idxs if i not in fold["each"]]
+            _each = [i for i in idxs if i in fold["each"]]
+            # A column carrying BOTH levels merges them line-by-line inside
+            # the VB reducer, so its break-level grid must keep one entry per
+            # declared line (a dropped wrap line would shift the merge).
+            _keep = bool(_once and _each)
+            # The per-row grid is the DEEPER frame's declared pitch -- but
+            # never shorter than its own declared members reach, or a member
+            # declared past its frame's box would be dropped (printing an
+            # instance one line taller beats losing a declared column).
+            _n_each = max(
+                [1, _line(fold["inner"])]
+                + [_line(band_tops[band_of[i]] - fold["base"]) + 1
+                   for i in _each])
+            _inner = max(fold["inner"], _n_each * lh) if _each \
+                else fold["inner"]
+            _oexpr = (f'LookupSet({src}, {dst}, '
+                      f'{_slot_expr(_once, n_lines, top, not _keep)}, "{ds}")'
+                      if _once else "Nothing")
+            _eexpr = (f'LookupSet({src}, {dst}, '
+                      f'{_slot_expr(_each, _n_each, fold["base"])}, "{ds}")'
+                      if _each else "Nothing")
+            # The declared frame BODY and the declared inter-frame GAP go
+            # over separately: Oracle grows the elastic body to hold the
+            # rows and still leaves the declared gap under it, so a block
+            # with more rows than the body reserves is
+            # rows*innerPitch + gap tall (truth-measured, 4-row block).
+            _body = float(getattr(region, "height", 0.0) or 0.0)
+            _gap = float(getattr(region, "vert_space", 0.0) or 0.0)
+            val = (f'=Code.NDBreakBlock('
+                   f'LookupSet({src}, {dst}, {fold["key"]}, "{ds}"), '
+                   f'{_oexpr}, {_eexpr}, '
+                   f'{_body:.4f}, {_gap:.4f}, {fold["base"]:.4f}, '
+                   f'{_inner:.4f}, {lh:.4f})')
+        else:
+            val = (f'=Join(LookupSet({src}, {dst}, {row_expr}, "{ds}"), {sep})'
+                   if any(i in join_idx for i in idxs)
+                   else members[idxs[0]][1])
+        if n_lines <= 1 and len(idxs) == 1:
+            out.append((head, val, members[idxs[0]][2]))
+            continue
+        box = copy.copy(head)
+        box.width = max(float(getattr(members[i][0], "width", 0.0) or 0.0)
+                        for i in idxs)
+        box.height = max(lh * n_lines,
+                         float(getattr(head, "height", 0.0) or 0.0))
+        out.append((box, val, top))
+    out.sort(key=lambda m: (m[2], float(getattr(m[0], "x", 0.0) or 0.0)))
+    return out
+
+
+# SSRS single-spaced text advances 1.116 x the font size per line: engine-
+# measured on this ReportViewer build (10pt Arial -> 11.16pt, 9pt -> 10.01pt),
+# and NOT changeable from the definition -- a declared <LineHeight> is ignored
+# on both the textbox and the paragraph style (same probe).
+_ENGINE_LINE_FACTOR = 1.116 / 72.0
+
+
+def _engine_line_height_in(lf) -> float:
+    """Inches the engine advances per text line for this object's font."""
+    try:
+        pt = float(getattr(lf, "font_size", 0) or 0)
+    except (TypeError, ValueError):
+        pt = 0.0
+    return max(1.0, pt or 10.0) * _ENGINE_LINE_FACTOR
+
+
+def _nested_region_line_unit(members) -> float:
+    """The region's DECLARED one-line box height.
+
+    A declared height is the height (no rounding, no padding), so the
+    SMALLEST declared member box in the region is the dialect's single text
+    line -- every taller member is that many lines. 0.0 when the region
+    declares no usable height, which switches the block-pitch pass off.
+    """
+    hs = [float(getattr(m[0], "height", 0.0) or 0.0) for m in members]
+    hs = [h for h in hs if h > 0.0]
+    return min(hs) if hs else 0.0
+
+
 def _build_nested_group_tablix(report, main):
     """Render an Oracle nested master-detail report (County -> Complaint ->
     Action, etc.) as ONE Tablix whose row hierarchy mirrors the parsed
@@ -7236,7 +11102,10 @@ def _build_nested_group_tablix(report, main):
     palette = _resolve_palette(report)
     BAND_BG = palette["band_bg"]; BAND_FG = palette["band_fg"]
     SUBHDR_BG = palette["subhdr_bg"]
-    INK = palette["ink"]; RULE = palette["rule"]
+    # NB: no palette "rule" ink here -- every rectangle edge this builder
+    # emits comes from the bound frame's own declaration (see
+    # _declared_group_box / _apply_edge_subset).
+    INK = palette["ink"]
 
     # Field-name set actually present in the dataset (so we never reference a
     # column the DataSet <Fields> doesn't declare -> avoids scope BLOCKERs).
@@ -7247,6 +11116,26 @@ def _build_nested_group_tablix(report, main):
     # navy column-header row, and the column-aligned detail row 1:1 instead of a
     # generic stack. Empty when there is no section_main (synthetic SQL ingest).
     field_geo, label_geo = _layout_geometry_index(report)
+    # Margin-band texts are PAGE CHROME the header/footer emits 1:1 —
+    # never body captions. Filter them out of the caption index so a
+    # margin title can't pair as a band caption, a trailer label, or a
+    # body column header (it printed twice: chrome + body).
+    _margin_lbls = set()
+    _sec_mm = _section_by_kind(report, "section_main")
+
+    def _collect_margin_lbls(g):
+        for _mf2 in (getattr(g, "fields", None) or []):
+            if (getattr(_mf2, "in_margin", False)
+                    and (getattr(_mf2, "kind", "") or "") == "text"
+                    and (getattr(_mf2, "text", "") or "").strip()):
+                _margin_lbls.add(_mf2.text.strip())
+        for _c2 in (getattr(g, "children", None) or []):
+            _collect_margin_lbls(_c2)
+    if _sec_mm is not None:
+        _collect_margin_lbls(_sec_mm)
+    if _margin_lbls:
+        label_geo = [e for e in label_geo if e[0] not in _margin_lbls]
+
     def _gx(name, default=0.0):
         g = field_geo.get((name or "").upper())
         return g[0] if g else default
@@ -7305,6 +11194,17 @@ def _build_nested_group_tablix(report, main):
     geo_band = bool(outer_band_color) and sum(
         1 for it in outer_items if field_geo.get(it.name.upper())) >= 2
 
+    # DECLARED horizontal rules around the band/detail rows (the heavy
+    # group rules and per-record top rule the source draws as <line>s).
+    _, _, _nd_row_y = _detail_band_fields(report)
+    _bg0 = field_geo.get((bcol or "").upper())
+    nd_rules = _nd_declared_hrules(report, _bg0[1] if _bg0 else None,
+                                   _nd_row_y)
+    # printable width of the REAL paper — every region clamps its declared
+    # geometry to it (hoisted: the band row draws declared rules too)
+    _nd_w = max(7.5, _page_width_for(report)
+                - 2 * _PAGE_HMARGIN_IN - 0.1)
+
     # ---- ROW 1: outer BAND --------------------------------------------------
     if geo_band:
         band_bg = outer_band_color
@@ -7331,8 +11231,10 @@ def _build_nested_group_tablix(report, main):
                    f'"", CStr(Fields!{_safe(it.name)}.Value))')
             _build_textbox(bri, f"Tb_ND_Band_{_safe(it.name)}", val, bold=True,
                            font_size="11pt", bg=band_bg, fg=band_fg,
-                           text_align="Left", vertical_align="Middle",
-                           border_color=band_bg, padding="2pt", can_grow=True)
+                           text_align="Left",
+                           vertical_align=_declared_vertical_align(),
+                           # NO INSET: placed at the DECLARED label x below.
+                           border_color=band_bg, padding="0pt", can_grow=True)
             _tb = bri[-1]
             # Place the caption at the LABEL's x (left of the value) so the
             # "Site:  <value>..." reads as one positioned line.
@@ -7346,14 +11248,44 @@ def _build_nested_group_tablix(report, main):
         outer_card_items = []  # already rendered in the band
     else:
         # Simple label + summary band (the County / generic case).
+        # DECLARED band geometry: the outer repeating frame's OWN direct
+        # fields + label texts. Their declared extent IS the band's height
+        # (the flat 0.34in stand-in measured ~45% tall against the truth
+        # band) and their declared x/width let the caption and the value
+        # print as SEPARATE boxes where the layout puts them — merging
+        # "caption: value" into one textbox pins the value immediately
+        # after the caption glyphs, which lands it a full inch off its
+        # declared column. Same declared-geometry principle as the
+        # per-record card row below.
+        _band_card = _declared_record_card(report, outer)
         band_h = 0.34
-        brow = _sub(rows, "TablixRow"); _sub(brow, "Height", f"{band_h:.2f}in")
+        if _band_card:
+            # ...and the BAND'S OWN DECLARED BOX wins over that extent
+            # whenever the source declares one taller: the blank the frame
+            # leaves under its last caption is declared, and re-deriving the
+            # height from the members alone printed the band short (the
+            # members' extent + slack, not the frame Oracle states).
+            band_h = max(0.18,
+                         (_band_card["y1"] - _band_card["y0"]) + 0.06,
+                         _band_card.get("frame_h") or 0.0)
+        # 4dp: a DECLARED band box is the box (a 0.24731in declaration is
+        # not 0.25in), and the row pitch this height sets is what every
+        # record below it steps on.
+        brow = _sub(rows, "TablixRow"); _sub(brow, "Height", f"{band_h:.4f}in")
         bcell = _sub(_sub(brow, "TablixCells"), "TablixCell")
         bcont = _sub(bcell, "CellContents")
         brect = _sub(bcont, "Rectangle"); brect.set("Name", "ND_Band")
         _sub(brect, "KeepTogether", "true")
         bs = _sub(brect, "Style"); _sub(bs, "BackgroundColor", BAND_BG)
         bri = _sub(brect, "ReportItems")
+        if nd_rules.get("band_top"):
+            # the DECLARED heavy rule Oracle draws above the group band, at
+            # its OWN declared endpoints (a band-wide TopBorder started and
+            # ended wherever the tablix happened to stop, not where the
+            # source draws — truth-measured on the county/site rules, which
+            # are inset differently from each other)
+            _emit_declared_rule(bri, nd_rules["band_top"][2], top=0.0,
+                                max_w=_nd_w)
         # Prefer the master frame's OWN band caption text (e.g.
         # "&COL_1 : &CS_COL_SITES SITE(S)") so the band reads exactly like the
         # report -- field tokens bind to Fields!, the SUMMARY token to its
@@ -7361,21 +11293,140 @@ def _build_nested_group_tablix(report, main):
         # source carries no such caption.
         band_caption = _resolve_band_caption(
             _find_band_caption_text(label_geo, bcol), outer, main, declared)
+        _band_geo = field_geo.get((bcol or "").upper())
+        # DECLARED band styling: face/size/italic/ink of the band field the
+        # layout itself positions (an italic yellow-on-navy county band must
+        # not print as the synthesized white regular).
+        _band_fs, _band_face = "11pt", None
+        _band_fg, _band_it = BAND_FG, False
+        _bf = _layout_field_font(report, bcol)
+        if _bf:
+            _band_face = _bf[0] or None
+            if _bf[1]:
+                _band_fs = f"{_bf[1]}pt"
+            _band_it = _bf[3]
+            if _bf[4]:
+                _band_fg = _bf[4]
         if band_caption:
             band_val = band_caption
+        elif (bcol and bcol.upper() in declared and _band_geo
+                and not _nearest_label(label_geo, _band_geo[0], _band_geo[1])):
+            # DECLARED bare band field: the layout positions the group value
+            # with NO caption beside it, so Oracle prints the value alone —
+            # the synthesized "Label: " prefix was an invention.
+            band_val = f"=Fields!{_safe(bcol)}.Value"
         else:
             band_left = _nested_group_label(outer.items[0]) if outer.items else outer.name
             if bcol and bcol.upper() in declared:
+                _decl_cap = (_nearest_label(label_geo, _band_geo[0],
+                                            _band_geo[1])
+                             if _band_geo else "")
+                if _decl_cap:
+                    band_left = _decl_cap
                 band_val = (f'="{band_left}: " & CStr(Fields!{_safe(bcol)}.Value)')
             else:
                 band_val = f'="{band_left}"'
-        _build_textbox(bri, "Tb_ND_BandL", band_val, bold=True, font_size="11pt",
-                       bg=BAND_BG, fg=BAND_FG, text_align="Left",
-                       vertical_align="Middle", border_color=BAND_BG, padding="5pt")
-        _tb = bri[-1]
-        _band_w = 7.4 if band_caption else 4.5
-        _sub(_tb, "Top", "0in"); _sub(_tb, "Left", "0in")
-        _sub(_tb, "Width", f"{_band_w:.2f}in"); _sub(_tb, "Height", f"{band_h:.2f}in")
+
+        def _decl_band_field(src):
+            """The band's own DECLARED layout field bound to ``src``."""
+            if not _band_card or not src:
+                return None
+            su = str(src).strip().upper()
+            for _f in _band_card["fields"]:
+                if (getattr(_f, "source", "") or "").strip().upper() == su:
+                    return _f
+            return None
+
+        def _decl_row_label(fobj):
+            """The DECLARED label text object on ``fobj``'s own row and to
+            its left — the caption Oracle prints beside that value. A
+            caption carrying an Oracle &TOKEN is the lexical band-caption
+            idiom, which has its own (single-box) path."""
+            if not _band_card or fobj is None:
+                return None
+            fx = float(getattr(fobj, "x", 0) or 0)
+            fy = float(getattr(fobj, "y", 0) or 0)
+            best, bdx = None, 1e9
+            for _t in _band_card["texts"]:
+                _tt = getattr(_t, "text", "") or ""
+                if "&" in _tt:
+                    continue
+                tx = float(getattr(_t, "x", 0) or 0)
+                ty = float(getattr(_t, "y", 0) or 0)
+                dx = fx - tx
+                if abs(ty - fy) <= 0.18 and 0 <= dx <= 2.5 and dx < bdx:
+                    bdx, best = dx, _t
+            return best
+
+        def _decl_style_of(f, dflt_fs, dflt_fg):
+            """(face, size, bold, italic, ink) the layout object declares."""
+            face = (getattr(f, "font_family", "") or "").strip() or None
+            try:
+                sz = int(float(getattr(f, "font_size", 0) or 0))
+            except (TypeError, ValueError):
+                sz = 0
+            return (face, f"{sz}pt" if sz else dflt_fs,
+                    bool(getattr(f, "bold", False)),
+                    bool(getattr(f, "italic", False)),
+                    (getattr(f, "color", "") or "").strip() or dflt_fg)
+
+        def _place_decl(tb, f):
+            """Place a band box at its DECLARED geometry, band-relative.
+            Same lead/slack convention as the declared record-card row: the
+            row is the declared extent + 0.06in and the content sits 0.02in
+            below its top edge (truth-measured: the band paint starts just
+            above the declared caption row, not flush with it)."""
+            _y0 = _band_card["y0"] if _band_card else 0.0
+            _sub(tb, "Top",
+                 f"{max(0.0, float(getattr(f, 'y', 0) or 0) - _y0 + 0.02):.3f}in")
+            _sub(tb, "Left",
+                 f"{max(0.0, float(getattr(f, 'x', 0) or 0)):.3f}in")
+            _sub(tb, "Width",
+                 f"{max(0.2, float(getattr(f, 'width', 0) or 0.5)):.3f}in")
+            _sub(tb, "Height",
+                 f"{max(0.15, float(getattr(f, 'height', 0) or 0.19)):.3f}in")
+
+        _bfld = _decl_band_field(bcol)
+        _blbl = _decl_row_label(_bfld)
+        _split_band = bool(not band_caption and _bfld is not None
+                           and _blbl is not None and bcol
+                           and bcol.upper() in declared)
+        if _split_band:
+            # DECLARED caption + DECLARED value, each in its own box at its
+            # own declared x/width (the truth prints them as two positioned
+            # objects, not one run).
+            _lface, _lfs, _lbold, _lit, _lfg = _decl_style_of(
+                _blbl, _band_fs, _band_fg)
+            _build_textbox(bri, "Tb_ND_BandL",
+                           _declared_literal(_blbl.text),
+                           bold=_lbold, italic=_lit, font_size=_lfs,
+                           font_family=_lface, bg=BAND_BG, fg=_lfg,
+                           text_align=_declared_text_align(_blbl, "Left"),
+                           vertical_align="Top", border_color=BAND_BG,
+                           padding="0pt", can_grow=False)
+            _place_decl(bri[-1], _blbl)
+            _vface, _vfs, _vbold, _vit, _vfg = _decl_style_of(
+                _bfld, _band_fs, _band_fg)
+            _build_textbox(bri, "Tb_ND_BandV",
+                           f"=Fields!{_safe(bcol)}.Value",
+                           bold=_vbold, italic=_vit, font_size=_vfs,
+                           font_family=_vface, bg=BAND_BG, fg=_vfg,
+                           text_align=_declared_text_align(_bfld, "Left"),
+                           vertical_align="Top", border_color=BAND_BG,
+                           padding="0pt")
+            _place_decl(bri[-1], _bfld)
+        else:
+            _build_textbox(bri, "Tb_ND_BandL", band_val, bold=True,
+                           font_size=_band_fs, font_family=_band_face,
+                           italic=_band_it,
+                           bg=BAND_BG, fg=_band_fg, text_align="Left",
+                           vertical_align="Middle", border_color=BAND_BG,
+                           padding="5pt")
+            _tb = bri[-1]
+            _band_w = 7.4 if band_caption else 4.5
+            _sub(_tb, "Top", "0in"); _sub(_tb, "Left", "0in")
+            _sub(_tb, "Width", f"{_band_w:.2f}in")
+            _sub(_tb, "Height", f"{band_h:.2f}in")
         # The Oracle caption already prints the group count inline, so don't ALSO
         # emit a separate right-hand total cell (it would duplicate the count).
         if outer.summaries and not band_caption:
@@ -7384,12 +11435,74 @@ def _build_nested_group_tablix(report, main):
             sval = _summary_total_expr(outer.summaries, main, declared)
             if not sval:
                 sval = f'="{_clean_label(outer.summaries[0].get("label") or "") or "Total"}"'
-            _build_textbox(bri, "Tb_ND_BandTotal", sval, bold=True, font_size="11pt",
-                           bg=BAND_BG, fg=BAND_FG, text_align="Right",
-                           vertical_align="Middle", border_color=BAND_BG, padding="5pt")
-            _tb = bri[-1]
-            _sub(_tb, "Top", "0in"); _sub(_tb, "Left", "4.5in")
-            _sub(_tb, "Width", "3.0in"); _sub(_tb, "Height", f"{band_h:.2f}in")
+            # DECLARED trailer wording + styling: when the layout positions
+            # the summary as its own band field with a label beside it, that
+            # label IS the printed wording (the data-model defaultLabel is
+            # not) — same-band pairing, styled from the declared field.
+            _tot_fs, _tot_face = "11pt", None
+            _tot_fg, _tot_it = BAND_FG, False
+            _tfld = _tlbl = None
+            _tval = ""
+            if len(outer.summaries) == 1:
+                _sm0 = outer.summaries[0]
+                _smname = (_sm0.get("name") or "")
+                _smgeo = field_geo.get(_smname.upper())
+                _smsrc = (_sm0.get("source") or "").upper()
+                # band trailer labels are wide ("Total For County:" spans
+                # ~1.8in) — widen the same-band pairing window accordingly
+                _decl_tlbl = (_nearest_label(label_geo, _smgeo[0], _smgeo[1],
+                                             max_dx=2.5)
+                              if _smgeo else "")
+                if _decl_tlbl and _smsrc in declared:
+                    _fn = _ssrs_summary_fn(_sm0.get("function") or "sum")
+                    _tval = (f'={_fn}(Fields!'
+                             f'{_safe(_orig_name(main, _smsrc))}.Value)')
+                    sval = f'="{_decl_tlbl}:  " & {_tval[1:]}'
+                    # the DECLARED trailer objects (label text + summary
+                    # field) — when the layout positions both, each keeps
+                    # its own declared x/width instead of riding a single
+                    # right-flush box
+                    _tfld = _decl_band_field(_smname)
+                    _tlbl = _decl_row_label(_tfld)
+                _smf = _layout_field_font(report, _smname)
+                if _smf:
+                    _tot_face = _smf[0] or None
+                    if _smf[1]:
+                        _tot_fs = f"{_smf[1]}pt"
+                    _tot_it = _smf[3]
+                    if _smf[4]:
+                        _tot_fg = _smf[4]
+            if _tfld is not None and _tlbl is not None and _tval:
+                _lface, _lfs, _lbold, _lit, _lfg = _decl_style_of(
+                    _tlbl, _tot_fs, _tot_fg)
+                _build_textbox(bri, "Tb_ND_BandTotalL",
+                               _declared_literal(_tlbl.text),
+                               bold=_lbold, italic=_lit, font_size=_lfs,
+                               font_family=_lface, bg=BAND_BG, fg=_lfg,
+                               text_align=_declared_text_align(_tlbl, "Left"),
+                               vertical_align="Top", border_color=BAND_BG,
+                               padding="0pt", can_grow=False)
+                _place_decl(bri[-1], _tlbl)
+                _vface, _vfs, _vbold, _vit, _vfg = _decl_style_of(
+                    _tfld, _tot_fs, _tot_fg)
+                _build_textbox(bri, "Tb_ND_BandTotal", _tval,
+                               bold=_vbold, italic=_vit, font_size=_vfs,
+                               font_family=_vface, bg=BAND_BG, fg=_vfg,
+                               text_align=_declared_text_align(_tfld, "Left"),
+                               vertical_align="Top", border_color=BAND_BG,
+                               padding="0pt")
+                _place_decl(bri[-1], _tfld)
+            else:
+                _build_textbox(bri, "Tb_ND_BandTotal", sval, bold=True,
+                               font_size=_tot_fs, font_family=_tot_face,
+                               italic=_tot_it,
+                               bg=BAND_BG, fg=_tot_fg, text_align="Right",
+                               vertical_align="Middle", border_color=BAND_BG,
+                               padding="5pt")
+                _tb = bri[-1]
+                _sub(_tb, "Top", "0in"); _sub(_tb, "Left", "4.5in")
+                _sub(_tb, "Width", "3.0in")
+                _sub(_tb, "Height", f"{band_h:.2f}in")
         # Outer-group non-break fields render as a follow-on card (generic case).
         outer_card_items = [it for it in outer_items
                             if it.name.upper() != (outer.break_col or "").upper()]
@@ -7413,8 +11526,11 @@ def _build_nested_group_tablix(report, main):
         rect = _sub(rcont, "Rectangle"); rect.set("Name", rect_name)
         _sub(rect, "KeepTogether", "true")
         st = _sub(rect, "Style"); _sub(st, "BackgroundColor", bg)
-        _bb = _sub(st, "BottomBorder"); _sub(_bb, "Style", "Solid")
-        _sub(_bb, "Color", RULE); _sub(_bb, "Width", "0.5pt")
+        # DECLARED card edge only: this rectangle stands for the group's own
+        # repeating frame, so its bottom rule is that frame's declared
+        # bottom edge (hideBottomBorder="yes" -> nothing paints, and a
+        # source that declares no box gets no rule at all).
+        _apply_edge_subset(st, _declared_group_box(report, group), ("bottom",))
         ri = _sub(rect, "ReportItems")
         for i, it in enumerate(flds):
             coln = i // per_col
@@ -7457,8 +11573,131 @@ def _build_nested_group_tablix(report, main):
     _det_names = ({(_it.name or "").upper()
                    for _it in _printable_items(last, skip_break=False)}
                   if last is not None else set())
+
+    def _emit_declared_card_row(mi, card, group=None):
+        """The middle group's card straight from its DECLARED layout frame:
+        every visible field + label text at its declared relative geometry
+        and declared font — the synthesized two-column card dropped the
+        frame's date/formula fields and ALL its label texts.
+
+        THE CARD IS AS TALL AS THE FRAME THE SOURCE DECLARES. Its members'
+        extent is only a floor: a record frame declared taller than its last
+        member leaves that slack DELIBERATELY (the next record starts at the
+        frame's declared bottom), so sizing the row from the members alone
+        ran every card short and drifted the whole per-record ladder."""
+        y0 = card["y0"]
+        h = max((card["y1"] - y0) + 0.06, float(card.get("frame_h") or 0.0))
+        # This group's own declared <summary> subtotal. The card frame may
+        # already POSITION it (a summary-bound layout field) — then it is
+        # emitted with the rest of the declared members and must not print
+        # twice; only an undeclared-position summary gets its own trailer
+        # line under the card.
+        _decl_srcs = {(getattr(_f, "source", "") or "").strip().upper()
+                      for _f in card["fields"]}
+        _sum_names = {(_s.get("name") or "").strip().upper()
+                      for _s in (getattr(group, "summaries", None) or [])}
+        _gtot = ""
+        if _sum_names and not (_sum_names & _decl_srcs):
+            _gtot = _summary_total_expr(getattr(group, "summaries", None),
+                                        main, declared)
+        _tot_line = 0.0
+        if _gtot:
+            _tot_line = LINE_H + 0.06
+            h += _tot_line
+        # the record frame's DECLARED painted fill (pattern-gated by the
+        # parser, ancestor-inherited) — the truth paints the whole card
+        # block in it; no declaration keeps the plain white card
+        _card_bg = (card.get("bg") or "").strip() or "#ffffff"
+        # 4dp for the same reason the members are placed at 4dp: this row IS
+        # the per-record pitch.
+        rrow = _sub(rows, "TablixRow"); _sub(rrow, "Height", f"{h:.4f}in")
+        rc = _sub(_sub(rrow, "TablixCells"), "TablixCell")
+        rcont = _sub(rc, "CellContents")
+        rect = _sub(rcont, "Rectangle"); rect.set("Name", f"ND_Card{mi}")
+        _sub(rect, "KeepTogether", "true")
+        st = _sub(rect, "Style"); _sub(st, "BackgroundColor", _card_bg)
+        # DECLARED card edge only — see _emit_card_row. The frame this card
+        # is built FROM is the same one whose hideXBorder attributes decide
+        # whether a bottom rule paints under it.
+        _apply_edge_subset(st, _declared_group_box(report, group), ("bottom",))
+        ri = _sub(rect, "ReportItems")
+        _mds = main.name or ""
+
+        def _decl_style(f):
+            face = (getattr(f, "font_family", "") or "").strip() or None
+            try:
+                size = int(float(getattr(f, "font_size", 0) or 0)) or 10
+            except (TypeError, ValueError):
+                size = 10
+            return (face, f"{size}pt", bool(getattr(f, "bold", False)),
+                    bool(getattr(f, "italic", False)),
+                    (getattr(f, "color", "") or "").strip() or INK)
+
+        def _place(tb, f):
+            # 4dp: a declared offset IS the offset. Rounding the ladder to
+            # 2dp moved each line up to 0.36pt off its declaration and the
+            # error compounds down the stack (a declared 0.19531in step
+            # printed as 0.20in).
+            _sub(tb, "Top",
+                 f"{max(0.0, float(getattr(f, 'y', 0) or 0) - y0 + 0.02):.4f}in")
+            _sub(tb, "Left",
+                 f"{max(0.0, float(getattr(f, 'x', 0) or 0)):.4f}in")
+            _sub(tb, "Width",
+                 f"{max(0.3, float(getattr(f, 'width', 0) or 0.5)):.4f}in")
+            _sub(tb, "Height",
+                 f"{max(0.18, float(getattr(f, 'height', 0) or 0.19)):.4f}in")
+
+        for fi, f in enumerate(card["fields"]):
+            try:
+                val = _field_value_for(f, report, dataset_name=_mds)
+            except Exception:  # noqa: BLE001
+                val = ""
+            if not val:
+                continue
+            face, fs, bold, it, fg = _decl_style(f)
+            _build_textbox(ri, f"Tb_NDC{mi}_{fi}_{_safe(f.source)}", val,
+                           bold=bold, italic=it, font_size=fs,
+                           font_family=face, fg=fg, bg=_card_bg,
+                           text_align="Left", vertical_align="Top",
+                           # NO INSET: _place() puts this at the DECLARED
+                           # x/y/width/height, so the declared box is the box.
+                           border_color=_card_bg, padding="0pt",
+                           can_grow=True)
+            _place(ri[-1], f)
+        for ti, f in enumerate(card["texts"]):
+            _txt = _declared_literal(f.text)
+            face, fs, bold, it, fg = _decl_style(f)
+            _build_textbox(ri, f"Tb_NDC{mi}_L{ti}", _txt,
+                           bold=bold, italic=it, font_size=fs,
+                           font_family=face, fg=fg, bg=_card_bg,
+                           text_align="Left", vertical_align="Top",
+                           # NO INSET: declared box, placed by _place().
+                           border_color=_card_bg, padding="0pt",
+                           can_grow=False)
+            _place(ri[-1], f)
+        if _gtot:
+            # the group's declared subtotal, on its own line under the
+            # declared card block (the synthesized card carried this and
+            # the declared path must not lose it)
+            _build_textbox(ri, f"Tb_NDC{mi}_total", _gtot, bold=True,
+                           font_size="9pt", bg=_card_bg, fg=INK,
+                           text_align="Right", vertical_align="Top",
+                           border_color=_card_bg, padding="2pt",
+                           can_grow=True)
+            _tt = ri[-1]
+            _sub(_tt, "Top", f"{max(0.0, h - _tot_line + 0.02):.4f}in")
+            _sub(_tt, "Left", "0.10in")
+            _sub(_tt, "Width", "7.30in")
+            _sub(_tt, "Height", f"{LINE_H:.4f}in")
+        return h
+
     _skip_card = set()  # middle indices whose card row AND member are suppressed
     for mi, grp in enumerate(middles):
+        _decl_card = _declared_record_card(report, grp)
+        if _decl_card:
+            h = _emit_declared_card_row(mi, _decl_card, group=grp)
+            row_specs.append((("card", mi), grp, h))
+            continue
         _mid_items = [_it for _it in _printable_items(grp, skip_break=False)
                       if not (_it.name or "").upper().endswith(
                           ("_ID", "_DATE", "_DT"))
@@ -7477,6 +11716,7 @@ def _build_nested_group_tablix(report, main):
     #    detail row, exactly like the Oracle table. Otherwise stack evenly.
     det_h = 0.26
     detail_has_header = False
+    hdr_allpage = False
     if last is not None:
         dflds = _printable_items(last, skip_break=False)
         # LAYOUT-DRIVEN detail table: collect the repeating-frame field band with
@@ -7485,6 +11725,32 @@ def _build_nested_group_tablix(report, main):
         # the group's raw items. Values resolve via the standard resolver
         # (Fields! / formula-dataset First() / param) so no orphan refs.
         row_layout, wrap_layout, row_y = _detail_band_fields(report)
+        # DECLARED band styling: per-source fonts, caption fonts, and the
+        # declared box chrome (solid frame + vertical separators) — the
+        # synthesized band dropped the Times faces to 9pt Helvetica and
+        # never drew the boxes the truth prints.
+        band_style = _detail_band_style(report, row_y)
+
+        def _band_font(src, default_size="9pt", default_bold=False):
+            fnt = band_style["fonts"].get((src or "").strip().upper())
+            if not fnt:
+                return None, default_size, default_bold
+            face, size, bold = fnt
+            return face, (f"{size}pt" if size else default_size), \
+                (bold or default_bold)
+
+        def _caption_font(text, default_size="9pt"):
+            _t = "\n".join(s.strip() for s in (text or "").splitlines()
+                           if s.strip())
+            fnt = band_style["caption_fonts"].get(_t)
+            if not fnt:
+                return None, default_size
+            face, size, _b = fnt
+            return face, (f"{size}pt" if size else default_size)
+        # printable width of the REAL paper — the hardcoded 7.5in
+        # clamp clipped the last column ('Visited') on a wide page
+        _nd_w = max(7.5, _page_width_for(report)
+                    - 2 * _PAGE_HMARGIN_IN - 0.1)
         main_ds = main.name or ""
         is_table = len(row_layout) >= 2 and len({round(x, 1) for _s, x, _y, _w in row_layout}) >= 2
 
@@ -7522,6 +11788,8 @@ def _build_nested_group_tablix(report, main):
                     return True
                 return bool(_bctok and _bctok in tl)
 
+            # (Margin titles were filtered out of label_geo at the top of
+            # the builder — page chrome never becomes a body column header.)
             _cand = [(text, lx, ly) for text, lx, ly, _bg in label_geo
                      if -0.02 <= (row_y - ly) <= 0.6 and text and "&<" not in text
                      and not _is_group_caption(text)]
@@ -7538,6 +11806,110 @@ def _build_nested_group_tablix(report, main):
                 # best-aligned band; tie -> the one closest to the detail row.
                 _best_y = max(_bands, key=lambda y: (_aligned(_bands[y]), y))
                 headers = list(_bands[_best_y])
+            # DECLARED header-band styling: the frame that directly OWNS
+            # the header label texts IS the band (same painted-fill
+            # dialect as the flat-table header path) — its pattern-gated
+            # fill paints the strip and each label prints its declared
+            # ink/weight/em. A source that declares no painted fill gets
+            # a plain band (never invented navy); a source that declares
+            # a solid dark fill keeps it (truth-measured both ways).
+            _hdr_owner = None
+            _hdr_lbl_style = {}
+            if headers:
+                _htexts = {t.strip() for t, _x in headers if t}
+                _sec_hh = _section_by_kind(report, "section_main")
+
+                def _walk_hf(g, inherited=""):
+                    _bgp = (getattr(g, "background_color", "") or "").strip()\
+                        or inherited
+                    yield g, _bgp
+                    for c in (getattr(g, "children", None) or []):
+                        yield from _walk_hf(c, _bgp)
+                for _g, _gbg in (_walk_hf(_sec_hh)
+                                 if _sec_hh is not None else ()):
+                    _own = [f for f in (getattr(_g, "fields", None) or [])
+                            if (getattr(f, "kind", "") or "") == "text"
+                            and (getattr(f, "text", "") or "").strip()
+                            in _htexts
+                            and abs(float(getattr(f, "y", 0) or 0)
+                                    - _best_y) <= 0.08]
+                    if len(_own) >= 2:
+                        _hdr_owner = (_g, _gbg)  # deepest owner wins
+                        _hdr_lbl_style = {
+                            (f.text or "").strip(): (
+                                (getattr(f, "color", "") or "").strip(),
+                                bool(getattr(f, "bold", False)),
+                                bool(getattr(f, "italic", False)))
+                            for f in _own}
+                if _hdr_owner is not None:
+                    _obg = _hdr_owner[1]
+                    hdr_bg = (_obg if _obg
+                              and not _is_designer_fill_hex(_obg)
+                              and _obg.lower() not in ("#ffffff", "white")
+                              else "#ffffff")
+                    # declared label ink wins per label below; the band
+                    # default is plain black on the declared fill
+                    hdr_fg = "#000000"
+            if headers:
+                # DECLARED page-repeat scope: when the frame OWNING the
+                # header labels declares printObjectOnPage="allPage" AND
+                # sits ABOVE the group band, the header belongs at the TOP
+                # of every physical page (Oracle reprints it there) — not
+                # under the first group band where the synthesized order
+                # put it. Structural: frame declaration + geometry only.
+                def _walk_sec(g, rep_depth=0):
+                    yield g, rep_depth
+                    for c in (getattr(g, "children", None) or []):
+                        _d = rep_depth + (
+                            1 if (getattr(c, "kind", "") or "").lower()
+                            == "repeating_frame" else 0)
+                        yield from _walk_sec(c, _d)
+                _hdr_texts = {t.strip() for t, _x in headers if t}
+                _sec = _section_by_kind(report, "section_main")
+                for _g, _rdepth in (_walk_sec(_sec)
+                                    if _sec is not None else ()):
+                    if (getattr(_g, "print_on_page", "") or "").lower() \
+                            != "allpage":
+                        continue
+                    if _rdepth >= 2:
+                        # the header frame lives INSIDE an inner repeating
+                        # frame: its "allPage" is scoped to the pages of
+                        # THAT record (basePrintingOn=enclosingObject), so
+                        # it repeats per record — hoisting it to the page
+                        # top printed it once per page instead of once per
+                        # record (per-record action tables lost their
+                        # heading). Only a section/outer-frame header is
+                        # genuine page chrome.
+                        continue
+                    _owned = sum(
+                        1 for f in (getattr(_g, "fields", None) or [])
+                        if (getattr(f, "kind", "") or "") == "text"
+                        and (getattr(f, "text", "") or "").strip()
+                        in _hdr_texts)
+                    if _owned >= 2 and float(getattr(_g, "y", 0) or 0) \
+                            <= _best_y + 0.03:
+                        hdr_allpage = True
+                        break
+                if hdr_allpage:
+                    # …and only when the header band really sits ABOVE the
+                    # group band's own caption in the declared layout
+                    _bcap = _find_band_caption_text(label_geo, bcol)
+                    _bcap_y = next(
+                        (ly for t, _lx, ly, _bg in label_geo
+                         if _bcap and t == _bcap), None)
+                    if _bcap_y is None and geo_band:
+                        # GEOMETRY band (positioned fields, no lexical
+                        # caption): the band's own declared field ys are
+                        # the comparison point — a header frame declared
+                        # BELOW them prints below the band in the truth,
+                        # allPage or not (the hoist inverted that order).
+                        _band_ys = [field_geo[it.name.upper()][1]
+                                    for it in outer_items
+                                    if field_geo.get(it.name.upper())]
+                        if _band_ys:
+                            _bcap_y = min(_band_ys)
+                    if _bcap_y is not None and _bcap_y <= _best_y:
+                        hdr_allpage = False
             if headers:
                 detail_has_header = True
                 hh = 0.24
@@ -7549,62 +11921,258 @@ def _build_nested_group_tablix(report, main):
                 hri = _sub(hrect, "ReportItems")
                 hsorted = sorted(headers, key=lambda z: z[1])
                 for hi, (text, hx) in enumerate(hsorted):
-                    nxt = hsorted[hi + 1][1] if hi + 1 < len(hsorted) else 7.5
+                    nxt = hsorted[hi + 1][1] if hi + 1 < len(hsorted) else _nd_w
                     # Resolve any Oracle &TOKEN in the caption (a &PARAM ->
                     # Parameters!..Value, a &FORMULA -> its placeholder) so the
                     # column-header band never prints a raw "&REPORT_VEHICLE_TYPE".
+                    _hface, _hfs = _caption_font(text)
+                    # declared per-label ink/weight/em from the owning
+                    # header frame (falls back to the band defaults)
+                    _hink, _hbold, _hital = _hdr_lbl_style.get(
+                        (text or "").strip(), ("", True, False))
                     text, _ = _resolve_text_expression(text, report, main_ds)
-                    _build_textbox(hri, f"Tb_NDHdr_{hi}", text, bold=True,
-                                   font_size="9pt", bg=hdr_bg, fg=hdr_fg,
-                                   text_align="Left", vertical_align="Middle",
-                                   border_color=hdr_bg, padding="2pt", can_grow=False)
+                    _build_textbox(hri, f"Tb_NDHdr_{hi}", text,
+                                   bold=_hbold if _hdr_owner else True,
+                                   italic=_hital,
+                                   font_size=_hfs, font_family=_hface,
+                                   bg=hdr_bg,
+                                   fg=(_hink or hdr_fg),
+                                   text_align="Left",
+                                   vertical_align=_declared_vertical_align(),
+                                   # NO INSET: declared caption x below.
+                                   border_color=hdr_bg, padding="0pt",
+                                   can_grow=False)
                     _tb = hri[-1]
                     _sub(_tb, "Top", "0in"); _sub(_tb, "Left", f"{max(0.02, hx):.2f}in")
                     _sub(_tb, "Width", f"{max(0.5, nxt - hx - 0.02):.2f}in")
                     _sub(_tb, "Height", f"{hh:.2f}in")
-                row_specs.append(("colhdr", last, hh))
+                if hdr_allpage:
+                    # declared page-top header: the ROW moves to the very
+                    # top of the tablix (its hierarchy member becomes a
+                    # top-level static that repeats on every page)
+                    rows.remove(hrow)
+                    rows.insert(0, hrow)
+                    row_specs.insert(0, ("colhdr_top", last, hh))
+                else:
+                    row_specs.append(("colhdr", last, hh))
 
             # --- detail row: row fields at their real x, wrap fields below ---
-            wrap_h = 0.22 * len(wrap_layout)
+            # wrap entries sharing a y-band print on ONE line (each at its
+            # declared x) — a multi-field sub-row (address + directions) is
+            # one physical line, not stacked copies.
+            _wband_of = {}   # entry index -> band line number
+            _wnext_x = {}    # entry index -> next same-band entry's x (or None)
+            _lasty = None; _bandno = -1
+            for _wi2, _went in enumerate(wrap_layout):
+                if _lasty is None or abs(_went[2] - _lasty) > 0.02:
+                    _bandno += 1
+                    _lasty = _went[2]
+                _wband_of[_wi2] = _bandno
+                if _wi2 > 0 and _wband_of[_wi2 - 1] == _bandno:
+                    _wnext_x[_wi2 - 1] = _went[1]
+            wrap_h = 0.22 * (_bandno + 1 if wrap_layout else 0)
             det_h = 0.26 + wrap_h
+            if band_style.get("record_box"):
+                # declared record frame slack: the truth leaves ~0.06in
+                # under the last wrap line inside the box
+                det_h += 0.06
+            # DECLARED NESTED REGIONS: a repeating frame declared INSIDE the
+            # record frame prints inside every record instance (above the rule
+            # that closes it), at its declared offset from the band. Sized in
+            # before the row height is fixed so the record actually contains
+            # it — the region used to be dropped here and re-appear as a
+            # report-end table under the closing rule.
+            _rec_frame = _record_frame_for_band(report, row_layout)
+            _nested_regions = _declared_nested_regions(report, main, _rec_frame)
+            _band_anchor = min((z[2] for z in row_layout), default=0.0)
+            _region_plan = []
+            for _rg, _rq, _rpairs in _nested_regions:
+                _mem = _nested_region_members(_rg, _rq, _rpairs, report)
+                if not _mem:
+                    continue
+                _rtop = max(0.0, float(getattr(_rg, "y", 0.0) or 0.0)
+                            - _band_anchor)
+                _rh = max(float(getattr(_rg, "height", 0.0) or 0.0),
+                          max(y + float(getattr(f, "height", 0.0) or 0.0)
+                              for f, _v, y in _mem))
+                _region_plan.append((_rg, _mem, _rtop, _rh))
+                det_h = max(det_h, _rtop + _rh)
+                # tell the report-end breakdown fallback this dataset is
+                # already rendered INSIDE each record, so it never also
+                # prints as a sibling table under the closing rule
+                try:
+                    report._nested_regions_emitted = (
+                        set(getattr(report, "_nested_regions_emitted", None)
+                            or ()) | {_safe(getattr(_rq, "name", "") or "")})
+                except Exception:  # noqa: BLE001 -- marker is advisory only
+                    pass
             drow = _sub(rows, "TablixRow"); _sub(drow, "Height", f"{det_h:.2f}in")
             dc = _sub(_sub(drow, "TablixCells"), "TablixCell")
             dcont = _sub(dc, "CellContents")
             drect = _sub(dcont, "Rectangle"); drect.set("Name", "ND_Detail")
             ds_ = _sub(drect, "Style"); _sub(ds_, "BackgroundColor", "#ffffff")
-            _db = _sub(ds_, "BottomBorder"); _sub(_db, "Style", "Solid")
-            _sub(_db, "Color", RULE); _sub(_db, "Width", "0.25pt")
+            if not nd_rules.get("detail_top"):
+                # No declared record-top rule -> the record's separator can
+                # only be the DECLARED bottom edge of its own repeating
+                # frame (hideBottomBorder="yes", or no declared box at all,
+                # means the source draws nothing between records).
+                _apply_edge_subset(ds_, _declared_group_box(report, last),
+                                   ("bottom",))
             dri = _sub(drect, "ReportItems")
+            if nd_rules.get("detail_top"):
+                # the source draws a solid rule at the top of every record
+                # instance — emit IT at its OWN declared endpoints (and not
+                # the invented gray hairline, nor a cell-wide border: the
+                # truth insets this rule from the group rule above it)
+                _emit_declared_rule(dri, nd_rules["detail_top"][2], top=0.0,
+                                    max_w=_nd_w)
             crow = sorted(row_layout, key=lambda z: z[1])
             for ci, (src, fx, fy, fw) in enumerate(crow):
-                nxt = crow[ci + 1][1] if ci + 1 < len(crow) else 7.5
+                nxt = crow[ci + 1][1] if ci + 1 < len(crow) else _nd_w
                 val = _field_value_for(LayoutField(name="F", source=src, kind="field"),
                                        report, dataset_name=main_ds)
                 if not val:
                     continue
+                _dface, _dfs, _dbold = _band_font(src)
                 _build_textbox(dri, f"Tb_NDDet_{ci}_{_safe(src)}", val,
-                               font_size="9pt", bg="#ffffff", fg=INK,
+                               font_size=_dfs, font_family=_dface,
+                               bold=_dbold, bg="#ffffff", fg=INK,
                                text_align="Left", vertical_align="Top",
-                               border_color="#ffffff", padding="2pt", can_grow=True)
+                               # NO INSET: declared field x below.
+                               border_color="#ffffff", padding="0pt",
+                               can_grow=True)
                 _tb = dri[-1]
                 _sub(_tb, "Top", "0in"); _sub(_tb, "Left", f"{max(0.02, fx):.2f}in")
                 _sub(_tb, "Width", f"{max(0.5, nxt - fx - 0.02):.2f}in")
                 _sub(_tb, "Height", "0.24in")
-            for wi, (src, fx, fy, fw) in enumerate(wrap_layout):
+            for wi, (src, fx, fy, fw, *_wl) in enumerate(wrap_layout):
                 val = _field_value_for(LayoutField(name="F", source=src, kind="field"),
                                        report, dataset_name=main_ds)
                 if not val:
                     continue
+                _wtop = 0.26 + _wband_of[wi] * 0.22
+                _wlbl = _wl[0] if _wl else ""
+                _wlblx = _wl[1] if len(_wl) > 1 else 0.0
+                if _wlbl:
+                    # the wrap line's INLINE LABEL at its declared x
+                    # ("Additional Information:" before the value)
+                    _wlface, _wlfs = _caption_font(_wlbl)
+                    _build_textbox(dri, f"Tb_NDWrapL_{wi}_{_safe(src)}",
+                                   _wlbl, font_size=_wlfs,
+                                   font_family=_wlface, bg="#ffffff",
+                                   fg=INK, text_align="Left",
+                                   vertical_align="Top",
+                                   # NO INSET: declared label x below.
+                                   border_color="#ffffff", padding="0pt",
+                                   can_grow=False)
+                    _lb = dri[-1]
+                    _sub(_lb, "Top", f"{_wtop:.2f}in")
+                    _sub(_lb, "Left", f"{max(0.02, _wlblx):.2f}in")
+                    _sub(_lb, "Width",
+                         f"{max(0.6, fx - _wlblx - 0.02):.2f}in")
+                    _sub(_lb, "Height", "0.22in")
+                _wface, _wfs, _wbold = _band_font(src)
                 _build_textbox(dri, f"Tb_NDWrap_{wi}_{_safe(src)}", val,
-                               font_size="9pt", bg="#ffffff", fg=INK,
+                               font_size=_wfs, font_family=_wface,
+                               bold=_wbold, bg="#ffffff", fg=INK,
                                text_align="Left", vertical_align="Top",
-                               border_color="#ffffff", padding="2pt", can_grow=True)
+                               # NO INSET: declared field x below.
+                               border_color="#ffffff", padding="0pt",
+                               can_grow=True)
                 _tb = dri[-1]
-                _sub(_tb, "Top", f"{0.26 + wi*0.22:.2f}in")
+                _sub(_tb, "Top", f"{_wtop:.2f}in")
                 _sub(_tb, "Left", f"{max(0.02, fx):.2f}in")
-                _sub(_tb, "Width", f"{max(2.0, 7.3 - fx):.2f}in")
+                if _wnext_x.get(wi) is not None:
+                    # a same-band neighbour to the right: keep the declared
+                    # column span so side-by-side wrap fields never overlap
+                    _ww = max(0.5, _wnext_x[wi] - fx - 0.05)
+                else:
+                    _ww = max(2.0, _nd_w - 0.2 - fx)
+                _sub(_tb, "Width", f"{_ww:.2f}in")
                 _sub(_tb, "Height", "0.22in")
+            # --- declared NESTED regions, inside this record instance ---
+            for _ri_i, (_rg, _mem, _rtop, _rh) in enumerate(_region_plan):
+                for _mi, (_mf, _mval, _my) in enumerate(_mem):
+                    _mx = float(getattr(_mf, "x", 0.0) or 0.0)
+                    _mw = float(getattr(_mf, "width", 0.0) or 0.0)
+                    _mh = float(getattr(_mf, "height", 0.0) or 0.0)
+                    _build_textbox(
+                        dri, f"Tb_NDSub_{_ri_i}_{_mi}_{_safe(_mf.name)}",
+                        _mval,
+                        font_size=f"{int(getattr(_mf, 'font_size', 0) or 10)}pt",
+                        font_family=(getattr(_mf, "font_family", "") or None),
+                        bold=bool(getattr(_mf, "bold", False)),
+                        italic=bool(getattr(_mf, "italic", False)),
+                        bg="#ffffff", fg=INK,
+                        text_align=_declared_text_align(_mf, "Left"),
+                        vertical_align="Top", border_color="#ffffff",
+                        # NO INSET: declared member geometry below.
+                        padding="0pt", can_grow=True)
+                    _tb = dri[-1]
+                    _sub(_tb, "Top", f"{_rtop + _my:.4f}in")
+                    _sub(_tb, "Left", f"{max(0.0, _mx):.4f}in")
+                    _sub(_tb, "Width",
+                         f"{max(0.1, min(_mw, _nd_w - max(0.0, _mx))):.4f}in")
+                    _sub(_tb, "Height", f"{max(0.1, _mh):.4f}in")
+            # DECLARED box chrome: the solid-linePattern frames around the
+            # record / row band and the vertical separator lines at their
+            # declared x (the truth prints boxed detail cells; ours drew
+            # nothing). Border-only rectangles: no fill, so no burial.
+            _rec_box = band_style.get("record_box")
+            _row_box = band_style.get("row_box")
+            _row_h = 0.26
+            for _bx_i, (_bgeo, _bh) in enumerate(
+                    ((_rec_box, det_h), (_row_box, _row_h))):
+                if not _bgeo:
+                    continue
+                _bx, _bw, _bc, _bwt = _bgeo
+                _brx = _sub(dri, "Rectangle")
+                _brx.set("Name", f"ND_BandBox_{_bx_i}")
+                _bst2 = _sub(_brx, "Style")
+                _bb2 = _sub(_bst2, "Border")
+                _sub(_bb2, "Style", "Solid")
+                _sub(_bb2, "Color", _bc)
+                _sub(_bb2, "Width", _bwt)
+                _sub(_brx, "Top", "0in")
+                _sub(_brx, "Left", f"{max(0.0, _bx):.2f}in")
+                _sub(_brx, "Width",
+                     f"{min(_bw, _nd_w - max(0.0, _bx)):.2f}in")
+                _sub(_brx, "Height", f"{_bh:.2f}in")
+                _sub(_brx, "ZIndex", "2")
+            for _vs_i, (_vx, _vc, _vwt) in enumerate(
+                    band_style.get("vseps") or []):
+                if not (0.0 < _vx < _nd_w):
+                    continue
+                _vl = _sub(dri, "Line")
+                _vl.set("Name", f"ND_VSep_{_vs_i}")
+                _vst = _sub(_vl, "Style")
+                _vb = _sub(_vst, "Border")
+                _sub(_vb, "Style", "Solid")
+                _sub(_vb, "Color", _vc)
+                _sub(_vb, "Width", _vwt)
+                _sub(_vl, "Top", "0in")
+                _sub(_vl, "Left", f"{_vx:.2f}in")
+                _sub(_vl, "Height", f"{_row_h:.2f}in")
+                _sub(_vl, "Width", "0in")
+                _sub(_vl, "ZIndex", "2")
             row_specs.append(("detail", last, det_h))
+            if nd_rules.get("group_bottom"):
+                # DECLARED section-level rule anchored under the master
+                # frame: a thin static row closing each outer-group block
+                # with the declared rule, drawn at its own declared
+                # endpoints (not stretched to the cell's border).
+                _grh = 0.03
+                grow = _sub(rows, "TablixRow")
+                _sub(grow, "Height", f"{_grh:.2f}in")
+                gcell = _sub(_sub(grow, "TablixCells"), "TablixCell")
+                gcont = _sub(gcell, "CellContents")
+                grect = _sub(gcont, "Rectangle")
+                grect.set("Name", "ND_GroupRule")
+                _sub(grect, "Style")
+                gri = _sub(grect, "ReportItems")
+                _emit_declared_rule(gri, nd_rules["group_bottom"][2],
+                                    top=0.0, max_w=_nd_w)
+                row_specs.append(("grouprule", last, _grh))
         else:
             # No geometry -> stack evenly (the original behavior).
             ncol = max(1, len(dflds))
@@ -7624,10 +12192,11 @@ def _build_nested_group_tablix(report, main):
                 hrect.set("Name", "ND_ColHdrI")
                 hs_ = _sub(hrect, "Style")
                 _sub(hs_, "BackgroundColor", "#ffffff")
-                _hb = _sub(hs_, "BottomBorder")
-                _sub(_hb, "Style", "Solid")
-                _sub(_hb, "Color", RULE)
-                _sub(_hb, "Width", "0.75pt")
+                # Same declaration gate as the record rows below: an
+                # underline paints only where the bound frame declares a
+                # bottom edge that is not hidden.
+                _apply_edge_subset(hs_, _declared_group_box(report, last),
+                                   ("bottom",))
                 hri = _sub(hrect, "ReportItems")
                 for ci, it in enumerate(dflds):
                     cap = _icaps[ci] or \
@@ -7650,8 +12219,9 @@ def _build_nested_group_tablix(report, main):
             dcont = _sub(dc, "CellContents")
             drect = _sub(dcont, "Rectangle"); drect.set("Name", "ND_Detail")
             ds_ = _sub(drect, "Style"); _sub(ds_, "BackgroundColor", "#ffffff")
-            _db = _sub(ds_, "BottomBorder"); _sub(_db, "Style", "Solid")
-            _sub(_db, "Color", RULE); _sub(_db, "Width", "0.25pt")
+            # DECLARED record edge only (see the geometry branch above).
+            _apply_edge_subset(ds_, _declared_group_box(report, last),
+                               ("bottom",))
             dri = _sub(drect, "ReportItems")
             for ci, it in enumerate(dflds):
                 _build_textbox(dri, f"Tb_NDDet_{_safe(it.name)}",
@@ -7671,6 +12241,15 @@ def _build_nested_group_tablix(report, main):
     # ---- ROW hierarchy: nested groups mirroring the chain -------------------
     rh = _sub(tablix, "TablixRowHierarchy")
     top_members = _sub(rh, "TablixMembers")
+
+    # DECLARED allPage column header: a TOP-LEVEL static member ahead of
+    # the dynamic group, RepeatOnNewPage=true — SSRS's page-repeating
+    # table-header machinery, matching Oracle's printObjectOnPage=allPage
+    # (the header prints at the top of every physical page).
+    if hdr_allpage:
+        _php_mem = _sub(top_members, "TablixMember")
+        _sub(_php_mem, "KeepWithGroup", "After")
+        _sub(_php_mem, "RepeatOnNewPage", "true")
 
     # Outer group on the band's break column.
     outer_mem = _sub(top_members, "TablixMember")
@@ -7739,7 +12318,9 @@ def _build_nested_group_tablix(report, main):
 
     # Column-header member (static) -- matches the ND_ColHdr row, repeats with
     # the detail group so the navy header prints above each action table.
-    if detail_has_header:
+    # (When the source declares allPage the header member moved to the TOP
+    # level above — no in-group member then, rows and members in lockstep.)
+    if detail_has_header and not hdr_allpage:
         ch_mem = _sub(cursor, "TablixMember")
         _sub(ch_mem, "KeepWithGroup", "After")
         _sub(ch_mem, "RepeatOnNewPage", "true")
@@ -7752,6 +12333,11 @@ def _build_nested_group_tablix(report, main):
         dbk = last.break_col
         _sub(dge, "GroupExpression",
              f"=Fields!{_safe(dbk)}.Value" if (dbk and dbk.upper() in declared) else "=1")
+    # Group-bottom rule member (static trailer, in lockstep with its row).
+    if any(k == "grouprule" for k, _g, _h in row_specs):
+        gr_mem = _sub(cursor, "TablixMember")
+        _sub(gr_mem, "KeepWithGroup", "Before")
+        _sub(gr_mem, "RepeatOnNewPage", "true")
 
     _sub(tablix, "DataSetName", _safe(main.name))
     _sub(tablix, "Top", "0in"); _sub(tablix, "Left", "0in")
@@ -7948,7 +12534,14 @@ def _build_grouped_card_tablix(report: "ParsedReport", main: "DataQuery") -> ET.
     CARD_BG     = palette["card_bg"]
     INK         = palette["ink"]
     INK_SOFT    = palette["ink_soft"]
-    RULE        = palette["rule"]
+    # CARD FRAME STROKE. The card stands for the query's own layout frame,
+    # so its edges take that frame's DECLARED ink/width; a source that
+    # declares no box falls back to the settled device-hairline dialect.
+    # No house colour or weight literal may appear on any edge below.
+    _card_box  = _declared_group_box(report, main)
+    _card_edges = set((_card_box or {}).get("edges") or
+                      ("top", "bottom", "left", "right"))
+    RULE, RULE_W = _synth_edge_stroke(_card_box)
     if not _lay:
         # No layout -> no color evidence: plain black-on-white, matching
         # Oracle's default (character-mode heritage) break output.
@@ -8074,8 +12667,17 @@ def _build_grouped_card_tablix(report: "ParsedReport", main: "DataQuery") -> ET.
     # textboxes get the same bg so they blend into a single
     # continuous grey panel.
     _sub(cs, "BackgroundColor", SUBHDR_BG)
-    cb = _sub(cs, "Border"); _sub(cb, "Style", "Solid")
-    _sub(cb, "Color", RULE); _sub(cb, "Width", "0.5pt")
+    if len(_card_edges) == 4:
+        cb = _sub(cs, "Border"); _sub(cb, "Style", "Solid")
+        _sub(cb, "Color", RULE); _sub(cb, "Width", RULE_W)
+    else:
+        # hideXBorder took edges off the declared card frame -- only the
+        # surviving ones may stroke.
+        for _e in ("top", "bottom", "left", "right"):
+            _eb = _sub(cs, _e.capitalize() + "Border")
+            _sub(_eb, "Style", "Solid" if _e in _card_edges else "None")
+            _sub(_eb, "Color", RULE)
+            _sub(_eb, "Width", RULE_W)
     card_ri = _sub(card_rect, "ReportItems")
 
     if id_field is not None and not _hide_id_subhdr:
@@ -8199,11 +12801,15 @@ def _build_grouped_card_tablix(report: "ParsedReport", main: "DataQuery") -> ET.
         # the same card instead of floating loose.
         ahs = _sub(ah_rect, "Style"); _sub(ahs, "BackgroundColor", "#ffffff")
         _ahb_l = _sub(ahs, "LeftBorder")
-        _sub(_ahb_l, "Style", "Solid"); _sub(_ahb_l, "Color", RULE)
-        _sub(_ahb_l, "Width", "0.75pt")
+        _sub(_ahb_l, "Style",
+             "Solid" if "left" in _card_edges else "None")
+        _sub(_ahb_l, "Color", RULE)
+        _sub(_ahb_l, "Width", RULE_W)
         _ahb_r = _sub(ahs, "RightBorder")
-        _sub(_ahb_r, "Style", "Solid"); _sub(_ahb_r, "Color", RULE)
-        _sub(_ahb_r, "Width", "0.75pt")
+        _sub(_ahb_r, "Style",
+             "Solid" if "right" in _card_edges else "None")
+        _sub(_ahb_r, "Color", RULE)
+        _sub(_ahb_r, "Width", RULE_W)
         _ahb_t = _sub(ahs, "TopBorder"); _sub(_ahb_t, "Style", "None")
         _ahb_b = _sub(ahs, "BottomBorder"); _sub(_ahb_b, "Style", "None")
         ah_ri = _sub(ah_rect, "ReportItems")
@@ -8234,15 +12840,21 @@ def _build_grouped_card_tablix(report: "ParsedReport", main: "DataQuery") -> ET.
         # bottom rule so the detail row reads as part of the card.
         ads = _sub(ad_rect, "Style"); _sub(ads, "BackgroundColor", "#ffffff")
         _adb_l = _sub(ads, "LeftBorder")
-        _sub(_adb_l, "Style", "Solid"); _sub(_adb_l, "Color", RULE)
-        _sub(_adb_l, "Width", "0.75pt")
+        _sub(_adb_l, "Style",
+             "Solid" if "left" in _card_edges else "None")
+        _sub(_adb_l, "Color", RULE)
+        _sub(_adb_l, "Width", RULE_W)
         _adb_r = _sub(ads, "RightBorder")
-        _sub(_adb_r, "Style", "Solid"); _sub(_adb_r, "Color", RULE)
-        _sub(_adb_r, "Width", "0.75pt")
+        _sub(_adb_r, "Style",
+             "Solid" if "right" in _card_edges else "None")
+        _sub(_adb_r, "Color", RULE)
+        _sub(_adb_r, "Width", RULE_W)
         _adb_t = _sub(ads, "TopBorder"); _sub(_adb_t, "Style", "None")
         _adb_b = _sub(ads, "BottomBorder")
-        _sub(_adb_b, "Style", "Solid"); _sub(_adb_b, "Color", RULE)
-        _sub(_adb_b, "Width", "0.5pt")
+        _sub(_adb_b, "Style",
+             "Solid" if "bottom" in _card_edges else "None")
+        _sub(_adb_b, "Color", RULE)
+        _sub(_adb_b, "Width", RULE_W)
         ad_ri = _sub(ad_rect, "ReportItems")
         for col_idx, field in enumerate(detail_items):
             head_x = col_idx * col_w
@@ -8503,9 +13115,23 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
         _fx = _formula_expr_for_column(report, main, src)
         if _fx:
             return _fx
-        if total_col:
+        # A GROUP-scope formula (its refs are the group's own reset="G_x"
+        # summaries) reconstructs from those summaries as unscoped
+        # aggregates — the band it prints in IS the group they reset at.
+        _fx = _formula_expr_group_scoped(report, main, src)
+        if _fx:
+            return _fx
+        # LAST-RESORT GUESS: total the detail's last numeric column. It is a
+        # guess about a NUMBER, so it must never stand in for a column the
+        # source declares CHARACTER — those values are text (a formatted
+        # range, a code, a label) and Sum(Val(text)) prints an invented 0
+        # where the declaration says words. Blank is the honest answer.
+        if total_col and not _declares_character(report, src):
             return f'=Sum(Val(Fields!{_safe(total_col)}.Value))'
-        return '="0"'
+        if (src or "").upper() in formula_cols:
+            return (f'=First(Fields!{_safe(src)}.Value, '
+                    f'"{_FORMULA_DATASET_NAME}")')
+        return "=Nothing" if _declares_character(report, src) else '="0"'
 
     def _label_expr(kind, val):
         if kind == "text":
@@ -8530,21 +13156,54 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
     palette = _resolve_palette(report)
     themed = bool(spec.get("themed"))
     HDR_BG = palette.get("band_bg", "#ffffff") if themed else "#ffffff"
-    HDR_FG = palette.get("band_fg", "#ffffff") if themed else "#111111"
+    HDR_FG = palette.get("band_fg", "#ffffff") if themed else _BODY_INK
     if not themed:
-        HDR_BG, HDR_FG = "#ffffff", "#111111"
+        HDR_BG, HDR_FG = "#ffffff", _BODY_INK
+    # the SOURCE's own band fills win over the synthesized theme: the
+    # group band tint comes from the group master frame, the column strip
+    # from the frame owning the column labels (truth paints BOTH as
+    # full-width bands, in different shades — fidelity-diff measured).
+    GRP_BG = (spec.get("grp_band_bg") or "").strip() or HDR_BG
+    COL_BG = (spec.get("col_band_bg") or "").strip() or GRP_BG
+    if (spec.get("grp_band_bg") or spec.get("col_band_bg")):
+        HDR_FG = _BODY_INK
+
+    def _chip_bg(f):
+        """A member's own painted box fill under the measured dialect
+        rule: a fillPattern attribute means the box is OPAQUE — painted
+        with its (already pattern-gated) background_color when declared,
+        else white (the truth renders totals value boxes as white chips
+        on the gray totals box). No attribute -> transparent."""
+        if f is None or not (getattr(f, "fill_pattern", "") or ""):
+            return None
+        return (getattr(f, "background_color", "") or "") or "#FFFFFF"
 
     cols = spec["col_headers"]
     dcols = spec["detail_cols"]
     ghdr = spec["group_header"]
     footers = spec["footers"]
-    BODY_W = max([7.5] + [x + (w or 0.0) + 0.1 for x, w, _s in dcols]
-                 + [x + 0.9 for x, _l in cols])
-    BODY_W = min(BODY_W, 7.5)
+    BODY_W = max([7.5] + [x + (w or 0.0) + 0.1 for x, w, _s, *_ in dcols]
+                 + [x + 0.9 for x, _l, *_ in cols])
+    # clamp to the PRINTABLE width of the report's real paper — a 10in-wide
+    # log keeps its declared column positions instead of squeezing into
+    # Letter's 7.5in (the truth prints its last column at x=8.06).
+    BODY_W = min(BODY_W,
+                 max(7.5, _page_width_for(report)
+                     - 2 * _PAGE_HMARGIN_IN - 0.1))
 
     def _col_w(i, seq_x, last):
         nxt = seq_x[i + 1] if i + 1 < len(seq_x) else last
-        return max(0.4, nxt - seq_x[i] - 0.02)
+        span = nxt - seq_x[i] - 0.02
+        # A SIZE FLOOR MAY NOT PUSH A COLUMN OVER ITS NEIGHBOUR. The 0.4in
+        # minimum is a readability guard for a degenerate column; where the
+        # DECLARATION puts the next column nearer than that, the declaration
+        # wins. Measured: a ledger's index column, declared 0.18750in wide at
+        # x=0.06250 with its name column declared at x=0.31250, was floored to
+        # 0.40in — its right edge then stood 0.19in inside the name column and
+        # the index value printed on top of the name (engine-render measured;
+        # the truth PDF prints the two boxes 27.0..40.5pt and 45.0..198.0pt,
+        # i.e. exactly as declared, with clear air between them).
+        return max(0.02, min(0.4, span) if span < 0.4 else span)
 
     tablix = ET.Element(_q("Tablix"))
     tablix.set("Name", "Tablix_GroupedSubtotal")
@@ -8559,72 +13218,328 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
     # distinct declared y (engine-render verified on a receipts log — all
     # header items flattened to one line painted over each other; the
     # Oracle truth prints a two-line header block).
-    _gh_ys = sorted({round(g[4], 2) for g in ghdr}) or [0.0]
+    # ...and each of those lines prints at its OWN declared y. The rounded y
+    # is only the BAND KEY (line-mates are rarely pixel-aligned); the band's
+    # smallest RAW y is where it prints. Stepping the stack at a constant
+    # instead ran a 4-line caption block 0.53in (43%) long against the truth.
+    _gh_raw: dict = {}
+    for _g in ghdr:
+        _k = round(_g[4], 2)
+        _gh_raw[_k] = min(_gh_raw.get(_k, float(_g[4])), float(_g[4]))
+    _gh_ys = sorted(_gh_raw) or [0.0]
+    _gh_y0 = _gh_raw[_gh_ys[0]] if _gh_raw else 0.0
+    _gh_tops = {_k: max(0.0, _gh_raw[_k] - _gh_y0) for _k in _gh_raw}
     hdr_h = GLINE_H * (len(_gh_ys) + 1) + 0.06
-    det_h = 0.20
-    ftr_h = max(0.20, FLINE_H * len(footers) + 0.04)
+    # The DECLARED detail-row pitch, used VERBATIM: the record frame's own
+    # height plus its declared inter-frame gutter. A 0.20in floor rounded a
+    # 0.18994in declaration UP by 5.3% and drifted pagination across a
+    # 70-page truth (truth-PDF measured: rows step exactly the declaration).
+    # The floor only stands in when the source declares no usable frame.
+    det_h = min(float(spec.get("det_row_h") or 0.0), 0.8) or 0.20
+    _f_ys = spec.get("footer_ys") or []
+    _f_y0 = min(_f_ys) if _f_ys else 0.0
+    _tbox = spec.get("totals_box")
+    if _f_ys:
+        # THE FOOTER BAND IS AS TALL AS ITS DECLARATION. Its bottom edge is
+        # the lowest declared (y + height) of any footer member, so nothing
+        # after it has to be pushed down by invented slack. The old
+        # "+ 0.34in" stood in for the last line's height and then some: on a
+        # truth-paired break report it inflated the band from the declared
+        # 0.998in to 1.16in, and every 0.16in of that landed between the
+        # group-subtotal rule and the report-total rule below the tablix
+        # (declared gap 0.700in, printed 0.94in). The synthesized stand-in
+        # is kept only for a source that declares no member heights at all.
+        _f_bot = float(spec.get("footer_bottom") or 0.0)
+        ftr_h = max(0.20, ((_f_bot - _f_y0) if _f_bot > max(_f_ys)
+                           else (max(_f_ys) - _f_y0) + 0.34))
+        if _tbox:
+            ftr_h = max(ftr_h, (_tbox[1] - _f_y0) + _tbox[3] + 0.10)
+    else:
+        ftr_h = max(0.20, FLINE_H * len(footers) + 0.04)
 
-    # ---- ROW 0: group header band + column-header strip ----
-    hrow = _sub(trows, "TablixRow"); _sub(hrow, "Height", f"{hdr_h:.2f}in")
-    hc = _sub(_sub(_sub(hrow, "TablixCells"), "TablixCell"), "CellContents")
-    hrect = _sub(hc, "Rectangle"); hrect.set("Name", "GTS_Hdr")
-    hst = _sub(hrect, "Style"); _sub(hst, "BackgroundColor", "#ffffff")
-    _hbb = _sub(hst, "BottomBorder")
-    _sub(_hbb, "Style", "Solid"); _sub(_hbb, "Color", "#444444"); _sub(_hbb, "Width", "1pt")
-    hri = _sub(hrect, "ReportItems")
+    def _gh_geom(gy, lf):
+        """(top, height) of one group-header caption line, DECLARED: its own
+        y inside the band, tiling to the next declared line."""
+        top = _gh_tops.get(round(gy, 2), 0.0)
+        nxt = min((t for t in _gh_tops.values() if t > top + 0.005),
+                  default=None)
+        h = max(GLINE_H, float(getattr(lf, "height", 0) or 0) + 0.02)
+        if nxt is not None:
+            h = max(0.10, min(h, nxt - top))
+        return top, h
+    # WHERE THE COLUMN STRIP STARTS IS DECLARED, not stacked. The column
+    # captions carry their own y; the strip belongs where they are. The old
+    # synthesized stride (one GLINE_H per distinct group-header line) put the
+    # strip 0.19in below its declared top on a ledger whose group header
+    # jitters onto four sub-lines — and the source's OWN bracketing rules,
+    # which print at their declared y, then landed 0.25in above the band and
+    # 0.24in into it, the lower one straight through the second caption line
+    # (engine-render measured; the truth PDF prints the two rules exactly on
+    # the strip's top and bottom edges, 0.5in apart, with the captions
+    # between them). The emitted group-caption stack is still the floor, so
+    # the strip can never ride up over the captions above it.
+    _gh_bottom = max((_gh_geom(g[4], g[5])[0] + _gh_geom(g[4], g[5])[1]
+                      for g in ghdr), default=GLINE_H)
+    _decl_cb = [float(getattr(_cf[0], "y", 0) or 0) - _gh_y0
+                for _cx, _l, *_cf in cols
+                if _cf and float(getattr(_cf[0], "y", 0) or 0) > 0]
+    _cband_top = (max(_gh_bottom, min(_decl_cb)) if _decl_cb
+                  else max(GLINE_H * len(_gh_ys), _gh_bottom))
+    # the column strip is as tall as its TALLEST declared label (the truth
+    # stacks "Pmnt/Type", "Payment/Amount" on two lines)
+    _cb_h = max([GLINE_H]
+                + [float(getattr(_cf[0], "height", 0) or 0) + 0.03
+                   for _cx, _l, *_cf in cols if _cf])
+
+    # ---- THE HEADER IS TWO BANDS, SO IT IS TWO ROWS -----------------------
+    # Oracle scopes its page-repeat PER OBJECT (<advancedLayout
+    # printObjectOnPage>), SSRS repeats a WHOLE static member. On a
+    # truth-paired 70-page break report the group band — the full-width rule
+    # (declared printObjectOnPage="allPage"), the group caption, its Status
+    # label and value (all "allPage") — reprints at the top of all 70 pages,
+    # while the column-header strip, whose frame declares no repeat scope,
+    # prints ONLY where a group actually starts (truth-measured: the band
+    # rule appears on 70/70 pages, the strip's underlines on 63 and never at
+    # a continuation top). Emitting both in ONE static member forced them to
+    # share a single answer — so the strip rode along with every repeat.
+    # Two rows let each carry its own declared scope.
+    band_h = _cband_top
+    colrow_h = _cb_h + 0.04
+    _split_hdr = band_h >= 0.05
+    if not _split_hdr:          # nothing declared above the strip: one row
+        band_h, colrow_h = 0.0, _cband_top + _cb_h + 0.04
+    hdr_h = band_h + colrow_h
+
+    def _open_hdr_row(name, height):
+        """One header TablixRow carrying the group band's tint."""
+        _r = _sub(trows, "TablixRow"); _sub(_r, "Height", f"{height:.4f}in")
+        _c = _sub(_sub(_sub(_r, "TablixCells"), "TablixCell"), "CellContents")
+        _rect = _sub(_c, "Rectangle"); _rect.set("Name", name)
+        # the GROUP band tint fills the whole header cell; the column strip
+        # below overrides with its own (usually darker) band rectangle.
+        _sub(_sub(_rect, "Style"), "BackgroundColor", GRP_BG)
+        # NO band border. A rule under this band exists only when the source
+        # DECLARES a <line> there, and it then prints as a real rule at its
+        # own declared endpoints (see the header body_rules pass below). The
+        # former synthesized-gray BottomBorder painted a full-width 1pt rule
+        # across every grouped report whose layout draws nothing there at all.
+        return _r, _sub(_rect, "ReportItems")
+
+    if _split_hdr:
+        hrow, hri = _open_hdr_row("GTS_Hdr", band_h)
+        crow, _cri_outer = _open_hdr_row("GTS_ColHdr", colrow_h)
+        _cband_row_top = 0.0
+    else:
+        hrow, hri = _open_hdr_row("GTS_Hdr", hdr_h)
+        crow, _cri_outer = hrow, hri
+        _cband_row_top = _cband_top
+    # full-width COLUMN band rectangle — its labels nest INSIDE it, so no
+    # z-order fight with the band fill (this engine ignores document order
+    # for equal-ZIndex overlaps).
+    _cband = _sub(_cri_outer, "Rectangle"); _cband.set("Name", "GTS_ColBand")
+    _cbst = _sub(_cband, "Style")
+    _sub(_cbst, "BackgroundColor", COL_BG)
+    # NO synthesized TopBorder either — a line capping the column strip is
+    # a declared rule and prints through the header body_rules pass.
+    cri = _sub(_cband, "ReportItems")
+
     # Neighbour-clamped widths, exactly like the detail columns: a header
     # item with no declared width defaulted to 2.0in while the band packs
     # items ~0.5in apart, so every label painted across the next two
     # (engine-render verified on a receipts log: 8 painted-over pairs in
     # the band; the Oracle truth prints them cleanly inline).
-    _line_of = {y: i for i, y in enumerate(_gh_ys)}
-    for gi, (k, v, x, w, gy) in enumerate(ghdr):
-        _line = _line_of.get(round(gy, 2), 0)
+    for gi, (k, v, x, w, gy, _lf) in enumerate(ghdr):
         # neighbour clamp WITHIN the same band line only
-        _line_xs = sorted({ox for (_k2, _v2, ox, _w2, oy2) in ghdr
+        _line_xs = sorted({ox for (_k2, _v2, ox, _w2, oy2, *_r) in ghdr
                            if round(oy2, 2) == round(gy, 2)})
         _nxt = next((nx for nx in _line_xs if nx > x + 0.02), None)
         _cap = (_nxt - x - 0.04) if _nxt is not None else (BODY_W - x)
         _cap = max(0.4, _cap)
         val = _master_expr(v) if k == "field" else _label_expr(k, v)
-        ta = "Right" if x > BODY_W * 0.6 else "Left"
-        _build_textbox(hri, f"Tb_GH_{gi}", val, bold=True, font_size="11pt",
-                       bg="#ffffff", fg="#111111", text_align=ta,
-                       vertical_align="Middle", border_color="#ffffff",
-                       padding="2pt", can_grow=False)
+        # DECLARED justification (fixed box => honored verbatim; a fluid box
+        # anchors at its declared left edge -- see _declared_text_align); the
+        # positional guess only fills the gap where nothing is declared.
+        ta = _declared_text_align(_lf, "Right" if x > BODY_W * 0.6 else "Left")
+        # DECLARED font (face/size/weight/slant/underline) — a band caption
+        # with no weight attribute is NOT bold; only a synthesized member
+        # (no declaration at all) falls back to the house literal weight.
+        _fkw = _declared_font_style(_lf, "10pt", default_bold=(k == "text"))
+        _gh_bg = _chip_bg(_lf)
+        # declared height (a two-line "Recorder/Cashier" label is taller
+        # than one band line). The DECLARED WIDTH is emitted verbatim —
+        # the width slack that used to be added here to stop a mid-word
+        # wrap moved every right-justified band caption off its declared
+        # right edge and pushed the band past the declared body; the room
+        # comes out of the invented cell padding instead (0pt below — an
+        # Oracle box has no inset, so the declared width IS the usable
+        # text width).
+        _gh_top, _gh_h = _gh_geom(gy, _lf)
+        _build_textbox(hri, f"Tb_GH_{gi}", val, **_fkw,
+                       bg=_gh_bg,
+                       # DECLARED text colour wins; nothing declared = black.
+                       fg=_text_color(getattr(_lf, "color", "")),
+                       text_align=ta,
+                       vertical_align=_declared_vertical_align(_lf),
+                       # A caption with no chip fill of its own gets NO edge.
+                       # The fallback used to outline it in the BAND'S OWN
+                       # colour, which paints nothing (it is the colour
+                       # already under it) while still stamping a stroke into
+                       # the PDF: on a band whose declared sub-lines sit
+                       # 0.03in apart, that phantom edge ran through the
+                       # caption's own glyphs, and the paint gate — which
+                       # reads ink, not intent — reported a cut the paper
+                       # does not show. A caption that DOES declare a chip
+                       # keeps its edge.
+                       border_color=_gh_bg,
+                       padding="0pt", can_grow=False)
         _t = hri[-1]
-        _sub(_t, "Top", f"{_line * GLINE_H:.2f}in")
-        _sub(_t, "Left", f"{max(0.02, x):.2f}in")
-        _sub(_t, "Width", f"{max(0.4, min(w or _cap, _cap)):.2f}in")
-        _sub(_t, "Height", f"{GLINE_H:.2f}in")
+        _sub(_t, "Top", f"{_gh_top:.4f}in")
+        _sub(_t, "Left", f"{_declared_left(x):.2f}in")
+        _sub(_t, "Width",
+             f"{max(0.4, min(w if w else _cap, _cap)):.2f}in")
+        _sub(_t, "Height", f"{_gh_h:.4f}in")
     col_xs = [c[0] for c in cols]
-    for ci, (cx, label) in enumerate(cols):
-        _build_textbox(hri, f"Tb_CH_{ci}", label, bold=True, font_size="9pt",
-                       bg=HDR_BG, fg=HDR_FG, text_align="Left",
-                       vertical_align="Middle", border_color=HDR_BG,
-                       padding="2pt", can_grow=False)
-        _t = hri[-1]
-        _sub(_t, "Top", f"{GLINE_H * len(_gh_ys):.2f}in")
-        _sub(_t, "Left", f"{max(0.02, cx):.2f}in")
-        _sub(_t, "Width", f"{_col_w(ci, col_xs, BODY_W):.2f}in")
-        _sub(_t, "Height", f"{GLINE_H:.2f}in")
+    for ci, (cx, label, *_cf) in enumerate(cols):
+        # DECLARED font: a caption declaring underline gets its rule, one
+        # declaring no weight prints PLAIN. Only a caption with no source
+        # object behind it keeps the synthesized bold house header.
+        _fkw = _declared_font_style(_cf[0] if _cf else None, "9pt",
+                                    default_bold=True)
+        # A column caption declaring its own justification is drawn that way
+        # (a right-justified numeric column's header sits flush with the
+        # column's right edge in the truth); Oracle's default start-of-box
+        # justification stays the fallback.
+        _ch_ta = _declared_text_align(_cf[0] if _cf else None, "Left")
+        _build_textbox(cri, f"Tb_CH_{ci}", label, **_fkw,
+                       bg=None, fg=HDR_FG, text_align=_ch_ta,
+                       vertical_align=_declared_vertical_align(
+                           _cf[0] if _cf else None),
+                       # No edge, for the same reason as the band captions
+                       # above: an outline in the strip's own fill colour is
+                       # ink that never reaches the paper.
+                       border_color=None,
+                       # NO INSET, like the group-band captions above: the
+                       # caption sits at its DECLARED x, so any padding is a
+                       # pure right-shift of the glyphs (the 1pt here printed
+                       # this report's column captions +0.011..0.016in right
+                       # of truth while the 0pt band captions landed on it).
+                       padding="0pt", can_grow=False)
+        _t = cri[-1]
+        _cl = _declared_left(cx)
+        _cw = _col_w(ci, col_xs, BODY_W)
+        _cdw = float(getattr(_cf[0], "width", 0) or 0) if _cf else 0.0
+        if _ch_ta == "Right" and _cdw > 0.05:
+            # Oracle right-justifies inside the caption's OWN declared box.
+            # The synthesized column span runs to the next column's start,
+            # which is WIDER, so anchoring the caption to it slid the text
+            # past its declared right edge into the neighbouring band (+2pt
+            # of metric slack for the Oracle->SSRS font-width drift).
+            _cw = min(_cw, max(0.4, (cx + _cdw + 0.02) - _cl))
+        _sub(_t, "Top", "0in")
+        _sub(_t, "Left", f"{_cl:.2f}in")
+        _sub(_t, "Width", f"{_cw:.2f}in")
+        _sub(_t, "Height", f"{_cb_h:.2f}in")
+    _sub(_cband, "Top", f"{_cband_row_top:.2f}in")
+    _sub(_cband, "Left", "0in")
+    _sub(_cband, "Width", f"{BODY_W:.2f}in")
+    _sub(_cband, "Height", f"{_cb_h:.2f}in")
+    # DECLARED rules living in the group-header band (the heavy line Oracle
+    # draws across the top of every group block): real rules at their own
+    # declared endpoints, not a band-wide border.
+    _body_rules = spec.get("body_rules") or []
+    _hdr_y0 = float(spec.get("hdr_y0") or 0.0)
+
+    def _band_rule_top(rf, y0, band_h, placed):
+        """Placed top for a declared rule inside a RE-FLOWED band: its own
+        declared offset, clamped to stay on the band it belongs to. Returns
+        None when an identical rule already prints there (a band compressed
+        below its declared span collapses two rules onto its bottom edge —
+        painting the same hairline twice is not a second declaration)."""
+        top = min(max(0.0, float(getattr(rf, "y", 0) or 0) - y0),
+                  max(0.0, band_h - 0.01))
+        key = (round(top, 3), round(float(getattr(rf, "x", 0) or 0), 3),
+               round(float(getattr(rf, "width", 0) or 0), 3))
+        if key in placed:
+            return None
+        placed.add(key)
+        return top
+
+    _hdr_placed = set()
+    for _ri, (_reg, _rf) in enumerate(_body_rules):
+        if _reg != "header":
+            continue
+        _htop = _band_rule_top(_rf, _hdr_y0, hdr_h, _hdr_placed)
+        if _htop is None:
+            continue
+        # The header is TWO rows now (band + column strip): a rule prints in
+        # whichever row its own declared offset falls in, so the band's
+        # full-width rule rides along with the band it belongs to (and
+        # repeats with it) instead of being stranded in the strip.
+        if _split_hdr and _htop >= band_h - 1e-6:
+            _emit_declared_rule(_cri_outer, _rf, y_origin=_hdr_y0,
+                                max_w=BODY_W, seq=_ri,
+                                top=max(0.0, _htop - band_h))
+        else:
+            _emit_declared_rule(hri, _rf, y_origin=_hdr_y0, max_w=BODY_W,
+                                seq=_ri, top=_htop)
 
     # ---- ROW 1: detail row (iterates per source row) ----
-    drow = _sub(trows, "TablixRow"); _sub(drow, "Height", f"{det_h:.2f}in")
+    # 4 decimals: a 2-decimal round of the DECLARED pitch is worth up to
+    # 0.36pt per row, which accumulates into a page-count drift on a long
+    # report. The declaration is emitted at full precision.
+    drow = _sub(trows, "TablixRow"); _sub(drow, "Height", f"{det_h:.4f}in")
     dc = _sub(_sub(_sub(drow, "TablixCells"), "TablixCell"), "CellContents")
     drect = _sub(dc, "Rectangle"); drect.set("Name", "GTS_Detail")
-    _sub(_sub(drect, "Style"), "BackgroundColor", "#ffffff")
+    _dst = _sub(drect, "Style")
+    # DECLARED per-row rule (see _grouped_tabular_spec): a <line> the source
+    # declares INSIDE the detail repeating frame repeats with every row, as
+    # a real rule at its declared endpoints (never a synthesized band
+    # border, which spans the whole body whatever the declaration says).
+    _dinset = spec.get("detail_rule_inset")
+    _sub(_dst, "BackgroundColor", "#ffffff")
+    _reorder_style_children(_dst)
     dri = _sub(drect, "ReportItems")
     det_xs = [c[0] for c in dcols]
-    for di, (x, w, s) in enumerate(dcols):
+    # DECLARED row-internal offset: the fields sit below the row's own
+    # rule line (truth prints the line 4.5pt into the row, text under it)
+    _doff = 0.0
+    if _dinset is not None:
+        _doff = min(max(0.0, float(spec.get("det_field_off") or 0.0)),
+                    max(0.0, det_h - 0.15))
+    for di, (x, w, s, *_df) in enumerate(dcols):
+        _fkw = _declared_font_style(_df[0] if _df else None, "9pt")
+        # DECLARED per-column justification: a numeric ledger column declares
+        # end and prints flush right (its glyph RIGHT edges line up in the
+        # truth, left edges vary with digit count), a code column declares
+        # center. Undeclared columns keep Oracle's start-of-box default.
+        _d_ta = _declared_text_align(_df[0] if _df else None, "Left")
         _build_textbox(dri, f"Tb_D_{di}", f"=Fields!{_safe(s)}.Value",
-                       font_size="9pt", bg="#ffffff", fg="#111111",
-                       text_align="Left", vertical_align="Top",
-                       border_color="#ffffff", padding="2pt", can_grow=False)
+                       **_fkw,
+                       bg="#ffffff",
+                       # DECLARED text colour wins; nothing declared = black.
+                       fg=_text_color(getattr(_df[0] if _df else None,
+                                              "color", "")),
+                       text_align=_d_ta, vertical_align="Top",
+                       # NO INSET: the cell IS the declared column box.
+                       border_color="#ffffff", padding="0pt", can_grow=False)
         _t = dri[-1]
-        _sub(_t, "Top", "0in"); _sub(_t, "Left", f"{max(0.02, x):.2f}in")
+        _sub(_t, "Top", f"{_doff:.2f}in")
+        _sub(_t, "Left", f"{_declared_left(x):.2f}in")
         _sub(_t, "Width", f"{_col_w(di, det_xs, BODY_W):.2f}in")
-        _sub(_t, "Height", f"{det_h:.2f}in")
+        _sub(_t, "Height", f"{max(0.15, det_h - _doff):.2f}in")
+    if _dinset is not None:
+        # the row's own DECLARED rule, repeating with every row, at its
+        # declared endpoints / ink / weight.
+        _ly, _lrf = _dinset
+        _emit_declared_rule(dri, _lrf, max_w=BODY_W, name="GTS_RowRule",
+                            top=min(_ly, det_h))
+    # any OTHER rule the detail record declares, at its declared endpoints
+    for _ri, (_reg, _rf) in enumerate(_body_rules):
+        if _reg != "detail":
+            continue
+        _emit_declared_rule(dri, _rf,
+                            y_origin=float(spec.get("det_y0") or 0.0),
+                            max_w=BODY_W, seq=_ri)
 
     # ---- ROW 2: group-footer totals stack ----
     frow = _sub(trows, "TablixRow"); _sub(frow, "Height", f"{ftr_h:.2f}in")
@@ -8632,41 +13547,122 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
     frect = _sub(fc, "Rectangle"); frect.set("Name", "GTS_Footer")
     _sub(_sub(frect, "Style"), "BackgroundColor", "#ffffff")
     fri = _sub(frect, "ReportItems")
+    # DECLARED rules in the group-footer band: the short subtotal
+    # underlines Oracle draws over each total line AND the once-per-group
+    # close-out rule after the last detail row — every one at its own
+    # declared endpoints and declared ink, clamped to stay on the band.
+    _ftr_placed = set()
+    for _ri, (_reg, _rf) in enumerate(_body_rules):
+        if _reg != "footer":
+            continue
+        _ftop = _band_rule_top(_rf, _f_y0, ftr_h, _ftr_placed)
+        if _ftop is None:
+            continue
+        _emit_declared_rule(fri, _rf, y_origin=_f_y0, max_w=BODY_W,
+                            seq=_ri, top=_ftop)
+    # DECLARED-GEOMETRY totals: every footer member at its source x/w and
+    # true vertical spacing, inside the source's own bordered box — the
+    # truth prints "CK/MO Total  $x" adjacent in a visible frame; the
+    # synthesized right-stack scattered labels and values (fidelity-diff
+    # verified against the truth PDF).
+    _box_ri = None
+    _box_geo = None
+    if _tbox:
+        _bx, _by, _bw, _bh = _tbox[:4]
+        _bbg = (_tbox[4] if len(_tbox) > 4 else "") or ""
+        _brect = _sub(fri, "Rectangle")
+        _brect.set("Name", "GTS_TotalsBox")
+        _bst = _sub(_brect, "Style")
+        if _bbg:
+            _sub(_bst, "BackgroundColor", _bbg)
+        _bb = _sub(_bst, "Border")
+        _sub(_bb, "Style", "Solid")
+        # DECLARED stroke color (truth prints a navy box border where the
+        # synthesized house gray printed). With no colour declared the ink
+        # is the dialect's, NOT a house tone: this box is selected because
+        # it declares a real stroke width, and a real stroke with no
+        # declared colour prints solid black (rule_color).
+        _sub(_bb, "Color",
+             _rule_color((_tbox[5] if len(_tbox) > 5 else ""),
+                         width_declared=True))
+        _sub(_bb, "Width", "1pt")
+        _box_ri = _sub(_brect, "ReportItems")
+        _sub(_brect, "Top", f"{max(0.0, _by - _f_y0):.2f}in")
+        _sub(_brect, "Left", f"{_declared_left(_bx):.2f}in")
+        _sub(_brect, "Width", f"{min(_bw, BODY_W - _bx):.2f}in")
+        _sub(_brect, "Height", f"{_bh:.2f}in")
+        _box_geo = (_bx, _by, _bw, _bh)
     for li, line in enumerate(footers):
         if not line:
             continue
-        top = li * FLINE_H
-        vk, vval, vx, _vw = line[-1]
-        # The label column runs from the leftmost label up to the value column,
-        # so a long staticized placeholder uses the full available run before it
-        # would collide with the right-aligned total.
-        lbl_left = min((x for _k, _v, x, _w in line[:-1]), default=max(0.02, vx - 1.5))
-        for ji, (k, v, x, w) in enumerate(line[:-1]):
-            _build_textbox(fri, f"Tb_FL_{li}_{ji}", _label_expr(k, v),
-                           font_size="8pt", bg="#ffffff", fg="#111111",
-                           text_align="Left", vertical_align="Middle",
-                           border_color="#ffffff", padding="2pt", can_grow=False)
-            _t = fri[-1]
-            _sub(_t, "Top", f"{top:.2f}in"); _sub(_t, "Left", f"{max(0.02, x):.2f}in")
-            _sub(_t, "Width", f"{max(0.6, vx - x - 0.04):.2f}in")
-            _sub(_t, "Height", f"{FLINE_H:.2f}in")
-        _build_textbox(fri, f"Tb_FV_{li}",
-                       _value_expr(vval) if vk == "field" else _label_expr(vk, vval),
-                       bold=True, font_size="8pt", bg="#ffffff", fg="#111111",
-                       text_align="Right", vertical_align="Middle",
-                       border_color="#ffffff", padding="2pt", can_grow=False)
-        _t = fri[-1]
-        # A footer value is often a COMPILED summary (=Sum(IIf(...))) the
-        # name-keyed Format post-pass can't match — stamp the layout
-        # field's mask here, keyed by the footer's source name.
-        if vk == "field":
-            _fe = _format_index(report).get((vval or "").upper())
-            if _fe and _fe[0]:
-                _stamp_format_on_textbox(_t, _fe[0])
-        _sub(_t, "Top", f"{top:.2f}in")
-        _sub(_t, "Left", f"{max(0.02, vx):.2f}in")
-        _sub(_t, "Width", f"{max(0.6, BODY_W - vx):.2f}in")
-        _sub(_t, "Height", f"{FLINE_H:.2f}in")
+        top = (_f_ys[li] - _f_y0) if li < len(_f_ys) else li * FLINE_H
+        # NOTE: footer members are a free 2D arrangement (labels and value
+        # boxes STAGGER — "Grand Total" sits a quarter-line above "CK/MO
+        # Total" at a different x), so each member keeps its own declared
+        # height; a same-line gap clamp crushed them to invisibility.
+        for ji, (k, v, x, w, *_jf) in enumerate(line):
+            _jf0 = _jf[0] if _jf else None
+            # DECLARED font: a subtotal CAPTION that declares no weight
+            # prints plain beside its bold value, exactly as the truth
+            # sets it; only a caption with no declaration behind it keeps
+            # the synthesized literal weight.
+            _fkw = _declared_font_style(_jf0, "10pt",
+                                        default_bold=(k == "text"))
+            # A DECLARED HEIGHT IS THE HEIGHT (same dialect as the declared
+            # width above). The +0.03in of slack that used to be added here
+            # pushed the footer band past its own declared bottom edge, and
+            # since the report-end block prints below that edge, the slack
+            # landed between the group-subtotal rule and the report-total
+            # rule (truth-measured: declared 0.69958in, printed 0.7392in
+            # with the slack, 0.7092in without). Nothing is lost by
+            # dropping it: the GENERAL descender rescue re-opens any box
+            # that turns out too short for its own font, and it does so
+            # without moving a neighbour.
+            _jh = float(getattr(_jf0, "height", 0) or 0) or 0.17
+            _jh = max(0.17, _jh)
+            # DECLARED WIDTH, VERBATIM. Padding it outward slid every
+            # right-justified subtotal off its declared right edge and let
+            # the totals band reach past the declared body, which then grew
+            # the whole report. The room the pad used to buy back is taken
+            # from the invented cell padding instead (see the 0pt below):
+            # an Oracle box has no inset, so the declared width IS the
+            # usable text width.
+            _jw = max(0.4, min(w if w else 0.8, BODY_W - x))
+            # A member whose rect FITS inside the totals box nests in the
+            # box's own ReportItems (relative coords) — as a sibling, the
+            # box's opaque fill paints OVER it (this engine ignores
+            # document order for equal-ZIndex overlaps, engine-verified:
+            # three of five totals members vanished under the box).
+            _src_y = _f_ys[li] if li < len(_f_ys) else (_f_y0 + top)
+            _in_box = bool(
+                _box_geo
+                and x >= _box_geo[0] - 0.01
+                and (x + _jw) <= _box_geo[0] + _box_geo[2] + 0.03
+                and _src_y >= _box_geo[1] - 0.01
+                and (_src_y + _jh) <= _box_geo[1] + _box_geo[3] + 0.03)
+            _parent = _box_ri if _in_box else fri
+            val = _value_expr(v) if k == "field" else _label_expr(k, v)
+            _build_textbox(_parent, f"Tb_F_{li}_{ji}", val, **_fkw,
+                           bg=_chip_bg(_jf0),
+                           # DECLARED text colour wins; none -> black.
+                           fg=_text_color(getattr(_jf0, "color", "")),
+                           text_align=_declared_text_align(_jf0, "Right"),
+                           vertical_align=_declared_vertical_align(_jf0),
+                           border_color="#ffffff", padding="0pt",
+                           can_grow=False)
+            _t = _parent[-1]
+            if k == "field":
+                _fe = _format_index(report).get((v or "").upper())
+                if _fe and _fe[0]:
+                    _stamp_format_on_textbox(_t, _fe[0])
+            if _in_box:
+                _sub(_t, "Top", f"{max(0.0, _src_y - _box_geo[1]):.2f}in")
+                _sub(_t, "Left", f"{max(0.0, x - _box_geo[0]):.2f}in")
+            else:
+                _sub(_t, "Top", f"{top:.2f}in")
+                _sub(_t, "Left", f"{_declared_left(x):.2f}in")
+            _sub(_t, "Width", f"{_jw:.2f}in")
+            _sub(_t, "Height", f"{_jh:.2f}in")
 
     # column hierarchy (single static column)
     _sub(_sub(_sub(tablix, "TablixColumnHierarchy"), "TablixMembers"),
@@ -8716,12 +13712,83 @@ def _build_grouped_tabular_subtotal_tablix(report, main):
                 if _dirn == "Descending":
                     _sub(_se, "Direction", "Descending")
     ginner = _sub(gmem, "TablixMembers")
+    # THE GROUP BAND repeats at the top of every continuation page when the
+    # declaration says so (Oracle reprints the break caption + its rule there,
+    # and prints "(continued)" beside it — a marker that is meaningless unless
+    # the caption is there). Read off printObjectOnPage, never assumed.
+    _band_repeats = _declares_page_repeat(spec.get("band_pop"))
     hmem = _sub(ginner, "TablixMember")
-    _sub(hmem, "KeepWithGroup", "After"); _sub(hmem, "RepeatOnNewPage", "true")
-    dmem = _sub(ginner, "TablixMember")
+    _sub(hmem, "KeepWithGroup", "After")
+    if _band_repeats:
+        _sub(hmem, "RepeatOnNewPage", "true")
+    # THE COLUMN STRIP repeats only when the export SAYS it does
+    # (printObjectOnPage="allPage" on the frame that owns the labels).
+    # Undeclared = Oracle's default, which prints the strip once where the
+    # group starts — truth-measured on a 70-page break report: the band's
+    # rule prints on 70/70 pages, the strip's underlines never at a
+    # continuation top.
+    _col_repeats = _declares_page_repeat(spec.get("col_band_pop"))
+
+    def _open_band_group():
+        """A dynamic member re-opening once per band instance (same break
+        key as the band itself, so exactly one instance per band). It is the
+        host for everything that must NOT ride the band's page repeat."""
+        _bm = _sub(ginner, "TablixMember")
+        _bg = _sub(_bm, "Group"); _bg.set("Name", "GTS_BandGroup")
+        _be = _sub(_bg, "GroupExpressions")
+        for _ge in gexprs.findall(_q("GroupExpression")):
+            _sub(_be, "GroupExpression", _ge.text or "")
+        return _sub(_bm, "TablixMembers")
+
+    _detail_host = ginner
+    if _split_hdr and not _col_repeats:
+        # SSRS forbids two statics on the SAME SIDE of a dynamic member
+        # disagreeing about RepeatOnNewPage ("The tablix has an invalid
+        # TablixMember... Expected Value: True; Actual Value: False" — a
+        # publish error, caught by rendering). The strip therefore sits one
+        # level DEEPER, exactly where Oracle declares it: inside the band,
+        # as the header of a member that re-opens once per band instance.
+        # Each static is then the only one on its side of its own dynamic
+        # member, so both keep their declared scope.
+        _detail_host = _open_band_group()
+        cmem = _sub(_detail_host, "TablixMember")
+        _sub(cmem, "KeepWithGroup", "After")
+    elif _split_hdr:
+        cmem = _sub(ginner, "TablixMember")
+        _sub(cmem, "KeepWithGroup", "After")
+        _sub(cmem, "RepeatOnNewPage", "true")
+    # A REPEATING BAND NEEDS A CONSISTENT RUN OF SIBLINGS. Engine-measured on
+    # a 70-page truth-paired break report (ReportViewer, PDF read back):
+    #   [band(repeat), dynamic, footer(no repeat)]  -> band NEVER reprints
+    #   [band(repeat), dynamic]                     -> band NEVER reprints
+    #   [band(repeat), dynamic, footer(repeat)]     -> band reprints ...but so
+    #                                                  does the footer, which
+    #                                                  truth prints once
+    # Unlike a TOP-LEVEL static (honoured on its own — measured on a 37-page
+    # landscape summary), a static NESTED inside a dynamic group only keeps
+    # RepeatOnNewPage when every static beside it agrees AND the run is closed
+    # by a trailing KeepWithGroup="Before" member. So the group footer moves
+    # one level deeper (into the band group, where it still closes the group
+    # exactly once) and a zero-height anchor closes the run instead.
+    if _band_repeats and _detail_host is ginner:
+        _detail_host = _open_band_group()
+    dmem = _sub(_detail_host, "TablixMember")
     _sub(dmem, "Group").set("Name", "GTS_DetailRows")
-    fmem = _sub(ginner, "TablixMember")
+    fmem = _sub(_detail_host if _band_repeats else ginner, "TablixMember")
     _sub(fmem, "KeepWithGroup", "Before")
+    if _band_repeats:
+        _amem = _sub(ginner, "TablixMember")
+        _sub(_amem, "KeepWithGroup", "Before")
+        _sub(_amem, "RepeatOnNewPage", "true")
+        # ...and its row, which carries no ink and no height, so the repeat it
+        # buys costs the page nothing.
+        _arow = _sub(trows, "TablixRow")
+        _sub(_arow, "Height", "0in")
+        _acc = _sub(_sub(_sub(_arow, "TablixCells"), "TablixCell"),
+                    "CellContents")
+        _arect = _sub(_acc, "Rectangle")
+        _arect.set("Name", "GTS_RepeatAnchor")
+        _sub(_arect, "Style")
 
     _sub(tablix, "DataSetName", _safe(main_ds))
     _sub(tablix, "Top", "0in"); _sub(tablix, "Left", "0in")
@@ -8764,6 +13831,10 @@ def _extract_title_lines(report, limit: int = 3):
         if iv and nm not in _binds and ("P_" + nm) not in _binds:
             _pdefault[nm] = iv
 
+    try:
+        _pw_cap = (_page_width_for(report) or 8.5) * 0.66
+    except Exception:  # noqa: BLE001
+        _pw_cap = 8.5 * 0.66
     candidates = []  # (y, x, text, in_band)
     for top in (report.layout or []):
         # Title lines live in the MARGIN / main section. The trailer and
@@ -8798,6 +13869,14 @@ def _extract_title_lines(report, limit: int = 3):
                     y = getattr(f, "y", 0) or 0
                     x = getattr(f, "x", 0) or 0
                     if y > 2.75:
+                        continue
+                    # A text ANCHORED in the far-right third of the page is
+                    # side-column content — a wallet-card stub column, a
+                    # right-margin echo — never the report title (the
+                    # license form's "Bearer ..." stub at x=7.94 on an 11in
+                    # page rode into the page banner). Titles are centered
+                    # or left-anchored; position-gated, never text-gated.
+                    if x > _pw_cap:
                         continue
                     candidates.append((y, x, s, in_band))
                     seen.add(s)
@@ -8867,11 +13946,21 @@ def _title_style(report):
                 if y > 2.75:
                     continue
                 x = getattr(f, "x", 0) or 0
-                key = (round(y, 3), round(x, 3))
+                # LARGEST FONT FIRST: the report's title is its biggest
+                # text in the upper region (a 24pt serif title lost to a
+                # 10pt top-left label under pure y/x ordering, and the
+                # whole header rendered at the label's size —
+                # fidelity-diff measured). Ties fall back to top-left.
+                try:
+                    _fsz = int(float(getattr(f, "font_size", 0) or 0))
+                except (TypeError, ValueError):
+                    _fsz = 0
+                key = (-_fsz, round(y, 3), round(x, 3))
                 if best is None or key < best[0]:
                     best = (key, f)
     font = "Arial"
     color = "#000000"
+    size = 11
     if best is not None:
         bf = best[1]
         if getattr(bf, "font_family", ""):
@@ -8879,7 +13968,88 @@ def _title_style(report):
         hexc = resolve_color(getattr(bf, "color", "") or "")
         if hexc:
             color = hexc
-    return font, color
+        try:
+            _sz = int(float(getattr(bf, "font_size", 0) or 0))
+            if 8 <= _sz <= 48:
+                size = _sz
+        except (TypeError, ValueError):
+            pass
+    return font, color, size
+
+
+def _declared_heading_style(report, wording: str) -> dict:
+    """_build_textbox kwargs carrying the DECLARED font of the layout <text>
+    that prints ``wording``.
+
+    A cover builder synthesizes a handful of section headings whose wording the
+    SOURCE also authors as boilerplate -- with its own declared face, size,
+    weight, slant, underline, colour and justification. Emitting a hardcoded
+    weight silently drops that declaration (a 12pt bold-italic-UNDERLINED
+    heading printed as plain bold). Match on the wording alone (whitespace
+    normalized, case-insensitive, trailing colon ignored) so ANY declared
+    heading carries its own style through; returns {} -- caller keeps its
+    defaults -- when the wording is nowhere in the layout."""
+    want = " ".join((wording or "").split()).strip().lower().rstrip(":")
+    if not want:
+        return {}
+    hit = None
+
+    def _scan(g):
+        nonlocal hit
+        for f in (getattr(g, "fields", None) or []):
+            if (getattr(f, "kind", "") or "") != "text":
+                continue
+            t = " ".join((f.text or "").split()).strip().lower().rstrip(":")
+            if t and t == want:
+                hit = f
+                return True
+        for c in (getattr(g, "children", None) or []):
+            if _scan(c):
+                return True
+        return False
+
+    for lg in (getattr(report, "layout", None) or []):
+        if _scan(lg):
+            break
+    if hit is None:
+        return {}
+    return _declared_field_style(hit)
+
+
+def _declared_field_style(lf, with_align: bool = True) -> dict:
+    """_build_textbox kwargs carrying ONE layout object's DECLARED font.
+
+    weight / slant / underline / size / face / colour (+ justification unless
+    the caller places the box on a synthesized grid, where the declared
+    alignment no longer describes the emitted box). Returns {} for None so
+    callers keep their own defaults. Declaration only -- no wording match, no
+    report-specific knowledge."""
+    from ..parsers.oracle_colors import resolve_color
+
+    if lf is None:
+        return {}
+    out: dict = {
+        "bold": bool(getattr(lf, "bold", False)),
+        "italic": bool(getattr(lf, "italic", False)),
+        "underline": bool(getattr(lf, "underline", False)),
+    }
+    try:
+        _sz = int(float(getattr(lf, "font_size", 0) or 0))
+    except (TypeError, ValueError):
+        _sz = 0
+    if 6 <= _sz <= 48:
+        out["font_size"] = f"{_sz}pt"
+    fam = (getattr(lf, "font_family", "") or "").strip()
+    if fam:
+        out["font_family"] = fam
+    hexc = resolve_color(getattr(lf, "color", "") or "")
+    if hexc:
+        out["fg"] = hexc
+    if with_align:
+        align = _declared_align(lf)
+        if align in ("left", "center", "right"):
+            out["text_align"] = align.capitalize()
+    return out
 
 
 def _is_header_summary_report(report) -> bool:
@@ -8972,6 +14142,745 @@ def _build_summary_header_cover(report) -> Optional[ET.Element]:
     return rect
 
 
+def _declared_cover_frame(report):
+    """The header-section box Oracle draws AROUND the criteria form, when
+    the source declares one — a <rectangle>/<roundedRectangle> with a solid
+    linePattern (the dialect's draw-the-border marker) that ENCLOSES the
+    bulk of the section's text/field content. Returns that LayoutField (so
+    the cover rect can carry its declared border 1:1) or None (the default:
+    Oracle covers are borderless label:value lists — truth-verified on the
+    letter corpus). Small drawn boxes (action-button faces, per-row rules)
+    never qualify: containment of the form content is required."""
+    hs = _section_by_kind(report, "section_header")
+    if hs is None:
+        return None
+
+    def _iter(g):
+        yield g
+        for c in (getattr(g, "children", None) or []):
+            yield from _iter(c)
+
+    rects, content = [], []
+    for g in _iter(hs):
+        for f in (getattr(g, "fields", None) or []):
+            k = (getattr(f, "kind", "") or "")
+            if k == "rect":
+                lp = (getattr(f, "line_pattern", "") or "").lower()
+                if lp and lp not in ("transparent", "none"):
+                    rects.append(f)
+            elif k in ("text", "field"):
+                content.append(f)
+    if not rects or not content:
+        return None
+
+    def _num(f, a):
+        return float(getattr(f, a, 0.0) or 0.0)
+
+    best = None
+    for r in rects:
+        rx, ry = _num(r, "x"), _num(r, "y")
+        rw, rh = _num(r, "width"), _num(r, "height")
+        if rw < 2.0 or rh < 1.0:
+            continue  # a button face / small drawn box, not a form frame
+        inside = sum(
+            1 for c in content
+            if rx - 0.05 <= _num(c, "x")
+            and _num(c, "x") + _num(c, "width") <= rx + rw + 0.05
+            and ry - 0.05 <= _num(c, "y")
+            and _num(c, "y") + _num(c, "height") <= ry + rh + 0.05)
+        if inside >= max(2, int(len(content) * 0.6)):
+            if best is None or rw * rh > (_num(best, "width")
+                                          * _num(best, "height")):
+                best = r
+    return best
+
+
+def _emit_cover_border(style, report) -> None:
+    """Cover-rect border, DECLARED-driven: solid 1pt in the source box's
+    own color when the header section draws a frame around the criteria
+    form (_declared_cover_frame); otherwise none — the default Oracle
+    cover is a borderless label:value list (letter-corpus verified)."""
+    border = _sub(style, "Border")
+    _cf = _declared_cover_frame(report)
+    if _cf is not None:
+        _sub(border, "Style", "Solid")
+        # Declared frame ink wins; the 1pt fallback below is a real stroke,
+        # so its undeclared-color default is the solid black Oracle prints.
+        _sub(border, "Color",
+             _rule_color(getattr(_cf, "border_color", ""),
+                         width_declared=True))
+        _sub(border, "Width", "1pt")
+    else:
+        _sub(border, "Style", "None")
+
+
+def _declared_cover_param_echo(report):
+    """[(label_text, param_name, label_obj, value_obj), ...] straight from the
+    DECLARED header-section criteria form: parameter-bound fields paired with
+    the label text beside them, in declared y-order. The two layout objects
+    ride along so the caller can carry their DECLARED font (a criteria form
+    authored bold printed regular otherwise). When the section also declares
+    a "Report Parameters"-style heading, only fields BELOW it belong to
+    the form (the Run-Date/Run-By meta block above it is emitted
+    separately). Empty when the header declares no such form — callers
+    fall back to the humanized parameter list. Geometry/declaration only."""
+    sec = _section_by_kind(report, "section_header")
+    if sec is None:
+        return []
+    pnames = {(p.name or "").upper(): p.name
+              for p in (report.parameters or [])}
+    fields, texts = [], []
+
+    def _walk(g):
+        for f in (getattr(g, "fields", None) or []):
+            k = (getattr(f, "kind", "") or "")
+            if (k == "field" and (getattr(f, "source", "") or "")
+                    .strip().upper() in pnames):
+                fields.append(f)
+            elif k == "text" and (getattr(f, "text", "") or "").strip():
+                texts.append(f)
+        for c in (getattr(g, "children", None) or []):
+            _walk(c)
+    _walk(sec)
+    if not fields:
+        return []
+    hdr_y = None
+    for t in texts:
+        if re.fullmatch(r"(report\s+)?parameters?:?",
+                        " ".join((t.text or "").split()), re.IGNORECASE):
+            hdr_y = float(getattr(t, "y", 0) or 0)
+            break
+    out = []
+    for f in sorted(fields, key=lambda f: float(getattr(f, "y", 0) or 0)):
+        fy = float(getattr(f, "y", 0) or 0)
+        if hdr_y is not None and fy <= hdr_y:
+            continue
+        fx = float(getattr(f, "x", 0) or 0)
+        best, bestdx = None, 1e9
+        for t in texts:
+            ty = float(getattr(t, "y", 0) or 0)
+            tx = float(getattr(t, "x", 0) or 0)
+            if abs(ty - fy) <= 0.12 and tx < fx + 0.05:
+                dx = fx - tx
+                if 0 <= dx < bestdx:
+                    bestdx, best = dx, t
+        lbl = " ".join((best.text or "").split()) if best is not None else ""
+        if not lbl:
+            continue
+        out.append((lbl, pnames[f.source.strip().upper()], best, f))
+    return out
+
+
+# --- DECLARATION-DRIVEN cover -------------------------------------------
+# Oracle authors the criteria/parameter cover as REAL layout objects inside
+# <section name="header">: each carries its own <geometryInfo x y width
+# height> and its own <font>/<visualSettings>. The synthesized cover
+# builders below re-INVENT that page from a template (a fixed label column,
+# a fixed value column, a fixed row pitch), which throws away every declared
+# coordinate: measured against the Oracle-rendered truth PDFs, the declared
+# 0.50in row pitch printed as 0.30in (a 0.20in error compounding down the
+# page), the value column printed 1.3-1.6in right of its declaration, and every
+# object the template has no slot for (drawn boxes, count rows, instruction
+# prose, action-button faces) was dropped or re-worded. The cover is a
+# positioned layout exactly like the body, so it is emitted through the same
+# body machinery, at the declared geometry, with the declared styles.
+
+def _cover_object_is_printable(lf) -> bool:
+    """True for a cover object that carries printable content AND a declared
+    box — the structural test for 'this section declares a layout'."""
+    kind = (getattr(lf, "kind", "") or "field")
+    if kind == "text":
+        if not (getattr(lf, "text", "") or "").strip():
+            return False
+    elif kind == "field":
+        if not (getattr(lf, "source", "") or "").strip():
+            return False
+    elif kind not in ("rect", "line", "image"):
+        return False
+    return (float(getattr(lf, "width", 0.0) or 0.0) > 0.0
+            and float(getattr(lf, "height", 0.0) or 0.0) > 0.0)
+
+
+def _declared_cover_objects(report):
+    """[(LayoutField, [format-trigger names, innermost first]), ...] for every
+    printable object declared in the cover section, in declared document
+    order, each carrying the EFFECTIVE trigger chain of its ancestor frames
+    (Oracle prints an object only when every trigger in the chain passes, so
+    a conditional variant frame gates all of its members)."""
+    sec = _section_by_kind(report, "section_header")
+    if sec is None:
+        return []
+    out = []
+
+    def _walk(g, chain):
+        gft = (getattr(g, "format_trigger", "") or "")
+        gchain = ([gft] + chain) if gft else chain
+        for f in (getattr(g, "fields", None) or []):
+            own = (getattr(f, "format_trigger", "") or "")
+            out.append((f, ([own] if own else []) + gchain))
+        for c in (getattr(g, "children", None) or []):
+            _walk(c, gchain)
+
+    _walk(sec, [])
+    return [(f, ch) for f, ch in out if _cover_object_is_printable(f)]
+
+
+def _cover_hidden_expr(chain, ft_map):
+    """One <Hidden> expression for a trigger CHAIN: hide when ANY translated
+    link hides. Untranslatable links are skipped (visible-biased, honest) —
+    a leaf trigger the translator declines must not erase an ancestor
+    variant gate that DOES translate."""
+    hs = []
+    for ftn in chain or []:
+        h = ft_map.get((ftn or "").lower())
+        if h and h != "false" and h not in hs:
+            hs.append(h)
+    if not hs:
+        return None
+    if "true" in hs:
+        return "true"
+    if len(hs) == 1:
+        return hs[0]
+    return "=" + " Or ".join(f"({h[1:]})" for h in hs)
+
+
+def _cover_sheet_hidden_expr(sheet_objs, ft_map):
+    """One <Hidden> expression for a whole continuation cover SHEET: hide the
+    sheet exactly when EVERY object on it hides.
+
+    Oracle prints a continuation parameter-form page only for the objects
+    that reach it, so a sheet whose entire content sits behind format
+    triggers prints no paper at all when those triggers fire. One
+    unconditional object on the sheet (or one whose trigger the translator
+    declines) leaves the sheet unconditional — visible-biased, like
+    _cover_hidden_expr."""
+    hs = []
+    for _lf, chain in sheet_objs:
+        h = _cover_hidden_expr(chain, ft_map)
+        if not h or h == "false":
+            return None
+        if h == "true":
+            return "true"
+        if h not in hs:
+            hs.append(h)
+    if not hs:
+        return None
+    if len(hs) == 1:
+        return hs[0]
+    return "=" + " And ".join(f"({h[1:]})" for h in hs)
+
+
+# A hidden RECTANGLE still reserves its declared box (SSRS renders the empty
+# space), so a continuation cover sheet placed as a rectangle at the top of
+# the next paper printed a BLANK page whenever its branch was hidden. A
+# hidden TABLIX ROW genuinely collapses. So the continuation sheets ride in a
+# one-column Tablix whose declared height is this stub: the row's rendered
+# height grows the container past the stub and pushes the regions below down,
+# while a hidden row leaves the stub — and no page.
+_COVER_SHEET_STUB_IN = 0.05
+
+
+def _cover_sheet_dataset_name(report) -> str:
+    """DataSetName for the continuation-sheet Tablix: the report's primary
+    dataset (SSRS requires every Tablix to name one). Its rows never repeat
+    the sheet — the sheet is a STATIC member — so the binding only satisfies
+    the engine; it never multiplies the cover."""
+    q = _pick_main_query(report)
+    if q is None:
+        qs = list(getattr(report, "queries", None) or [])
+        q = qs[0] if qs else None
+    name = (getattr(q, "name", "") or "") if q is not None else ""
+    # "Q_MAIN" is the placeholder dataset _build_data_sets emits for a report
+    # that declares no query at all, so the binding still resolves.
+    return _safe(name) if name else "Q_MAIN"
+
+
+def _build_cover_sheet_tablix(report, sheets, span_w: float, pitch: float,
+                              top_in: float,
+                              name: str = "Tablix_CoverSheets"):
+    """The continuation cover SHEETS as rows of a single-column Tablix.
+
+    WHY A TABLIX AND NOT STACKED RECTANGLES. SSRS reserves the space of a
+    hidden Rectangle: a continuation sheet whose every object sits behind a
+    format trigger still printed its paper, blank, under the shipped
+    defaults (engine-measured — the truth export has no blank page
+    anywhere). A hidden TABLIX ROW collapses to nothing. So each sheet is
+    one row carrying that sheet's own <Hidden>, every object keeps its
+    declared geometry inside the sheet's Rectangle, and a fully hidden sheet
+    consumes no page at all.
+
+    Each row is a WHOLE printable sheet tall, so sheet ``k + 1`` can never
+    share paper with sheet ``k`` (nor with the cover's first sheet, which
+    the row is placed under) — Oracle's continuation parameter-form pages
+    are pages, not appended blocks.
+    """
+    t = ET.Element(_q("Tablix"))
+    t.set("Name", name)
+    tb = _sub(t, "TablixBody")
+    _sub(_sub(_sub(tb, "TablixColumns"), "TablixColumn"), "Width",
+         f"{span_w:.4f}in")
+    rows_el = _sub(tb, "TablixRows")
+    row_h = max(0.5, pitch - _BODY_FIT_SLACK_IN)
+    for cont, _hid in sheets:
+        r = _sub(rows_el, "TablixRow")
+        _sub(r, "Height", f"{row_h:.4f}in")
+        cell = _sub(_sub(r, "TablixCells"), "TablixCell")
+        _sub(cell, "CellContents").append(cont)
+    _sub(_sub(_sub(t, "TablixColumnHierarchy"), "TablixMembers"),
+         "TablixMember")
+    rhm = _sub(_sub(t, "TablixRowHierarchy"), "TablixMembers")
+    for _cont, hid in sheets:
+        m = _sub(rhm, "TablixMember")
+        if hid:
+            _sub(_sub(m, "Visibility"), "Hidden", hid)
+    _sub(t, "DataSetName", _cover_sheet_dataset_name(report))
+    _sub(t, "Top", f"{max(0.0, top_in):.4f}in")
+    _sub(t, "Left", "0.0000in")
+    # UNDERSTATED ON PURPOSE (see _COVER_SHEET_STUB_IN): the declared height
+    # is what the container reserves; the rendered rows are what grows it.
+    _sub(t, "Height", f"{_COVER_SHEET_STUB_IN:.4f}in")
+    _sub(t, "Width", f"{span_w:.4f}in")
+    _sub(_sub(_sub(t, "Style"), "Border"), "Style", "None")
+    return t
+
+
+def _cover_pair_index(objs):
+    """{id(LayoutField): (pair_index, "lbl"|"val")} for the declared
+    label:value FORM rows of a cover — a left-hand label TEXT whose declared
+    box shares a row with the object immediately to its right. Naming only:
+    the emitted geometry is always the declared one. Purely structural
+    (declared x/y/height overlap), so it never depends on wording."""
+    def _g(f, a):
+        return float(getattr(f, a, 0.0) or 0.0)
+
+    boxes = [f for f in objs
+             if (getattr(f, "kind", "") or "field") in ("text", "field")]
+    out, idx = {}, 0
+    for lf in sorted(boxes, key=lambda f: (_g(f, "y"), _g(f, "x"))):
+        if (getattr(lf, "kind", "") or "") != "text":
+            continue
+        if id(lf) in out:
+            continue
+        lx, ly, lh = _g(lf, "x"), _g(lf, "y"), _g(lf, "height")
+        best, bestdx = None, 1e9
+        for cand in boxes:
+            if cand is lf or id(cand) in out:
+                continue
+            cx, cy, ch = _g(cand, "x"), _g(cand, "y"), _g(cand, "height")
+            if cx <= lx + 0.02:
+                continue
+            # same declared ROW = the two boxes' vertical spans overlap
+            if min(ly + lh, cy + ch) - max(ly, cy) <= 0.0:
+                continue
+            if cx - lx < bestdx:
+                bestdx, best = cx - lx, cand
+        if best is not None:
+            out[id(lf)] = (idx, "lbl")
+            out[id(best)] = (idx, "val")
+            idx += 1
+    return out
+
+
+def _mark_cover_growable(objs) -> None:
+    """Let a declared cover TEXT grow into the free space the declaration
+    leaves beneath it.
+
+    Oracle's renderer fits a declared multi-line caption in its declared box
+    with tighter leading than SSRS's; a box authored to hold exactly N lines
+    therefore clips its last line here (measured: a 3-line 11pt cover title
+    in a declared 0.58in box lost its third line to a wrapped second one).
+    Growth is safe ONLY into declared emptiness: a Rectangle positions its
+    members absolutely, so a box that grows over a declared neighbour paints
+    on it. Same rule the frame emitter uses — grow only when nothing is
+    declared below, here measured against the real gap.
+
+    AND ONLY WHEN THE DECLARATION ALLOWS IT. Oracle's default vertical
+    elasticity for a boilerplate text object is FIXED: the box is exactly its
+    declared height and whatever does not fit is CLIPPED, so a caption that
+    over-runs its box loses its tail in Oracle too. Truth-measured: a cover
+    title declaring three lines in a 0.58in box at 11pt (three lines need
+    ~0.63in) prints TWO lines on the Oracle page — the third is simply gone.
+    Growing it here would print a line the source does not. So growth is
+    reserved for boxes that declare ``verticalElasticity="variable"`` or
+    ``"expand"``; an undeclared (== fixed) box keeps its declared height."""
+    def _g(f, a):
+        return float(getattr(f, a, 0.0) or 0.0)
+
+    for lf, _chain in objs:
+        if (getattr(lf, "kind", "") or "") != "text":
+            continue
+        if (getattr(lf, "vertical_elasticity", "") or "").strip().lower() \
+                not in ("variable", "expand"):
+            continue
+        txt = getattr(lf, "text", "") or ""
+        # explicit declared line breaks, or an AFM-measured overflow
+        if "\n" not in txt and not _static_text_overflows_box(lf):
+            continue
+        x0, x1 = _g(lf, "x"), _g(lf, "x") + _g(lf, "width")
+        bottom = _g(lf, "y") + _g(lf, "height")
+        gap = min(
+            [(_g(o, "y") - bottom) for o, _c in objs
+             if o is not lf and _g(o, "y") >= bottom - 0.01
+             and _g(o, "x") < x1 and _g(o, "x") + _g(o, "width") > x0]
+            or [99.0])
+        if gap > 0.10:
+            try:
+                lf._cangrow_safe = True
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def _cover_page_budget(report, oy: float) -> float:
+    """Printable height a cover Rectangle placed at body-y ``oy`` may use:
+    the sheet minus its margins, minus the page chrome this converter emits,
+    minus the strict-inequality slack (a box that merely REACHES the bottom
+    edge spills a near-empty companion page — the vertical twin of the body
+    width rule)."""
+    return max(2.0, _cover_sheet_pitch(report)
+               - max(0.0, oy) - _BODY_FIT_SLACK_IN)
+
+
+def _cover_sheet_pitch(report) -> float:
+    """Vertical PITCH of one cover sheet: the paper minus its margins minus
+    the page chrome this converter emits.
+
+    Body coordinates are ONE continuous canvas that the engine cuts every
+    ``pitch`` inches, so an item placed at body-y ``k * pitch`` lands at the
+    top of sheet ``k + 1``. That is the mechanism a continuation cover page
+    rides on (see _paginate_cover_objects)."""
+    try:
+        chrome = _page_header_height(report) + _PAGE_FOOTER_HEIGHT_IN
+    except Exception:  # noqa: BLE001 - budgeting must never sink a convert
+        chrome = 0.85
+    return max(2.0, _page_height_for(report) - 2 * _PAGE_MARGIN_IN - chrome)
+
+
+def _paginate_cover_objects(objs, oy, budget, pitch):
+    """``[(sheet_origin_y, [(LayoutField, chain), ...]), ...]`` — the declared
+    cover canvas cut into SHEETS.
+
+    Oracle's parameter form is a CANVAS, not a page: a conditional variant
+    block (the mail branch beside the mail-less one) or a debug parameter echo
+    is routinely authored BELOW the first sheet, and Oracle paginates that
+    canvas onto continuation parameter-form pages. Reproduced here: the cut
+    always falls BETWEEN two declared objects (never through one), every
+    object keeps its declared offset from the first object of its own sheet,
+    and nothing is dropped, clipped or squashed to make the canvas fit.
+
+    Sheet 0 gets ``budget`` (the first sheet also carries the cover's own
+    body offset ``oy``); every continuation sheet starts at the paper top and
+    gets the full ``pitch`` less the strict-inequality slack. Objects come
+    back in DECLARED DOCUMENT ORDER within their sheet; only the sheet
+    ASSIGNMENT is geometric."""
+    def _g(f, a):
+        return float(getattr(f, a, 0.0) or 0.0)
+
+    order = sorted(range(len(objs)),
+                   key=lambda i: (round(_lf_y(objs[i][0]), 4),
+                                  _g(objs[i][0], "x")))
+    page_of, origins = {}, [oy]
+    page, origin, cap = 0, oy, budget
+    for i in order:
+        lf = objs[i][0]
+        y = _lf_y(lf)
+        # ``y > origin`` keeps a single object taller than a whole sheet on
+        # the sheet it opened instead of spinning a new one forever.
+        if y > origin and (y - origin) + max(0.18, _g(lf, "height")) > cap:
+            page += 1
+            origin = y
+            cap = pitch - _BODY_FIT_SLACK_IN
+            origins.append(origin)
+        page_of[i] = page
+    return [(origins[p], [objs[i] for i in range(len(objs))
+                          if page_of[i] == p])
+            for p in range(page + 1)]
+
+
+def _build_declared_cover_page(
+        report, prefix="Cov",
+        pair_names=("Cov_ParmLbl_", "Cov_ParmVal_")) -> Optional[ET.Element]:
+    """The cover section rendered from its DECLARATION: every declared object
+    at its declared x/y/width/height, in its declared font/colour/alignment,
+    through the same emitter the body uses.
+
+    Returns None when the header section declares no positioned layout, so
+    the caller falls back to its synthesized template.
+    """
+    sec = _section_by_kind(report, "section_header")
+    if sec is None:
+        return None
+    frame = _declared_cover_frame(report)
+    objs = [(f, ch) for f, ch in _declared_cover_objects(report)
+            if f is not frame]
+    if not objs:
+        return None
+    # STRUCTURAL GATE: a real declared layout puts several boxed objects on
+    # at least two distinct declared rows. A section that merely holds one
+    # stray label declares no cover layout, and keeps the synthesized path.
+    rows = {round(float(getattr(f, "y", 0.0) or 0.0), 2) for f, _ in objs}
+    if len(objs) < 3 or len(rows) < 2:
+        return None
+
+    def _g(f, a):
+        return float(getattr(f, a, 0.0) or 0.0)
+
+    if frame is not None:
+        ox, oy = max(0.0, _g(frame, "x")), max(0.0, _g(frame, "y"))
+        span_w, span_h = _g(frame, "width"), _g(frame, "height")
+    else:
+        ox = max(0.0, min(_g(f, "x") for f, _ in objs))
+        oy = max(0.0, min(_g(f, "y") for f, _ in objs))
+        span_w = max(_g(f, "x") + _g(f, "width") for f, _ in objs) - ox
+        span_h = max(_g(f, "y") + _g(f, "height") for f, _ in objs) - oy
+    # The body placer keeps a 0.02in inset from its container's left edge, so
+    # a container whose edge IS the leftmost declared object would push that
+    # one object right by 0.02in and shrink the declared column gap by the
+    # same amount. Back the container off by the inset instead, and widen it
+    # to match, so every declared x/width survives verbatim (a declared width
+    # is the width — no padding, no rounding).
+    _INSET = 0.02
+    _ox2 = max(0.0, min(ox, min(_g(f, "x") for f, _ in objs) - _INSET))
+    span_w += (ox - _ox2)
+    ox = _ox2
+    if frame is None:
+        span_w += _INSET
+    # The header section has its OWN declared body origin; the RDL page origin
+    # is the SMALLEST section origin (see _page_left_margin_for). The
+    # difference is real paper displacement and belongs on this Rectangle's
+    # Left/Top — every member is positioned relative to the Rectangle, so
+    # shifting it carries the whole declared cover to its declared paper spot.
+    _shift = _section_body_left_shift(report, "section_header")
+    _shift = max(-ox, _shift)          # never off the left edge of the body
+    _vshift = _section_body_top_shift(report, "section_header")
+    avail = max(1.0, _page_width_for(report) - 2 * _PAGE_HMARGIN_IN
+                - ox - max(0.0, _shift))
+    span_w = max(1.0, min(span_w, avail))
+    span_h = max(0.5, span_h)
+
+    # THE COVER IS A CANVAS, NOT A PAGE. Oracle's parameter form can be
+    # declared taller than one printable sheet (a conditional variant block
+    # or a debug parameter echo parked below the fold); Oracle paginates that
+    # canvas onto continuation parameter-form pages. So does this: sheet 0
+    # goes straight into the cover Rectangle, and every further sheet becomes
+    # a nested Rect_CoverPage_N placed at the TOP of the next paper (the body
+    # is one continuous canvas the engine cuts every _cover_sheet_pitch
+    # inches). Nothing declared is dropped because its branch is not the
+    # default, and nothing is squashed to make the canvas fit.
+    _pitch = _cover_sheet_pitch(report)
+    _page_budget = _cover_page_budget(report, oy)
+    _sheets = _paginate_cover_objects(objs, oy, _page_budget, _pitch)
+    if len(_sheets) > 1:
+        try:
+            report.warnings.append(
+                f"Cover page: the header section declares "
+                f"{sum(len(s) for _o, s in _sheets[1:])} object(s) past its "
+                f"first printable sheet ({_page_budget:.2f}in), so the cover "
+                f"prints on {len(_sheets)} pages, as Oracle's continuation "
+                f"parameter-form pages do. A sheet whose every object is "
+                f"format-trigger conditional prints NO page when those "
+                f"triggers hide it (each sheet is a Tablix row, and a hidden "
+                f"row consumes no paper).")
+        except Exception:  # noqa: BLE001
+            pass
+
+    rect = ET.Element(_q("Rectangle"))
+    rect.set("Name", "Rect_CoverPage")
+    # A cover that spans sheets MUST be splittable; one that fits stays whole.
+    _sub(rect, "KeepTogether", "true" if len(_sheets) == 1 else "false")
+    style = _sub(rect, "Style")
+    _emit_cover_border(style, report)
+    _sub(style, "BackgroundColor", "#ffffff")
+    ri = _sub(rect, "ReportItems")
+
+    ft_map = _format_trigger_hidden_map(report)
+    pair_of = _cover_pair_index([f for f, _ in objs])
+    lbl_tpl, val_tpl = pair_names
+    counter = [0]
+    _mark_cover_growable(objs)
+
+    def _emit_sheet(items, sheet_oy, sheet_objs) -> float:
+        """Emit one cover SHEET's objects relative to ``sheet_oy``; returns
+        the content bottom in that sheet's own coordinates."""
+        bottom = 0.0
+        for lf, chain in sheet_objs:
+            pair = pair_of.get(id(lf))
+            if _is_cover_params_heading(lf):
+                # The source's own criteria-form heading, named so its
+                # declared face stays greppable in the emitted RDL.
+                name = f"{prefix}_ParamsHdr"
+            elif pair is None:
+                name = f"{prefix}_Tb_{counter[0]}"
+                counter[0] += 1
+            else:
+                name = f"{(lbl_tpl if pair[1] == 'lbl' else val_tpl)}{pair[0]}"
+            before = len(items)
+            runs = (_cover_runs_spec(lf, report)
+                    if (getattr(lf, "kind", "") or "") == "text" else None)
+            if runs:
+                # Oracle's mid-sentence <textSegment> styling FLOWS inline and
+                # wraps (truth PDF: "Suggestion: Select **Site** for [Sort
+                # Order] to generate ..." wraps mid-run). Stacked per-segment
+                # paragraphs would print one segment per line.
+                _build_textbox(
+                    items, name, "", runs_spec=runs,
+                    font_size=f"{int(_g(lf, 'font_size') or 10)}pt",
+                    fg=_text_color(getattr(lf, "color", "")),
+                    text_align=_declared_text_align(lf, "Left"),
+                    vertical_align="Top", border_color="#ffffff",
+                    # NO INSET: the cover object is placed at its DECLARED
+                    # x/y/width/height below. 2pt of it on each side is 4pt
+                    # of lost text width -- enough to wrap a declared
+                    # single-line cover title and push the whole cover down.
+                    padding="0pt", can_grow=False,
+                )
+                tb = items[-1]
+                _sub(tb, "Top", f"{max(0.0, _g(lf, 'y') - sheet_oy):.4f}in")
+                _sub(tb, "Left", f"{max(0.0, _g(lf, 'x') - ox):.2f}in")
+                _sub(tb, "Width",
+                     f"{max(0.4, min(_g(lf, 'width'), span_w - max(0.0, _g(lf, 'x') - ox))):.2f}in")
+                _sub(tb, "Height", f"{max(0.18, _g(lf, 'height')):.2f}in")
+                ok, by = True, (_g(lf, "y") - sheet_oy) + _g(lf, "height")
+            else:
+                ok, by = _emit_field_textbox(
+                    items, name, "", lf, ox, sheet_oy, span_w, span_h,
+                    report, set())
+            if not ok:
+                continue
+            bottom = max(bottom, by)
+            el = items[-1] if len(items) > before else None
+            if el is None:
+                continue
+            hid = _cover_hidden_expr(chain, ft_map)
+            if hid and el.find(_q("Visibility")) is None:
+                _sub(_sub(el, "Visibility"), "Hidden", hid)
+            _attach_declared_cover_hyperlink(report, el, lf)
+        return bottom
+
+    max_by = _emit_sheet(ri, oy, _sheets[0][1])
+    # Continuation sheets are built here but PLACED below, as rows of one
+    # Tablix: a hidden Rectangle reserves its paper, a hidden Tablix row does
+    # not (see _build_cover_sheet_tablix). Nothing in the sheet changes —
+    # only what carries it.
+    _cont_sheets = []
+    for _n, (_sheet_oy, _sheet_objs) in enumerate(_sheets[1:], start=1):
+        cont = ET.Element(_q("Rectangle"))
+        cont.set("Name", f"Rect_CoverPage_{_n + 1}")
+        # Each continuation SHEET stays whole; the outer cover splits.
+        _sub(cont, "KeepTogether", "true")
+        _cstyle = _sub(cont, "Style")
+        _sub(_sub(_cstyle, "Border"), "Style", "None")
+        _citems = _sub(cont, "ReportItems")
+        _cbottom = _emit_sheet(_citems, _sheet_oy, _sheet_objs)
+        if len(_citems) == 0:
+            continue
+        _ch = max(0.5, min(_cbottom + 0.30, _pitch - _BODY_FIT_SLACK_IN))
+        _sub(cont, "Width", f"{span_w:.4f}in")
+        _sub(cont, "Height", f"{_ch:.4f}in")
+        _cont_sheets.append((cont,
+                             _cover_sheet_hidden_expr(_sheet_objs, ft_map)))
+
+    if len(ri) == 0 and not _cont_sheets:
+        return None
+    # A DECLARED FRAME IS THE FRAME. When the header section draws its own
+    # cover box, that box's declared height is the height of the printed
+    # rectangle — its border is ink the reader sees, so ending it at the last
+    # caption instead shortens a visible box (truth-measured: a cover
+    # rectangle declared 5.9375in tall printed 5.4849in, 0.45in short, because
+    # the declaration leaves empty space below its last line ON PURPOSE).
+    # Content that runs PAST the declared frame still has to fit inside the
+    # container, so the height is the larger of the two.
+    _content_h = max_by + 0.30
+    rect_h = _content_h if frame is None else max(span_h, max_by)
+    # The DECLARED box never reaches past the FIRST sheet: continuation sheets
+    # live in the sheet Tablix appended below, which reserves only its stub
+    # until a row actually renders. So the space a hidden continuation used to
+    # reserve — a blank page under the shipped defaults — is gone, and the
+    # region that follows the cover starts right after sheet one.
+    rect_h = min(max(0.5, rect_h), _page_budget)
+    if _cont_sheets:
+        # QUANTIZE THE BOTTOM EDGE. The region below a cover is placed FLUSH
+        # at the extent this rectangle reports, written with 2 decimals — so
+        # an extent of 8.9718in becomes a Top of 8.97in, which is 0.0018in
+        # INSIDE this rectangle. SSRS never displaces an item that overlaps
+        # the growing container, so that hair of overlap swallowed the whole
+        # push and the continuation sheet printed on top of the first record
+        # (engine-measured: flush 8.9700 → sheet alone on its page and the
+        # record after it; 0.0018in of overlap → both on one page).
+        _bottom = math.floor((oy + rect_h) * 100.0) / 100.0
+        rect_h = max(0.5, _bottom - oy)
+        # Bottom-anchored inside the declared box so the growth starts exactly
+        # at the cover's own bottom edge, and every region below is pushed by
+        # exactly the sheets that really rendered.
+        ri.append(_build_cover_sheet_tablix(
+            report, _cont_sheets, span_w, _pitch,
+            max(0.0, rect_h - _COVER_SHEET_STUB_IN)))
+    # Field refs in this rectangle are body-direct (the cover is chrome, not a
+    # data region), so SSRS requires every Fields!X.Value wrapped in a scoped
+    # aggregate — the continuation sheets included, which is why this runs
+    # AFTER they are appended (a dataset-scoped aggregate stays legal inside
+    # the sheet Tablix, which binds a dataset only to satisfy the engine).
+    for _v in rect.iter(_q("Value")):
+        _t = _v.text or ""
+        if "Fields!" in _t:
+            _v.text = _wrap_unscoped_aggregates(_t, report,
+                                                in_tablix_scope=False)
+    # 4 decimals on the ORIGIN: every member's offset was computed against the
+    # exact ox/oy, so rounding the container would add its own error on top of
+    # the member's (a declared box is the box — no padding, no 2dp rounding).
+    _sub(rect, "Top", f"{oy + _vshift:.4f}in")
+    _sub(rect, "Left", f"{ox + _shift:.4f}in")
+    _sub(rect, "Width", f"{span_w:.4f}in")
+    _sub(rect, "Height", f"{rect_h:.4f}in")
+    rect.set("data-rect-height-in", f"{oy + _vshift + rect_h:.4f}")
+    return rect
+
+
+def _is_cover_params_heading(lf) -> bool:
+    """The declared criteria-form heading ("Report Parameters"), matched on
+    wording SHAPE only — the same structural test _has_cover_page uses."""
+    if (getattr(lf, "kind", "") or "") != "text":
+        return False
+    return bool(re.fullmatch(
+        r"(report\s+)?parameters?:?",
+        " ".join((getattr(lf, "text", "") or "").split()), re.IGNORECASE))
+
+
+def _attach_declared_cover_hyperlink(report, el, lf) -> None:
+    """A declared cover object carrying an Oracle ``<webSettings hyperlink=>``
+    is a click surface. _emit_field_textbox already wires sub-report
+    drill-throughs; this adds the computed-URL action buttons (the
+    distribution idiom), emitted only when the URL builder translates
+    provably — otherwise the face still renders 1:1 but stays inert and the
+    conversion warns."""
+    token = (getattr(lf, "hyperlink", "") or "").strip()
+    if not token or el.tag != _q("Textbox"):
+        return
+    if _drillthrough_for(report, lf) is not None:
+        return
+    run = next((r for r in el.iter(_q("TextRun"))), None)
+    if run is None or run.find(_q("ActionInfo")) is not None:
+        return
+    url = _hyperlink_action_expr(report, token)
+    if url:
+        # RDL TextRun order: <Value> then <ActionInfo> then <Style>.
+        _style = run.find(_q("Style"))
+        _emit_hyperlink(run, url)
+        if _style is not None:
+            run.remove(_style)
+            run.append(_style)
+        return
+    try:
+        report.warnings.append(
+            f"Cover click surface {(getattr(lf, 'text', '') or token).strip()!r}: "
+            f"its Oracle hyperlink ({token}) is computed by PL/SQL this "
+            f"converter could not prove into a URL, so it renders but is not "
+            f"clickable. If it triggered report-server distribution (mass "
+            f"email), the SSRS-native equivalent is a subscription or this "
+            f"tool's Bursting output.")
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def _build_cover_page(report) -> Optional[ET.Element]:
     """Cover page ("Report Parameters") -- renders on page 1 only.
     Generic: pulls title from layout via _extract_title_lines, params
@@ -8982,6 +14891,16 @@ def _build_cover_page(report) -> Optional[ET.Element]:
     _summ = _build_summary_header_cover(report)
     if _summ is not None:
         return _summ
+    # The source's OWN cover layout wins over the synthesized template: when
+    # <section name="header"> declares positioned objects, they are emitted
+    # at their declared geometry/styles (see _build_declared_cover_page).
+    # The template below stays the fallback for a report that declares no
+    # cover layout at all (its cover has to be built from the parameter
+    # list, because the source draws none).
+    _decl = _build_declared_cover_page(report, "Cov",
+                                       ("Cov_ParmLbl_", "Cov_ParmVal_"))
+    if _decl is not None:
+        return _decl
     title_lines = _extract_title_lines(report, limit=3)
     title_lines = [
         ln for ln in title_lines
@@ -9000,20 +14919,49 @@ def _build_cover_page(report) -> Optional[ET.Element]:
     if not title_lines and not params:
         return None
 
-    BORDER = "#777777"
-    _ct_font, TITLE_FG = _title_style(report)
-    INK = "#282828"
+    # (No house border ink here: the cover rect's frame comes from
+    # _emit_cover_border, which reads the DECLARED cover frame's own edge.)
+    _ct_font, TITLE_FG, _ct_size = _title_style(report)
+    # Undeclared body text is BLACK (Oracle device default, truth-measured);
+    # a declared colour overrides it at each emitter below.
+    INK = _BODY_INK
 
     rect = ET.Element(_q("Rectangle"))
     rect.set("Name", "Rect_CoverPage")
     _sub(rect, "KeepTogether", "true")
     style = _sub(rect, "Style")
-    # The real Oracle criteria cover is a plain label:value list on white paper --
-    # NO border box (verified against the letter-cover ground truth). A drawn
-    # box was an invented frame, so the cover border is None.
-    border = _sub(style, "Border")
-    _sub(border, "Style", "None")
+    # The real Oracle criteria cover is a plain label:value list on white
+    # paper -- NO border box -- UNLESS the source itself draws a frame
+    # around the form (a solid-linePattern roundedRectangle enclosing the
+    # criteria fields); that declared border is reproduced 1:1.
+    _emit_cover_border(style, report)
     _sub(style, "BackgroundColor", "#ffffff")
+
+    # DECLARED horizontal span: when the source draws that frame, the emitted
+    # Rectangle sits at ITS x/width, and the synthesized label:value grid
+    # inside scales proportionally into the declared span (the grid's columns
+    # are synthesized, so only the span it must fit is declaration-driven).
+    # No declared frame -> the historical 0.35in/6.8in default stands.
+    _COV_X, _COV_W, _COV_W0 = 0.35, 6.80, 6.80
+    _cov_frame = _declared_cover_frame(report)
+    if _cov_frame is not None:
+        _dfx = float(getattr(_cov_frame, "x", 0.0) or 0.0)
+        _dfw = float(getattr(_cov_frame, "width", 0.0) or 0.0)
+        try:
+            _cov_lim = _page_width_for(report) - 2 * _PAGE_HMARGIN_IN
+        except Exception:  # noqa: BLE001
+            _cov_lim = 8.0
+        # A span narrower than a label:value row can hold, or one that would
+        # push the box past the printable edge (the blank-companion-page
+        # failure), keeps the synthesized default.
+        if _dfx >= 0.0 and 4.0 <= _dfw and _dfx + _dfw <= _cov_lim + 0.02:
+            _COV_X, _COV_W = _dfx, _dfw
+    _cov_s = _COV_W / _COV_W0
+
+    def _gx(v: float) -> str:
+        """An inch on the synthesized cover grid, scaled into the declared
+        frame span (identity when nothing is declared)."""
+        return f"{v * _cov_s:.2f}in"
 
     ri = _sub(rect, "ReportItems")
     y = 0.30
@@ -9024,17 +14972,43 @@ def _build_cover_page(report) -> Optional[ET.Element]:
             ) + '"'
         )
         title_h = 0.30 * len(title_lines)
+        # style from the FIELD that actually carries the title line — the
+        # truth prints the cover title in its declared face/colour (a
+        # dark-blue Verdana banner), which the generic largest-font
+        # heuristic can miss when another text is bigger.
+        _tt0 = (title_lines[0] or "").strip().lower()
+        _tfont, _tsz, _tbold, _tfg = _ct_font, 13, True, TITLE_FG
+
+        def _find_tf(g):
+            for f in (getattr(g, "fields", None) or []):
+                if (getattr(f, "kind", "") or "") == "text" and _tt0 and \
+                        _tt0 in " ".join((f.text or "").lower().split()):
+                    return f
+            for c in (getattr(g, "children", None) or []):
+                r = _find_tf(c)
+                if r is not None:
+                    return r
+            return None
+        for _lg in (getattr(report, "layout", None) or []):
+            _tf = _find_tf(_lg)
+            if _tf is not None:
+                _tfont = (getattr(_tf, "font_family", "") or "").strip() \
+                    or _ct_font
+                _tsz = int(getattr(_tf, "font_size", 0) or 0) or 13
+                _tbold = bool(getattr(_tf, "bold", True))
+                _tfg = (getattr(_tf, "color", "") or "").strip() or TITLE_FG
+                break
         _build_textbox(
             ri, "Cov_Title", title_expr,
-            bold=True, font_size="13pt", fg=TITLE_FG,
+            bold=_tbold, font_size=f"{_tsz}pt", fg=_tfg,
             text_align="Center", vertical_align="Middle",
             border_color="#ffffff", padding="2pt",
-            font_family=_ct_font,
+            font_family=_tfont,
         )
         tb = ri[-1]
         _sub(tb, "Top", f"{y:.2f}in")
-        _sub(tb, "Left", "0.15in")
-        _sub(tb, "Width", "6.50in")
+        _sub(tb, "Left", _gx(0.15))
+        _sub(tb, "Width", _gx(6.50))
         _sub(tb, "Height", f"{title_h:.2f}in")
         y += title_h + 0.30
 
@@ -9101,8 +15075,8 @@ def _build_cover_page(report) -> Optional[ET.Element]:
             border_color="#ffffff", padding="2pt",
         )
         ltb = ri[-1]
-        _sub(ltb, "Top", f"{y:.2f}in"); _sub(ltb, "Left", "1.8in")
-        _sub(ltb, "Width", "2.0in"); _sub(ltb, "Height", "0.24in")
+        _sub(ltb, "Top", f"{y:.2f}in"); _sub(ltb, "Left", _gx(1.8))
+        _sub(ltb, "Width", _gx(2.0)); _sub(ltb, "Height", "0.24in")
         _build_textbox(
             ri, f"Cov_MetaVal_{idx}", val,
             bold=True, font_size="10pt", fg=INK,
@@ -9110,49 +15084,87 @@ def _build_cover_page(report) -> Optional[ET.Element]:
             border_color="#ffffff", padding="2pt",
         )
         vtb = ri[-1]
-        _sub(vtb, "Top", f"{y:.2f}in"); _sub(vtb, "Left", "3.9in")
-        _sub(vtb, "Width", "2.7in"); _sub(vtb, "Height", "0.24in")
+        _sub(vtb, "Top", f"{y:.2f}in"); _sub(vtb, "Left", _gx(3.9))
+        _sub(vtb, "Width", _gx(2.7)); _sub(vtb, "Height", "0.24in")
         y += 0.28
 
     y += 0.30
+    # DECLARED heading style wins: when the source authors this heading's
+    # wording as boilerplate, carry ITS face/size/weight/slant/underline/
+    # colour/justification (an italic underlined 12pt heading rendered as
+    # plain bold otherwise). Absent a declaration the synthesized defaults
+    # below stand, so covers with no authored heading are unchanged.
+    _hdr_kw = dict(bold=True, font_size="12pt", fg=INK, text_align="Center")
+    _hdr_kw.update(_declared_heading_style(report, "Report Parameters"))
     _build_textbox(
         ri, "Cov_ParamsHdr", "Report Parameters",
-        bold=True, font_size="12pt", fg=INK,
-        text_align="Center", vertical_align="Middle",
+        vertical_align="Middle",
         border_color="#ffffff", padding="2pt",
+        **_hdr_kw,
     )
     hdr_tb = ri[-1]
-    _sub(hdr_tb, "Top", f"{y:.2f}in"); _sub(hdr_tb, "Left", "0.15in")
-    _sub(hdr_tb, "Width", "6.50in"); _sub(hdr_tb, "Height", "0.30in")
-    y += 0.40
+    try:
+        _hdr_pt = float(str(_hdr_kw.get("font_size", "12pt")).replace("pt", ""))
+    except ValueError:
+        _hdr_pt = 12.0
+    # A declared heading may be larger than the synthesized 12pt — the box must
+    # hold one full line of it (SSRS padding + descenders + any underline) or
+    # the decoration clips.
+    _hdr_h = max(0.30, _hdr_pt * 1.28 / 72.0 + 0.086)
+    _sub(hdr_tb, "Top", f"{y:.2f}in"); _sub(hdr_tb, "Left", _gx(0.15))
+    _sub(hdr_tb, "Width", _gx(6.50)); _sub(hdr_tb, "Height", f"{_hdr_h:.2f}in")
+    y += _hdr_h + 0.10
 
-    for idx, p in enumerate(params):
-        lbl_text = (_clean_label(p.label) or _abbrev_expand(
-            p.name.replace("PARM_", "").replace("P_", ""))) + ":"
+    # DECLARED criteria form first: the source's own cover labels + order
+    # are the truth; the humanized parameter list is only the fallback for
+    # sources that never author a criteria form.
+    _decl_echo = _declared_cover_param_echo(report)
+    if _decl_echo:
+        # DECLARED styling rides with each row: the source authors the
+        # criteria labels AND their value fields with their own weight /
+        # slant / size / face / colour. Justification is dropped -- these
+        # boxes sit on the synthesized label:value grid, whose columns
+        # already carry the right-then-left reading order.
+        _echo_entries = [
+            (lbl if lbl.rstrip().endswith(":") else lbl + ":",
+             f"=Parameters!{_safe(pn)}.Value",
+             _declared_field_style(_lo, with_align=False),
+             _declared_field_style(_vo, with_align=False))
+            for lbl, pn, _lo, _vo in _decl_echo]
+    else:
+        _echo_entries = [
+            ((_clean_label(p.label) or _abbrev_expand(
+                p.name.replace("PARM_", "").replace("P_", ""))) + ":",
+             f"=Parameters!{_safe(p.name)}.Value", {}, {})
+            for p in params]
+    for idx, (lbl_text, _vexpr, _lsty, _vsty) in enumerate(_echo_entries):
+        _lkw = dict(bold=True, font_size="10pt", fg=INK)
+        _lkw.update(_lsty)
         _build_textbox(
             ri, f"Cov_ParmLbl_{idx}", lbl_text,
-            bold=True, font_size="10pt", fg=INK,
             text_align="Right", vertical_align="Middle",
             border_color="#ffffff", padding="2pt",
+            **_lkw,
         )
         ltb = ri[-1]
-        _sub(ltb, "Top", f"{y:.2f}in"); _sub(ltb, "Left", "1.5in")
-        _sub(ltb, "Width", "2.5in"); _sub(ltb, "Height", "0.22in")
+        _sub(ltb, "Top", f"{y:.2f}in"); _sub(ltb, "Left", _gx(1.5))
+        _sub(ltb, "Width", _gx(2.5)); _sub(ltb, "Height", "0.22in")
+        _vkw = dict(font_size="10pt", fg=INK)
+        _vkw.update(_vsty)
         _build_textbox(
-            ri, f"Cov_ParmVal_{idx}",
-            f"=Parameters!{_safe(p.name)}.Value",
-            font_size="10pt", fg=INK,
+            ri, f"Cov_ParmVal_{idx}", _vexpr,
             text_align="Left", vertical_align="Middle",
             border_color="#ffffff", padding="2pt",
+            **_vkw,
         )
         vtb = ri[-1]
-        _sub(vtb, "Top", f"{y:.2f}in"); _sub(vtb, "Left", "4.1in")
-        _sub(vtb, "Width", "2.5in"); _sub(vtb, "Height", "0.22in")
+        _sub(vtb, "Top", f"{y:.2f}in"); _sub(vtb, "Left", _gx(4.1))
+        _sub(vtb, "Width", _gx(2.5)); _sub(vtb, "Height", "0.22in")
         y += 0.26
 
     rect_h = y + 0.40
-    _sub(rect, "Top", "0in"); _sub(rect, "Left", "0.35in")
-    _sub(rect, "Width", "6.8in"); _sub(rect, "Height", f"{rect_h:.2f}in")
+    _sub(rect, "Top", "0in"); _sub(rect, "Left", f"{_COV_X:.2f}in")
+    _sub(rect, "Width", f"{_COV_W:.2f}in"); _sub(rect, "Height", f"{rect_h:.2f}in")
     rect.set("data-rect-height-in", f"{rect_h:.4f}")
     return rect
 
@@ -9177,6 +15189,59 @@ def _cover_text_value(text: str, report: ParsedReport) -> str:
         if val[max(0, m.start() - 6):m.start()] != "First(":
             return '="' + raw.replace('"', '""') + '"'
     return val
+
+
+def _cover_runs_spec(lf, report):
+    """Inline-run paragraphs for a MIXED-STYLE cover <text> — the source
+    declares styled segments flowing IN ONE SENTENCE ("Select **Site**
+    for ..."); vbCrLf-joining them broke the sentence across lines
+    (truth-measured). A whitespace-only newline segment is the declared
+    paragraph break. Returns [[run, ...], ...] or None (single-style
+    texts keep the plain path)."""
+    segs = getattr(lf, "segments", None) or []
+    if len(segs) < 2:
+        return None
+    _lf_size = int(getattr(lf, "font_size", 0) or 0)
+    _lf_color = (getattr(lf, "color", "") or "").strip()
+    paras, cur = [], []
+    for sg in segs:
+        raw = sg.get("text") or ""
+        if not raw.strip():
+            if "\n" in raw and cur:
+                paras.append(cur)
+                cur = []
+            continue
+        # collapse the XML pretty-print whitespace frame; run-boundary
+        # spacing is restored below (the CDATA's meaningful edge spaces
+        # are inseparable from the exporter's indent)
+        core = re.sub(r"\s*\n\s*", " ", raw).strip()
+        if not core:
+            continue
+        if cur and core[:1] not in ".,;:!?)":
+            # run-boundary space goes at the END of the PREVIOUS run —
+            # the renderer trims a run's LEADING whitespace (measured:
+            # 'Select'+' Site' printed 'SelectSite')
+            _pv = cur[-1]["value"]
+            if _pv.startswith('="') and _pv.endswith('"') \
+                    and not _pv[:-1].endswith(" "):
+                cur[-1]["value"] = _pv[:-1] + ' "'
+            elif not _pv.startswith('="'):
+                core = " " + core
+        val = _cover_text_value(core, report)
+        cur.append({
+            "value": val,
+            "bold": bool(sg.get("bold")),
+            "italic": bool(sg.get("italic")),
+            "underline": bool(sg.get("underline")),
+            "font_size": (f"{sg.get('size')}pt" if sg.get("size")
+                          else (f"{_lf_size}pt" if _lf_size else None)),
+            "color": (sg.get("color") or "").strip() or _lf_color or None,
+        })
+    if cur:
+        paras.append(cur)
+    if not paras or sum(len(p) for p in paras) < 2:
+        return None
+    return paras
 
 
 def _build_letter_cover_page(report) -> Optional[ET.Element]:
@@ -9211,6 +15276,73 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
     if not fields:
         return None
 
+    # EFFECTIVE format-trigger CHAIN per field: its own trigger PLUS
+    # every ancestor frame's — Oracle prints an object only when ALL of
+    # them pass. The flat field walk above loses frame ancestry, which
+    # dropped the frame-level triggers gating Oracle's conditional cover
+    # VARIANTS (email-run vs mail-run blocks, error-only warnings, debug
+    # echoes) — so every variant printed at once (truth PDF shows
+    # exactly one). Untranslatable links in the chain are skipped
+    # (visible-biased, honest) — a leaf trigger the translator declines
+    # must not erase the ancestor variant gate that DOES translate.
+    _eff_ft: dict = {}
+    _frame_ft: dict = {}
+
+    def _walk_eff(g, chain):
+        gft = (getattr(g, "format_trigger", "") or "")
+        gchain = chain + [gft] if gft else chain
+        for _f in (getattr(g, "fields", None) or []):
+            own = (getattr(_f, "format_trigger", "") or "")
+            fchain = ([own] if own else []) + gchain
+            if gchain:
+                _frame_ft[id(_f)] = gchain
+            if fchain:
+                _eff_ft[id(_f)] = fchain
+        for _c in (getattr(g, "children", None) or []):
+            _walk_eff(_c, gchain)
+    _walk_eff(header_section, [])
+    _ft_map = _format_trigger_hidden_map(report)
+
+    def _attach_cover_hidden(tb, subject, *donors):
+        """Visibility/Hidden for the textbox that renders ``subject``.
+
+        EACH OBJECT KEEPS ITS OWN DECLARED FORMAT TRIGGER. The subject's
+        chain is its OWN trigger plus every ancestor frame's, ANDed as
+        Oracle ANDs them (Oracle prints only when every link passes, so
+        the Hidden expressions OR). A ``donor`` is a NEIGHBOUR object of
+        the same declared form row (the label beside a value, or the value
+        beside a label) and contributes ONLY its ANCESTOR-FRAME links --
+        never its own leaf trigger. Measured: donating the leaf too gave a
+        label the value's per-object condition, so a whole declared row
+        appeared/disappeared together on a trigger only ONE of its two
+        objects declares.
+
+        Untranslatable links are skipped (visible-biased, honest) -- a
+        leaf trigger the translator declines must not erase the ancestor
+        variant gate that DOES translate. Bare Fields! refs are scoped
+        body-safe later by _scope_body_direct_field_refs."""
+        for _i, _f in enumerate((subject,) + donors):
+            if _f is None:
+                continue
+            chain = ((_eff_ft.get(id(_f)) if _i == 0
+                      else _frame_ft.get(id(_f))) or [])
+            hs = []
+            for ftn in chain:
+                h = _ft_map.get(ftn.lower())
+                if h and h != "false" and h not in hs:
+                    hs.append(h)
+            if not hs:
+                continue
+            if "true" in hs:            # a literal always-hide in the chain
+                expr = "true"
+            elif len(hs) == 1:
+                expr = hs[0]
+            else:
+                expr = "=" + " Or ".join(f"({h[1:]})" for h in hs)
+            if tb.find(_q("Visibility")) is None:
+                _sub(_sub(tb, "Visibility"), "Hidden", expr)
+            return
+
     # Bucket by y row (within 0.10 inch -> same row), preserve y/x sort.
     rows = []
     current_y = None
@@ -9226,6 +15358,39 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
             bucket.append(entry)
     if bucket:
         rows.append(bucket)
+
+    # DECLARED-SPAN row merge: a LABEL-only row whose y-center falls
+    # inside the vertical SPAN of the previous row's value-column text
+    # belongs to THAT row (Oracle anchors the label to the multi-line
+    # note's middle — "Hyperlinks in Permits:" beside its 3-line note;
+    # split rows orphaned the label and mis-chained the note).
+    _merged_rows = []
+    for row in rows:
+        _row_lefts = [(x, f) for (_y, x, _d, f) in row
+                      if (f.kind or "field") == "text"
+                      and (f.text or "").strip() and x < 1.5]
+        _only_label = (len(_row_lefts) == len(
+            [1 for (_y3, _x3, _d3, f3) in row
+             if ((f3.kind or "field") == "text" and (f3.text or "").strip())
+             or ((f3.kind or "field") == "field"
+                 and (f3.source or "").strip())])
+            and len(_row_lefts) >= 1)
+        if _only_label and _merged_rows:
+            _prev = _merged_rows[-1]
+            _prev_rights = [
+                (y4, f4) for (y4, x4, _d4, f4) in _prev
+                if (f4.kind or "field") == "text"
+                and (f4.text or "").strip() and x4 >= 1.5]
+            _lbl_f = _row_lefts[0][1]
+            _lbl_yc = (float(getattr(_lbl_f, "y", 0) or 0)
+                       + float(getattr(_lbl_f, "height", 0) or 0) / 2.0)
+            if any(y4 <= _lbl_yc <= y4
+                    + float(getattr(f4, "height", 0) or 0)
+                   for y4, f4 in _prev_rights):
+                _merged_rows[-1] = _prev + row
+                continue
+        _merged_rows.append(row)
+    rows = _merged_rows
 
     # Build (label, value-expr) pairs from each row.
     # Some rows are continuation text (e.g. a suggestion note at x≈2.25
@@ -9262,11 +15427,13 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
                    and _drillthrough_for(report, f) is None]
         if _linked and value_field is None:
             for _lf in _linked:
-                pairs.append(("__action__", (_lf.text or "").strip(), _lf))
+                pairs.append(("__action__", (_lf.text or "").strip(), _lf,
+                              None))
             for _x, f in texts:
                 if f not in _linked and (f.text or "").strip():
                     pairs.append(("__fulltext__",
-                                  _cover_text_value(f.text or "", report), f))
+                                  _cover_text_value(f.text or "", report), f,
+                                  None))
             continue
 
         # Full-width INSTRUCTION prose: a left-column text with nothing to
@@ -9277,7 +15444,7 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
                 and not right_texts and len(texts) == 1):
             pairs.append(("__fulltext__",
                           _cover_text_value(label_field.text or "", report),
-                          label_field))
+                          label_field, None))
             continue
 
         # Continuation-text row: text only, positioned in the VALUE column
@@ -9292,17 +15459,24 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
             # "... is a hyperlink to &CP_CHILD_REPORT" never prints raw.
             ct_val = _cover_text_value(raw_ct, report)
             if pairs and raw_ct:
-                prev_lbl, prev_val, prev_vf = pairs[-1]
+                prev_lbl, prev_val, prev_vf, prev_lf = pairs[-1]
                 # Chain into the previous value only when BOTH are plain static
                 # literals; a resolved-token EXPRESSION can't be string-spliced
-                # into a literal, so emit it as its own note row.
-                if prev_val.startswith('="') and ct_val.startswith('="'):
+                # into a literal, so emit it as its own note row. A text with
+                # DECLARED inline-styled segments also stays its own row —
+                # splicing would flatten the styled runs to plain lines.
+                if (_cover_runs_spec(cont_text, report) is None
+                        and prev_val.startswith('="')
+                        and ct_val.startswith('="')):
                     pairs[-1] = (prev_lbl, prev_val[:-1] + ' ' + ct_val[2:],
-                                 prev_vf)
+                                 prev_vf, prev_lf)
                 else:
-                    pairs.append(("", ct_val, None))
+                    # keep the SOURCE text field so a conditional
+                    # continuation note inherits its variant frame's
+                    # trigger (a None here dropped the Hidden gate)
+                    pairs.append(("", ct_val, cont_text, None))
             elif raw_ct:
-                pairs.append(("", ct_val, None))
+                pairs.append(("", ct_val, cont_text, None))
             continue
 
         # Standalone field with no label (e.g. the URL line below
@@ -9313,7 +15487,7 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
                 value_field, report,
                 dataset_name=(report.queries[0].name if report.queries else ""),
             )
-            pairs.append(("", value_expr or "=Nothing", value_field))
+            pairs.append(("", value_expr or "=Nothing", value_field, None))
             continue
 
         # Normal label + value pair.
@@ -9334,17 +15508,37 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
                 # Resolve any &TOKEN scope-safely (a &PARAM/&FORMULA cover value)
                 # so a raw "&SITE_NAME (&PERM_NAME)" never prints on the cover.
                 value_expr = _cover_text_value(right.text or "", report)
+                # the TEXT object rides along so its declared styling
+                # (color/weight/size) and inline segments reach emission
+                value_field = right
             else:
                 continue
         else:
             continue
 
-        pairs.append((label_txt, value_expr, value_field))
+        # The LABEL OBJECT rides along beside the value object: each emitted
+        # box then carries ITS OWN declared format trigger, and only the
+        # ancestor-frame links are shared between the two (see
+        # _attach_cover_hidden). Before it did, the label box read a
+        # `label_field` left over from the LAST row bucket -- an unrelated
+        # object's per-object condition.
+        pairs.append((label_txt, value_expr, value_field, label_field))
 
     if not pairs:
         return None
 
-    INK = "#282828"
+    # DECLARATION FIRST. The pairing above only decides THAT this report has
+    # a form-shaped cover (the caller's contract: None -> generic cover).
+    # WHAT prints, and where, comes from the source's own layout objects at
+    # their declared geometry — the synthesized label/value grid below is
+    # the fallback for a cover whose objects declare no boxes.
+    _decl = _build_declared_cover_page(report, "LcCov",
+                                       ("LcCov_Lbl_", "LcCov_Val_"))
+    if _decl is not None:
+        return _decl
+
+    # Undeclared body text is BLACK; declared colours override per field.
+    INK = _BODY_INK
 
     rect = ET.Element(_q("Rectangle"))
     rect.set("Name", "Rect_CoverPage")
@@ -9352,9 +15546,9 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
     style = _sub(rect, "Style")
     # Oracle's criteria cover is a borderless label:value list on white paper
     # (verified against the letter-cover ground truth — page 1 of each is
-    # a plain list, no drawn box). A Solid border was an invented frame.
-    border = _sub(style, "Border")
-    _sub(border, "Style", "None")
+    # a plain list, no drawn box) — UNLESS the source itself draws a frame
+    # around the form; that declared border is reproduced 1:1.
+    _emit_cover_border(style, report)
     _sub(style, "BackgroundColor", "#ffffff")
 
     ri = _sub(rect, "ReportItems")
@@ -9399,7 +15593,7 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
     except Exception:  # noqa: BLE001
         _face_tokens = set()
 
-    for label_txt, value_expr, value_field in pairs:
+    for label_txt, value_expr, value_field, label_field in pairs:
         if label_txt == "__action__":
             # In-report action button ("Send Emails" distribution idiom).
             # Faithful rendering + a REAL SSRS Hyperlink action carrying the
@@ -9427,6 +15621,7 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
                               + 0.4))
             _sub(atb, "Top", f"{y:.2f}in"); _sub(atb, "Left", "0.40in")
             _sub(atb, "Width", f"{_w:.2f}in"); _sub(atb, "Height", "0.34in")
+            _attach_cover_hidden(atb, _lf)
             if _url is None:
                 try:
                     report.warnings.append(
@@ -9457,6 +15652,7 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
             ntb = ri[-1]
             _sub(ntb, "Top", f"{y:.2f}in"); _sub(ntb, "Left", "0.40in")
             _sub(ntb, "Width", "6.10in"); _sub(ntb, "Height", "0.30in")
+            _attach_cover_hidden(ntb, value_field)
             _nlines = max(1, (value_expr or "").count("vbCrLf") + 1)
             lbl_idx += 1
             y += 0.30 * min(_nlines, 6)
@@ -9481,6 +15677,25 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
                           f'"Open {child_lbl}", CStr(({inner}) & ""))')
         link_kw = ({"fg": "#0b5cad", "underline": True, "drillthrough": dt}
                    if dt else {"fg": INK})
+        # DECLARED styling for a TEXT-sourced value (the cover emitters
+        # overrode the maroon bold-italic note to 10pt gray — the source
+        # declaration wins), plus inline-styled segments as TRUE TextRuns.
+        _v_is_text = (value_field is not None
+                      and (getattr(value_field, "kind", "") or "") == "text")
+        _v_runs = _cover_runs_spec(value_field, report) if _v_is_text \
+            else None
+        _v_kw = {}
+        _v_h = 0.26
+        if _v_is_text and not dt:
+            _vc = (getattr(value_field, "color", "") or "").strip()
+            if _vc:
+                _v_kw["fg"] = _vc
+            _v_kw["bold"] = bool(getattr(value_field, "bold", False))
+            _v_kw["italic"] = bool(getattr(value_field, "italic", False))
+            _vsz = int(getattr(value_field, "font_size", 0) or 0)
+            if _vsz:
+                _v_kw["font_size"] = f"{_vsz}pt"
+            _v_h = max(0.26, float(getattr(value_field, "height", 0) or 0))
         if label_txt:
             # Normal label:value pair — label on the left, value on the right.
             _build_textbox(
@@ -9492,32 +15707,39 @@ def _build_letter_cover_page(report) -> Optional[ET.Element]:
             ltb = ri[-1]
             _sub(ltb, "Top", f"{y:.2f}in"); _sub(ltb, "Left", "0.40in")
             _sub(ltb, "Width", "2.40in"); _sub(ltb, "Height", "0.26in")
+            # The LABEL box renders the label OBJECT: its own declared
+            # trigger first, the value only as a frame-chain donor.
+            _attach_cover_hidden(ltb, label_field, value_field)
             _build_textbox(
                 ri, f"LcCov_Val_{lbl_idx}", value_expr,
-                font_size="10pt",
                 text_align="Left", vertical_align="Middle",
                 border_color="#ffffff", padding="2pt", can_grow=True,
-                **link_kw,
+                runs_spec=_v_runs,
+                **{"font_size": "10pt", **link_kw, **_v_kw},
             )
             vtb = ri[-1]
             _sub(vtb, "Top", f"{y:.2f}in"); _sub(vtb, "Left", "2.95in")
-            _sub(vtb, "Width", "3.60in"); _sub(vtb, "Height", "0.26in")
+            _sub(vtb, "Width", "3.60in")
+            _sub(vtb, "Height", f"{_v_h:.2f}in")
+            _attach_cover_hidden(vtb, value_field, label_field)
         else:
             # Standalone value with no label (continuation note or the
             # URL line itself). Render as a full-width textbox spanning
             # the value column.
             _build_textbox(
                 ri, f"LcCov_Val_{lbl_idx}", value_expr,
-                font_size="9pt",
                 text_align="Left", vertical_align="Middle",
                 border_color="#ffffff", padding="2pt", can_grow=True,
-                **link_kw,
+                runs_spec=_v_runs,
+                **{"font_size": "9pt", **link_kw, **_v_kw},
             )
             vtb = ri[-1]
             _sub(vtb, "Top", f"{y:.2f}in"); _sub(vtb, "Left", "2.95in")
-            _sub(vtb, "Width", "3.60in"); _sub(vtb, "Height", "0.26in")
+            _sub(vtb, "Width", "3.60in")
+            _sub(vtb, "Height", f"{_v_h:.2f}in")
+            _attach_cover_hidden(vtb, value_field, label_field)
         lbl_idx += 1
-        y += 0.30
+        y += max(0.30, _v_h + 0.04 if _v_h > 0.30 else 0.30)
 
     rect_h = y + 0.40
     _sub(rect, "Top", "0in"); _sub(rect, "Left", "0.35in")
@@ -9654,8 +15876,17 @@ def _ensure_no_rows_message(root) -> None:
     (caught by tools/renderlab/shape_matrix.py at rows=0).
 
     ``NoRowsMessage`` renders ONLY when the region is empty, so a report
-    with data is byte-identical apart from this element."""
+    with data is byte-identical apart from this element.
+
+    EXCEPT the cover-sheet carrier: it is not a data region the reader
+    reads, it is the container that lets a declared continuation criteria
+    SHEET collapse when its branch hides (it binds a dataset only because
+    SSRS makes every Tablix name one, and its rows are static). A
+    NoRowsMessage there would replace a declared parameter-form sheet with
+    a notice the source never prints."""
     for tablix in root.iter(_q("Tablix")):
+        if (tablix.get("Name") or "").startswith("Tablix_CoverSheets"):
+            continue
         if tablix.find(_q("NoRowsMessage")) is not None:
             continue
         ds = tablix.find(_q("DataSetName"))
@@ -9708,6 +15939,71 @@ def _drop_duplicated_header_margin_items(root) -> None:
             h_el.text = f"{max(0.25, h - 0.24 * removed):.2f}in"
         except (AttributeError, ValueError):
             pass
+    _drop_title_lines_the_body_already_renders(ph, body, items)
+
+
+# Pure literal-join expression: ="A" or ="A" & vbCrLf & "B" & vbCrLf & "C"
+_LITERAL_JOIN_RE = re.compile(
+    r'^=\s*"(?:[^"]|"")*"(?:\s*&\s*vbCrLf\s*&\s*"(?:[^"]|"")*")*\s*$')
+_LITERAL_ATOM_RE = re.compile(r'"((?:[^"]|"")*)"')
+
+
+def _drop_title_lines_the_body_already_renders(ph, body, items) -> None:
+    """The synthesized page-title textbox scavenges top-band layout texts;
+    on a per-record letter/license the SAME text object also renders inside
+    each record's body (the letterhead), so the line printed twice — once
+    in the invented banner, once in the form (license truth PDF prints it
+    once, in the form). Drop each title LINE whose exact literal the body
+    already renders; remove the whole textbox when nothing is left.
+
+    Tightly gated: pure string literals only (an expression atom never
+    drops), exact match after whitespace strip, and body literals inside
+    the page-1-only cover rects (Rect_CoverPage / Rect_SummaryHeader) are
+    EXCLUDED — the cover prints only where the banner doesn't, so a cover
+    echo is not a duplication."""
+    if ph is None or body is None or items is None:
+        return
+    title_tb = next((tb for tb in ph.iter(_q("Textbox"))
+                     if tb.get("Name") == "Tb_PageTitle"), None)
+    if title_tb is None:
+        return
+    val_el = next((v for v in title_tb.iter(_q("Value"))
+                   if (v.text or "").strip()), None)
+    if val_el is None or not _LITERAL_JOIN_RE.match(val_el.text.strip()):
+        return
+
+    _cover_names = ("Rect_CoverPage", "Rect_SummaryHeader")
+
+    def _collect(el, out):
+        if el.tag == _q("Rectangle") and el.get("Name") in _cover_names:
+            return
+        if el.tag == _q("Value"):
+            t = (el.text or "").strip()
+            if t and _LITERAL_JOIN_RE.match(t):
+                for m in _LITERAL_ATOM_RE.finditer(t):
+                    out.add(m.group(1).replace('""', '"').strip())
+        for ch in el:
+            _collect(ch, out)
+
+    body_lits: set = set()
+    _collect(body, body_lits)
+    if not body_lits:
+        return
+    atoms = _LITERAL_ATOM_RE.findall(val_el.text.strip())
+    kept = [a for a in atoms
+            if a.replace('""', '"').strip() not in body_lits]
+    if len(kept) == len(atoms):
+        return
+    if not kept:
+        if title_tb in list(items):
+            items.remove(title_tb)
+        return
+    val_el.text = "=" + " & vbCrLf & ".join('"' + a + '"' for a in kept)
+    # NB: the title box HEIGHT is left as declared. A long surviving line
+    # still word-wraps past the per-line estimate, and shrinking the box
+    # makes the engine push every row below it out of the band (measured:
+    # the run-on line clipped at the band bottom). Blank slack is safe;
+    # a pushed row is not.
 
 
 def _repair_blob_textboxes(root, report) -> None:
@@ -9854,7 +16150,397 @@ def _layer_images_behind_text(container):
             _set_zindex(k, "0" if k.tag == _q("Image") else "1")
 
 
-def _flow_frame_elasticity(group) -> None:
+# Slack allowed when asking "did the source declare this member INSIDE that
+# frame's box?" — one hairline, so an exact bottom-edge abutment still counts
+# as inside while a member parked further down the sheet does not.
+_DECL_BOX_TOL = 0.02
+
+
+# --- MUTUALLY EXCLUSIVE VARIANT FRAMES -----------------------------------
+# Oracle prints ONE of a set of variant frames and collapses the rest to zero
+# height, so everything under them rides up. SSRS reserves the declared box of
+# every hidden item inside a rectangle, so stacking the variants at their
+# DESIGN-TIME y makes the page start below the SUM of all of them (measured on
+# a per-record letter: first ink at 6.085in where the truth starts at 0.484in).
+# Variants that can never print together are therefore emitted OVERLAID at one
+# band top, and the band reserves ONE variant's height.
+#
+# Exclusivity is PROVEN from the translated <Hidden> conditions -- never
+# guessed. Anything the tiny grammar below cannot parse becomes an UNKNOWN
+# boolean the proof must survive for EVERY assignment, so an unrecognised
+# fragment can only make a proof fail, never succeed wrongly. No proof =>
+# today's stacking (the safe default).
+_VARIANT_MAX_WORLDS = 4096
+_VARIANT_REF_RE = re.compile(r"^(?:Fields!|Parameters!)[A-Za-z0-9_]+\.Value$")
+_VARIANT_EQ_RE = re.compile(r'^(.+?)\s*(=|<>)\s*"((?:[^"]|"")*)"$', re.S)
+
+
+class _CondParseError(Exception):
+    """The Hidden expression left the grammar the prover understands."""
+
+
+def _cond_parse(expr):
+    """Translated <Hidden> expression -> tiny boolean AST.
+
+    Nodes: ("lit", bool) | ("not", n) | ("and", a, b) | ("or", a, b)
+           | ("iif", c, t, f) | ("eq", ref, literal) | ("atom", text)
+    """
+    s = (expr or "").strip()
+    if s.startswith("="):
+        s = s[1:].strip()
+    if not s:
+        raise _CondParseError("empty")
+    pos = [0]
+    n = len(s)
+
+    def _ws():
+        while pos[0] < n and s[pos[0]].isspace():
+            pos[0] += 1
+
+    def _kw(word):
+        """Consume a whole-word keyword (case-insensitive); else no move."""
+        _ws()
+        i = pos[0]
+        if s[i:i + len(word)].lower() != word.lower():
+            return False
+        j = i + len(word)
+        if j < n and (s[j].isalnum() or s[j] == "_"):
+            return False
+        pos[0] = j
+        return True
+
+    def _expect(ch):
+        _ws()
+        if pos[0] >= n or s[pos[0]] != ch:
+            raise _CondParseError(f"expected {ch!r} at {pos[0]}")
+        pos[0] += 1
+
+    def _match_paren(i):
+        """Index of the ')' closing the '(' at i."""
+        depth = 0
+        k = i
+        while k < n:
+            c = s[k]
+            if c == '"':
+                k += 1
+                while k < n and s[k] != '"':
+                    k += 1
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    return k
+            k += 1
+        raise _CondParseError("unbalanced")
+
+    def _scan_leaf():
+        """Raw span up to the next top-level ')' / ',' / And / Or."""
+        start = pos[0]
+        depth = 0
+        k = start
+        while k < n:
+            c = s[k]
+            if c == '"':
+                k += 1
+                while k < n and s[k] != '"':
+                    k += 1
+            elif c == "(":
+                depth += 1
+            elif c == ")":
+                if depth == 0:
+                    break
+                depth -= 1
+            elif c == "," and depth == 0:
+                break
+            elif depth == 0 and (c in "AaOo"):
+                for w in ("And", "Or"):
+                    if (s[k:k + len(w)].lower() == w.lower()
+                            and (k == start or not (s[k - 1].isalnum()
+                                                    or s[k - 1] == "_"))
+                            and (k + len(w) >= n
+                                 or not (s[k + len(w)].isalnum()
+                                         or s[k + len(w)] == "_"))):
+                        pos[0] = k
+                        return s[start:k]
+            k += 1
+        pos[0] = k
+        if k == start:
+            raise _CondParseError("empty leaf")
+        return s[start:k]
+
+    def _leaf(text):
+        t = (text or "").strip()
+        m = _VARIANT_EQ_RE.match(t)
+        if m and _VARIANT_REF_RE.match(m.group(1).strip()):
+            node = ("eq", m.group(1).strip(), m.group(3))
+            return node if m.group(2) == "=" else ("not", node)
+        return ("atom", t)
+
+    def parse_or():
+        node = parse_and()
+        while True:
+            save = pos[0]
+            if _kw("Or"):
+                node = ("or", node, parse_and())
+            else:
+                pos[0] = save
+                return node
+
+    def parse_and():
+        node = parse_unary()
+        while True:
+            save = pos[0]
+            if _kw("And"):
+                node = ("and", node, parse_unary())
+            else:
+                pos[0] = save
+                return node
+
+    def parse_unary():
+        save = pos[0]
+        if _kw("Not"):
+            _ws()
+            if pos[0] < n and s[pos[0]] == "(":
+                pos[0] += 1
+                inner = parse_or()
+                _expect(")")
+                return ("not", inner)
+            pos[0] = save
+        return parse_primary()
+
+    def parse_primary():
+        _ws()
+        if pos[0] >= n:
+            raise _CondParseError("eof")
+        save = pos[0]
+        if _kw("IIf"):
+            _ws()
+            if pos[0] < n and s[pos[0]] == "(":
+                pos[0] += 1
+                cnd = parse_or()
+                _expect(",")
+                yes = parse_or()
+                _expect(",")
+                no = parse_or()
+                _expect(")")
+                return ("iif", cnd, yes, no)
+            pos[0] = save
+        if _kw("True"):
+            return ("lit", True)
+        if _kw("False"):
+            return ("lit", False)
+        if s[pos[0]] == "(":
+            close = _match_paren(pos[0])
+            open_at = pos[0]
+            pos[0] = open_at + 1
+            try:
+                inner = parse_or()
+                _ws()
+                if pos[0] == close:
+                    pos[0] = close + 1
+                    return inner
+            except _CondParseError:
+                pass
+            pos[0] = close + 1
+            return _leaf(s[open_at + 1:close])
+        return _leaf(_scan_leaf())
+
+    tree = parse_or()
+    _ws()
+    if pos[0] != n:
+        raise _CondParseError(f"trailing {s[pos[0]:][:20]!r}")
+    return tree
+
+
+def _cond_collect(node, refs, atoms):
+    """Gather (ref -> {literals}) and the opaque atom texts of an AST."""
+    kind = node[0]
+    if kind == "eq":
+        refs.setdefault(node[1], set()).add(node[2])
+    elif kind == "atom":
+        atoms.add(node[1])
+    else:
+        for sub in node[1:]:
+            if isinstance(sub, tuple):
+                _cond_collect(sub, refs, atoms)
+
+
+def _cond_eval(node, ref_vals, atom_vals):
+    kind = node[0]
+    if kind == "lit":
+        return node[1]
+    if kind == "not":
+        return not _cond_eval(node[1], ref_vals, atom_vals)
+    if kind == "and":
+        return (_cond_eval(node[1], ref_vals, atom_vals)
+                and _cond_eval(node[2], ref_vals, atom_vals))
+    if kind == "or":
+        return (_cond_eval(node[1], ref_vals, atom_vals)
+                or _cond_eval(node[2], ref_vals, atom_vals))
+    if kind == "iif":
+        return (_cond_eval(node[2], ref_vals, atom_vals)
+                if _cond_eval(node[1], ref_vals, atom_vals)
+                else _cond_eval(node[3], ref_vals, atom_vals))
+    if kind == "eq":
+        return ref_vals.get(node[1]) == node[2]
+    return bool(atom_vals.get(node[1]))
+
+
+def _conds_exclusive(hidden_a, hidden_b) -> bool:
+    """True when two translated <Hidden> expressions can NEVER both be false
+    -- i.e. the two frames can never both be VISIBLE -- and each frame is
+    individually printable. Proven by exhausting every world the two
+    expressions can distinguish: each referenced column/parameter takes each
+    literal it is compared against, plus one "some other value"; every
+    unparsed fragment takes both truth values. Unprovable -> False."""
+    if not hidden_a or not hidden_b:
+        return False
+    try:
+        tree_a = _cond_parse(hidden_a)
+        tree_b = _cond_parse(hidden_b)
+    except (_CondParseError, RecursionError):
+        return False
+    refs: dict = {}
+    atoms: set = set()
+    _cond_collect(tree_a, refs, atoms)
+    _cond_collect(tree_b, refs, atoms)
+    if not refs:
+        return False
+    ref_keys = sorted(refs)
+    # None = "any value the source never compares against".
+    choices = [sorted(refs[k]) + [None] for k in ref_keys]
+    atom_keys = sorted(atoms)
+    worlds = 2 ** len(atom_keys)
+    for opts in choices:
+        worlds *= len(opts)
+        if worlds > _VARIANT_MAX_WORLDS:
+            return False
+    if worlds > _VARIANT_MAX_WORLDS:
+        return False
+    sat_a = sat_b = False
+    for combo in itertools.product(*choices):
+        ref_vals = dict(zip(ref_keys, combo))
+        for bits in itertools.product((False, True), repeat=len(atom_keys)):
+            atom_vals = dict(zip(atom_keys, bits))
+            vis_a = not _cond_eval(tree_a, ref_vals, atom_vals)
+            vis_b = not _cond_eval(tree_b, ref_vals, atom_vals)
+            if vis_a and vis_b:
+                return False
+            sat_a = sat_a or vis_a
+            sat_b = sat_b or vis_b
+    return sat_a and sat_b
+
+
+def _frame_hidden_cond(group, report):
+    """The frame's own translated <Hidden> expression (the SAME lookup
+    _emit_frame_rect stamps on the rect), or None."""
+    name = (getattr(group, "format_trigger", "") or "").strip()
+    if not name or report is None:
+        return None
+    try:
+        hmap = getattr(report, "_ft_hidden_map_cache", None)
+        if hmap is None:
+            hmap = _format_trigger_hidden_map(report)
+            report._ft_hidden_map_cache = hmap
+    except Exception:  # noqa: BLE001 - a trigger we cannot read is no variant
+        return None
+    return hmap.get(name.lower()) or hmap.get(name)
+
+
+def _collapse_exclusive_variant_bands(group, report) -> None:
+    """OVERLAY mutually exclusive sibling variant frames; the band reserves
+    ONE variant's height and everything below it rides up by the difference.
+
+    A run is a maximal stretch of CONSECUTIVE conditional sibling frames (in
+    flowed-y order) with no unconditional frame and no bare field between
+    them -- an unconditional neighbour always prints, so it pins the band and
+    nothing may be moved across it. The run collapses only when its members
+    fall into >= 2 classes (by translated condition) that are PAIRWISE
+    exclusive. Members of one class keep their offsets relative to each
+    other; each class's top moves to the band top.
+
+    Runs AFTER the elasticity push pass, on the flowed positions it produced,
+    and rewrites ``_flow_y`` in place. Placement-only: a frame's interior
+    keeps its declared origin, so a moved frame carries its whole interior.
+    Idempotent."""
+    if report is None or getattr(group, "_variant_band_done", False):
+        return
+    group._variant_band_done = True
+    kids = [c for c in (getattr(group, "children", None) or [])
+            if "frame" in (getattr(c, "kind", "") or "").lower()]
+    if len(kids) < 2:
+        return
+
+    def _y(o):
+        v = getattr(o, "_flow_y", None)
+        return float(v) if v is not None else float(getattr(o, "y", 0.0) or 0.0)
+
+    def _bot(o):
+        return _y(o) + float(getattr(o, "height", 0.0) or 0.0)
+
+    def _move(o, dy):
+        if abs(dy) > 1e-9:
+            o._flow_y = _y(o) + dy
+
+    units = sorted(
+        [("g", c) for c in kids]
+        + [("f", f) for f in (getattr(group, "fields", None) or [])],
+        key=lambda u: (_y(u[1]), float(getattr(u[1], "x", 0) or 0)))
+
+    carry = 0.0          # inches reclaimed by the bands collapsed so far
+    i = 0
+    while i < len(units):
+        kind, obj = units[i]
+        cond = _frame_hidden_cond(obj, report) if kind == "g" else None
+        if not cond:
+            _move(obj, -carry)
+            i += 1
+            continue
+        run = []
+        j = i
+        while j < len(units):
+            k2, o2 = units[j]
+            c2 = _frame_hidden_cond(o2, report) if k2 == "g" else None
+            if not c2:
+                break
+            run.append((o2, c2))
+            j += 1
+        classes: dict = {}
+        for obj2, cond2 in run:
+            classes.setdefault(cond2, []).append(obj2)
+        keys = list(classes)
+        proven = len(keys) >= 2
+        for a in range(len(keys)):
+            if not proven:
+                break
+            for b in range(a + 1, len(keys)):
+                if not _conds_exclusive(keys[a], keys[b]):
+                    proven = False
+                    break
+        if not proven:
+            for obj2, _c in run:
+                _move(obj2, -carry)
+            i = j
+            continue
+        band_top = min(_y(o) for o, _c in run)
+        run_bottom = max(_bot(o) for o, _c in run)
+        reserved = 0.0
+        class_tops = {}
+        for cond2, members in classes.items():
+            class_tops[cond2] = min(_y(m) for m in members)
+            reserved = max(reserved,
+                           max(_bot(m) for m in members) - class_tops[cond2])
+        for cond2, members in classes.items():
+            for m in members:
+                _move(m, (band_top - class_tops[cond2]) - carry)
+        saved = (run_bottom - band_top) - reserved
+        if saved > 0.01:
+            carry += saved
+        i = j
+
+
+def _flow_frame_elasticity(group, report=None) -> None:
     """ORACLE ELASTICITY FLOW, computed POST-ORDER over a frame subtree.
 
     The general rule, driven entirely by each report's own declarations:
@@ -9883,7 +16569,7 @@ def _flow_frame_elasticity(group) -> None:
     kids = [c for c in (getattr(group, "children", None) or [])
             if "frame" in (getattr(c, "kind", "") or "").lower()]
     for c in kids:
-        _flow_frame_elasticity(c)
+        _flow_frame_elasticity(c, report)
 
     def _geom(o):
         return (float(getattr(o, "x", 0.0) or 0.0),
@@ -9900,23 +16586,50 @@ def _flow_frame_elasticity(group) -> None:
         frames that merely sit near each other (A/B-measured: a clean
         form report gained 24 pairs from phantom pushes)."""
         x, y, w, h = _geom(o)
-        top = float(getattr(o, "_flow_y", None) or y)
+        # NOTE the explicit None test: a variant collapsed onto the band top
+        # can legitimately flow to y=0.0, which an `or y` fallback would read
+        # as "never flowed" and silently restore the declared y.
+        _fy = getattr(o, "_flow_y", None)
+        top = float(_fy) if _fy is not None else y
         if kind != "g":
             return top + h
 
         def _eff_h(g):
             gx0, gy0, gw0, gh0 = _geom(g)
+            # DECLARED-BOX GATE. Only what the source declared INSIDE this
+            # frame's own box can grow it. A member whose DECLARED y sits
+            # below the box bottom is a separate declaration printing at its
+            # own absolute position, not frame growth: an Oracle export
+            # collapses every repeating frame bound to the same group into
+            # ONE data region, so a frame declared 0.4in tall can end up
+            # holding members another (variant) declaration parked 8in
+            # further down the sheet. Counting those as growth turned that
+            # frame into a 9.7in push frontier and shifted every sibling
+            # below it by the same amount — synthesized slack the
+            # declaration never states (measured: +9.45in on one record,
+            # three sheets per record against the truth's one).
+            _box_bot = gy0 + gh0
             used = 0.0
             for f2 in (getattr(g, "fields", None) or []):
-                fy = float(getattr(f2, "_flow_y", None)
-                           or getattr(f2, "y", 0) or 0)
+                if (gh0 > 0.0
+                        and float(getattr(f2, "y", 0) or 0)
+                        > _box_bot + _DECL_BOX_TOL):
+                    continue
+                _f2y = getattr(f2, "_flow_y", None)
+                fy = (float(_f2y) if _f2y is not None
+                      else float(getattr(f2, "y", 0) or 0))
                 used = max(used, (fy - gy0)
                            + float(getattr(f2, "height", 0) or 0))
             for c2 in (getattr(g, "children", None) or []):
                 if "frame" not in (getattr(c2, "kind", "") or "").lower():
                     continue
-                cy = float(getattr(c2, "_flow_y", None)
-                           or getattr(c2, "y", 0) or 0)
+                if (gh0 > 0.0
+                        and float(getattr(c2, "y", 0) or 0)
+                        > _box_bot + _DECL_BOX_TOL):
+                    continue
+                _c2y = getattr(c2, "_flow_y", None)
+                cy = (float(_c2y) if _c2y is not None
+                      else float(getattr(c2, "y", 0) or 0))
                 used = max(used, (cy - gy0) + _eff_h(c2))
             return max(gh0, used + 0.10) if used > 0 else max(gh0, 0.0)
 
@@ -10002,6 +16715,16 @@ def _flow_frame_elasticity(group) -> None:
             if _is_elastic(k, o) or eb > my + shift + mh + 0.005:
                 frontiers.append((eb, mx, mx + mw))
 
+    # LAST: mutually exclusive VARIANTS collapse onto one band top. Run AFTER
+    # the push pass, on the flowed positions — running it first only had the
+    # push pass undo it (the variant below was shoved back down past the one
+    # above it, and the band shift then leaked onto every sibling below,
+    # measured +1.30in on the letter this fixes).
+    try:
+        _collapse_exclusive_variant_bands(group, report)
+    except Exception:  # noqa: BLE001 - a proof must never sink a convert
+        pass
+
 
 def _lf_y(lf) -> float:
     """A member's emission y: the ELASTICITY-FLOWED position when the frame
@@ -10017,9 +16740,81 @@ def _lf_y(lf) -> float:
     return float(getattr(lf, "y", 0.0) or 0.0)
 
 
+def _declared_left_bound(lf, siblings):
+    """Absolute x a FIT adjustment may not push ``lf`` left of, or None.
+
+    That is the right edge of the nearest DECLARED sibling that sits wholly
+    to the left of this box and shares its vertical band. Purely structural:
+    it reads the source's own geometry, so it holds for any grid, caption
+    stack or voucher block without knowing what the report is."""
+    try:
+        x0 = float(getattr(lf, "x", 0) or 0)
+        y0 = float(getattr(lf, "y", 0) or 0)
+        y1 = y0 + float(getattr(lf, "height", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    bound = None
+    for o in (siblings or []):
+        if o is lf or not getattr(o, "visible", True):
+            continue
+        try:
+            ox0 = float(getattr(o, "x", 0) or 0)
+            ox1 = ox0 + float(getattr(o, "width", 0) or 0)
+            oy0 = float(getattr(o, "y", 0) or 0)
+            oy1 = oy0 + float(getattr(o, "height", 0) or 0)
+        except (TypeError, ValueError):
+            continue
+        if ox1 > x0 + 0.001:          # overlaps or starts right of us
+            continue
+        if oy1 <= y0 + 0.001 or oy0 >= y1 - 0.001:   # different band
+            continue
+        bound = ox1 if bound is None else max(bound, ox1)
+    return bound
+
+
+def _declared_inline_paragraphs(segs):
+    """Group one Oracle <text>'s <textSegment>s into PARAGRAPHS of inline RUNS.
+
+    Oracle FLOWS the segments of a single text object inline: a bold phrase
+    that opens mid-sentence continues the very same line -- truth PDF, letter
+    body: the plain run ends at y=3.8818in and the bold run that follows it
+    opens at x=4.9310in on that same baseline (y=3.8825in). Emitting one
+    <Paragraph> per segment instead put every styled phrase on a line of its
+    own (one 11-segment boilerplate object printed 11 stacked lines).
+
+    Only a break the DECLARATION carries starts a new paragraph: a newline
+    inside the CDATA payload, or an inline <br> the parser already turned into
+    one. Each segment's payload is otherwise kept VERBATIM -- the exporter's
+    pretty-print frame is removed at parse time, so the whitespace still
+    standing is the author's: the edge spaces that separate one styled run
+    from the next ("</b> If you use <b>"), and the leading spaces that indent
+    a lettered clause. The engine advances by every one of them
+    (probe-measured: a run declared with 5 leading spaces starts its first
+    glyph 5 space-widths in, exactly like the Oracle truth).
+
+    Returns [[(text, segment_dict), ...], ...]. Paragraphs with no printable
+    run (Oracle's whitespace-only spacer lines) are dropped, matching what the
+    uniform-text path already does with its blank declared lines.
+    """
+    paras, cur = [], []
+    for sg in (segs or []):
+        raw = sg.get("text") or ""
+        if not raw:
+            continue
+        pieces = raw.split("\n")
+        for i, piece in enumerate(pieces):
+            if i:
+                paras.append(cur)
+                cur = []
+            if piece:
+                cur.append((piece, sg))
+    paras.append(cur)
+    return [p for p in paras if any(t.strip() for t, _s in p)]
+
+
 def _emit_field_textbox(
     parent_items, name, value, lf, ox, oy, rect_w, rect_h, report,
-    cover_title_lines, value_override=None,
+    cover_title_lines, value_override=None, y_shift=0.0,
 ):
     """Emit ONE LayoutField as a Textbox positioned relative to its
     containing frame's (ox, oy) origin. Used by _emit_frame_rect.
@@ -10028,7 +16823,12 @@ def _emit_field_textbox(
     value_override: when a caller has already resolved the field's value
     expression (e.g. a cross-query Lookup the dataset-local _field_value_for
     can't synthesize), pass it here to bypass value derivation while keeping
-    all geometry / font / rotation / drillthrough handling."""
+    all geometry / font / rotation / drillthrough handling.
+
+    y_shift: the RIGID offset the caller applies to the WHOLE declared stack
+    so its topmost member clears the frame's own top edge. Every member of
+    one frame gets the same value, so every DECLARED inter-line gap survives
+    verbatim (see _emit_frame_rect)."""
     kind = getattr(lf, "kind", "field") or "field"
     text = (getattr(lf, "text", "") or "").strip()
     source = (getattr(lf, "source", "") or "").strip()
@@ -10068,14 +16868,22 @@ def _emit_field_textbox(
         if not _resid:
             return (False, 0.0)
     # Oracle module-filename trailer (a text field whose entire content is the
-    # source report's own file name, e.g. "GRANT_STATUS.rdf"). Oracle prints
-    # this in a developer/margin trailer next to the page number; it is the source
-    # artifact name, never report content, and would otherwise leak into the body.
-    # Same skip the title path already applies (".rdf"-suffixed text is ignored
-    # there). Anchored to a bare filename so prose mentioning a file is untouched.
-    if kind == "text" and re.match(
-        r"(?i)^[\w .#-]+\.(?:rdf|rep|rex|rdl|jsp)\.?\s*$", text
-    ):
+    # source report's own file name, e.g. "GRANT_STATUS.rdf"). Where the
+    # DECLARATION puts it decides what it is, and the parser already tags that:
+    #   * declared inside the section's <margin> band  -> PAGE CHROME. Its SSRS
+    #     home is the PageHeader/PageFooter (_emit_margin_chrome emits it
+    #     there), so a body copy would print it twice.
+    #   * declared inside the BODY -> report content, and the export prints it
+    #     exactly where the body declares it. Truth-measured on a per-record
+    #     invoice letter: the stamp is declared at x=6.2604in w=1.2396in with
+    #     justify="end" inside the signature repeating frame, and the truth PDF
+    #     prints it right-aligned at that frame's right edge (declared right
+    #     edge 7.50in -> 0.50in body origin + 7.50in = 576pt; the 8pt glyph run
+    #     measured in the truth ends at exactly 576pt) on EVERY letter page.
+    #     Suppressing it there is silent content loss.
+    # Anchored to a bare filename so prose mentioning a file is untouched.
+    if (kind == "text" and getattr(lf, "in_margin", False) and re.match(
+            r"(?i)^[\w .#-]+\.(?:rdf|rep|rex|rdl|jsp)\.?\s*$", text)):
         return (False, 0.0)
 
     if kind == "text" and not text:
@@ -10114,9 +16922,12 @@ def _emit_field_textbox(
         fy = _lf_y(lf)
         iw = float(getattr(lf, "width", 0.0) or 0.0) or 1.0
         ih = float(getattr(lf, "height", 0.0) or 0.0) or 1.0
-        i_left = max(0.02, fx - ox)
-        i_top = max(0.02, fy - oy)
-        i_w = max(0.2, min(iw, rect_w - i_left - 0.02))
+        # DECLARED offsets, floored only at the frame edge (SSRS rejects a
+        # negative one). The 0.02in minima that used to sit here nudged a
+        # seal/logo declared flush with its frame off its declared origin.
+        i_left = _declared_left(fx - ox)
+        i_top = max(0.0, fy - oy)
+        i_w = max(0.2, min(iw, rect_w - i_left))
         i_h = max(0.2, ih)
         _emit_embedded_image(parent_items, name, emb_name,
                              i_left, i_top, i_w, i_h)
@@ -10131,11 +16942,43 @@ def _emit_field_textbox(
         fy_g = _lf_y(lf)
         gw = float(getattr(lf, "width", 0.0) or 0.0)
         gh = float(getattr(lf, "height", 0.0) or 0.0)
-        bw_pt = float(getattr(lf, "border_width", 0.0) or 0.0) or 1.0
-        bcolor = (getattr(lf, "border_color", "") or "#000000")
-        g_left = max(0.02, fx_g - ox)
-        g_top = max(0.02, fy_g - oy)
-        bw_in = min(0.06, max(0.01, bw_pt / 72.0))
+        bw_decl = float(getattr(lf, "border_width", 0.0) or 0.0)
+        bw_pt = bw_decl or 1.0
+        # Declared stroke ink wins; with none, the width declaration picks
+        # the device default (solid black for a real stroke, ~20%-ink
+        # hairline for the undeclared-width rule Oracle writes 0-width).
+        bcolor = _rule_color(getattr(lf, "border_color", ""),
+                             width_declared=bw_decl > 0 or kind != "line")
+        # DECLARED offset, floored only at the frame edge. A rule declared
+        # flush with its frame's left edge starts THERE; the 0.02in minimum
+        # that used to sit here both moved the rule's left end and (through
+        # the span clamp below) cut that much off its length.
+        g_left = _declared_left(fx_g - ox)
+        # DECLARED offset, plus the frame-wide rigid shift (see the textbox
+        # path): a rule rides its stack, it is never nudged on its own.
+        g_top = max(0.0, fy_g - oy + y_shift)
+        # Rule weight: a DECLARED lineWidth maps 1:1 to points; an
+        # UNDECLARED width is Oracle's device hairline (truth PDFs measure
+        # 0-width strokes for every no-lineWidth rule), NOT 1pt — the old
+        # 0.01in floor painted a near-black 0.72pt bar where the truth
+        # shows a light hairline.
+        bw_in = min(0.06, max(0.003, (bw_decl if bw_decl > 0 else 0.25) / 72.0))
+        # A DECLARED DASH is part of the rule's ink weight, and a filled bar
+        # cannot carry one: the truth exports stroke a dash="dot" rule with
+        # a real PDF dash array at the declared lineWidth, painting about
+        # HALF the ink of the solid bar below (rasterized on a truth-paired
+        # invoice at 150 dpi: solid bar 3.36 ink-px vs the truth stroke's
+        # 1.77). A dashed/dotted rule therefore has to be a real stroke —
+        # an RDL <Line>, which is the only element whose border pattern the
+        # PDF renderer turns into a dash array.
+        _dash_style = _declared_dash_style(getattr(lf, "line_dash", ""))
+        if _dash_style != "Solid" and gh <= gw:
+            _dw = max(0.1, min(gw if gw > 0 else rect_w,
+                               rect_w - g_left))
+            _emit_rule_line(parent_items, name, g_top, g_left, _dw, bcolor,
+                            weight=f"{bw_pt:g}pt",
+                            dash=getattr(lf, "line_dash", ""))
+            return (True, g_top + bw_in)
         rg = _sub(parent_items, "Rectangle")
         rg.set("Name", name)
         rstyle = _sub(rg, "Style")
@@ -10147,7 +16990,7 @@ def _emit_field_textbox(
             _sub(rb, "Style", "Solid")
             _sub(rb, "Color", bcolor)
             _sub(rb, "Width", f"{bw_pt:g}pt")
-            g_w = max(0.02, min(gw, rect_w - g_left - 0.02))
+            g_w = max(0.02, min(gw, rect_w - g_left))
             g_h = max(0.02, gh)
         else:
             # A rule: a thin filled bar along its LONGER axis. A horizontal rule
@@ -10162,27 +17005,31 @@ def _emit_field_textbox(
                 g_h = max(bw_in, gh)
             else:
                 g_w = max(bw_in, min(gw if gw > 0 else rect_w,
-                                     rect_w - g_left - 0.02))
+                                     rect_w - g_left))
                 g_h = bw_in
-        _sub(rg, "Top", f"{g_top:.2f}in")
-        _sub(rg, "Left", f"{g_left:.2f}in")
-        _sub(rg, "Height", f"{g_h:.2f}in")
-        _sub(rg, "Width", f"{g_w:.2f}in")
+        _sub(rg, "Top", f"{g_top:.4f}in")
+        # 4 decimals: a rule's left end is a DECLARED quantity (the same
+        # precision _emit_rule_line already writes), and 2-decimal rounding
+        # moves it by up to 0.36pt.
+        _sub(rg, "Left", f"{g_left:.4f}in")
+        # 3 decimals: a hairline rule is ~0.003in thick — 2-decimal
+        # rounding would collapse it to 0.00in and the rule would vanish.
+        _sub(rg, "Height", f"{g_h:.3f}in")
+        _sub(rg, "Width", f"{g_w:.3f}in")
         return (True, g_top + g_h)
 
     bold = bool(getattr(lf, "bold", False))
     italic = bool(getattr(lf, "italic", False))
+    # DECLARED underline: Oracle draws a real rule under the glyphs of any
+    # object whose <font underline="yes"> says so.
+    underline = bool(getattr(lf, "underline", False))
     fs = getattr(lf, "font_size", 0) or 10
     # Oracle font FACE: parsed but (like the tablix path) was never passed
     # through here, so positioned per-record/document fields fell back to the
     # default Arial. Carry it (None -> SSRS default).
     fam = (getattr(lf, "font_family", "") or "").strip() or None
-    fcolor = getattr(lf, "color", "") or "#111111"
-    align = (getattr(lf, "align", "") or "left").lower()
-    text_align = {
-        "left": "Left", "center": "Center", "centre": "Center",
-        "right": "Right", "start": "Left", "end": "Right",
-    }.get(align, "Left")
+    fcolor = _text_color(getattr(lf, "color", ""))
+    text_align = _declared_text_align(lf, "Left")
     font_size = f"{fs}pt" if fs else "10pt"
 
     # Heuristic centring: bold, large text near the top of its frame
@@ -10203,72 +17050,77 @@ def _emit_field_textbox(
         text_align = "Center"
 
     value_expr = ""
-    seg_spec = None
+    runs_spec = None
     if img_bind is None:
-        # MIXED-FONT Oracle <text> (per-segment <font>): emit each segment as its
-        # own line/run with its real weight + size, so e.g. the UNbold "IS
-        # LICENSED TO OPERATE" caption and the BOLD business-name line beneath it
-        # render correctly (the license body). Resolve each segment's &tokens
-        # independently. Falls through to the uniform path when not segmented.
+        # MIXED-FONT Oracle <text> (per-segment <font>): the segments of ONE
+        # text object FLOW INLINE and only the breaks the declaration carries
+        # start a new line, so each declared LINE becomes one <Paragraph> and
+        # each segment on that line becomes one TextRun inside it, with its
+        # real weight/size/colour. Emitting a Paragraph per SEGMENT instead
+        # broke every mid-sentence bold phrase onto a line of its own (an
+        # 11-segment letter paragraph printed as 11 stacked lines; the truth
+        # PDF flows them, the bold run opening at x=4.9310in on the same
+        # baseline the plain run before it ends on). Resolve each run's
+        # &tokens independently. Falls through to the uniform path when not
+        # segmented.
         _segs = getattr(lf, "segments", None) or []
         if kind == "text" and _segs:
             _main_ds = (_pick_main_query(report).name
                         if _pick_main_query(report) else "")
-            seg_spec = []
-            for _sg in _segs:
-                _st = re.sub(r"\s*\n\s*", " ", (_sg.get("text") or "")).strip()
-                if not _st:
-                    continue
-                _rv, _isx = _resolve_text_expression(_st, report, dataset_name=_main_ds)
-                _sval = _rv if _isx else ('="' + _st.replace('"', '""') + '"')
-                seg_spec.append({
-                    "value": _sval,
-                    "bold": bool(_sg.get("bold")),
-                    "italic": bool(_sg.get("italic")),
-                    "underline": bool(_sg.get("underline")),
-                    "font_size": (f"{_sg.get('size')}pt" if _sg.get("size") else font_size),
-                    "color": _sg.get("color") or fcolor,
-                })
-            if not seg_spec:
-                seg_spec = None
-            else:
-                # N stacked <Paragraph>s (one per segment) in a CanGrow=false box
-                # OVERFLOW and clip every segment past the first when Oracle's box
-                # isn't tall enough for N lines: the "expires <date>" wallet card
-                # lost its date, the bureau-chief name/address line lost the
-                # address. Oracle rendered these as ONE elastic box -- inline runs
-                # on a single line (short box) or wrapped lines that fit a
-                # sized-to-content box -- not as independent stacked paragraphs.
-                # Collapse the segments into ONE TextRun occupying the same
-                # vertical budget Oracle assumed: space-joined inline when the box
-                # is one line, vbCrLf-joined when it spans >= 2 lines.
-                # EXCEPTION: a GROWABLE, ~full-width prose box (verticalElasticity
-                # variable/expand AND most of the printable width) is a flowing
-                # letter body Oracle expands at run time; collapsing it to a fixed
-                # line would clip the prose, so keep its per-segment paragraphs.
-                _elastic = (getattr(lf, "vertical_elasticity", "") or "").lower()
-                _growable = _elastic in ("variable", "expand")
-                _bh = float(getattr(lf, "height", 0.0) or 0.0)
-                try:
-                    _maxpt = max(float(str(s["font_size"]).replace("pt", "").strip())
-                                 for s in seg_spec)
-                except (ValueError, KeyError, TypeError):
-                    _maxpt = float(fs)
-                _seg_lh = max(6.0, _maxpt) * 1.15 / 72.0
-                _printable = max(1.0, _page_width_for(report) - 2 * _PAGE_HMARGIN_IN)
-                _wide = float(getattr(lf, "width", 0.0) or 0.0) >= 0.6 * _printable
-                _oneline = _bh > 0 and _bh < 2 * _seg_lh
-                _keep_stacked = _growable and ((not _oneline) or _wide)
-                if _keep_stacked:
-                    value_expr = '=""'
-                else:
-                    _vals = [s["value"][1:] if str(s["value"]).startswith("=")
-                             else '"' + str(s["value"]).replace('"', '""') + '"'
-                             for s in seg_spec]
-                    _join = ' & " " & ' if _oneline else ' & vbCrLf & '
-                    value_expr = "=" + _join.join(_vals)
-                    seg_spec = None
-        if seg_spec is not None:
+            _paras = _declared_inline_paragraphs(_segs)
+            # Oracle's own geometry is the discriminator for whether the
+            # declared breaks are LAYOUT or export formatting: a box whose
+            # height only fits ONE line of its font renders as one line (the
+            # same rule the uniform-text path below applies to its newlines).
+            try:
+                _maxpt = max(float(_sg.get("size") or 0) or float(fs)
+                             for _sg in _segs)
+            except (TypeError, ValueError):
+                _maxpt = float(fs)
+            _seg_lh = max(6.0, _maxpt) * 1.15 / 72.0
+            _bh = float(getattr(lf, "height", 0.0) or 0.0)
+            if len(_paras) > 1 and _bh and _bh < 2 * _seg_lh:
+                _flat = []
+                for _p in _paras:
+                    if (_flat and not _flat[-1][0][-1:].isspace()
+                            and not _p[0][0][:1].isspace()):
+                        _flat.append((" ", _flat[-1][1]))
+                    _flat.extend(_p)
+                _paras = [_flat]
+            runs_spec = []
+            for _p in _paras:
+                _runs = []
+                for _txt, _sg in _p:
+                    # DECLARED indentation is ink, and it must not reach the
+                    # token resolver: that normalizes a line's leading run to
+                    # a single space. Split it off, resolve the rest, and put
+                    # the indent back as its own literal. A ONE-space lead is
+                    # left in place -- it is exactly the run-boundary space
+                    # the resolver already preserves verbatim.
+                    _ind = _txt[:len(_txt) - len(_txt.lstrip(" \t"))]
+                    if len(_ind) < 2:
+                        _ind = ""
+                    _core = _txt[len(_ind):]
+                    _rv, _isx = _resolve_text_expression(
+                        _core, report, dataset_name=_main_ds)
+                    if _isx:
+                        _sval = ('="' + _ind + '" & ' + _rv[1:]) if _ind else _rv
+                    else:
+                        _sval = '="' + (_ind + _rv).replace('"', '""') + '"'
+                    _runs.append({
+                        "value": _sval,
+                        "bold": bool(_sg.get("bold")),
+                        "italic": bool(_sg.get("italic")),
+                        "underline": bool(_sg.get("underline")),
+                        "font_size": (f"{_sg.get('size')}pt"
+                                      if _sg.get("size") else font_size),
+                        "color": _sg.get("color") or fcolor,
+                    })
+                if _runs:
+                    runs_spec.append(_runs)
+            if not runs_spec:
+                runs_spec = None
+        if runs_spec is not None:
             pass
         elif kind == "text":
             # Oracle's XML export pretty-prints CDATA text: REAL line
@@ -10300,7 +17152,14 @@ def _emit_field_textbox(
                 # fixed-height box (CanGrow stays False for positional fidelity --
                 # see below), clipping the tail (signatory city/phone, the last
                 # numbered clause). Drop the spacer lines to match Oracle.
-                lines = [ln.strip() for ln in text.split(chr(10)) if ln.strip()]
+                #
+                # A surviving line keeps its DECLARED leading indentation --
+                # the exporter's pretty-print frame is stripped at parse time,
+                # so what is left was written inside the CDATA and Oracle
+                # prints it (truth PDF: the lettered clauses of a fee letter
+                # stand 5 and 10 space-widths in). Trailing whitespace is
+                # invisible ink and still goes.
+                lines = [ln.rstrip() for ln in text.split(chr(10)) if ln.strip()]
                 esc = [ln.replace('"', '""') for ln in lines]
                 value_expr = ('=' + ' & vbCrLf & '.join(
                     '"' + ln + '"' for ln in esc)) if esc else '=""'
@@ -10316,16 +17175,78 @@ def _emit_field_textbox(
                 return (False, 0.0)
 
     # Position relative to the parent frame's (ox, oy).
-    rel_left = max(0.02, fx_abs - ox)
-    rel_top = max(0.02, fy_abs - oy)
+    #
+    # DECLARED offset, floored only at the frame edge. The 0.02in minimum that
+    # used to sit here is the HORIZONTAL twin of the vertical one removed
+    # below, and it manufactured overlaps out of thin air: a declaration that
+    # abuts two boxes (left box [0 .. 3.1875], right box [3.1875 .. 6.6875])
+    # became [0.02 .. 3.2075] and [3.19 .. 6.69] -- the left box's right edge
+    # now standing 0.0175in INSIDE the right box, so its border stroke printed
+    # through the neighbour's first glyph (engine-render measured; the truth
+    # PDF draws the two frames sharing one edge at 229.52pt with nothing
+    # between them). Nothing needs the floor: a box declared at its frame's
+    # own left edge belongs there.
+    rel_left = max(0.0, fx_abs - ox)
+    # DECLARED offset plus the frame's RIGID stack shift. The 0.02in minimum
+    # that used to sit here bit only the member declared at (or within a
+    # hairline of) its frame's top edge -- and pushing THAT one down while
+    # its stack-mates kept their declared y shortened the first inter-line
+    # gap by up to 1pt, turning a declared caption stack into a different
+    # one (truth-PDF measured on a voucher block: 15.12pt printed against a
+    # declared and truth-measured 16.15pt). The shift is computed ONCE per
+    # frame and applied to every member, so all declared gaps survive.
+    rel_top = max(0.0, fy_abs - oy + y_shift)
     fw = float(getattr(lf, "width", 0.0) or 0.0)
     fh = float(getattr(lf, "height", 0.0) or 0.0)
     if fw <= 0:
-        fw = max(0.5, rect_w - rel_left - 0.02)
+        fw = max(0.5, rect_w - rel_left)
     if fh <= 0:
         fh = 0.22
-    place_w = max(0.40, min(fw, rect_w - rel_left - 0.02))
-    place_h = max(0.18, fh)
+    # WHICH box edges this declaration strokes (linePattern gates, then
+    # hideXBorder removes edges). Drives both the emitted border below and
+    # the size floors here.
+    _paint_edges = _declared_paint_edges(lf)
+    # A SIZE FLOOR MAY NOT MOVE A DECLARED STROKE. The 0.40in / 0.18in
+    # minima are text-clipping guards, invisible on a box that draws no
+    # chrome. On a box whose RIGHT / BOTTOM edge strokes they relocate a
+    # declared rule: a fee table's sub-header separator, declared 0.14587in
+    # tall, was floored to 0.18in and its bottom rule landed 0.034in INSIDE
+    # the caption box below it, cutting that caption's glyphs (engine-render
+    # measured; the declaration puts the rule 0.0007in ABOVE the caption's
+    # declared top). A declared edge that paints IS geometry, so the
+    # declared extent wins and the engine clips the text exactly as
+    # Oracle's fixed-elasticity box does.
+    _w_floor = 0.02 if "right" in _paint_edges else 0.40
+    _h_floor = 0.02 if "bottom" in _paint_edges else 0.18
+    # A DECLARED WIDTH IS THE WIDTH. The container span is the only limit,
+    # and it ends at the frame's right edge -- the extra 0.02in that used to
+    # be subtracted here trimmed every box declared flush with that edge
+    # (and did it again at each nesting level, since the frame span was
+    # shrunk by the same amount).
+    place_w = max(_w_floor, min(fw, rect_w - rel_left))
+    if place_w < fw - 0.01 and \
+            _declared_align(lf) in ("end", "right") \
+            and getattr(lf, "_left_bound_x", None) is None:
+        # RIGHT-anchored box in a container clamped below its declared
+        # span: Oracle anchors the box's RIGHT edge, so keep the declared
+        # width and slide left — clipping the width instead cut the tail
+        # glyphs off a large right-justified title.
+        #
+        # The slide may only consume space the DECLARATION leaves empty.
+        # A fit adjustment that pushes a box over a sibling the source
+        # declares DISJOINT from it manufactures an overlap Oracle never
+        # prints: on a voucher grid the source declares a +0.018in gap
+        # between a caption's right edge and its value's left edge, and
+        # the slide turned that into a 0.17in overlap — the value box's
+        # own left border then printed straight through the caption
+        # glyphs (engine-render measured). So a box with ANY declared
+        # sibling to its left on the same band pays for the squeeze out
+        # of its own width instead (_left_bound_x, set per frame).
+        _shift = min(fw - place_w, rel_left - 0.02)
+        if _shift > 0:
+            rel_left -= _shift
+            place_w = max(_w_floor, min(fw, rect_w - rel_left))
+    place_h = max(_h_floor, fh)
 
     if img_bind is not None:
         ds_name, col = img_bind
@@ -10362,14 +17283,33 @@ def _emit_field_textbox(
         _bline = (getattr(lf, "border_color", "") or "").strip() or "#000000"
     else:
         _bline = "#ffffff"
+    # DECLARED PER-EDGE BOX. The source names the box with linePattern and
+    # then names which of its four edges strokes with hideXBorder; a box
+    # stacked against its neighbour hides the shared edge precisely so no
+    # divider stands inside the neighbouring cell. Emitting all four
+    # regardless drew that divider through the neighbour's glyphs
+    # (engine-render measured). Only pass the subset when the declaration
+    # actually draws a box, so a pattern-less object keeps the existing
+    # white-border-on-coloured-fill gridline behaviour untouched.
+    _border_edges = (_paint_edges
+                     if (_lpat and _lpat not in ("transparent", "none")
+                         and len(_paint_edges) < 4)
+                     else None)
 
     _build_textbox(
         parent_items, name, value_expr,
-        bold=bold, italic=italic, font_family=fam,
+        bold=bold, italic=italic, underline=underline, font_family=fam,
         font_size=font_size, fg=fcolor,
         bg=(_bgfill or None),
         text_align=text_align, vertical_align="Top",
-        border_color=_bline, padding="2pt",
+        # NO INSET: this box is placed at the source's DECLARED x/y/w/h
+        # below, so the declared width is the usable text width and the
+        # declared top is where the line box starts. The 2pt that used to
+        # sit here cost 4pt of interior width -- enough to wrap a declared
+        # one-line title onto two lines and slide everything under it down
+        # -- and pushed every top-anchored glyph 2pt (0.0278in) below its
+        # declared top. Oracle's own box carries no padding.
+        border_color=_bline, border_edges=_border_edges, padding="0pt",
         writing_mode=_wmode,
         # FIXED boxes, like Oracle. CanGrow=true lets a multi-line value
         # grow past its declared height and PUSH every sibling below it;
@@ -10388,13 +17328,32 @@ def _emit_field_textbox(
         # post-pass over the finished tree).
         can_grow=bool(getattr(lf, "_cangrow_safe", False)),
         drillthrough=_drillthrough_for(report, lf),
-        segments_spec=seg_spec,
+        runs_spec=runs_spec,
     )
     tb = parent_items[-1]
-    _sub(tb, "Top", f"{rel_top:.2f}in")
-    _sub(tb, "Left", f"{rel_left:.2f}in")
-    _sub(tb, "Width", f"{place_w:.2f}in")
-    _sub(tb, "Height", f"{place_h:.2f}in")
+    # 4 decimals: 2-decimal rounding is worth up to 0.36pt per member, and
+    # a declared stack rounds its lines in DIFFERENT directions, so the
+    # printed pitch stops being the declared one (voucher block measured).
+    _sub(tb, "Top", f"{rel_top:.4f}in")
+    # Same argument on the NEAR left edge: when the declaration strokes it,
+    # the left edge is a printed rule and 2-decimal rounding moves it by up
+    # to 0.36pt -- a declared 3.1875in became 3.19in, which is exactly the
+    # slack that let the box to its left overhang into this one's glyphs.
+    _sub(tb, "Left",
+         f"{rel_left:.4f}in" if "left" in _paint_edges
+         else f"{rel_left:.2f}in")
+    # The far EDGES carry the same precision as the near ones whenever the
+    # declaration strokes them: a box's right/bottom edge is then a printed
+    # rule, and rounding it to 2 decimals moves that rule by up to 0.36pt --
+    # enough to push a sub-header separator off the declared ascent gap and
+    # into the caption below it. Boxes that stroke nothing there keep the
+    # existing 2-decimal form, so no unrelated geometry shifts.
+    _sub(tb, "Width",
+         f"{place_w:.4f}in" if "right" in _paint_edges
+         else f"{place_w:.2f}in")
+    _sub(tb, "Height",
+         f"{place_h:.4f}in" if "bottom" in _paint_edges
+         else f"{place_h:.2f}in")
     # Conditional print: a field-level format trigger whose PL/SQL body
     # reduces to a boolean becomes a REAL <Hidden> expression (Oracle
     # RETURN FALSE = suppress -> Hidden true). Conditional STYLING
@@ -10424,6 +17383,57 @@ def _emit_field_textbox(
         if _net:
             _stamp_format_on_textbox(tb, _net)
     return (True, rel_top + place_h)
+
+
+# NOTE on Oracle's LINE PITCH (why nothing here truncates declared lines).
+# Reproducing Oracle's clip by counting lines needs Oracle's leading, and the
+# available truth says that is FONT-DEPENDENT, not one factor:
+#   * Helvetica/Arial-Bold 10pt renders at 0.1561in per line (1.124 em) --
+#     the same number in four separate Oracle-rendered truth PDFs;
+#   * Helvetica/Arial 10pt at 0.1661in (1.196 em);
+#   * Verdana-Bold 11pt at 0.2083in (1.364 em) -- ink-measured on the one
+#     report that uses it, whose truth is a screenshot, not a PDF.
+# A single em factor cannot satisfy both a 3-line 10pt Arial caption that
+# FITS a 0.500in box (needs <= 1.20) and a 3-line 11pt Verdana caption that
+# does NOT fit a 0.58337in box (needs > 1.273). Until a Verdana truth PDF
+# pins that family, dropping declared lines from a fixed box would be a
+# guess that loses content, so the fixed-elasticity contract is expressed the
+# only way the declaration supports: declared Height + CanGrow=false (see
+# _mark_cover_growable), and the engine does the clipping.
+
+
+def _static_text_overflows_box(lf) -> bool:
+    """True when a STATIC prose text's AFM-estimated wrapped height exceeds
+    its declared box. Oracle's renderer fits such a note in its fixed box;
+    SSRS's GDI line metrics need more, so without CanGrow the tail lines clip
+    (an invoice's billing note lost its last sentence). Estimate-only and
+    grow-only: a text that already fits keeps its fixed box.
+
+    The box is emitted with NO inset, so the whole DECLARED width wraps the
+    text -- the 0.08in that used to be shaved off here modelled a padding the
+    emitter no longer adds and over-counted the line count on a note that
+    fits."""
+    if (getattr(lf, "kind", "") or "") != "text":
+        return False
+    txt = " ".join((getattr(lf, "text", "") or "").split())
+    if len(txt) < 60:
+        return False
+    try:
+        size = float(getattr(lf, "font_size", 0) or 10)
+    except (TypeError, ValueError):
+        size = 10.0
+    w_in = float(getattr(lf, "width", 0) or 0)
+    h_in = float(getattr(lf, "height", 0) or 0)
+    if w_in <= 0.5 or h_in <= 0:
+        return False
+    tbl = _AFM_HELVETICA_BOLD if getattr(lf, "bold", False) \
+        else _AFM_HELVETICA
+    units = sum((tbl[ord(c) - 32] if 32 <= ord(c) <= 126 else 500)
+                for c in txt)
+    text_w = units / 1000.0 * size / 72.0
+    lines = max(1, math.ceil(text_w / max(0.5, w_in)))
+    need = lines * (size * 1.30 / 72.0) + 0.06
+    return need > h_in + 0.02
 
 
 def _record_has_watermark(report) -> bool:
@@ -10481,9 +17491,15 @@ def _is_page_furniture_frame(group) -> bool:
             s = txt.strip()
             if not s:
                 continue
-            if ("&<PageNumber>" in s or "&<TotalPages>" in s
-                    or "&<PhysicalPageNumber>" in s
-                    or "&<TotalPhysicalPages>" in s
+            # BOTH token dialects: the bracketed export form
+            # ("&<PageNumber>") and the bare-ampersand form
+            # ("Page &PageNumber of &TotalPages") — some exports write the
+            # page builtins without brackets, and missing them left the
+            # whole footer frame in the BODY flow (row height inflated to
+            # the footer's paper y -> a near-blank spill page per record).
+            if (re.search(r"&<?(?:Physical|Logical)?"
+                          r"(?:PageNumber|TotalPages|TotalPhysicalPages|"
+                          r"PhysicalPageNumber)>?\b", s)
                     or s.lower().endswith((".rdf", ".rep"))):
                 printable += 1
                 continue
@@ -10566,7 +17582,19 @@ def _emit_frame_rect(
     if gh <= 0:
         gh = 1.0
 
-    rect_left = max(0.02, gx - parent_x)
+    # NESTING IS TRANSPARENT TO DECLARED GEOMETRY. A child's absolute
+    # position is the SUM of the declared offsets down the chain, so each
+    # level contributes exactly (declared x - parent's declared x) and
+    # nothing else. The 0.02in floors that used to sit on rect_left /
+    # rect_top invented an inset at EVERY level a frame is declared flush
+    # with its parent (the common case: an Oracle group wrapper shares its
+    # child's origin), and the matching 0.02in taken off rect_w shrank the
+    # usable span the same way. Measured on a per-record invoice whose cut
+    # rule sits three Rectangle levels deep: +0.04in of left drift and
+    # 0.075in of lost rule length, with every full-width box under it
+    # clipped by the same amount. Only a NEGATIVE coordinate is clamped,
+    # since SSRS rejects one (same rule as _declared_left).
+    rect_left = _declared_left(gx - parent_x)
     # PLACEMENT honors the parent's elasticity flow (see the push-down pass:
     # an elastic sibling above pushed this frame to _flow_y), while every
     # INTERIOR offset keeps the DECLARED origin `gy` — the frame's members
@@ -10574,10 +17602,25 @@ def _emit_frame_rect(
     # the origin they subtract from would drag the whole interior up and out
     # of the rect.
     _gy_flow = getattr(group, "_flow_y", None)
-    rect_top = max(0.02, (float(_gy_flow) if _gy_flow is not None else gy)
+    rect_top = max(0.0, (float(_gy_flow) if _gy_flow is not None else gy)
                    - parent_y)
-    rect_w = max(0.5, min(gw, parent_w - rect_left - 0.02))
-    rect_h = max(0.5, gh)
+    rect_w = max(0.5, min(gw, parent_w - rect_left))
+    # Does this frame's declaration STROKE its edges? (Read here because the
+    # size floors below depend on it; the border itself is emitted further
+    # down from the same value.)
+    border_w = float(getattr(group, "border_width", 0) or 0)
+    # A SIZE FLOOR MAY NOT MOVE A DECLARED STROKE — the same rule the member
+    # emitter follows for its own boxes. On a BORDERLESS grouping frame the
+    # 0.5in floor is invisible slack that only keeps a container from
+    # collapsing; on a frame the declaration BORDERS, that floor relocates a
+    # printed rule. Measured: a prose frame declared 0.18750in tall with
+    # linePattern="solid" was floored to 0.50in, so its left and bottom edges
+    # ran 0.31in past the declaration and stroked straight through the
+    # caption declared directly beneath it (the truth PDF draws that frame
+    # ending where its grown text ends, with the caption below it untouched).
+    # The frame still never prints shorter than the members inside it: SSRS
+    # grows a Rectangle to contain a child that grows.
+    rect_h = max(0.02 if border_w > 0 else 0.5, gh)
 
     rect = _sub(parent_items, "Rectangle")
     rect.set("Name", f"{name_prefix}_Rect_{counter[0]}")
@@ -10586,17 +17629,51 @@ def _emit_frame_rect(
     if _ft_hidden:
         _sub(_sub(rect, "Visibility"), "Hidden", _ft_hidden)
     style = _sub(rect, "Style")
-    border_w = float(getattr(group, "border_width", 0) or 0)
     if border_w > 0:
-        # Visible frame: black border. White card fill UNLESS a watermark/seal
-        # sits behind the record -- then keep the fill transparent so the seal
-        # shows through continuously instead of being sliced into white bands.
-        if not _record_has_watermark(report):
-            _sub(style, "BackgroundColor", "#ffffff")
+        # Visible frame: the frame's DECLARED edge color (a source that
+        # declares lineForegroundColor prints THAT stroke, not black);
+        # with none declared this stays the solid black the truth prints
+        # for a real (width-declared) stroke. Fill = the frame's DECLARED
+        # dialect-gated background only — the old white-card default
+        # buried sibling text wherever the source declares OVERLAPPING
+        # bordered rows (a requisition grid's 36pt rows at 22pt pitch:
+        # each row's white card painted over the previous row's text and
+        # the grid rendered EMPTY; adversarial-sweep + seqno-proven).
+        # Oracle itself paints nothing for a pattern-less frame.
+        _decl_bg = (getattr(group, "background_color", "") or "").strip()
+        if _decl_bg and not _record_has_watermark(report):
+            _sub(style, "BackgroundColor", _decl_bg)
         border = _sub(style, "Border")
-        _sub(border, "Style", "Solid")
-        _sub(border, "Color", "#000000")
-        _sub(border, "Width", "1pt")
+        # DECLARED stroke pattern (dash="dot"/"longDash"/...): Oracle strokes
+        # it as a real dash array, which is half a solid edge's ink.
+        _sub(border, "Style",
+             _declared_dash_style(getattr(group, "line_dash", "")))
+        _sub(border, "Color",
+             _rule_color(getattr(group, "border_color", ""),
+                         width_declared=True))
+        # WEIGHT follows the DECLARATION, never a house 1pt. Same dialect
+        # the standalone rules and cell edges already use: a declared
+        # lineWidth maps 1:1 to points, an UNDECLARED width is Oracle's
+        # device hairline. Truth-measured on an invoice export whose frames
+        # and cut rule declare lineWidth="2": the Oracle PDF strokes them at
+        # exactly 2.0pt (and a second export's dash="dot" lineWidth="1" rule
+        # at exactly 1.0pt), while every solid-linePattern frame that
+        # declares NO lineWidth is stroked at width 0.0. The flat 1pt here
+        # was therefore HALF the ink on every declared-2pt edge and ~4x the
+        # ink on every undeclared one. `border_w` (the parser's 1.0
+        # draw-flag fallback) still decides WHETHER the edge paints; only
+        # the raw declaration decides how heavily. A declared lineWidth only
+        # counts where the frame also declares a STROKE PATTERN — the same
+        # linePattern gate the rest of the dialect uses. A frame carrying a
+        # lineWidth but no linePattern draws no stroke at all in the truth
+        # exports (an invoice declares lineWidth="4" on two pattern-less
+        # frames and its PDF contains no 4.0pt stroke anywhere), so its
+        # width is a template leftover, not a weight to honour.
+        _lp_decl = (getattr(group, "border_pattern", "") or "").strip().lower()
+        _sub(border, "Width", _declared_edge_weight(
+            getattr(group, "line_width", 0.0)
+            if _lp_decl and _lp_decl not in ("transparent", "none")
+            else 0.0))
     else:
         # Invisible grouping frame: NO background fill. A white fill on a
         # borderless container paints OVER sibling text that slightly
@@ -10647,22 +17724,46 @@ def _emit_frame_rect(
     #   * only when the UPPER member is declared elastic by the source.
     try:
         if not getattr(group, "_flow_done", False):
-            _flow_frame_elasticity(group)
+            _flow_frame_elasticity(group, report)
     except Exception:  # noqa: BLE001 - flow layout must never sink a convert
         pass
+
+    # RIGID DECLARED STACK. Every member prints at its own declared offset
+    # from the frame origin; when the topmost one is declared ABOVE the
+    # frame's top edge the WHOLE stack shifts down by the same amount so
+    # that it clears it (SSRS rejects a negative Top). Nudging just that
+    # member -- what a per-member minimum does -- shortens the first
+    # declared gap and the printed pitch stops being the declared pitch
+    # (truth-measured on a voucher caption stack: 15.12pt printed for a
+    # declared 16.15pt).
+    #
+    # The inset is ZERO: a member declared exactly AT its frame's top edge
+    # belongs there, and the 0.02in that used to sit here pushed the whole
+    # declared stack down by that much at EVERY nesting level whose first
+    # member is flush with its frame (the vertical twin of the rect_left /
+    # rect_top floors removed above). Only a negative offset is corrected,
+    # so nothing declared is invented and nothing declared is dropped.
+    _STACK_INSET = 0.0
+    _rel_ys = [(_lf_y(o) - gy) for o in (group.fields or [])]
+    _y_shift = (max(0.0, _STACK_INSET - min(_rel_ys)) if _rel_ys else 0.0)
 
     for lf in (group.fields or []):
         _el = (getattr(lf, "vertical_elasticity", "") or "").lower()
         try:
-            lf._cangrow_safe = _el in ("expand", "variable") \
-                and _nothing_below(lf)
+            lf._cangrow_safe = (_el in ("expand", "variable")
+                                and _nothing_below(lf)) \
+                or _static_text_overflows_box(lf)
         except Exception:  # noqa: BLE001
             pass
+        try:
+            lf._left_bound_x = _declared_left_bound(lf, group.fields)
+        except Exception:  # noqa: BLE001 - geometry hints never sink a convert
+            lf._left_bound_x = None
         nm = f"{name_prefix}_Tb_{counter[0]}"
         counter[0] += 1
         ok, by = _emit_field_textbox(
             inner, nm, "", lf, gx, gy, rect_w, rect_h,
-            report, cover_title_lines,
+            report, cover_title_lines, y_shift=_y_shift,
         )
         if ok:
             max_y_used = max(max_y_used, by)
@@ -10689,22 +17790,84 @@ def _emit_frame_rect(
                 max_y_used = max(max_y_used, cy)
         else:
             # Non-frame group: flatten its fields into this rect.
+            _c_rel = [(_lf_y(o) - gy) for o in (child.fields or [])]
+            _c_shift = (max(0.0, _STACK_INSET - min(_c_rel))
+                        if _c_rel else 0.0)
             for lf in (child.fields or []):
                 nm = f"{name_prefix}_Tb_{counter[0]}"
                 counter[0] += 1
+                try:
+                    lf._left_bound_x = _declared_left_bound(lf, child.fields)
+                except Exception:  # noqa: BLE001 - hints never sink a convert
+                    lf._left_bound_x = None
                 ok, by = _emit_field_textbox(
                     inner, nm, "", lf, gx, gy, rect_w, rect_h,
-                    report, cover_title_lines,
+                    report, cover_title_lines, y_shift=_c_shift,
                 )
                 if ok:
                     max_y_used = max(max_y_used, by)
 
+    # ZERO-ROW COLLAPSE for a 1:many repeating sub-block: Oracle prints
+    # NOTHING (label included) when the linked child has no rows for this
+    # record — its repeating frame simply has zero instances. The block's
+    # content resolves via Join(LookupSet(...)), so the whole rect hides
+    # when the joined set is empty (a comments block's static caption
+    # printed orphaned on zero-comment permits, truth-measured).
+    _grp_printables = [f for f in (getattr(group, "fields", None) or [])
+                       if ((getattr(f, "kind", "") or "") == "field"
+                           and (getattr(f, "source", "") or "").strip())
+                       or ((getattr(f, "kind", "") or "") == "text"
+                           and (getattr(f, "text", "") or "").strip())]
+    _is_comments_idiom = bool(_grp_printables) and all(
+        (getattr(f, "kind", "") or "") == "text"
+        and "&" in (getattr(f, "text", "") or "")
+        for f in _grp_printables)
+    if ("repeating" in (getattr(group, "kind", "") or "").lower()
+            and _is_comments_idiom
+            and rect.find(_q("Visibility")) is None):
+        _sq_owner = next(
+            (q for q in (getattr(report, "queries", None) or [])
+             if (getattr(group, "source_query", "") or "").upper()
+             in {(g or "").upper()
+                 for g in (getattr(q, "group_names", None) or [])}),
+            None)
+        if _sq_owner is not None and (_sq_owner.name or "").upper() \
+                in getattr(report, "_one_to_many_children", set()):
+            _join_expr = None
+            for v in rect.iter(_q("Value")):
+                _vt = v.text or ""
+                _ji = _vt.find("Join(LookupSet(")
+                if _ji < 0:
+                    continue
+                # balanced-paren extraction of the Join(...) call
+                _depth = 0
+                for _ci in range(_ji + 4, len(_vt)):
+                    if _vt[_ci] == "(":
+                        _depth += 1
+                    elif _vt[_ci] == ")":
+                        _depth -= 1
+                        if _depth == 0:
+                            _join_expr = _vt[_ji:_ci + 1]
+                            break
+                if _join_expr:
+                    break
+            if _join_expr:
+                _sub(_sub(rect, "Visibility"), "Hidden",
+                     "=(" + _join_expr + ') = ""')
+
     # Now stamp Top/Left/Height/Width on the Rectangle.
+    #
+    # 4 decimals, not 2: this Rectangle's Left/Top is one term of every
+    # member's ABSOLUTE position (members are placed relative to the frame's
+    # DECLARED origin, not to the rounded one), so 2-decimal rounding leaks
+    # up to 0.005in of drift into the whole interior at EVERY nesting level.
+    # The same argument applies to the span: a frame's right edge is where
+    # its full-width members are clamped.
     final_h = max(rect_h, max_y_used + 0.10)
-    _sub(rect, "Top", f"{rect_top:.2f}in")
-    _sub(rect, "Left", f"{rect_left:.2f}in")
-    _sub(rect, "Width", f"{rect_w:.2f}in")
-    _sub(rect, "Height", f"{final_h:.2f}in")
+    _sub(rect, "Top", f"{rect_top:.4f}in")
+    _sub(rect, "Left", f"{rect_left:.4f}in")
+    _sub(rect, "Width", f"{rect_w:.4f}in")
+    _sub(rect, "Height", f"{final_h:.4f}in")
     return rect_top + final_h
 
 
@@ -10722,7 +17885,37 @@ _PAGE_MARGIN_IN = 0.5          # top == bottom
 # classic SSRS bug). 7.5 + 0.25 + 0.25 = 8.0 < 8.5 -> 0.5in of safety, and
 # 0.25in also matches the source report's own page margins.
 _PAGE_HMARGIN_IN = 0.25        # left == right
+# Oracle's DEFAULT body inset, used when a source declares no body geometry
+# at all (no <body width=> and no <body><location>): the classic Reports
+# default body sits one half-inch in from each edge of the sheet. Truth-
+# measured: on four such reports EVERY body object renders at exactly
+# declared_x + 0.500in. Only the width BUDGETS keep using _PAGE_HMARGIN_IN
+# (they size the body, not its origin); the emitted margins come from
+# _page_left_margin_for / _fit_body_to_page, which reconcile the two.
+_PAGE_DEFAULT_BODY_MARGIN_IN = 0.5
+# Slack kept between (LeftMargin + body Width + RightMargin) and PageWidth so
+# the sum stays STRICTLY under the sheet — equality is what makes the SSRS PDF
+# renderer emit a blank page after every page.
+_BODY_FIT_SLACK_IN = 0.04
+# Legibility floor for a Tablix column, matching the column sizer's own floor:
+# a table too wide for the sheet paginates ACROSS at readable widths rather
+# than being crushed, so width recovery never takes a column below this.
+_TABLIX_MIN_COL_W_IN = 0.5
 _PAGE_FOOTER_HEIGHT_IN = 0.6
+# Lead above the body's FIRST item, in inches. It is zero, and that is a
+# structural rule rather than a taste call: the <Body> origin is where page
+# ONE starts its content, and SSRS restarts the body at that same origin on
+# every continuation page. So a lead is spent on page 1 alone — pages 2..N
+# never see it — and page 1 alone prints low by exactly that much.
+# Engine-measured on the per-record family: a 0.10in cosmetic lead put every
+# span on page 1 exactly 7.2pt (=0.10in) below its twin on pages 2 and 3,
+# with the record rect at y0 93.45pt on page 1 against 86.25pt on 2/3 — and
+# 86.25pt is precisely the DECLARED body origin (<section><body><location
+# y=1.19788>), so the pages without the lead were the correct ones.
+# Where a source DECLARES a band origin inside the body (see
+# _declared_column_header_band) that declared y is used instead; this
+# constant only governs the synthesized case, where the answer is "nothing".
+_BODY_LEAD_IN = 0.0
 
 # Vertical safety slack when sizing a per-record page (letter / certificate /
 # invoice packets). This is the EXACT vertical analogue of the horizontal rule
@@ -10793,11 +17986,22 @@ def _resolved_title_lines(report):
 def _page_header_height(report) -> float:
     """Height of the <PageHeader> band that _build_page emits, in
     inches. Kept in lock-step with _build_page so the page-height
-    budget computed in _build_report_root matches the real header."""
+    budget computed in _build_report_root matches the real header.
+    When both a declared margin band and a synthesized title are
+    possible, budget for the TALLER one — over-budgeting only adds
+    slack; under-budgeting spills records onto blank pages."""
+    est = 0.25
     title_lines = _resolved_title_lines(report)
     if title_lines:
-        return 0.20 + 0.22 * len(title_lines) + 0.30
-    return 0.25
+        _lh = max(0.22, _title_style(report)[2] * 1.35 / 72.0)
+        est = 0.20 + _lh * len(title_lines) + 0.30
+    try:
+        _hdr, _ = _margin_page_chrome(report)
+        if _hdr:
+            est = max(est, _declared_chrome_header_height(_hdr, report))
+    except Exception:  # noqa: BLE001
+        pass
+    return est
 
 
 def _center_sibling_frame_rows(frames, parent_w):
@@ -10973,6 +18177,86 @@ def _is_summary_trailer_frame(fr) -> bool:
                for f in fields)
 
 
+def _record_bearing_trailer_section(report):
+    """The report's ``<section name="trailer">`` when it prints its OWN
+    records, together with its top-level frames.
+
+    SECTION PRINT ORDER (truth-measured on a 307-page export whose source
+    declares a header, a main and a trailer section, all three record-
+    bearing): page 1 is the header section, pages 2..128 are ALL of the
+    main section's records, pages 129..307 are ALL of the trailer
+    section's records. Oracle finishes one section before it starts the
+    next — the trailer is never interleaved between main records. So a
+    record-bearing trailer section is a data region of its OWN, printed
+    after the record region, not a band nested inside every record.
+
+    A trailer section counts as record-bearing when it repeats on a data
+    group or carries data fields: then it IS deliverable content (the
+    invoice / voucher that follows the letters), not one-off chrome.
+
+    Returns ``(None, [])`` for every report that declares no such section,
+    so single-section reports keep their existing shape exactly.
+    """
+    sec = _section_by_kind(report, "section_trailer")
+    if sec is None:
+        return None, []
+
+    def _has_data_fields(g):
+        if any((getattr(f, "kind", "") or "") == "field"
+               for f in (getattr(g, "fields", None) or [])):
+            return True
+        return any(_has_data_fields(c)
+                   for c in (getattr(g, "children", None) or []))
+
+    if not ((getattr(sec, "repeat_on", "") or "").strip()
+            or _has_data_fields(sec)):
+        return None, []
+    frames = [c for c in (getattr(sec, "children", None) or [])
+              if "frame" in (getattr(c, "kind", "") or "").lower()]
+    if not frames:
+        return None, []
+    return sec, frames
+
+
+def _section_dataset_name(report, section, default_name: str) -> str:
+    """The dataset a SECTION iterates: the query that owns the Oracle group
+    the section repeats on, else the report's main dataset.
+
+    Purely declaration-driven (``repeatOn`` / the section's source group);
+    falls back to the main dataset whenever the group names no query, so a
+    section can never bind to a dataset the report does not declare."""
+    src = ((getattr(section, "repeat_on", "") or "")
+           or (getattr(section, "source_query", "") or "")).strip()
+    if src:
+        for q in (getattr(report, "queries", None) or []):
+            try:
+                if _query_matches_layout_ref(q, src):
+                    return (q.name or default_name)
+            except Exception:  # noqa: BLE001 - name matching must never sink
+                continue
+    return default_name
+
+
+def _frame_is_inert(g) -> bool:
+    """True for a frame with NOTHING to render: no fields or children anywhere
+    in its subtree and no painted border or fill of its own. Such a frame is
+    pure geometry noise (typically an empty invisible group wrapper around the
+    real repeating frame) -- emitting it can only inflate or shift layout.
+    Frames that paint a border or fill are NOT inert even when empty (a
+    bordered empty box is a real write-in / signature box)."""
+    try:
+        if (getattr(g, "fields", None) or []) or (getattr(g, "children", None) or []):
+            return False
+        if float(getattr(g, "border_width", 0) or 0) > 0:
+            return False
+        if ((getattr(g, "background_color", "") or "")
+                or (getattr(g, "fill_pattern", "") or "")):
+            return False
+        return True
+    except Exception:  # noqa: BLE001 -- classification must never break RDL
+        return False
+
+
 def _build_per_record_body(report, main, suppress_empty_cover=False):
     """Build a Body that renders ONE PAGE PER RECORD of the main dataset.
 
@@ -11048,7 +18332,13 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
         # cover is retained for API compatibility; the _has_cover_page gate now
         # governs the cover uniformly for the form and letter/cert paths.)
         cover = _build_cover_page(report)
-    next_top = 0.10
+    # The record region starts AT the body origin (see _BODY_LEAD_IN): a
+    # lead is charged to page 1 only, because SSRS restarts the body at the
+    # origin on every continuation page — the first record then printed low
+    # by the lead while every following record printed at the origin.
+    # (Small stock already had to run leadless: a lead made body = lead +
+    # full-page row > printable and spilled a sliver page per card.)
+    next_top = _BODY_LEAD_IN
     if cover is not None:
         # The cover does NOT carry its own PageBreak. Reason: SSRS positions
         # body items at their ABSOLUTE Top coordinate on every page — a cover
@@ -11087,10 +18377,17 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
         # (body + margins < PageWidth) holds and SSRS doesn't insert
         # blank pages. PageWidth is 8.5 (portrait) for normal reports -> 7.98,
         # but WIDENS for landscape content so wide grids aren't compressed.
-        _MAX_BODY_W = _page_width_for(report) - 2 * _PAGE_HMARGIN_IN - 0.02
-        BODY_W = min(_MAX_BODY_W, max(7.5, round(max(_all_r) + 0.15, 2)))
+        _MAX_BODY_W = (_page_width_for(report)
+                       - 2 * _page_hmargin_for(report) - 0.02)
+        # The 7.5in floor is a LETTER-sheet convention; declared small
+        # stock (card/label) must keep its own narrow width or every
+        # record row centers into invented empty width and displaces
+        # the content sideways (truth-measured on the card class).
+        _floor_w = min(7.5, _MAX_BODY_W)
+        BODY_W = min(_MAX_BODY_W, max(_floor_w, round(max(_all_r) + 0.15, 2)))
     else:
-        BODY_W = 7.5
+        BODY_W = min(7.5, _page_width_for(report)
+                     - 2 * _page_hmargin_for(report) - 0.02)
 
     # ---- Tablix that iterates per row of the main dataset ----------------
     tablix = ET.Element(_q("Tablix"))
@@ -11139,10 +18436,16 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
     # Build a set of cover-title lines so we suppress any text field
     # whose content duplicates the cover-page title (preventing a
     # multi-line letterhead, e.g. "<STATE> / <DEPARTMENT> ...", from being
-    # repeated at the bottom of page 1).
+    # repeated at the bottom of page 1). ONLY when the page actually
+    # prints the title as chrome (declared margin / loose section items
+    # -> the header band carries it): a chrome-less per-record source
+    # gets NO synthesized band, so its title prints exactly where the
+    # BODY declares it — suppressing there erased the line entirely
+    # (a card-face text scavenged as "title" simply vanished).
     _cover_title_lines = set()
-    for _ln in _extract_title_lines(report, limit=3):
-        _cover_title_lines.add(_ln.strip().lower())
+    if _declares_margin_band(report):
+        for _ln in _extract_title_lines(report, limit=3):
+            _cover_title_lines.add(_ln.strip().lower())
 
     # Build (text or value) lines for each field. For static text we
     # emit the text verbatim. For data-bound fields we emit
@@ -11197,6 +18500,16 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
         if (c.kind or "").lower() in ("frame", "repeating_frame")
         or "frame" in (c.kind or "").lower()
     ]
+    # Drop INERT frames: no fields or children anywhere and no painted
+    # border/fill of their own -- nothing to render. Oracle group wrappers
+    # (an empty invisible frame enclosing the real repeating frame) are the
+    # common case; emitting one adds pure geometry noise, and the record-level
+    # elasticity walk then stacks the full-record-sized empty rect BELOW the
+    # content, doubling the record height (measured: an empty 9.72in wrapper
+    # inflated a requisition record 10.06->19.77in -- one content-free page
+    # per record). Frames that PAINT (border/fill) stay: an empty bordered
+    # box is a real write-in/signature box.
+    frame_children = [c for c in frame_children if not _frame_is_inert(c)]
     # Split off any REPORT-WIDE summary TRAILER frame (a totals frame with no
     # repeating descendant, e.g. a report-end status count-table frame).
     # It must print ONCE at the report end via a static Tablix trailer row, NOT on
@@ -11206,18 +18519,27 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
         frame_children = [c for c in frame_children if c not in _trailer_frames]
     else:
         _trailer_frames = []
+    # SECTION PRINT ORDER: a record-bearing <section name="trailer"> owns its
+    # own records and prints them all AFTER the main section's — collected
+    # here, emitted below as a separate top-level data region (never nested
+    # inside the record). Empty for every single-section report.
+    _tsec, _tsec_frames = _record_bearing_trailer_section(report)
     used_frame_walk = False
     if frame_children:
         used_frame_walk = True
         counter = [0]
         max_by = 0.0
-        # Center rows of SIBLING frames (e.g. the two wallet cards) within
-        # the body width so they appear visually centered on the page.
-        # The centering function groups same-y frames into rows and shifts
-        # each row so its span is centered in BODY_W. Single-frame rows
-        # (like the main cert) keep their Oracle position (already centered
-        # by the Oracle designer).
-        center_deltas = _center_sibling_frame_rows(frame_children, BODY_W)
+        # Record frames keep their DECLARED x. Oracle prints every body
+        # object at the body's origin on the paper plus the object's own
+        # declared x — nothing is re-centred (truth-measured on letters,
+        # certificates and accreditation records alike, to within the
+        # textbox's own ink inset). Rows of sibling frames used to be
+        # centred inside the body to make up for a page whose left margin
+        # was a fixed guess and a body width that did not match the declared
+        # one; now that the margin IS the declared body origin
+        # (_page_left_margin_for) centring would shift the record a second
+        # time — measured at +0.22..+0.60in past the truth on three reports.
+        center_deltas: dict = {}
         # The RECORD-level siblings (certificate + wallet cards) get the
         # same elasticity band walk their interiors get — without it, a
         # frame whose interior flow grew its emitted height intersects the
@@ -11229,46 +18551,27 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
             import types as _types
             _flow_frame_elasticity(_types.SimpleNamespace(
                 name="_record_flow", kind="frame",
-                children=list(frame_children), fields=[]))
+                children=list(frame_children), fields=[]), report)
         except Exception:  # noqa: BLE001 - flow must never sink a convert
             pass
+        # The main section's own body origin need not be the page origin (the
+        # page takes the SMALLEST section origin, see _page_left_margin_for /
+        # _page_top_margin_for). Whatever it gives away, this region takes
+        # back as a positive offset, so every declared object still lands at
+        # its declared PAPER position. Zero on a single-section report.
+        _m_dy = _section_body_top_shift(report, "section_main")
         for child in frame_children:
             delta = center_deltas.get(id(child), 0.0)
             by = _emit_frame_rect(
-                rect_items, child, -delta, 0.0, BODY_W,
+                rect_items, child, -delta, -_m_dy, BODY_W,
                 report, _cover_title_lines, "RecP", counter,
             )
             if by is not None:
                 max_by = max(max_by, by)
-        # CONTENT-bearing report TRAILER section: when the trailer repeats on a
-        # group or carries data fields, it IS deliverable content (the invoice /
-        # fee tables / payment voucher printed after each record's letter), not
-        # one-off chrome — dropping it loses the report's actual product
-        # (production verified). Emit its frames below the main content in
-        # their own vertical region; the record body paginates naturally.
-        _tsec = _section_by_kind(report, "section_trailer")
-
-        def _sec_has_data_fields(g):
-            if any((getattr(f, "kind", "") or "") == "field"
-                   for f in (getattr(g, "fields", None) or [])):
-                return True
-            return any(_sec_has_data_fields(c)
-                       for c in (getattr(g, "children", None) or []))
-
-        if _tsec is not None and ((getattr(_tsec, "repeat_on", "") or "")
-                                  or _sec_has_data_fields(_tsec)):
-            _tframes = [c for c in (_tsec.children or [])
-                        if "frame" in (getattr(c, "kind", "") or "").lower()]
-            if _tframes:
-                _t0 = min(float(getattr(c, "y", 0) or 0) for c in _tframes)
-                _toff = max_by + 0.30 - _t0
-                for child in _tframes:
-                    by = _emit_frame_rect(
-                        rect_items, child, 0.0, _toff, BODY_W,
-                        report, _cover_title_lines, "RecT", counter,
-                    )
-                    if by is not None:
-                        max_by = max(max_by, by)
+        # NOTE: a CONTENT-bearing <section name="trailer"> is NOT emitted
+        # here. Oracle prints every record of one section before it starts
+        # the next (see _record_bearing_trailer_section), so the trailer is
+        # built as its OWN top-level data region after the record region.
         # Skip the flat positional loop -- frames already handled it. The
         # section_main-direct top-of-page header band (a title subtitle bound to
         # &P_DIVISION, the run date, the heavy rule) is page-margin chrome that
@@ -11316,10 +18619,11 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
         # Style hints from the parsed XML.
         bold = bool(getattr(f, "bold", False))
         italic = bool(getattr(f, "italic", False))
+        underline = bool(getattr(f, "underline", False))
         fs = getattr(f, "font_size", 0) or 10
         fam = (getattr(f, "font_family", "") or "").strip() or None
-        fcolor = getattr(f, "color", "") or "#111111"
-        align = (getattr(f, "align", "") or "left").lower()
+        fcolor = _text_color(getattr(f, "color", ""))
+        align = _declared_align(f) or "left"
         text_align = {
             "left": "Left", "center": "Center", "centre": "Center",
             "right": "Right", "start": "Left", "end": "Right",
@@ -11387,10 +18691,11 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
 
         _build_textbox(
             rect_items, f"Tb_Rec_{emitted}", value,
-            bold=bold, italic=italic, font_family=fam,
+            bold=bold, italic=italic, underline=underline, font_family=fam,
             font_size=font_size, fg=fcolor,
             text_align=text_align, vertical_align="Top",
-            border_color="#ffffff", padding="2pt",
+            # NO INSET: placed at the DECLARED x/y/width/height below.
+            border_color="#ffffff", padding="0pt",
             can_grow=True,
             drillthrough=_drillthrough_for(report, f),
         )
@@ -11422,7 +18727,7 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
                     'CStr(Fields!' + _sc + '.Value))')
             _build_textbox(
                 rect_items, "Tb_Rec_" + str(emitted), _val,
-                bold=False, font_size="10pt", fg="#111111",
+                bold=False, font_size="10pt", fg=_BODY_INK,
                 text_align="Left", vertical_align="Top",
                 border_color="#ffffff", padding="2pt", can_grow=True,
             )
@@ -11440,6 +18745,71 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
     # every positionally-emitted textbox (was a simple running
     # accumulator in the stack-vertically version).
     rect_h = max(1.0, y + 0.30)
+    # DECLARED-PAPER FIT: the +0.30 tail pad is comfort slack, not content.
+    # When the record's real extent fits the declared printable page but the
+    # pad pushes past it, clamp to the printable height — otherwise every
+    # record emits a near-blank SPILL page (truth: one page per record).
+    # Genuinely oversize records (extent itself > printable) keep the full
+    # height and the grow/flow rules downstream.
+    _sp_fit = _small_paper_for(report)
+    # DECLARED BODY FIT (the same rule for ordinary sheets): when the source
+    # states <section name="main"><body height="H">, H IS the record's body —
+    # the record's objects print at their declared y inside it and the row may
+    # not run past it on synthesized pad alone. Without this the comfort pad
+    # (plus the per-frame emission pad it sits on) pushes a record that the
+    # declaration fits onto a second sheet.
+    _fit_h = None
+    if _sp_fit:
+        _fit_h = _sp_fit[1] - 2 * _page_vmargin_for(report)
+    else:
+        _decl_bh = _declared_record_body_height(report)
+        if _decl_bh:
+            _fit_h = _decl_bh
+    if _fit_h is not None:
+        _printable = _fit_h
+        # y is the EMITTED extent: declared content plus per-box emission
+        # pad (padding/CanGrow air), so allow the pad family (<=0.35in)
+        # to be absorbed by the clamp; more than that means the record
+        # genuinely exceeds the stock and keeps the grow/flow behavior.
+        if rect_h > _printable and y <= _printable + 0.35:
+            # 0.02in under the printable height: an EXACT-fit row still
+            # spills an empty remainder page on engine rounding (measured).
+            rect_h = round(_printable - 0.02, 2)
+            # An exact-fit row must not KeepTogether-push: the engine
+            # inserts a blank leader page per record when a row equals the
+            # printable height (measured on the card stock render). Scoped
+            # to the declared STOCK case that measurement came from.
+            if _sp_fit:
+                for _r in record_row.iter(_q("Rectangle")):
+                    for _kt in _r.findall(_q("KeepTogether")):
+                        _kt.text = "false"
+
+            # Clip descendants to the clamped extent. SSRS containers GROW
+            # to hold overflowing children, so a frame rect whose emission
+            # pad reaches past the row re-inflates it and the sliver page
+            # returns. Oracle clips at the paper edge — shaving the pad
+            # (<=0.35in, guarded above) is the faithful rendering.
+            def _clip_extent(el, off):
+                for _ch in list(el):
+                    _tag = _ch.tag.split("}")[-1] if isinstance(
+                        _ch.tag, str) else ""
+                    if _tag in ("Rectangle", "Textbox", "Image", "Line",
+                                "Tablix"):
+                        _t = _ch.findtext(_q("Top")) or "0in"
+                        _h = _ch.find(_q("Height"))
+                        try:
+                            _tv = float(_t.replace("in", ""))
+                            _hv = (float(_h.text.replace("in", ""))
+                                   if _h is not None and _h.text else 0.0)
+                        except ValueError:
+                            _tv, _hv = 0.0, 0.0
+                        if off + _tv + _hv > rect_h and _h is not None:
+                            _h.text = (
+                                f"{max(0.0, rect_h - off - _tv):.2f}in")
+                        _clip_extent(_ch, off + _tv)
+                    else:
+                        _clip_extent(_ch, off)
+            _clip_extent(record_row, 0.0)
     for h_el in record_row.findall(_q("Height")):
         h_el.text = f"{rect_h:.2f}in"
 
@@ -11528,19 +18898,87 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
     # 11.12in TablixRow past the 11.32in printable area on page 2,
     # causing SSRS to insert a blank page.
     tablix_top = cover_h if cover is not None else next_top
+    # Horizontal twin of _m_dy above: the main section's body origin minus the
+    # page origin, carried on the region's own Left (every member inside is
+    # positioned relative to it). Zero on a single-section report.
+    _m_dx = _section_body_left_shift(report, "section_main")
     _sub(tablix, "Top", f"{tablix_top:.2f}in")
-    _sub(tablix, "Left", "0in")
+    _sub(tablix, "Left", f"{_m_dx:.4f}in")
     _sub(tablix, "Height", f"{rect_h + _trailer_h:.2f}in")
     _sub(tablix, "Width", f"{BODY_W}in")
     _sub(tablix, "Style")
 
     items.append(tablix)
 
+    # ---- SECTION PRINT ORDER: the trailer section's OWN records ----------
+    # A record-bearing <section name="trailer"> prints ALL of its records
+    # AFTER the last main record, never interleaved with them (see
+    # _record_bearing_trailer_section for the 307-page truth measurement).
+    # In SSRS that is a SEPARATE top-level data region, stacked flush under
+    # the record region and iterating its own section's dataset, with its
+    # detail group carrying PageBreak=Start so the first trailer record
+    # leaves the last main record's page and each following one starts its
+    # own. Reports that declare no such section append nothing here.
+    _sect_h = 0.0
+    if _tsec_frames:
+        _st = ET.Element(_q("Tablix"))
+        _st.set("Name", "Tablix_SectionTrailer")
+        _st_body = _sub(_st, "TablixBody")
+        _sub(_sub(_sub(_st_body, "TablixColumns"), "TablixColumn"),
+             "Width", f"{BODY_W}in")
+        _st_rows = _sub(_st_body, "TablixRows")
+        _st_row = _sub(_st_rows, "TablixRow")
+        _st_rect = _sub(_sub(_sub(_sub(_st_row, "TablixCells"), "TablixCell"),
+                             "CellContents"), "Rectangle")
+        _st_rect.set("Name", "Rect_SectionTrailerPage")
+        _sub(_st_rect, "KeepTogether", "true")
+        _sub(_sub(_sub(_st_rect, "Style"), "Border"), "Style", "None")
+        _st_items = _sub(_st_rect, "ReportItems")
+        # The section's own top is its origin: _emit_frame_rect places at
+        # (declared y - parent_y), so handing it the topmost declared frame
+        # y lands the section's first frame at the top of its own page.
+        # ...offset by this section's OWN body origin relative to the page
+        # origin, exactly as the record region is (a trailer section that
+        # declares a lower/righter body prints there, not at the page corner).
+        _t_dx = _section_body_left_shift(report, "section_trailer")
+        _t_dy = _section_body_top_shift(report, "section_trailer")
+        _st_base = min(float(getattr(c, "y", 0.0) or 0.0)
+                       for c in _tsec_frames) - _t_dy
+        _st_counter = [0]
+        _st_max = 0.0
+        for _tc in _tsec_frames:
+            _by = _emit_frame_rect(_st_items, _tc, 0.0, _st_base, BODY_W,
+                                   report, _cover_title_lines, "SecT",
+                                   _st_counter)
+            if _by is not None:
+                _st_max = max(_st_max, _by)
+        _sect_h = max(0.5, round(_st_max + 0.02, 2))
+        _sub(_st_row, "Height", f"{_sect_h:.2f}in")
+        _sub(_sub(_sub(_st, "TablixColumnHierarchy"), "TablixMembers"),
+             "TablixMember")
+        _st_members = _sub(_sub(_st, "TablixRowHierarchy"), "TablixMembers")
+        _st_outer = _sub(_st_members, "TablixMember")
+        _st_og = _sub(_st_outer, "Group")
+        _st_og.set("Name", "SectionTrailerWrapper")
+        _sub(_sub(_st_og, "GroupExpressions"), "GroupExpression", "=1")
+        _st_det = _sub(_sub(_st_outer, "TablixMembers"), "TablixMember")
+        _st_dg = _sub(_st_det, "Group")
+        _st_dg.set("Name", "Details_SectionTrailer")
+        _sub(_sub(_st_dg, "PageBreak"), "BreakLocation", "Start")
+        _sub(_st, "DataSetName",
+             _safe(_section_dataset_name(report, _tsec, main.name or "")))
+        _sub(_st, "Top", f"{tablix_top + rect_h + _trailer_h:.2f}in")
+        _sub(_st, "Left", f"{_t_dx:.4f}in")
+        _sub(_st, "Height", f"{_sect_h:.2f}in")
+        _sub(_st, "Width", f"{BODY_W}in")
+        _sub(_st, "Style")
+        items.append(_st)
+
     # Body must end EXACTLY at the Tablix bottom. Any slack below the last
     # record (even 0.1in) is rendered as body whitespace AFTER the final
     # record and spills onto a TRAILING BLANK PAGE (measured with the real
     # MS engine: 0.6in slack -> one blank last page on every run).
-    body_height_in = round(tablix_top + rect_h + _trailer_h, 2)
+    body_height_in = round(tablix_top + rect_h + _trailer_h + _sect_h, 2)
     _sub(body, "Height", f"{body_height_in}in")
     _sub(body, "Style")
     # Stamp the per-record CONTENT height. The caller
@@ -11549,7 +18987,13 @@ def _build_per_record_body(report, main, suppress_empty_cover=False):
     # under-budgeted the chrome (~2.3in), so the wallet cards at the
     # foot of the certificate spilled onto a second page.
     body.set("data-required-page-height-in", f"{rect_h:.2f}")
-    body.set("data-body-width-in", f"{BODY_W:.2f}")
+    # The body has to CONTAIN every region at the offset its own section
+    # origin puts it at, or the fit clamp narrows the shifted ones.
+    _shifted_w = max([BODY_W] + [
+        BODY_W + _section_body_left_shift(report, _k)
+        for _k in ("section_main", "section_trailer")
+        if _section_by_kind(report, _k) is not None])
+    body.set("data-body-width-in", f"{_shifted_w:.2f}")
     if signature_in_body:
         body.set("data-signature-in-body", "1")
     # Seal / watermark images must sit BEHIND the body prose they overlap.
@@ -11661,8 +19105,11 @@ def _detect_multi_section(report: ParsedReport):
 
     def _tables_in_frame(frame):
         # Each repeating frame -> (query, ordered column names). De-dups
-        # identical (query, cols) tables.
+        # identical (query, cols) tables. ``geo`` runs parallel to the
+        # result: each table's declared (y, x) — the detail band's top and
+        # its left indent relative to the section frame.
         out = []
+        geo = []
         seen = set()
 
         def walk(g):
@@ -11679,11 +19126,26 @@ def _detect_multi_section(report: ParsedReport):
                     if key not in seen:
                         seen.add(key)
                         out.append((q, cols))
+                        # The row's visible LEFT EDGE is the leftmost FIELD:
+                        # this dialect stores field x ABSOLUTE in section
+                        # space, and a detail repeating frame can sit at x=0
+                        # while its fields carry the declared row indent
+                        # (truth prints those rows inset; the frame-x-only
+                        # read rendered them flush). max() keeps the frame's
+                        # own offset authoritative when fields sit flush
+                        # inside it (relative-x exports).
+                        _gx = float(getattr(g, "x", 0.0) or 0.0)
+                        _fxs = [float(getattr(f, "x", 0.0) or 0.0)
+                                for f in (g.fields or [])
+                                if (f.kind or "") == "field"]
+                        if _fxs:
+                            _gx = max(_gx, min(_fxs))
+                        geo.append((float(getattr(g, "y", 0.0) or 0.0), _gx))
             for c in (g.children or []):
                 walk(c)
 
         walk(frame)
-        return out
+        return out, geo
 
     def _footer_totals(frame):
         # The Oracle group-footer sub-frame(s) carry the section's REAL total-row
@@ -11710,11 +19172,14 @@ def _detect_multi_section(report: ParsedReport):
         walk(frame, False)
         labels.sort(key=lambda z: z[0])
         # De-dup while preserving order (a label can repeat across sub-frames).
+        # Keeps each label's declared y so the section builder can tell
+        # whether the totals sit BELOW every detail band (source geometry
+        # order -> both gray total rows trail the whole section).
         seen, out = set(), []
         for _y, lt in labels:
             if lt.lower() not in seen:
                 seen.add(lt.lower())
-                out.append(lt)
+                out.append((lt, _y))
         return out
 
     sections = []
@@ -11797,20 +19262,27 @@ def _detect_multi_section(report: ParsedReport):
         return [c[2] for c in band]
 
     for fr in sorted(frames, key=lambda f: (f.y or 0.0)):
-        tables = _tables_in_frame(fr)
+        tables, _tgeo = _tables_in_frame(fr)
         if not tables:
             continue
         for q, _ in tables:
             distinct_q.add(q.name.upper())
-        _tot = _footer_totals(fr)
+        _tot_pairs = _footer_totals(fr)
+        _tot = [t[0] for t in _tot_pairs]
         _hdr = _header_text(fr)
         _ch = _band_col_headers(fr) or _band_col_headers_deep(fr)
         _agg = _has_aggregate(fr)
         sections.append({
             "header": _hdr,
             "y": fr.y or 0.0,
+            "x": float(getattr(fr, "x", 0.0) or 0.0),
             "tables": tables,
             "totals": _tot,
+            # Declared geometry for source-order total placement + the
+            # detail bands' left indent: totals' y list parallel to
+            # ``totals``; per-table (y, x) parallel to ``tables``.
+            "totals_y": [t[1] for t in _tot_pairs],
+            "table_geo": _tgeo,
             # The Oracle header band's value-column captions ("Applications"/"Fees",
             # or "Number") -- used by the section builder for the real column
             # headers instead of a humanized field-name dump.
@@ -11931,8 +19403,312 @@ def _formula_expr_for_column(report, query, col):
     return None
 
 
+_CHARACTER_DATATYPES = {
+    "character", "char", "varchar", "varchar2", "vchar", "vchar2",
+    "nchar", "nvarchar2", "string", "text", "long",
+}
+
+
+def _declares_character(report, col) -> bool:
+    """True when the SOURCE declares ``col``'s datatype as CHARACTER.
+
+    Oracle carries the declaration on the object itself: a ``<formula
+    datatype="character">`` (its ``return_type``) or a ``<dataItem
+    datatype="vchar2">``. A character column's values are text — a
+    formatted range, a label, a code — so no numeric aggregate over it
+    means anything, whatever its name suggests."""
+    cu = (col or "").upper()
+    if not cu:
+        return False
+    for f in (getattr(report, "formulas", None) or []):
+        if (getattr(f, "name", "") or "").upper() == cu:
+            rt = (getattr(f, "return_type", "") or "").strip().lower()
+            return rt in _CHARACTER_DATATYPES
+    for q in (getattr(report, "queries", None) or []):
+        for it in (getattr(q, "items", None) or []):
+            if (getattr(it, "name", "") or "").upper() == cu:
+                return (getattr(it, "datatype", "") or "").strip().lower() \
+                    in _CHARACTER_DATATYPES
+    return False
+
+
+_SSRS_AGG_FN = {"sum": "Sum", "count": "Count", "avg": "Avg",
+                "average": "Avg", "min": "Min", "minimum": "Min",
+                "max": "Max", "maximum": "Max", "first": "First",
+                "last": "Last", "stddev": "StDev", "variance": "Var"}
+
+
+def _formula_expr_group_scoped(report, query, col):
+    """Compile a report FORMULA into a VB expression valid INSIDE a GROUP
+    band of a data region bound to ``query``.
+
+    Same deterministic translation as ``_formula_expr_for_column``, plus the
+    one resolution a group band makes available: a reference to a declared
+    Oracle ``<summary>`` over a column of ``query`` compiles to the matching
+    SSRS aggregate with NO scope argument, which the engine evaluates in the
+    innermost enclosing group — exactly the ``reset="G_x"`` the summary
+    declares. Without it a group-scope formula had no reconstruction at all
+    and fell through to an unrelated-column guess; its report-scope twin
+    reconstructed correctly through the trailer's scoped-aggregate path.
+    Returns the ``=...`` string, or None when anything fails to resolve."""
+    qcols = {(it.name or "").upper(): it.name
+             for it in (getattr(query, "items", None) or []) if it.name}
+    cu = (col or "").upper()
+    if not cu or cu in qcols:
+        return None
+    f = next((ff for ff in (getattr(report, "formulas", None) or [])
+              if (getattr(ff, "name", "") or "").upper() == cu), None)
+    if f is None:
+        return None
+    params = {(p.name or "").upper(): p.name
+              for p in (getattr(report, "parameters", None) or []) if p.name}
+    summaries = {}
+    for ff in (getattr(report, "formulas", None) or []):
+        fn = (getattr(ff, "agg_function", "") or "").strip().lower()
+        src = (getattr(ff, "agg_source", "") or "").strip()
+        nm = (getattr(ff, "name", "") or "").strip()
+        if fn and src and nm:
+            summaries[nm.upper()] = (_SSRS_AGG_FN.get(fn, "Sum"), src)
+
+    def _ref(nm):
+        nu = (nm or "").upper()
+        if nu in qcols:
+            return f"Fields!{_safe(qcols[nu])}.Value"
+        if nu in params:
+            return f"Parameters!{_safe(params[nu])}.Value"
+        agg = summaries.get(nu)
+        if agg and agg[1].upper() in qcols:
+            return f"{agg[0]}(Fields!{_safe(qcols[agg[1].upper()])}.Value)"
+        raise ValueError(f"unresolvable ref {nm!r}")
+
+    try:
+        tr = translate_formula_to_vb(getattr(f, "plsql_body", "") or "", _ref)
+    except Exception:  # noqa: BLE001 — any translator failure = honest fallback
+        return None
+    if tr.get("ok") and tr.get("expr"):
+        return tr["expr"]
+    return None
+
+
+def _iif_top_args(expr):
+    """Split a compiled ``=IIf(a, b, c)`` VB expression into its three
+    TOP-LEVEL argument strings (depth-1 commas only, string literals
+    respected). Returns [cond, true_branch, false_branch] or None when the
+    expression is not a single top-level IIf call."""
+    s = (expr or "").strip()
+    if s.startswith("="):
+        s = s[1:].strip()
+    m = re.match(r"(?is)^IIf\s*\(", s)
+    if not m or not s.endswith(")"):
+        return None
+    inner = s[m.end():-1]
+    args, depth, buf, in_str = [], 0, [], False
+    i = 0
+    while i < len(inner):
+        c = inner[i]
+        if in_str:
+            buf.append(c)
+            if c == '"':
+                # VB doubles quotes inside strings; "" stays inside
+                if i + 1 < len(inner) and inner[i + 1] == '"':
+                    buf.append('"'); i += 1
+                else:
+                    in_str = False
+        elif c == '"':
+            in_str = True; buf.append(c)
+        elif c == "(":
+            depth += 1; buf.append(c)
+        elif c == ")":
+            depth -= 1
+            if depth < 0:
+                return None      # extra text after the IIf's closing paren
+            buf.append(c)
+        elif c == "," and depth == 0:
+            args.append("".join(buf).strip()); buf = []
+        else:
+            buf.append(c)
+        i += 1
+    args.append("".join(buf).strip())
+    return args if len(args) == 3 and not in_str and depth == 0 else None
+
+
+def _section_row_edge_rule(report, query, cols):
+    """DECLARED per-row edge rule for a stat/stacked section: the repeating
+    row frame whose subtree binds one of the section's columns and declares
+    ``linePattern="solid"`` with hideXBorder edge selection (the dialect: a
+    solid box paints ONLY its non-hidden edges — hideLeft/Right/Top = the
+    per-row bottom underline the truth draws under every data row).
+
+    Returns {"edges": [...], "color": str, "width_pt": float,
+    "group_end_line": bool} or None. ``group_end_line`` is True when the
+    frame's enclosing group frame also draws a solid full-width <line>
+    (the heavy close-out rule under the group's subtotal row).
+    Declaration-driven only; no report names."""
+    main = _section_by_kind(report, "section_main")
+    if main is None or not cols:
+        return None
+    colset = {(c or "").upper() for c in cols if c}
+
+    def _fields_of(g):
+        for f in (getattr(g, "fields", None) or []):
+            yield f
+        for c in (getattr(g, "children", None) or []):
+            yield from _fields_of(c)
+
+    hit = None  # (row_frame, parent_group)
+
+    def _walk(g, parent):
+        nonlocal hit
+        if hit is not None:
+            return
+        if ((getattr(g, "kind", "") or "").lower() == "repeating_frame"
+                and (getattr(g, "border_pattern", "") or "").lower()
+                == "solid"
+                and (getattr(g, "hidden_edges", "") or "")):
+            srcs = {(getattr(f, "source", "") or "").upper()
+                    for f in _fields_of(g)}
+            if srcs & colset:
+                hit = (g, parent)
+                return
+        for c in (getattr(g, "children", None) or []):
+            _walk(c, g)
+    _walk(main, None)
+    if hit is None:
+        return None
+    frame, parent = hit
+    hidden = {e.strip() for e in (frame.hidden_edges or "").split(",")
+              if e.strip()}
+    edges = [e for e in ("top", "bottom", "left", "right")
+             if e not in hidden]
+    if not edges:
+        return None
+    group_end = False
+    group_end_gap = 0.0
+    _row_bot = (float(getattr(frame, "y", 0) or 0)
+                + float(getattr(frame, "height", 0) or 0))
+    for f in (getattr(parent, "fields", None) or []) \
+            if parent is not None else []:
+        if ((getattr(f, "kind", "") or "") == "line"
+                and (getattr(f, "line_pattern", "") or "").lower()
+                == "solid"
+                and abs(float(getattr(f, "height", 0) or 0)) <= 0.02
+                and float(getattr(f, "width", 0) or 0) >= 1.0):
+            group_end = True
+            # DECLARED white gap of the heavy DOUBLE rule: the close-out
+            # line sits BELOW the row frame's declared bottom by this
+            # much (truth prints two separate strokes, not one).
+            group_end_gap = max(0.0, float(getattr(f, "y", 0) or 0)
+                                - _row_bot)
+            break
+    return {
+        "edges": edges,
+        # Declared edge ink wins; a solid box edge always carries a width
+        # (declared, or the dialect's 1pt default), so its undeclared-color
+        # default stays the solid black the truth prints for real strokes.
+        "color": _rule_color(
+            getattr(frame, "border_color", ""),
+            width_declared=float(getattr(frame, "border_width", 0) or 0) > 0),
+        "width_pt": max(1.0, float(getattr(frame, "border_width", 0) or 0)),
+        "group_end_line": group_end,
+        "group_end_gap_in": group_end_gap,
+    }
+
+
+def _apply_row_edge_borders(tb, rule):
+    """Append the declared per-edge borders to a row cell textbox's Style
+    (constant styles only — the local RDL deserializer rejects expression-
+    valued BorderStyle)."""
+    st = tb.find(_q("Style"))
+    if st is None or not rule:
+        return
+    for e in rule["edges"]:
+        eb = _sub(st, e.capitalize() + "Border")
+        _sub(eb, "Style", "Solid")
+        _sub(eb, "Color", rule["color"])
+        _sub(eb, "Width", f"{rule['width_pt']:g}pt")
+
+
+def _rollup_subtotal_fontweight(fx):
+    """Given a ROLLUP section's compiled label formula (``=IIf(cond,
+    rename, passthrough)`` — the NVL-sentinel idiom where the CF renames
+    the rollup subtotal row), return a ``FontWeight`` expression that bolds
+    exactly the rows the CF's own condition marks as subtotals. The
+    subtotal branch is identified STRUCTURALLY: it is the branch that is
+    NOT a bare single-field passthrough. Returns None (no conditional
+    bolding) when the shape doesn't match — both/neither branch bare, or
+    not a top-level IIf. Purely derived from the formula; no literals of
+    our own beyond Bold/Normal."""
+    args = _iif_top_args(fx)
+    if not args:
+        return None
+    cond, t_branch, f_branch = args
+
+    def _bare(s):
+        return bool(re.fullmatch(r"[\s(]*Fields!\w+\.Value[\s)]*", s or ""))
+    if _bare(f_branch) and not _bare(t_branch):
+        return f'=IIf({cond}, "Bold", "Normal")'
+    if _bare(t_branch) and not _bare(f_branch):
+        return f'=IIf({cond}, "Normal", "Bold")'
+    return None
+
+
+def _section_col_widths(report, cols):
+    """DECLARED column geometry for a stat-section table: the truth prints
+    these sections at their Oracle layout width (~half page), not stretched
+    across the printable width. Column i spans from its field's declared x
+    to the next field's x (the last keeps its own declared width) — uniform
+    7.5/n only when the layout doesn't place these columns."""
+    _geo = {}
+
+    def _wlk(g):
+        for f in (getattr(g, "fields", None) or []):
+            s = (getattr(f, "source", "") or "").strip().upper()
+            if s and s not in _geo and float(getattr(f, "width", 0) or 0) > 0:
+                _geo[s] = (float(getattr(f, "x", 0) or 0),
+                           float(getattr(f, "width", 0) or 0))
+        for c in (getattr(g, "children", None) or []):
+            _wlk(c)
+    for _lg in (getattr(report, "layout", None) or []):
+        _wlk(_lg)
+    _pts = [_geo.get((c or "").upper()) for c in cols]
+    if all(_pts) and len(cols) >= 1:
+        col_ws = []
+        for i, (fx, fw) in enumerate(_pts):
+            if i + 1 < len(_pts) and _pts[i + 1][0] > fx:
+                col_ws.append(max(0.4, round(_pts[i + 1][0] - fx, 2)))
+            else:
+                col_ws.append(max(0.4, round(fw + 0.12, 2)))
+        return col_ws
+    return [round(7.5 / max(1, len(cols)), 3)] * len(cols)
+
+
+def _section_col_aligns(report, cols):
+    """DECLARED text alignment per stat-section column, as an SSRS
+    <TextAlign> or None when the layout declares none for that column.
+
+    The stat/accounting section defaults its value columns to Right by
+    POSITION (cols[1:] are counts/fees). That default must only fill the gap
+    the declaration leaves: a column whose layout field states its own
+    justification is drawn the way the report author declared it. Same walk
+    (and same first-hit-wins ordering) as _section_col_widths."""
+    _by_src = {}
+
+    def _wlk(g):
+        for f in (getattr(g, "fields", None) or []):
+            s = (getattr(f, "source", "") or "").strip().upper()
+            if s and _by_src.get(s) is None:
+                _by_src[s] = _ssrs_text_align(_declared_align(f))
+        for c in (getattr(g, "children", None) or []):
+            _wlk(c)
+
+    for _lg in (getattr(report, "layout", None) or []):
+        _wlk(_lg)
+    return [_by_src.get((c or "").upper()) for c in cols]
+
+
 def _build_section_tablix(report, name, query, columns, header_text, palette,
-                          total_label=None, col_captions=None):
+                          total_label=None, col_captions=None,
+                          group_expr=None, indent_in=0.0):
     """One stacked Tablix for a single dashboard section: an optional header
     band, a column-header row, and a detail row bound to ``query``. Mirrors the
     proven _build_tablix shape so it always uploads cleanly.
@@ -11941,7 +19717,13 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
       * None   -> generic "Total" (backward-compatible default).
       * "<str>"-> use the section's REAL Oracle total label (e.g. "Total
                   Properties Closed") -- the value stays =Sum() of the count col.
-      * ""     -> emit NO total row (the Oracle section has no group footer)."""
+      * ""     -> emit NO total row (the Oracle section has no group footer).
+
+    ``group_expr`` (optional ``=...`` expression): emit a real ROW GROUP over
+    the section dimension — the band row becomes the per-group header and the
+    details nest inside it, so a multi-valued section column prints one
+    banded block per value instead of collapsing into a single ungrouped
+    list (the Oracle break-group R_<X>_Group idiom)."""
     cols = [c for c in (columns or []) if c]
     if not cols:
         cols = [it.name for it in (query.items or []) if it.name][:4] or ["VALUE"]
@@ -11953,10 +19735,10 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
     band_fg = palette.get("band_fg", "#ffffff")
     body = _sub(tablix, "TablixBody")
     cols_el = _sub(body, "TablixColumns")
-    col_w = round(7.5 / max(1, len(cols)), 3)
-    for _ in cols:
+    col_ws = _section_col_widths(report, cols)
+    for _w in col_ws:
         c = _sub(cols_el, "TablixColumn")
-        _sub(c, "Width", f"{col_w}in")
+        _sub(c, "Width", f"{_w}in")
     rows_el = _sub(body, "TablixRows")
 
     have_header = bool(header_text)
@@ -11999,7 +19781,25 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
     drow = _sub(rows_el, "TablixRow")
     _sub(drow, "Height", "0.24in")
     dcells = _sub(drow, "TablixCells")
-    alt = '=IIf(RowNumber(Nothing) Mod 2 = 0, "#f5f7fa", "#ffffff")'
+    # NO synthesized zebra striping: the Oracle truth prints stat-section
+    # detail rows plain white (fidelity-diff measured — the invented
+    # alternating tint was a fill the real report never paints).
+    alt = None
+    # ROLLUP subtotal rows print BOLD like the Oracle format triggers do:
+    # when the resultset carries its own subtotal rows (GROUP BY ROLLUP) and
+    # the label column's CF compiles to the rename-the-sentinel IIf, key a
+    # FontWeight IIf on that SAME translated condition (structural — nothing
+    # beyond what the formula itself contains).
+    _fw_expr = None
+    if _sql_has_rollup(query) and cols:
+        _fw_expr = _rollup_subtotal_fontweight(
+            _formula_expr_for_column(report, query, cols[0]))
+    # DECLARED per-row edge rule (linePattern=solid + hideXBorder edge
+    # selection on the row frame): the truth underlines every data row.
+    _edge_rule = _section_row_edge_rule(report, query, cols)
+    # DECLARED per-column justification (None where the layout declares
+    # none) — it outranks the positional numeric default below.
+    _col_ta = _section_col_aligns(report, cols)
     for ci, col in enumerate(cols):
         cell = _sub(dcells, "TablixCell")
         contents = _sub(cell, "CellContents")
@@ -12007,18 +19807,35 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
         # count/fee VALUE columns -> right-align them to match the band's
         # "Number" caption (and Oracle's numeric right-justify). Verified
         # against an accounting/summary report truth (counts align right).
+        # That is only the FALLBACK: a column whose layout field declares its
+        # own justification is drawn as declared (a fluid-width box keeps its
+        # text at the declared left edge — see _declared_align).
         # A column that is really a report FORMULA (CF_/CP_ label or computed
         # value) compiles to an inline per-row expression here — binding it as
         # =Fields!CF_X.Value would get "repaired" onto the NULL formula-dataset
         # stub and render BLANK at run time.
+        # Dialect: only DECLARED borders paint — the invented #d0d0d0 cell
+        # grid the truth never shows is gone (border_color=None).
         _fx = _formula_expr_for_column(report, query, col)
-        _build_textbox(
+        _dtb = _build_textbox(
             contents, f"{_safe(name)}_Cell_{_safe(col)}",
             _fx or f"=Fields!{_safe(col)}.Value",
             bg=alt, vertical_align="Middle",
-            text_align=("Right" if ci > 0 else "Left"),
-            border_color="#d0d0d0", padding="3pt",
+            text_align=(_col_ta[ci] or ("Right" if ci > 0 else "Left")),
+            border_color=None, padding="3pt",
         )
+        if _fw_expr:
+            for _run in _dtb.iter(_q("TextRun")):
+                _rs = _run.find(_q("Style"))
+                if _rs is not None and _rs.find(_q("FontWeight")) is None:
+                    _sub(_rs, "FontWeight", _fw_expr)
+        _apply_row_edge_borders(_dtb, _edge_rule)
+        if ci == 0 and indent_in > 0.04:
+            # Declared detail-row left indent (repeating-frame x offset
+            # under the full-width band) — applied as label-cell padding.
+            _pl = _dtb.find(_q("Style")).find(_q("PaddingLeft"))
+            if _pl is not None:
+                _pl.text = f"{indent_in:.2f}in"
 
     # Bold per-section Total footer: SUM of each value column (every column after
     # the first/label column). Val() coerces text-or-numeric so the aggregate can
@@ -12040,7 +19857,9 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
                 _fval, _falign = (total_label or "Total"), "Left"
             elif col in value_cols:
                 # Right-align the total to sit under its now-right-aligned value
-                # column (Center left the total visually off the column).
+                # column (Center left the total visually off the column) — or
+                # under whatever the column itself declared, so the total never
+                # drifts off a column drawn to a declared justification.
                 # A formula-backed value column sums its compiled per-row
                 # expression (the raw Fields!CF_X ref would be the NULL stub).
                 _fcx = _formula_expr_for_column(report, query, col)
@@ -12048,14 +19867,45 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
                     _fval = f"=Sum(Val({_fcx[1:]}))"
                 else:
                     _fval = f"=Sum(Val(Fields!{_safe(col)}.Value))"
-                _falign = "Right"
+                _falign = _col_ta[i] or "Right"
             else:
                 _fval, _falign = "", "Left"
+            # total-row fill = the palette's declared sub-header shade
+            # (lightest pattern-marked non-band fill in the source; the
+            # truth paints these total chips at exactly that gray)
+            _tot_bg = _resolve_palette(report).get("subhdr_bg") or "#EAEAEA"
             _build_textbox(
                 contents, f"{_safe(name)}_Ftr_{_safe(col)}", _fval,
-                bold=True, bg="#eef0f3", vertical_align="Middle",
-                text_align=_falign, border_color="#d0d0d0", padding="3pt",
+                bold=True, bg=_tot_bg, vertical_align="Middle",
+                text_align=_falign, border_color=None, padding="3pt",
             )
+
+    # The DECLARED group close-out <line> with a real declared white gap
+    # below the row frame = the SECOND stroke of the heavy DOUBLE rule the
+    # truth draws under subtotal/total bands. The old tablix BottomBorder
+    # hugged the last row's underline at ~0.2pt and rendered as ONE line;
+    # a thin static trailer row whose bottom border paints at the declared
+    # offset reproduces the two separate strokes (truth-PNG measured ~3pt
+    # apart). A close-out line declared flush with the frame (< 0.02in)
+    # keeps the plain BottomBorder — geometry-driven either way.
+    _rule2_gap = 0.0
+    if _edge_rule and _edge_rule.get("group_end_line"):
+        _rule2_gap = float(_edge_rule.get("group_end_gap_in") or 0.0)
+    have_rule2 = _rule2_gap >= 0.02
+    if have_rule2:
+        trow = _sub(rows_el, "TablixRow")
+        _sub(trow, "Height", f"{min(0.10, _rule2_gap):.3f}in")
+        tcells = _sub(trow, "TablixCells")
+        for i, _col in enumerate(cols):
+            contents = _sub(_sub(tcells, "TablixCell"), "CellContents")
+            _rtb = _build_textbox(
+                contents, f"{_safe(name)}_Rule2_{i}", "",
+                border_color=None, padding="0pt", can_grow=False)
+            _rst = _rtb.find(_q("Style"))
+            _rbb = _sub(_rst, "BottomBorder")
+            _sub(_rbb, "Style", "Solid")
+            _sub(_rbb, "Color", _edge_rule["color"])
+            _sub(_rbb, "Width", f"{_edge_rule['width_pt']:g}pt")
 
     col_hier = _sub(tablix, "TablixColumnHierarchy")
     cmembers = _sub(col_hier, "TablixMembers")
@@ -12064,6 +19914,18 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
 
     row_hier = _sub(tablix, "TablixRowHierarchy")
     rmembers = _sub(row_hier, "TablixMembers")
+    if group_expr:
+        # Real ROW GROUP over the section dimension: one outer member
+        # grouped by ``group_expr`` whose nested members mirror the row
+        # list (band header / detail / footer) — each distinct dimension
+        # value prints its own banded block, exactly the Oracle
+        # break-group repeating-frame nesting. No SortExpressions: the
+        # source query's ORDER BY already delivers group order.
+        gm = _sub(rmembers, "TablixMember")
+        gg = _sub(gm, "Group")
+        gg.set("Name", f"{_safe(name)}_Sect")
+        _sub(_sub(gg, "GroupExpressions"), "GroupExpression", group_expr)
+        rmembers = _sub(gm, "TablixMembers")
     if have_header:
         bm = _sub(rmembers, "TablixMember")
         _sub(bm, "KeepWithGroup", "After")
@@ -12072,7 +19934,72 @@ def _build_section_tablix(report, name, query, columns, header_text, palette,
     if have_total:
         fm = _sub(rmembers, "TablixMember")
         _sub(fm, "KeepWithGroup", "Before")
+    if have_rule2:
+        # the second-rule trailer row's static member — inside the row
+        # group when one exists, so every group closes with the double
+        # rule exactly where the source declares its close-out line
+        tm = _sub(rmembers, "TablixMember")
+        _sub(tm, "KeepWithGroup", "Before")
 
+    _sub(tablix, "DataSetName", _safe(query.name))
+    _sub(tablix, "Left", "0in")
+    _sub(tablix, "Width", "7.5in")
+    _tstyle = _sub(tablix, "Style")
+    if _edge_rule and _edge_rule.get("group_end_line") and not have_rule2:
+        # close-out line declared FLUSH with the row frame: keep it as the
+        # tablix's own bottom border (a single heavier close), pairing
+        # with the last row's underline.
+        _tb2 = _sub(_tstyle, "BottomBorder")
+        _sub(_tb2, "Style", "Solid")
+        _sub(_tb2, "Color", _edge_rule["color"])
+        _sub(_tb2, "Width", f"{_edge_rule['width_pt']:g}pt")
+    return tablix
+
+
+def _build_section_totals_row(report, name, query, cols, label, palette):
+    """One TRAILING gray total row for a multi-table stat section whose
+    declared totals sit BELOW every detail band: label (bold, left) +
+    =Sum() of each value column, at the section's declared column
+    geometry. Its value uses the CANONICAL dataset-scoped aggregate
+    (=Sum(Fields!X.Value, "Q")) so the report-level summary net
+    recognizes the total as already displayed and emits nothing extra.
+    A standalone 1-row static Tablix bound to ``query`` (the proven
+    _build_summary_line_band shape)."""
+    tablix = ET.Element(_q("Tablix"))
+    tablix.set("Name", _safe(name))
+    body = _sub(tablix, "TablixBody")
+    cols_el = _sub(body, "TablixColumns")
+    col_ws = _section_col_widths(report, cols)
+    for _w in col_ws:
+        _sub(_sub(cols_el, "TablixColumn"), "Width", f"{_w}in")
+    rows_el = _sub(body, "TablixRows")
+    row = _sub(rows_el, "TablixRow")
+    _sub(row, "Height", "0.24in")
+    rcells = _sub(row, "TablixCells")
+    _tot_bg = _resolve_palette(report).get("subhdr_bg") or "#EAEAEA"
+    for i, col in enumerate(cols):
+        contents = _sub(_sub(rcells, "TablixCell"), "CellContents")
+        if i == 0:
+            _val, _align = (label or "Total"), "Left"
+        else:
+            _fcx = _formula_expr_for_column(report, query, col)
+            if _fcx:
+                _val = f"=Sum(Val({_fcx[1:]}))"
+            else:
+                _val = (f'=Sum(Fields!{_safe(col)}.Value, '
+                        f'"{_safe(query.name)}")')
+            _align = "Right"
+        _build_textbox(
+            contents, f"{_safe(name)}_C{i}", _val,
+            bold=True, bg=_tot_bg, vertical_align="Middle",
+            text_align=_align, border_color=None, padding="3pt",
+        )
+    col_hier = _sub(tablix, "TablixColumnHierarchy")
+    cmembers = _sub(col_hier, "TablixMembers")
+    for _ in cols:
+        _sub(cmembers, "TablixMember")
+    row_hier = _sub(tablix, "TablixRowHierarchy")
+    _sub(_sub(row_hier, "TablixMembers"), "TablixMember")
     _sub(tablix, "DataSetName", _safe(query.name))
     _sub(tablix, "Left", "0in")
     _sub(tablix, "Width", "7.5in")
@@ -12137,7 +20064,7 @@ def _build_multi_section_body(report: ParsedReport, sections) -> ET.Element:
     items = _sub(body, "ReportItems")
     palette = _resolve_palette(report)
 
-    top = 0.10
+    top = _BODY_LEAD_IN   # first section starts AT the body origin
     idx = 0
     SECTION_GAP = 0.30
     EST_ROW = 0.24
@@ -12184,14 +20111,37 @@ def _build_multi_section_body(report: ParsedReport, sections) -> ET.Element:
         # report (real header text + one table/section) is untouched.
         _tables = sec["tables"]
         _hdr_expr = None
+        _grp_expr = None
+        _collapsed = False
         if (not sec.get("header") and len(_tables) == 2
                 and _tables[0][0].name == _tables[1][0].name
                 and len(_tables[0][1] or []) == 1
                 and re.search(r"(?i)(_group$)", (_tables[0][1][0] or ""))):
             _grp_col = _tables[0][1][0]
             _q0 = _tables[0][0]
-            _hdr_expr = (f'=First(Fields!{_safe(_grp_col)}.Value, '
-                         f'"{_safe(_q0.name)}")')
+            # The section dimension can span SEVERAL values (a ROLLUP break
+            # report's DECODE buckets). A dataset-scope First() header +
+            # ungrouped details collapses them into one mislabeled list, and
+            # a CF_-named header column would get "repaired" onto the NULL
+            # formula-dataset stub (blank on a real server). Compile a CF_
+            # header through the inline formula translator and GROUP the
+            # section tablix by that computed expression; a plain dataset
+            # column groups by (and binds) itself in group scope. Honest
+            # fallback: neither compiles/resolves -> keep the historic
+            # ungrouped First() shape.
+            _q0cols = {(it.name or "").upper(): it.name
+                       for it in (getattr(_q0, "items", None) or []) if it.name}
+            _fx_grp = _formula_expr_for_column(report, _q0, _grp_col)
+            if _fx_grp:
+                _hdr_expr = _fx_grp
+                _grp_expr = _fx_grp
+            elif (_grp_col or "").upper() in _q0cols:
+                _col_real = _q0cols[(_grp_col or "").upper()]
+                _hdr_expr = f"=Fields!{_safe(_col_real)}.Value"
+                _grp_expr = _hdr_expr
+            else:
+                _hdr_expr = (f'=First(Fields!{_safe(_grp_col)}.Value, '
+                             f'"{_safe(_q0.name)}")')
             # Order the data columns the way Oracle's layout does: the
             # description/LABEL column leftmost, then the count ("Applications")
             # and fee ("Fees") value columns -- the parser returns them in query
@@ -12205,16 +20155,47 @@ def _build_multi_section_body(report: ParsedReport, sections) -> ET.Element:
                 _tables = [(_dq, _reord)]
             else:
                 _tables = [_tables[1]]
+            _collapsed = True
             if _has_total and (not _sec_totals) and not _sql_has_rollup(_q0):
-                _sec_totals = [(f'="Total " & First(Fields!{_safe(_grp_col)}.Value, '
-                                f'"{_safe(_q0.name)}")')]
+                if _grp_expr:
+                    # Grouped section: the footer sits INSIDE the row group,
+                    # so the label evaluates in group scope (a dataset-scope
+                    # First would stamp the first group's name on them all).
+                    _sec_totals = [f'="Total " & ({_grp_expr[1:]})']
+                else:
+                    _sec_totals = [(f'="Total " & '
+                                    f'First(Fields!{_safe(_grp_col)}.Value, '
+                                    f'"{_safe(_q0.name)}")')]
+        # SOURCE-GEOMETRY total placement: when a multi-table section's total
+        # labels ALL sit BELOW every detail band in the declared layout, the
+        # truth prints BOTH gray total rows TOGETHER after the whole section
+        # (closed rows, then open rows, then Total-Closed + Total-Active) —
+        # not one footer sandwiched between the tables. Emit the tables
+        # footer-less and trail the totals as their own rows, each summing
+        # its own table's query.
+        _tot_ys = sec.get("totals_y") or []
+        _tgeo = sec.get("table_geo") or []
+        if _collapsed and len(_tgeo) == 2:
+            # The group-title collapse folded 2 same-query tables into the
+            # ONE detail table; keep the geometry list parallel so the
+            # detail band's declared x offset (its row indent) survives —
+            # the stale 2-entry list failed the parallelism gate and
+            # silently dropped the indent the truth prints.
+            _tgeo = [_tgeo[1]]
+        _geo_ok = len(_tgeo) == len(_tables) and bool(_tgeo)
+        _trailing = (len(_tables) >= 2 and _sec_totals and _tot_ys and _geo_ok
+                     and _has_total and len(_sec_totals) == len(_tot_ys)
+                     and min(_tot_ys) >= max(y for y, _x in _tgeo) - 0.01)
+        _n_tables = len(_tables)
         for _ti, (query, cols) in enumerate(_tables):
             name = f"Tbx_S{idx}"
             # Only the FIRST table in a section carries the section header band.
             _base_hdr = _hdr_expr if _hdr_expr is not None else sec.get("header", "")
             hdr = _base_hdr if not header_used else ""
             header_used = True
-            if not _has_total:
+            if _trailing:
+                _tl = ""            # totals trail the section, not each table
+            elif not _has_total:
                 _tl = ""            # plain list section -> no total row at all
             elif _sec_totals:
                 _tl = _sec_totals[_ti] if _ti < len(_sec_totals) else ""
@@ -12226,8 +20207,18 @@ def _build_multi_section_body(report: ParsedReport, sections) -> ET.Element:
                 # them (production verified: 3x the true section total). The
                 # rollup rows render inline with their compiled CF labels.
                 _tl = ""
+            # DECLARED left indent: the detail repeating frame's x offset
+            # relative to its section frame (Oracle prints detail rows
+            # inset under the full-width band).
+            _ind = 0.0
+            if _geo_ok:
+                _ind = max(0.0, _tgeo[_ti][1]
+                           - float(sec.get("x", 0.0) or 0.0))
             tx = _build_section_tablix(report, name, query, cols, hdr, palette,
-                                       total_label=_tl, col_captions=_col_caps)
+                                       total_label=_tl, col_captions=_col_caps,
+                                       group_expr=(_grp_expr if _ti == 0
+                                                   else None),
+                                       indent_in=_ind)
             _sub(tx, "Top", f"{top:.2f}in")
             items.append(tx)
             # Stack at the section's MINIMAL static height (band + one detail
@@ -12238,8 +20229,26 @@ def _build_multi_section_body(report: ParsedReport, sections) -> ET.Element:
             # so real data can only expand this, never overlap it.
             _sec_h = ((0.30 if hdr else 0.0) + EST_ROW
                       + (EST_ROW if _tl != "" else 0.0))
-            top += _sec_h + SECTION_GAP
+            # Sibling detail bands of ONE trailing-totals section stack
+            # contiguously (the truth shows one visual table).
+            _gap = 0.06 if (_trailing and _ti < _n_tables - 1) else SECTION_GAP
+            top += _sec_h + _gap
             idx += 1
+        if _trailing:
+            # Both total rows together, source y-order, directly after the
+            # section's last detail band.
+            top -= SECTION_GAP - 0.06
+            for _tj, _lbl in enumerate(_sec_totals):
+                if _tj >= len(_tables):
+                    break
+                _tq, _tcols = _tables[_tj]
+                tr = _build_section_totals_row(
+                    report, f"Tbx_S{idx - 1}_Tot{_tj}", _tq, _tcols,
+                    _lbl, palette)
+                _sub(tr, "Top", f"{top:.2f}in")
+                items.append(tr)
+                top += EST_ROW + 0.02
+            top += SECTION_GAP - 0.02
 
     _sub(body, "Height", f"{top + 0.10:.2f}in")
     _sub(body, "Style")
@@ -12737,6 +20746,10 @@ def _find_matrix_spec(report, index: int = 0) -> Optional[dict]:
     return {"row": row0, "col": col0, "cells": cells,
             "query": query, "dominant": dominant,
             "measure_fns": measure_fns, "margins": margins,
+            # the matrix layout object itself -- carries the DECLARED box
+            # (linePattern / lineWidth / lineColor / hideXBorder) the
+            # cross-tab is drawn with, so the emitter never has to invent one
+            "group": mx,
             "band": band_col, "n_matrices": len(matrices)}
 
 
@@ -12790,25 +20803,36 @@ def _build_matrix_tablix(report, spec, suffix: str = "") -> ET.Element:
     rows_el = _sub(body, "TablixRows")
 
     band_f = _safe(spec["band"]) if spec.get("band") else ""
-    hdr_bg, hdr_fg = "#4a6a8a", "#ffffff"
+    # Header band ink: the report's RESOLVED palette (declared fills win;
+    # the literal is only the no-declaration fallback, same contract as the
+    # columnar path) -- not a slate-blue of our own.
+    _mx_pal = _resolve_palette(report)
+    hdr_bg = _mx_pal.get("band_bg") or "#4a6a8a"
+    hdr_fg = _mx_pal.get("band_fg") or "#ffffff"
+    # Cross-tab GRID: declaration-driven. The matrix layout object carries
+    # its own linePattern box; with none declared the cross-tab prints
+    # without gridlines rather than with an invented gray one.
+    _mx_rule = _declared_box_edges(spec.get("group"))
+    _mx_ink = (_mx_rule["color"]
+               if _mx_rule and len(_mx_rule["edges"]) == 4 else None)
     r0 = _sub(rows_el, "TablixRow")
     _sub(r0, "Height", "0.30in")
     c0 = _sub(r0, "TablixCells")
     cont = _sub(_sub(c0, "TablixCell"), "CellContents")
     _build_textbox(cont, f"Mx_Corner{suffix}", spec["row"].replace("_", " "),
                    bold=True, bg=hdr_bg, fg=hdr_fg, text_align="Left",
-                   vertical_align="Middle", border_color="#a0a0a0",
+                   vertical_align="Middle", border_color=_mx_ink,
                    padding="5pt")
     cont = _sub(_sub(c0, "TablixCell"), "CellContents")
     _build_textbox(cont, f"Mx_ColHdr{suffix}", f"=Fields!{col_f}.Value",
                    bold=True, bg=hdr_bg, fg=hdr_fg, text_align="Center",
-                   vertical_align="Middle", border_color="#a0a0a0",
+                   vertical_align="Middle", border_color=_mx_ink,
                    padding="5pt")
     if _rt:
         cont = _sub(_sub(c0, "TablixCell"), "CellContents")
         _build_textbox(cont, f"Mx_TotColHdr{suffix}", "Total",
                        bold=True, bg=hdr_bg, fg=hdr_fg, text_align="Center",
-                       vertical_align="Middle", border_color="#a0a0a0",
+                       vertical_align="Middle", border_color=_mx_ink,
                        padding="5pt")
 
     if band_f:
@@ -12821,12 +20845,12 @@ def _build_matrix_tablix(report, spec, suffix: str = "") -> ET.Element:
         _build_textbox(cont, f"Mx_BandHdr{suffix}",
                        f'=Fields!{band_f}.Value',
                        bold=True, font_size="11pt", text_align="Left",
-                       vertical_align="Middle", border_color="#d0d0d0",
+                       vertical_align="Middle", border_color=_mx_ink,
                        padding="4pt")
         for _bi in range(2 if _rt else 1):
             cont = _sub(_sub(cb, "TablixCell"), "CellContents")
             _build_textbox(cont, f"Mx_BandPad{suffix}_{_bi}", "",
-                           border_color="#d0d0d0", padding="4pt")
+                           border_color=_mx_ink, padding="4pt")
 
     r1 = _sub(rows_el, "TablixRow")
     _sub(r1, "Height", f"{0.25 + 0.15 * max(0, len(cells) - 1):.2f}in")
@@ -12834,7 +20858,7 @@ def _build_matrix_tablix(report, spec, suffix: str = "") -> ET.Element:
     cont = _sub(_sub(c1, "TablixCell"), "CellContents")
     _build_textbox(cont, f"Mx_RowHdr{suffix}", f"=Fields!{row_f}.Value",
                    bold=True, text_align="Left", vertical_align="Middle",
-                   border_color="#d0d0d0", padding="4pt")
+                   border_color=_mx_ink, padding="4pt")
     # Aggregate per the DECLARED <summary> function (a count matrix must
     # Count, not Sum -- Sum() over a text column renders 0/#Error).
     _MXFN = {"count": "Count", "sum": "Sum", "avg": "Avg", "average": "Avg",
@@ -12853,13 +20877,13 @@ def _build_matrix_tablix(report, spec, suffix: str = "") -> ET.Element:
         expr = "=" + " & vbCrLf & ".join(parts)
     cont = _sub(_sub(c1, "TablixCell"), "CellContents")
     _build_textbox(cont, f"Mx_Cell{suffix}", expr, text_align="Right",
-                   vertical_align="Middle", border_color="#d0d0d0",
+                   vertical_align="Middle", border_color=_mx_ink,
                    padding="4pt")
     if _rt:
         cont = _sub(_sub(c1, "TablixCell"), "CellContents")
         _build_textbox(cont, f"Mx_RowTotal{suffix}", expr, bold=True,
                        text_align="Right", vertical_align="Middle",
-                       border_color="#d0d0d0", padding="4pt")
+                       border_color=_mx_ink, padding="4pt")
     if _ct:
         # Bottom per-column total row (+ grand corner when a right total
         # column also exists). The SAME measure expression auto-scopes to
@@ -12870,16 +20894,16 @@ def _build_matrix_tablix(report, spec, suffix: str = "") -> ET.Element:
         cont = _sub(_sub(c2, "TablixCell"), "CellContents")
         _build_textbox(cont, f"Mx_TotRowLbl{suffix}", "Total", bold=True,
                        text_align="Left", vertical_align="Middle",
-                       border_color="#d0d0d0", padding="4pt")
+                       border_color=_mx_ink, padding="4pt")
         cont = _sub(_sub(c2, "TablixCell"), "CellContents")
         _build_textbox(cont, f"Mx_ColTotal{suffix}", expr, bold=True,
                        text_align="Right", vertical_align="Middle",
-                       border_color="#d0d0d0", padding="4pt")
+                       border_color=_mx_ink, padding="4pt")
         if _rt:
             cont = _sub(_sub(c2, "TablixCell"), "CellContents")
             _build_textbox(cont, f"Mx_GrandTotal{suffix}", expr, bold=True,
                            text_align="Right", vertical_align="Middle",
-                           border_color="#d0d0d0", padding="4pt")
+                           border_color=_mx_ink, padding="4pt")
 
     ch = _sub(t, "TablixColumnHierarchy")
     chm = _sub(ch, "TablixMembers")
@@ -12949,6 +20973,9 @@ def _build_matrix_tablix(report, spec, suffix: str = "") -> ET.Element:
             pass
     _sub(t, "Height", f"{max(0.55, _true_h):.2f}in")
     _sub(t, "Width", "3.3in")
+    # DECLARED outer box only (per edge, hideXBorder honoured); nothing at
+    # all when the matrix object declares no linePattern.
+    _apply_declared_box_edges(t, _mx_rule)
     return t
 
 
@@ -12989,10 +21016,13 @@ def _build_grantee_grid_tablix(report, main):
     rect.set("Name", "Rect_GranteeBox")
     _sub(rect, "KeepTogether", "true")
     rstyle = _sub(rect, "Style")
-    rb = _sub(rstyle, "Border")
-    _sub(rb, "Style", "Solid")
-    _sub(rb, "Color", "#000000")
-    _sub(rb, "Width", "1pt")
+    # DECLARED box only: this rectangle IS the repeating frame, so its
+    # edges, ink and weight come from that frame's <visualSettings>
+    # (linePattern gates, hideXBorder selects, lineWidth/lineForegroundColor
+    # stroke). A hardcoded black 1pt frame printed a box the declaration may
+    # never have asked for, in an ink and weight it never named.
+    _apply_edge_subset(rstyle, _declared_frame_box(org),
+                       ("top", "bottom", "left", "right"))
     ri = _sub(rect, "ReportItems")
     counter = [0]
     _emit_frame_rect(ri, org, 0.0, 0.0, BODY_W, report, set(), "Grid", counter)
@@ -13081,6 +21111,37 @@ def _build_grantee_grid_tablix(report, main):
     return tablix
 
 
+def _ensure_break_after_cover(tablix) -> None:
+    """A header-section cover prints on its OWN page(s) in Oracle — the main
+    section always starts a fresh sheet. When the tablix's outermost dynamic
+    group declares no PageBreak of its own (adding Start THERE would also
+    break between group instances, which Oracle does not do), wrap the whole
+    row hierarchy in a single-instance group carrying PageBreak=Start: it
+    fires exactly once, before the first data row, pushing the body off the
+    cover page. Leaf-member count (the TablixRows pairing) is unchanged.
+    A tablix whose groups already declare a PageBreak is left alone — its
+    own break already separates the cover."""
+    rh = tablix.find(_q("TablixRowHierarchy"))
+    if rh is None:
+        return
+    om = rh.find(_q("TablixMembers"))
+    if om is None or len(om) == 0:
+        return
+    for m in om.iter(_q("TablixMember")):
+        g = m.find(_q("Group"))
+        if g is not None and g.find(_q("PageBreak")) is not None:
+            return
+    wrapper = ET.Element(_q("TablixMember"))
+    g = _sub(wrapper, "Group"); g.set("Name", "PageSep_Cover")
+    ge = _sub(g, "GroupExpressions"); _sub(ge, "GroupExpression", "=1")
+    pb = _sub(g, "PageBreak"); _sub(pb, "BreakLocation", "Start")
+    kids = _sub(wrapper, "TablixMembers")
+    for m in list(om):
+        om.remove(m)
+        kids.append(m)
+    om.append(wrapper)
+
+
 def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
     """Build the <Body> for a tabular grouped-card report. Letter /
     certificate reports use _build_certificate_body via the caller.
@@ -13095,7 +21156,7 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
     body = ET.Element(_q("Body"))
     items = _sub(body, "ReportItems")
     cover_top = 0.0
-    next_top = 0.10  # default if no cover
+    next_top = _BODY_LEAD_IN  # default if no cover: start AT the body origin
 
     # A "Run Date / Run By / Total of ALL Records + Report Parameters" cover is
     # prepended ONLY when the report actually carries cover content (a real
@@ -13160,7 +21221,18 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
         # so the Tablix sits BELOW the cover in body coordinates.
         for t in tablix.findall(_q("Top")):
             tablix.remove(t)
-        _sub(tablix, "Top", f"{next_top:.2f}in")
+        # With NO cover above it, a column-grid table starts at the y its
+        # own caption frame DECLARES inside the body -- not at a cosmetic
+        # 0.10in lead. (Truth-measured: the lead plus the header-band pad
+        # printed the caption band 14pt below the declaration.) Only for
+        # the two column-grid shapes whose band geometry is declared.
+        _decl_hdr = (_declared_column_header_band(report, main)
+                     if cover is None else None)
+        if _decl_hdr is not None and tablix.get("Name") in (
+                "Tablix_Main", "Tablix_StackedList"):
+            _sub(tablix, "Top", f"{max(0.0, _decl_hdr[0]):.4f}in")
+        else:
+            _sub(tablix, "Top", f"{next_top:.2f}in")
         # With NO COVER above the Tablix, a Start page-break on its OUTERMOST
         # group fires before the first instance too (SSRS renders an empty
         # leading page whenever a PageHeader exists). Oracle's
@@ -13176,6 +21248,11 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
                 _bl = _pb.find(_q("BreakLocation")) if _pb is not None else None
                 if _bl is not None and (_bl.text or "") == "Start":
                     _bl.text = "Between"
+        else:
+            # Cover present: the main section starts a fresh sheet in
+            # Oracle. Adds a one-shot Start break only when no group of
+            # its own already breaks (see helper).
+            _ensure_break_after_cover(tablix)
         items.append(tablix)
         # MULTI-MATRIX: every FURTHER dominant pivot renders as its own
         # Tablix stacked below (each with unique suffixed names/groups).
@@ -13216,31 +21293,507 @@ def _build_body(report: ParsedReport, main: Optional[DataQuery]) -> ET.Element:
     return body
 
 
-def _content_span_in(report) -> float:
-    """Widest right-edge (x + width) across the main section's frames and their
-    fields = the Oracle CONTENT width. Drives portrait-vs-landscape page sizing:
-    a span wider than portrait's usable area needs a wide (landscape) page, or
-    the columns get compressed."""
+def _is_page_chrome_group(g) -> bool:
+    """True when a layout frame carries ONLY page furniture — every field in
+    its subtree is tagged ``in_margin`` (authored inside the section's
+    <margin> band) and there is at least one such field. Purely structural,
+    driven by the parser's tag; no names or report-specific tokens."""
+    found = [False]
+
+    def walk(x) -> bool:
+        for f in (getattr(x, "fields", None) or []):
+            found[0] = True
+            if not getattr(f, "in_margin", False):
+                return False
+        for c in (getattr(x, "children", None) or []):
+            if not walk(c):
+                return False
+        return True
+
+    try:
+        return bool(walk(g) and found[0])
+    except Exception:  # noqa: BLE001 -- probing must never break the RDL
+        return False
+
+
+def _declared_body_left_in(report) -> float:
+    """Leftmost declared x across the main section's BODY objects (page-chrome
+    objects excluded — they are paper-relative). This is where the source puts
+    its content INSIDE the body, so a builder that synthesizes a region rather
+    than following one declared box has a declared indent to honour instead of
+    assuming one. 0.0 when nothing is declared."""
     sec = _section_by_kind(report, "section_main")
-    spans = [0.0]
+    lefts = []
 
-    def _r(o) -> float:
+    def walk(g):
+        if _is_page_chrome_group(g):
+            return
         try:
-            return float(getattr(o, "x", 0) or 0) + float(getattr(o, "width", 0) or 0)
-        except Exception:  # noqa: BLE001
-            return 0.0
-
-    def walk(g) -> None:
-        spans.append(_r(g))
+            lefts.append(float(getattr(g, "x", 0) or 0))
+        except (TypeError, ValueError):
+            pass
         for f in (getattr(g, "fields", None) or []):
-            spans.append(_r(f))
-        for ch in (getattr(g, "children", None) or []):
-            walk(ch)
+            if getattr(f, "in_margin", False):
+                continue
+            try:
+                lefts.append(float(getattr(f, "x", 0) or 0))
+            except (TypeError, ValueError):
+                pass
+        for c in (getattr(g, "children", None) or []):
+            walk(c)
 
     if sec:
         for c in (getattr(sec, "children", None) or []):
             walk(c)
+    return max(0.0, min(lefts)) if lefts else 0.0
+
+
+def _content_span_in(report, exclude_page_chrome: bool = False,
+                     include_section_shift: bool = False) -> float:
+    """Widest right-edge (x + width) across the BODY-EMITTED sections' frames
+    and their fields = the Oracle CONTENT width. Drives portrait-vs-landscape
+    page sizing: a span wider than portrait's usable area needs a wide
+    (landscape) page, or the columns get compressed.
+
+    EVERY section the emitter renders into the body counts, not just the main
+    one. A record-bearing trailer section is a data region of its own (see
+    ``_record_bearing_trailer_section``) with its OWN declared body rectangle,
+    and measuring only the main section silently under-sized the sheet for it:
+    the trailer's containers were then squeezed by the fit clamps, the
+    right-anchored boxes inside them slid left over their own labels, and the
+    box borders printed straight through the label glyphs (truth-measured on a
+    voucher grid: the source declares a +0.018in gap between a label's right
+    edge and the value's left edge; the squeeze turned that into a 0.17in
+    overlap and drove the divider through the number).
+
+    ``exclude_page_chrome`` drops the declared <margin>-band objects (and the
+    frames that hold nothing else). Those live in PAPER coordinates — they
+    already include the page's own side margins — so counting them as body
+    content double-counts the margin and inflates the sheet.
+
+    ``include_section_shift`` measures each section in BODY coordinates —
+    its declared span plus the offset its own body origin puts it at inside
+    the emitted body (``_section_body_left_shift``). That is the span the
+    <Width> budget has to cover; the raw declared span is what the page
+    ORIGIN is resolved from, so the two must stay separable (and the flag
+    is what keeps them from calling each other in a circle)."""
+    spans = [0.0]
+    _shift = [0.0]
+
+    def _r(o) -> float:
+        try:
+            return (float(getattr(o, "x", 0) or 0)
+                    + float(getattr(o, "width", 0) or 0) + _shift[0])
+        except Exception:  # noqa: BLE001
+            return 0.0
+
+    def walk(g) -> None:
+        if exclude_page_chrome and _is_page_chrome_group(g):
+            return
+        spans.append(_r(g))
+        for f in (getattr(g, "fields", None) or []):
+            if exclude_page_chrome and getattr(f, "in_margin", False):
+                continue
+            spans.append(_r(f))
+        for ch in (getattr(g, "children", None) or []):
+            walk(ch)
+
+    def _set_shift(kind) -> None:
+        _shift[0] = (_section_body_left_shift(report, kind)
+                     if include_section_shift else 0.0)
+
+    sec = _section_by_kind(report, "section_main")
+    if sec:
+        _set_shift("section_main")
+        for c in (getattr(sec, "children", None) or []):
+            walk(c)
+    # A trailer section only counts when the emitter actually prints its
+    # records; a chrome-only trailer stays out of the sheet budget.
+    try:
+        _tsec, _tframes = _record_bearing_trailer_section(report)
+    except Exception:  # noqa: BLE001 -- sizing must never break the RDL
+        _tsec, _tframes = None, []
+    if _tsec is not None:
+        _set_shift("section_trailer")
+        for c in _tframes:
+            walk(c)
     return max(spans)
+
+
+def _page_chrome_span_in(report) -> float:
+    """Widest right-edge across the DECLARED page-chrome objects (the
+    <margin>-band fields emitted 1:1 into the page header/footer). These are
+    paper-relative, so the sheet only has to CONTAIN them — see
+    ``_page_width_for``. 0.0 when the source declares no chrome."""
+    spans = [0.0]
+
+    def walk(g) -> None:
+        for f in (getattr(g, "fields", None) or []):
+            if not getattr(f, "in_margin", False):
+                continue
+            try:
+                spans.append(float(getattr(f, "x", 0) or 0)
+                             + float(getattr(f, "width", 0) or 0))
+            except Exception:  # noqa: BLE001
+                pass
+        for c in (getattr(g, "children", None) or []):
+            walk(c)
+
+    for lg in (getattr(report, "layout", None) or []):
+        walk(lg)
+    return max(spans)
+
+
+def _small_paper_for(report):
+    """Declared SMALL paper — card/label stock. The main section declares a
+    paper width genuinely below the default sheet, its own body fits that
+    width, and the laid-out content fits it too (the Oracle-rendered truth
+    prints the card at exactly the declared stock size, not centered on a
+    Letter sheet). Returns ``(width, height)`` in inches, or None."""
+    cached = getattr(report, "_small_paper", "unset")
+    if cached != "unset":
+        return cached
+    out = None
+    try:
+        sec = _section_by_kind(report, "section_main")
+        if sec is not None:
+            w = float(getattr(sec, "width", 0) or 0)
+            h = float(getattr(sec, "height", 0) or 0)
+            body_w = float(getattr(sec, "body_width", 0) or 0) or w
+            if 1.5 <= w < 8.0 and 3.0 <= h <= 17.0 and body_w <= w + 0.05:
+                try:
+                    span = _content_span_in(report)
+                except Exception:  # noqa: BLE001
+                    span = 0.0
+                if span <= w + 0.05:
+                    out = (w, h)
+    except Exception:  # noqa: BLE001 -- paper probing must never break RDL
+        out = None
+    report._small_paper = out
+    return out
+
+
+def _declared_body_origin_x(report):
+    """The main section's declared BODY ORIGIN x (paper inches), or None.
+
+    Oracle's ``<section><body><location x= y=/>`` places the body rectangle
+    on the sheet; body object coordinates restart at that origin. So the
+    origin IS the sheet's left margin and every body object prints at
+    ``location.x + its own declared x`` — truth-measured to 0.0003in on the
+    Oracle-rendered PDFs (a 14in landscape summary, an 11in landscape log, a
+    letter body and a full-bleed form all land exactly there)."""
+    sec = _section_by_kind(report, "section_main")
+    loc = getattr(sec, "body_location", ()) if sec is not None else ()
+    if not loc:
+        return None
+    try:
+        x = float(loc[0])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return x if x >= 0.0 else None
+
+
+def _declared_body_origin_y(report):
+    """The main section's declared BODY ORIGIN y (paper inches), or None.
+
+    The vertical twin of ``_declared_body_origin_x``: the body rectangle's
+    top edge on the sheet. Everything above it is page chrome, so an RDL's
+    TopMargin + PageHeader height must add up to exactly this — otherwise
+    every declared body band prints LOW by the difference (truth-measured:
+    a 0.12in header pad plus a 0.10in body lead put one report's header
+    band 14pt below where its declaration -- and the truth -- put it)."""
+    sec = _section_by_kind(report, "section_main")
+    loc = getattr(sec, "body_location", ()) if sec is not None else ()
+    if not loc or len(loc) < 2:
+        return None
+    try:
+        y = float(loc[1])
+    except (TypeError, ValueError, IndexError):
+        return None
+    return y if y >= 0.0 else None
+
+
+def _page_hmargin_for(report) -> float:
+    """Horizontal margin used for the body's WIDTH BUDGET (how much of the
+    sheet a body may span). Small stock scales it down so the declared body
+    still fits (blank-page rule: body < page - margins); normal sheets keep
+    the standard margin. This is deliberately NOT the emitted page origin —
+    see _page_left_margin_for, which places the body on the paper. The two
+    are reconciled by _fit_body_to_page (the body is capped at what the sheet
+    can hold at its real origin, and the right margin is the residual)."""
+    sp = _small_paper_for(report)
+    if sp:
+        sec = _section_by_kind(report, "section_main")
+        body_w = (float(getattr(sec, "body_width", 0) or 0)
+                  if sec is not None else 0.0) or sp[0]
+        return min(_PAGE_HMARGIN_IN,
+                   max(0.0, round((sp[0] - body_w) / 2.0, 2)))
+    return _PAGE_HMARGIN_IN
+
+
+def _page_left_margin_for(report) -> float:
+    """The sheet's LEFT margin in inches — the page origin the body prints
+    from, DERIVED from the declaration rather than assumed.
+
+    Resolution order:
+
+    1. the declared body ORIGIN (``<body><location x=>``) — Oracle's own
+       statement of where the body rectangle sits on the paper (0.25in on an
+       8.0in body, 0.30212in on an 11in landscape sheet, 0.54053in on a 14in
+       one, 0.85413in on a letter body: every one of those matches the
+       rendered truth to 0.0003in);
+    2. otherwise Oracle's DEFAULT body inset — the export omits the axis
+       whose margin is the default, and on every such report the truth
+       renders body objects at exactly declared_x + 0.5in.
+
+    Small card/label stock keeps its own scaled margin when it declares no
+    origin (half an inch is most of a wallet card).  Whatever the source
+    says, the margin is finally clamped so the declared content still fits
+    the sheet — the margin may never push body content off the paper (that
+    is what paginates a blank companion page after every content page)."""
+    cached = getattr(report, "_page_left_margin_in", None)
+    if cached is not None:
+        return cached
+    paper = _page_width_for(report)
+    sec = _section_by_kind(report, "section_main")
+    body_w = (float(getattr(sec, "body_width", 0) or 0)
+              if sec is not None else 0.0)
+    declared = _declared_body_origin_x(report)
+    if declared is not None:
+        margin = declared
+    elif _small_paper_for(report):
+        margin = _page_hmargin_for(report)
+    else:
+        margin = _PAGE_DEFAULT_BODY_MARGIN_IN
+    # ONE page origin, SEVERAL declared section origins. A section whose body
+    # starts LEFT of the emitted margin cannot be placed at all (a body Left is
+    # never negative), so the page origin is the smallest of them and every
+    # other section pays the difference as a positive Left inside its own
+    # region (_section_body_left_shift). Single-section reports resolve to
+    # exactly the main origin, as before.
+    for _k in _body_section_kinds(report):
+        _o = _section_body_origin_x(report, _k)
+        if _o is not None:
+            margin = min(margin, _o)
+    # The declared content must still fit: never let the side margin push
+    # the body past the right edge of the sheet.
+    try:
+        need = max(body_w, _content_span_in(report, exclude_page_chrome=True))
+    except Exception:  # noqa: BLE001 -- sizing must never break the RDL
+        need = body_w
+    if need > 0:
+        margin = min(margin, max(0.0, paper - need - _BODY_FIT_SLACK_IN))
+    margin = max(0.0, round(margin, 3))
+    report._page_left_margin_in = margin
+    return margin
+
+
+def _section_body_origin_x(report, section_kind: str) -> float:
+    """Paper x of ONE section's body rectangle, resolved the same way
+    _page_left_margin_for resolves the main section's.
+
+    Oracle gives EVERY section its own ``<body><location>``: the header
+    (parameter-form) section's body need not sit where the main section's
+    does, and the export omits the axis whose origin is Oracle's default —
+    exactly as it omits it on the main body. Truth-measured on two reports
+    whose main bodies sit at DIFFERENT origins (0.25in and 0.85413in) but
+    whose header bodies both omit ``x``: both render their header objects at
+    declared_x + 0.5in, the same default inset _page_left_margin_for already
+    applies. So the offset is a property of the SECTION, not of the report.
+    """
+    sec = _section_by_kind(report, section_kind)
+    if sec is None:
+        return None
+    loc = getattr(sec, "body_location", ()) if sec is not None else ()
+    try:
+        x = float(loc[0]) if loc else None
+    except (TypeError, ValueError, IndexError):
+        x = None
+    if x is None or x < 0.0:
+        return _PAGE_DEFAULT_BODY_MARGIN_IN
+    return x
+
+
+# Section kinds the emitter can render into the BODY, in print order. A
+# section absent from the source resolves to None everywhere below, so a
+# single-section report answers exactly as it did before per-section
+# origins existed (every shift is 0 and every margin is the main
+# section's) -- that equivalence is what makes this change inert for the
+# whole single-section corpus.
+_BODY_SECTION_KINDS = ("section_header", "section_main", "section_trailer")
+
+
+def _body_section_kinds(report) -> list:
+    """The declared sections the emitter places in the body."""
+    return [k for k in _BODY_SECTION_KINDS
+            if _section_by_kind(report, k) is not None]
+
+
+def _section_body_extent_v(report, section_kind: str):
+    """How TALL one section's body rectangle is (inches), or None.
+
+    The declared ``<body height=>`` when the source states one; otherwise
+    the deepest declared frame bottom in that section, which is the drawing
+    area Oracle sized the body from."""
+    sec = _section_by_kind(report, section_kind)
+    if sec is None:
+        return None
+    try:
+        h = float(getattr(sec, "body_height", 0) or 0)
+    except (TypeError, ValueError):
+        h = 0.0
+    if h > 0.0:
+        return h
+    deepest = [0.0]
+
+    def _walk(g):
+        try:
+            deepest[0] = max(deepest[0],
+                             float(getattr(g, "y", 0) or 0)
+                             + float(getattr(g, "height", 0) or 0))
+        except (TypeError, ValueError):
+            pass
+        for ch in (getattr(g, "children", None) or []):
+            _walk(ch)
+
+    for ch in (getattr(sec, "children", None) or []):
+        _walk(ch)
+    return deepest[0] or None
+
+
+def _section_declares_origin_y(report, section_kind: str) -> bool:
+    """True when the section states its own ``<body><location y=>``."""
+    sec = _section_by_kind(report, section_kind)
+    loc = getattr(sec, "body_location", ()) if sec is not None else ()
+    try:
+        return bool(loc) and len(loc) > 1 and loc[1] is not None \
+            and float(loc[1]) >= 0.0
+    except (TypeError, ValueError, IndexError):
+        return False
+
+
+def _section_body_origin_y(report, section_kind: str):
+    """Paper y of ONE section's body rectangle, or None when the section is
+    absent — the vertical twin of ``_section_body_origin_x``.
+
+    The declared ``<body><location y=>`` when the source states one.  When
+    the axis is OMITTED the body sits at Oracle's default for it, which is
+    the body CENTRED on the sheet: ``(paper - body extent) / 2``.  That is
+    measured, not assumed --
+
+      * an 8.00in-wide body on an 8.5in sheet DECLARES x=0.25 = (8.5-8.0)/2;
+      * a 10.00in-tall body on an 11in sheet DECLARES y=0.5 = (11-10)/2;
+      * the long-standing 0.5in default this file already applies on the x
+        axis is exactly (8.5-7.5)/2 for the 7.5in bodies that produced it;
+      * and a section that omits y with a 9.00in body predicts (11-9)/2 =
+        1.00in — its truth PDF renders that section's first caption at
+        declared_y + 1.0008in.
+
+    So an omitted axis is not "no information": it is the centred value."""
+    sec = _section_by_kind(report, section_kind)
+    if sec is None:
+        return None
+    if _section_declares_origin_y(report, section_kind):
+        return float(getattr(sec, "body_location", ())[1])
+    extent = _section_body_extent_v(report, section_kind)
+    if not extent:
+        return None
+    try:
+        paper_h = _page_height_for(report)
+    except Exception:  # noqa: BLE001 -- sizing probes never break the RDL
+        return None
+    return max(0.0, round((paper_h - extent) / 2.0, 5))
+
+
+def _declares_section_origin_y(report) -> bool:
+    """True when at least one body section states its own body origin y.
+    The gate for the declared vertical page setup: a source that states
+    nothing keeps the synthesized margins it always had."""
+    return any(_section_declares_origin_y(report, k)
+               for k in _body_section_kinds(report))
+
+
+def _page_top_margin_for(report):
+    """The page's TOP margin, DERIVED from the declaration: the topmost
+    declared section body origin.
+
+    SSRS has ONE page margin; Oracle gives every section its own body
+    origin.  The margin therefore has to be the SMALLEST of them (an item
+    above the page margin cannot be expressed — a body Top is never
+    negative), and every other section pays the difference as a positive
+    offset inside its own region (``_section_body_top_shift``).  Returns
+    None when the source declares no section origin at all, so the
+    synthesized half-inch margin still governs those reports."""
+    if not _declares_section_origin_y(report):
+        return None
+    ys = [_section_body_origin_y(report, k) for k in _body_section_kinds(report)]
+    ys = [y for y in ys if y is not None]
+    if not ys:
+        return None
+    return max(0.0, round(min(ys), 5))
+
+
+def _page_bottom_margin_for(report):
+    """The paper left UNDER the deepest declared section body, or None.
+
+    Paired with ``_page_top_margin_for``: top margin + printable height
+    must reach the bottom edge of the tallest declared section body, or
+    that section's last inch is paginated onto a page the truth does not
+    print."""
+    top = _page_top_margin_for(report)
+    if top is None:
+        return None
+    bottoms = []
+    for k in _body_section_kinds(report):
+        y = _section_body_origin_y(report, k)
+        ext = _section_body_extent_v(report, k)
+        if y is None or not ext:
+            continue
+        bottoms.append(y + ext)
+    if not bottoms:
+        return None
+    try:
+        paper_h = _page_height_for(report)
+    except Exception:  # noqa: BLE001
+        return None
+    return max(0.0, min(_PAGE_MARGIN_IN, round(paper_h - max(bottoms), 5)))
+
+
+def _section_body_left_shift(report, section_kind: str) -> float:
+    """How far a SECTION's body sits inside the emitted RDL page body.
+
+    The RDL has ONE page origin (the SMALLEST declared section body origin,
+    emitted as LeftMargin), so a section whose own body origin differs
+    prints that difference as an extra Left inside the body. Zero for the
+    section that owns the page origin, and zero for any section that
+    declares the same one."""
+    origin = _section_body_origin_x(report, section_kind)
+    if origin is None:
+        return 0.0
+    return max(0.0, origin - _page_left_margin_for(report))
+
+
+def _section_body_top_shift(report, section_kind: str) -> float:
+    """The vertical twin of ``_section_body_left_shift``: how far below the
+    page's TopMargin this section's body rectangle starts."""
+    top = _page_top_margin_for(report)
+    origin = _section_body_origin_y(report, section_kind)
+    if top is None or origin is None:
+        return 0.0
+    return max(0.0, round(origin - top, 5))
+
+
+def _page_vmargin_for(report) -> float:
+    """Vertical page margin; the small-stock analogue of
+    _page_hmargin_for."""
+    sp = _small_paper_for(report)
+    if sp:
+        sec = _section_by_kind(report, "section_main")
+        body_h = (float(getattr(sec, "body_height", 0) or 0)
+                  if sec is not None else 0.0) or sp[1]
+        return min(_PAGE_MARGIN_IN,
+                   max(0.0, round((sp[1] - body_h) / 2.0, 2)))
+    return _PAGE_MARGIN_IN
 
 
 def _page_width_for(report) -> float:
@@ -13253,13 +21806,535 @@ def _page_width_for(report) -> float:
         return cached
     portrait_usable = 8.5 - 2 * _PAGE_HMARGIN_IN - 0.02  # 7.98
     try:
-        span = _content_span_in(report)
+        # BODY content only: the declared <margin> band is page furniture in
+        # PAPER coordinates (its x already includes the sheet's side margin),
+        # so adding margins to it again inflates the sheet past the paper the
+        # source draws on — a full-width footer rule on a Letter report asked
+        # for an 8.61in sheet. The band never widens the paper; the paper only
+        # has to CONTAIN it (checked below).
+        span = _content_span_in(report, exclude_page_chrome=True)
     except Exception:  # noqa: BLE001 -- never let sizing break the RDL
         span = 0.0
     pw = (min(round(span + 2 * _PAGE_HMARGIN_IN + 0.1, 2), 17.0)
           if span > portrait_usable else 8.5)
+    # CONTAINMENT: declared chrome is emitted into the page band at its
+    # PAPER position — shifted one LeftMargin inward, and any sliver left
+    # of that margin is clipped rather than pushed right, so the box keeps
+    # its declared paper RIGHT edge (_emit_margin_chrome). The paper
+    # therefore has to reach exactly the declared chrome span and not a
+    # hundredth more: reserving an extra side margin on top of it grew a
+    # portrait sheet whose own full-width band furniture measures 8.5in to
+    # 8.75in, and the right margin was then squeezed to 0 to pay for it.
+    try:
+        _chrome_span = _page_chrome_span_in(report)
+    except Exception:  # noqa: BLE001
+        _chrome_span = 0.0
+    if _chrome_span:
+        pw = max(pw, min(round(_chrome_span, 2), 17.0))
+    # The source's own DECLARED section width is the authoritative paper
+    # width (the Oracle-rendered truth PDFs measure exactly it). Honor it
+    # when it exceeds the computed fit, so a 10in-wide log prints at 10in
+    # instead of squeezing into Letter.
+    try:
+        declared = max((float(getattr(g, "width", 0) or 0)
+                        for g in (getattr(report, "layout", None) or [])
+                        if (getattr(g, "kind", "") or "")
+                        .startswith("section_")), default=0.0)
+    except Exception:  # noqa: BLE001
+        declared = 0.0
+    if declared > pw:
+        pw = min(declared, 17.0)
+    # SMALL-PAPER dialect: a declared main-section width BELOW the default
+    # sheet is real stock too (a card / label prints at its declared size;
+    # truth-measured page aspect matches the declaration exactly). Honored
+    # only when body + content genuinely fit it (_small_paper_for), with
+    # margins scaled by _page_hmargin_for so the blank-page rule holds.
+    _sp = _small_paper_for(report)
+    if _sp:
+        pw = _sp[0]
     report._page_width_in = pw
     return pw
+
+
+def _page_height_for(report) -> float:
+    """Resolve the report's PageHeight in inches (cached on the report).
+
+    The source's DECLARED main-section height is the paper height when it
+    is paper-sized (>= 8in): the Oracle-rendered truth PDFs measure exactly
+    it — an 11x8.5 landscape inspection log paginates at 8.5in, and a 14x8.5
+    accreditation summary at 8.5in; emitting Letter-portrait 11in there
+    makes pagination diverge from the truth on every page. A section that
+    declares only a short BODY band (e.g. a 7in license form) is NOT a
+    paper height — those keep the 11in default. Per-record document paths
+    still GROW past this so one record always fits a physical page
+    (engine-verified growth)."""
+    cached = getattr(report, "_page_height_in", None)
+    if cached:
+        return cached
+    try:
+        decl_h = max((float(getattr(g, "height", 0) or 0)
+                      for g in (getattr(report, "layout", None) or [])
+                      if (getattr(g, "kind", "") or "") == "section_main"),
+                     default=0.0)
+    except Exception:  # noqa: BLE001
+        decl_h = 0.0
+    ph = decl_h if 8.0 <= decl_h <= 17.0 else 11.0
+    # SMALL-PAPER dialect (see _page_width_for): declared card/label stock
+    # keeps its declared height even below the paper band.
+    _sp = _small_paper_for(report)
+    if _sp:
+        ph = _sp[1]
+    report._page_height_in = ph
+    return ph
+
+
+def _declared_record_body_height(report):
+    """The main section's declared BODY HEIGHT in inches, or None.
+
+    ``<section name="main"><body height="H">`` is the source stating how tall
+    one record's drawing area is — the counterpart of ``_declared_body_origin_y``
+    on the vertical axis. A per-record document reserves exactly H per record;
+    anything the generator adds past it (comfort pads, per-frame emission slack)
+    is synthesized furniture, not declaration, and it is what pushes a
+    one-sheet record onto two.
+
+    Only a height that could be a real drawing area is returned: nothing is
+    reported below 1in (a stray/degenerate declaration) or above the sheet the
+    report prints on plus a hairline."""
+    sec = _section_by_kind(report, "section_main")
+    if sec is None:
+        return None
+    try:
+        h = float(getattr(sec, "body_height", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if h < 1.0:
+        return None
+    try:
+        paper_h = _page_height_for(report)
+    except Exception:  # noqa: BLE001 -- sizing probes never break the RDL
+        return None
+    return h if h <= paper_h + 0.01 else None
+
+
+def _declares_paper_body(report) -> bool:
+    """True when section_main declares a PAPER-like sheet: either the section's
+    own height or its <body> height sits in the paper band (8..17in). That is
+    the author saying "this report prints on normal sheets" — a per-record
+    document whose record outgrows one sheet must then PAGINATE across sheets
+    (the Oracle-rendered truth PDFs stay at the declared paper size and flow
+    the form), never grow the paper. A section declaring only a short BODY
+    band (e.g. a 7in license form) is NOT paper-sized and keeps the
+    grow-the-page budget."""
+    try:
+        for g in (getattr(report, "layout", None) or []):
+            if (getattr(g, "kind", "") or "") != "section_main":
+                continue
+            for h in (float(getattr(g, "height", 0) or 0),
+                      float(getattr(g, "body_height", 0) or 0)):
+                if 8.0 <= h <= 17.0:
+                    return True
+    except Exception:  # noqa: BLE001 -- sizing probes must never break RDL
+        pass
+    return False
+
+
+def _declared_paper_vinset(report):
+    """The vertical inset the SOURCE declares between its paper and its body:
+    ``(paper_height - declared body height) / 2``, or None when section_main
+    declares no paper-sized body.
+
+    Oracle's sheet is fully described by the declaration — the body it draws
+    on plus the margin that surrounds it. The generator's own half-inch
+    margins and its synthesized header/footer bands are page furniture the
+    source never asked for, and on a source whose body nearly fills the sheet
+    they steal enough of the printable area to push a ONE-page record onto
+    two. Capped at the default margin so this can only ever RECLAIM space."""
+    try:
+        paper_h = _page_height_for(report)
+        best = 0.0
+        for g in (getattr(report, "layout", None) or []):
+            if (getattr(g, "kind", "") or "") != "section_main":
+                continue
+            bh = float(getattr(g, "body_height", 0) or 0)
+            if 8.0 <= bh <= paper_h + 0.01:
+                best = max(best, bh)
+        if best <= 0.0:
+            return None
+        return max(0.0, min(_PAGE_MARGIN_IN, round((paper_h - best) / 2.0, 2)))
+    except Exception:  # noqa: BLE001 -- sizing probes must never break RDL
+        return None
+
+
+def _content_bottom_in(el, off: float = 0.0) -> float:
+    """Deepest absolute bottom (inches) of positioned items under ``el``."""
+    bottom = 0.0
+    for ch in list(el):
+        tag = ch.tag.split("}")[-1] if isinstance(ch.tag, str) else ""
+        if tag in ("Rectangle", "Textbox", "Image", "Line", "Tablix", "List"):
+            try:
+                top = float((ch.findtext(_q("Top")) or "0in")
+                            .replace("in", "").strip())
+            except ValueError:
+                top = 0.0
+            try:
+                h = float((ch.findtext(_q("Height")) or "0in")
+                          .replace("in", "").strip())
+            except ValueError:
+                h = 0.0
+            bottom = max(bottom, off + top + h)
+            ri = ch.find(_q("ReportItems"))
+            if ri is not None:
+                bottom = max(bottom, _content_bottom_in(ri, off + top))
+        else:
+            bottom = max(bottom, _content_bottom_in(ch, off))
+    return bottom
+
+
+def _fit_record_to_declared_sheet(report, body, page=None):
+    """A per-record document whose record FITS the sheet its source declares
+    must print ONE record per sheet, not flow across two.
+
+    A record can miss the sheet by a hair purely because of synthesized page
+    furniture: the fixed half-inch margins standing in for a much smaller
+    DECLARED inset, empty header/footer bands the source never declared, and
+    the comfort pad the record rect carries below its last item. Reclaim
+    exactly those — never declared chrome — and if the record's real content
+    then fits, trim the record row to the sheet and report the reclaimed
+    margin so the page is emitted with it.
+
+    Returns the reclaimed vertical margin (inches) when the record fits after
+    reclaiming, else None (the caller then flows the record as before). Fully
+    self-gating: a record that is genuinely taller than the declared sheet can
+    never fit however much furniture is reclaimed, so it is untouched."""
+    inset = _declared_paper_vinset(report)
+    if inset is None or _small_paper_for(report):
+        return None
+    # A source that DECLARES a <margin> band authored its own page furniture
+    # and its own margin geometry (the band's top offset IS the page's
+    # TopMargin) — never second-guess it. Only the synthesized bands and the
+    # synthesized half-inch margins are reclaimable.
+    if _declares_margin_band(report):
+        return None
+    # Only EMPTY chrome bands are reclaimable; a band that actually renders
+    # something still costs its height, so measure the built page.
+    bands = 0.0
+    for tag in ("PageHeader", "PageFooter"):
+        band = page.find(_q(tag)) if page is not None else None
+        if band is None:
+            continue
+        _ri = band.find(_q("ReportItems"))
+        if _ri is None or len(list(_ri)) == 0:
+            continue
+        try:
+            bands += float((band.findtext(_q("Height")) or "0in")
+                           .replace("in", "").strip())
+        except ValueError:
+            pass
+    # The margins this page will actually be emitted with — the declared
+    # section origins when the source states them, the symmetric inset
+    # otherwise (see _apply_declared_sheet_chrome, which writes the same
+    # pair). Measuring against a different number trims the record row to a
+    # height the sheet does not have.
+    _vm_top = _page_top_margin_for(report)
+    _vm_bot = _page_bottom_margin_for(report)
+    _vm_top = inset if _vm_top is None else _vm_top
+    _vm_bot = inset if _vm_bot is None else _vm_bot
+    printable = _page_height_for(report) - _vm_top - _vm_bot - bands
+    if printable <= 1.0:
+        return None
+    rec = None
+    for r in body.iter(_q("Rectangle")):
+        if (r.get("Name") or "") == "Rect_RecordPage":
+            rec = r
+            break
+    if rec is None:
+        return None
+    ri = rec.find(_q("ReportItems"))
+    if ri is None:
+        return None
+    content_h = _content_bottom_in(ri)
+    if content_h <= 0.0 or content_h > printable - 0.02:
+        return None
+    tablix = None
+    body_items = body.find(_q("ReportItems"))
+    if body_items is None:
+        return None
+    # Behind a COVER the record region starts on its own sheet (the detail
+    # group breaks before every record), so the region's body offset costs the
+    # record nothing. With no cover the FIRST record shares page 1 with that
+    # offset, and the offset is cosmetic — a sheet-filling record has no room
+    # for it, so drop it rather than spill.
+    has_cover = any(el.get("Name") in ("Rect_CoverPage", "Rect_SummaryHeader")
+                    for el in list(body_items))
+    for el in list(body_items):
+        if (el.get("Name") or "").startswith("Tablix_Record"):
+            tablix = el
+            break
+    if tablix is None:
+        return None
+    lead = 0.0
+    t_el = tablix.find(_q("Top"))
+    if t_el is not None and not has_cover:
+        try:
+            lead = float((t_el.text or "0in").replace("in", "").strip())
+        except ValueError:
+            lead = 0.0
+        if lead + content_h > printable - 0.02:
+            t_el.text = "0in"
+            lead = 0.0
+    if lead + content_h > printable - 0.02:
+        return None
+    row_h = round(printable - lead - 0.02, 2)
+    row = None
+    for r in tablix.iter(_q("TablixRow")):
+        row = r
+        break
+    if row is None:
+        return None
+    old_h = None
+    rh_el = row.find(_q("Height"))
+    if rh_el is not None:
+        try:
+            old_h = float((rh_el.text or "0in").replace("in", "").strip())
+        except ValueError:
+            old_h = None
+    if old_h is None or old_h <= row_h:
+        return inset  # already fits; nothing to trim
+    rh_el.text = f"{row_h:.2f}in"
+    th_el = tablix.find(_q("Height"))
+    if th_el is not None:
+        try:
+            th = float((th_el.text or "0in").replace("in", "").strip())
+            th_el.text = f"{max(row_h, th - (old_h - row_h)):.2f}in"
+        except ValueError:
+            pass
+    bh = body.find(_q("Height"))
+    if bh is not None:
+        try:
+            bh.text = (f"{float((bh.text or '0in').replace('in', '').strip()) - (old_h - row_h):.2f}in")
+        except ValueError:
+            pass
+    return inset
+
+
+def _apply_declared_sheet_chrome(page, vmargin_in: float, report=None) -> None:
+    """Emit the sheet the SOURCE declares: its own vertical inset as the page
+    margins, and no SYNTHESIZED EMPTY header/footer band. An empty band is
+    furniture the source never declared, and it costs the record exactly the
+    inches it needs to print on one sheet. Bands that actually carry items
+    (declared chrome, a title, a signature) are left untouched.
+
+    ``vmargin_in`` is the SYMMETRIC inset derived from the declared body
+    height. When the source also states WHERE that body starts
+    (``<section><body><location y=>``) the two margins are not symmetric and
+    the declaration wins on both edges — the inset is only the fallback."""
+    for tag in ("PageHeader", "PageFooter"):
+        band = page.find(_q(tag))
+        if band is None:
+            continue
+        _ri = band.find(_q("ReportItems"))
+        if _ri is None or len(list(_ri)) == 0:
+            page.remove(band)
+    _top = _bot = vmargin_in
+    if report is not None:
+        _dt, _db = _page_top_margin_for(report), _page_bottom_margin_for(report)
+        if _dt is not None:
+            _top = _dt
+        if _db is not None:
+            _bot = _db
+    for tag, val in (("TopMargin", _top), ("BottomMargin", _bot)):
+        el = page.find(_q(tag))
+        if el is not None:
+            el.text = _page_margin_in(val)
+
+
+def _flow_oversize_record_rects(body, printable_h: float) -> None:
+    """Per-record FLOW mode: let any rectangle TALLER than one printable page
+    split across pages. KeepTogether=true on an oversize rect makes the engine
+    push it to a fresh page before splitting anyway — a blank leader page per
+    record — so flip those (the record rect Rect_RecordPage carries no Height
+    of its own and is always flipped).
+
+    INSIDE the record rect nothing may keep together at all. Once a record is
+    known not to fit one sheet it is being split by construction, and a
+    descendant frame that still demands to stay whole makes the engine push it
+    to a fresh sheet — which empties the sheet it left behind (engine-measured:
+    a paper-declared invoice record emitted one blank sheet per record until
+    its inner frames were released). Rects OUTSIDE the record (cover, report
+    trailer) keep theirs: those are single-sheet blocks that must not straddle
+    a break."""
+    record_rects = [r for r in body.iter(_q("Rectangle"))
+                    if (r.get("Name") or "") == "Rect_RecordPage"]
+    inside = set()
+    for rr in record_rects:
+        for d in rr.iter(_q("Rectangle")):
+            inside.add(id(d))
+    for rect in body.iter(_q("Rectangle")):
+        h = None
+        h_el = rect.find(_q("Height"))
+        if h_el is not None and h_el.text:
+            try:
+                h = float(h_el.text.replace("in", "").strip())
+            except ValueError:
+                h = None
+        oversize = (h is not None and h > printable_h - 0.01)
+        if not oversize and id(rect) not in inside:
+            continue
+        kt = rect.find(_q("KeepTogether"))
+        if kt is None:
+            kt = ET.SubElement(rect, _q("KeepTogether"))
+        kt.text = "false"
+
+
+def _fit_cover_to_one_page(body, printable_h: float) -> None:
+    """FLOW mode: keep the synthesized criteria COVER on ONE sheet.
+
+    The cover is a stack of label/value rows laid out at a fixed pitch, and
+    the record data region is positioned flush beneath it — deliberately with
+    NO page break of its own, because the detail group already breaks before
+    every record (a second break would waste a sheet). That invariant holds
+    only while the cover fits one printable sheet: a taller stack spills onto
+    a second sheet, the data region's origin lands there, and the detail
+    break then pushes record 1 to the sheet AFTER it, leaving the spill sheet
+    completely EMPTY.
+
+    So close the empty vertical GAPS between cover items until the stack fits.
+    Nothing is clipped, scaled or overlapped — only whitespace that no item
+    occupies is reclaimed, and everything below a closed gap (the data region
+    and the body height included) moves up with it. When the gaps cannot make
+    up the difference the cover honestly keeps its extra sheet.
+
+    A cover the SOURCE declares across more than one sheet is exempt: it
+    carries a Rect_CoverPage_N continuation sheet, whose whole purpose is the
+    gap this pass would close (see _paginate_cover_objects)."""
+    if printable_h <= 0:
+        return
+    ri_body = body.find(_q("ReportItems"))
+    if ri_body is None:
+        return
+    cover = None
+    for el in list(ri_body):
+        if el.get("Name") in ("Rect_CoverPage", "Rect_SummaryHeader"):
+            cover = el
+            break
+    if cover is None:
+        return
+    if any(re.fullmatch(r"Rect_CoverPage_\d+", el.get("Name") or "")
+           for el in cover.iter(_q("Rectangle"))):
+        return
+
+    def _f(el, tag, dv=0.0):
+        if el is None:
+            return dv
+        t = el.findtext(_q(tag))
+        try:
+            return float((t or "").replace("in", "").strip())
+        except (ValueError, AttributeError):
+            return dv
+
+    cur_h = _f(cover, "Height")
+    if cur_h <= printable_h:
+        return
+    ri = cover.find(_q("ReportItems"))
+    if ri is None:
+        return
+    rows = []
+    for it in list(ri):
+        t_el = it.find(_q("Top"))
+        if t_el is None:
+            continue
+        top = _f(it, "Top")
+        rows.append((top, top + _f(it, "Height"), t_el))
+    if not rows:
+        return
+    rows.sort(key=lambda r: r[0])
+    # Tail pad the cover builder leaves under the last row is reclaimable too,
+    # down to a hairline so the last row is not flush against the rect edge.
+    _TAIL_KEEP = 0.10
+    last_bottom = max(r[1] for r in rows)
+    need = cur_h - printable_h
+    tail = max(0.0, cur_h - last_bottom - _TAIL_KEEP)
+    # Standard row pitch leaves a ~0.04in gap between consecutive rows; keep
+    # it so a compressed cover still reads as separate lines.
+    _GAP_KEEP = 0.04
+    shift = 0.0
+    frontier = rows[0][0]
+    left = max(0.0, need - tail)
+    for top, bottom, t_el in rows:
+        gap = top - frontier
+        if gap > _GAP_KEEP and left > 0:
+            cut = min(gap - _GAP_KEEP, left)
+            shift += cut
+            left -= cut
+        if shift:
+            t_el.text = f"{top - shift:.2f}in"
+        frontier = max(frontier, bottom)
+    new_h = round(max(0.5, (last_bottom - shift) + _TAIL_KEEP), 2)
+    if new_h >= cur_h:
+        return
+    h_el = cover.find(_q("Height"))
+    if h_el is not None:
+        h_el.text = f"{new_h:.2f}in"
+    delta = round(cur_h - new_h, 2)
+    cover_bottom = _f(cover, "Top") + cur_h
+    for el in list(ri_body):
+        if el is cover:
+            continue
+        t_el = el.find(_q("Top"))
+        if t_el is None:
+            continue
+        t = _f(el, "Top")
+        if t >= cover_bottom - 0.01:
+            t_el.text = f"{t - delta:.2f}in"
+    bh = body.find(_q("Height"))
+    if bh is not None:
+        try:
+            bh.text = f"{float((bh.text or '0in').replace('in', '')) - delta:.2f}in"
+        except ValueError:
+            pass
+
+
+def _per_record_page_budget(report, req: float, chrome: float):
+    """Page-height budget for ANY per-record document body (form, letter,
+    certificate). Returns ``(page_height_in, flow_printable_h)``.
+
+    ``flow_printable_h`` is None unless the record must PAGINATE across
+    sheets; when it is a number the caller passes it to
+    ``_flow_oversize_record_rects`` so the engine splits the record in place
+    instead of pushing it to a fresh sheet.
+
+    Three declaration-driven cases, in precedence order:
+
+    * SMALL-PAPER stock (card/label) the record fits -> the page IS that
+      declared stock (chrome bands are suppressed and margins scaled for it).
+    * PAPER-declared source (section_main declares a sheet-sized body) whose
+      ONE record outgrows the printable area of that sheet -> KEEP the
+      declared paper and let the record FLOW across sheets. Oracle prints such
+      a source on ordinary sheets; growing the paper to swallow a whole record
+      emits one enormous sheet per record and diverges from the truth on every
+      page.
+    * Everything else -> grow the page so one record stays whole, which is
+      load-bearing for wallet-card / permit records that must not straddle a
+      page break.
+
+    Shared by the per-record FORM arm and the certificate/letter arm so a
+    per-record document is budgeted identically however it was routed: the
+    letter arm used to grow unconditionally, which is how a paper-declared
+    invoice letter ended up on one sheet per record."""
+    sp = _small_paper_for(report)
+    if sp:
+        try:
+            sp_chrome = 2 * _page_vmargin_for(report)
+        except Exception:  # noqa: BLE001 -- sizing probes never break the RDL
+            sp_chrome = 0.0
+        if req <= sp[1] - sp_chrome + 0.01:
+            return sp[1], None
+    paper_h = _page_height_for(report)
+    if (_declares_paper_body(report)
+            and req + _PER_RECORD_SLACK_IN > paper_h - chrome):
+        return paper_h, paper_h - chrome
+    return max(11.0, req + chrome + _PER_RECORD_SLACK_IN), None
 
 
 def _leading_param_echo(report) -> list:
@@ -13295,18 +22370,19 @@ def _leading_param_echo(report) -> list:
             tl = text.lower().rstrip(":").strip()
             if tl in title_lines or "report run on" in tl:
                 continue
-            labels.append((x, y, text))
+            labels.append((x, y, text, f))
         elif kind == "field" and src.upper() in params:
-            values.append((x, y, src))
+            values.append((x, y, src, f))
     out = []
-    for (lx, ly, lt) in labels:
+    for (lx, ly, lt, lf) in labels:
         best = None
-        for (vx, vy, vs) in values:
+        for (vx, vy, vs, vf) in values:
             if abs(vy - ly) < 0.25 and vx >= lx and (best is None or vx < best[0]):
-                best = (vx, vy, vs)
+                best = (vx, vy, vs, vf)
         if best:
             out.append({"label": lt, "lx": lx, "vx": best[0],
-                        "ly": ly, "value": best[2]})
+                        "ly": ly, "value": best[2],
+                        "lf": lf, "vf": best[3]})
     return sorted(out, key=lambda p: p["ly"])
 
 
@@ -13358,12 +22434,666 @@ def _section_header_banner(report):
         return None
 
 
+def _margin_page_chrome(report, page_height_in: float = 11.0):
+    """The page chrome Oracle authored in the section <margin> band —
+    title, logo, run-date stamp, page number — split into (header,
+    footer) item lists by PAPER y (margin coordinates are paper-relative,
+    unlike body coordinates). Returns ([], []) when the report has no
+    margin band or the band carries nothing header-worthy, so callers
+    fall back to the synthesized header. Purely structural — driven by
+    the parser's in_margin tag, no names or report-specific tokens."""
+    items = []
+
+    def walk(g):
+        for f in (getattr(g, "fields", None) or []):
+            if getattr(f, "in_margin", False) \
+                    and getattr(f, "visible", True):
+                items.append(f)
+        for c in (getattr(g, "children", None) or []):
+            walk(c)
+    for lg in (getattr(report, "layout", None) or []):
+        walk(lg)
+    if not items:
+        return [], []
+    split = max(2.0, float(page_height_in) * 0.55)
+    hdr = [f for f in items if float(getattr(f, "y", 0) or 0) < split]
+    ftr = [f for f in items if float(getattr(f, "y", 0) or 0) >= split]
+    # Only trust the declared band when it actually carries page furniture
+    # (a boilerplate text or an image) with real geometry — a margin
+    # holding nothing but stray fields yields the synthesized header.
+    if not any(getattr(f, "kind", "") in ("text", "image")
+               and float(getattr(f, "width", 0) or 0) > 0 for f in hdr):
+        return [], []
+    return hdr, ftr
+
+
+def _chrome_excluded_from_section(chrome, section_kind: str) -> bool:
+    """True when EVERY item of a declared page band is RESTRICTED away from
+    the pages a given section produces.
+
+    Oracle's ``templateSection="<section>"`` on a <margin> object names the
+    section whose pages that object belongs to; each section prints its own
+    margin band, so the object is furniture of that section alone. A band
+    whose every item names some OTHER section therefore prints nothing at
+    all on this section's pages, and the band must be suppressed there
+    rather than stamped on a page the source never stamps.
+
+    ``section_kind`` is the LayoutGroup kind of the section in question
+    (e.g. ``"section_header"``); its Oracle name is the part after the
+    underscore. Undeclared items are unrestricted, so one of them keeps the
+    band printing everywhere — the suppression is all-or-nothing because an
+    RDL page band is."""
+    if not chrome:
+        return False
+    want = (section_kind or "").split("_", 1)[-1].strip().lower()
+    if not want:
+        return False
+    for f in chrome:
+        decl = (getattr(f, "template_section", "") or "").strip().lower()
+        if not decl or decl == want:
+            return False
+    return True
+
+
+_AGG_WRAP_RE = re.compile(
+    r"\b(?:First|Last|Sum|Count|CountDistinct|CountRows|Min|Max|Avg)"
+    r"\s*\(\s*$")
+
+
+def _has_bare_fields_ref(v: str) -> bool:
+    """True when the expression carries a Fields! ref NOT wrapped in a
+    dataset-scoped aggregate — the form page bands reject at publish
+    (aggregates like First()/Count() with an explicit scope are
+    accepted; a title's "&CS_ALL_SITES" count resolves to Count(...))."""
+    for m in re.finditer(r"Fields!", v or ""):
+        if not _AGG_WRAP_RE.search(v[:m.start()]):
+            return True
+    return False
+
+
+def _emit_margin_chrome(items_parent, chrome, report, band_top,
+                        prefix) -> int:
+    """Emit declared margin objects into a page band at their source
+    geometry (band-relative Top, page Left shifted inside the RDL page
+    margin). Returns how many items were actually emitted — texts that
+    resolve to Fields! references are skipped (illegal in page bands),
+    as are images with no parsed asset and unknown angle-tokens."""
+    emitted = 0
+
+    def _chrome_bg(f):
+        """Pattern-gated declared fill (same dialect gate as the body
+        emitters): paints only when the export wrote a fillPattern
+        attribute; white/designer pastels never paint."""
+        if not (getattr(f, "fill_pattern", "") or "").strip():
+            return None
+        bgf = (getattr(f, "background_color", "") or "").strip()
+        if not bgf or bgf.lower() in ("#ffffff", "white") \
+                or _is_designer_fill_hex(bgf):
+            return None
+        return bgf
+
+    def _chrome_fg(f):
+        return (getattr(f, "color", "") or "").strip() or "#000000"
+
+    def _chrome_can_grow(f):
+        """A page-chrome box grows VERTICALLY only when it declares that it
+        does. The band's height is measured from these declared boxes, so a
+        box that grows past its declaration grows straight through the band
+        floor and paints on the body's first rows: SSRS centres the text in
+        the GROWN box, which drops a 24pt title ~0.14in below the band the
+        source drew it in (truth-measured — the Oracle render keeps that
+        title's ink inside its declared slot). Oracle's own default for a
+        boilerplate/text object is fixed; only a declared variable/expand
+        elasticity grows."""
+        return (getattr(f, "vertical_elasticity", "") or "").strip().lower() \
+            in ("variable", "expand")
+
+    # Margin objects are authored in PAPER coordinates, and an RDL page band
+    # starts at the page's own LeftMargin — so the band-relative Left is the
+    # declared x minus THIS report's left margin (not a fixed default, which
+    # shifted the chrome by the difference on every report whose declaration
+    # implies another margin).
+    _lm = _page_left_margin_for(report)
+    for f in sorted(chrome, key=lambda f: (float(getattr(f, "y", 0) or 0),
+                                           float(getattr(f, "x", 0) or 0))):
+        _paper_x = float(getattr(f, "x", 0) or 0)
+        x = max(0.0, _paper_x - _lm)
+        # Oracle's margin band covers the WHOLE sheet; an RDL page band only
+        # covers the printable area. A box that starts left of the page
+        # margin therefore loses that sliver — CLIP it, never slide the box
+        # right to make it fit: sliding moved a full-sheet band's every
+        # glyph a whole margin rightward and made the paper itself grow by
+        # that margin to hold the displaced right edge. The declared PAPER
+        # RIGHT EDGE is what survives.
+        _clip_left = max(0.0, _lm - _paper_x)
+        top = max(0.0, float(getattr(f, "y", 0) or 0) - band_top)
+        # A DECLARED WIDTH IS THE WIDTH. These boxes are emitted verbatim —
+        # no metric slack, no rounding upward. A page-chrome box is very
+        # often centred or right-justified, so every hundredth added to the
+        # box moves its TEXT (a former +0.06in cushion landed centred and
+        # right-flush chrome 2-3pt right of the Oracle truth on every
+        # report that declares a margin band), and the widened boxes then
+        # dragged the body-fit pass into growing the report past its
+        # declared body. Clipping is handled where clipping belongs:
+        # _build_textbox emits CanGrow=true and these boxes carry 0pt
+        # padding, so a hair of font-metric drift wraps inside the declared
+        # box instead of widening it. Geometry is written at 3dp for the
+        # same reason — 2dp quantisation is itself a rounding of the
+        # declaration.
+        w = max(0.2, (float(getattr(f, "width", 0) or 0) or 1.0) - _clip_left)
+        # ... but a CENTRE-justified box is not its edges, it is its AXIS.
+        # Oracle centres the glyphs in the DECLARED PAPER box, so trimming
+        # only the left sliver slides every glyph right by HALF of it. Trim
+        # the far edge by the same amount instead: the box narrows
+        # symmetrically and the declared centre line survives the clip
+        # (truth-measured: a full-sheet title declared x=0 width=8.5 on a
+        # report whose body origin is 0.25in centres on the paper's own
+        # 4.25in axis; the one-sided clip printed it at 4.375in).
+        if _clip_left > 0 and _declared_text_align(f) == "Center":
+            w = max(0.2, w - _clip_left)
+        h = max(0.15, float(getattr(f, "height", 0) or 0) or 0.2)
+        kind = getattr(f, "kind", "") or ""
+        nm = _safe(f"MChrome_{prefix}_{getattr(f, 'name', '') or emitted}")
+        if kind == "image":
+            ref = _image_asset_for(f, report)
+            if not ref:
+                continue
+            _emit_embedded_image(items_parent, nm, ref, x, top, w, h)
+            # explicit paint order: this engine ignores document order for
+            # equal-ZIndex overlaps, so a band-fill object painted first
+            # in Oracle buried the date/page items drawn on top of it
+            _set_zindex(items_parent[-1], emitted)
+            emitted += 1
+            continue
+        if kind == "line":
+            # A declared margin <line> (the rule capping the footer band —
+            # truth prints it above the report-name/page/date chrome).
+            # linePattern gates the draw, same dialect as body lines.
+            _lp = (getattr(f, "line_pattern", "") or "").lower()
+            if not _lp or _lp in ("transparent", "none"):
+                continue
+            _bwd = float(getattr(f, "border_width", 0) or 0)
+            _emit_rule_line(
+                items_parent, nm, top, x, w,
+                _rule_color(getattr(f, "border_color", ""),
+                            width_declared=_bwd > 0),
+                weight=(f"{_bwd:g}pt" if _bwd > 0 else "0.25pt"),
+                zindex=emitted)
+            emitted += 1
+            continue
+        if kind == "text":
+            t = getattr(f, "text", "") or ""
+            if not t.strip():
+                continue
+            # pretty-printed CDATA carries blank lines + indentation
+            # ("LINE ONE\n\n   \n   LINE TWO") — normalize so a two-line
+            # title stays two lines instead of overflowing its declared
+            # box onto the subtitle below (engine-verified: a form title
+            # painted over its own subtitle line).
+            t = "\n".join(s.strip() for s in t.splitlines() if s.strip())
+            if "&<" in t or re.search(
+                    r"&(?:Physical|Logical)?(?:PageNumber|TotalPages)\b",
+                    t, re.I):
+                val = _page_builtin_text_expr(t)
+                if val is None:
+                    continue
+            else:
+                try:
+                    val, _ = _resolve_text_expression(t, report)
+                except Exception:  # noqa: BLE001
+                    val = t
+                # Page bands accept dataset-scoped aggregates; only a
+                # BARE Fields! ref is a publish rejection there — a title
+                # whose token resolves through First(Fields!CF_X, "DS")
+                # was being dropped, losing the report's own title line.
+                if _has_bare_fields_ref(val or ""):
+                    continue
+        elif kind == "field":
+            src = (getattr(f, "source", "") or "").strip()
+            if not src:
+                continue
+            # A field bound to a BLOB query item is a database image (the
+            # DEQ logo the truth prints top-left). Emit it as a page-band
+            # Image with a dataset-scoped First() — the same publish-legal
+            # pattern the signature footer uses.
+            _blob_q = None
+            for _q2 in (getattr(report, "queries", None) or []):
+                for _it in (getattr(_q2, "items", None) or []):
+                    if ((_it.name or "").upper() == src.upper()
+                            and (getattr(_it, "datatype", "") or "")
+                            .lower() in ("blob", "graphic", "long raw",
+                                         "longraw", "image")):
+                        _blob_q = _q2
+                        break
+                if _blob_q:
+                    break
+            if _blob_q is not None:
+                img = _sub(items_parent, "Image")
+                img.set("Name", nm)
+                _sub(img, "Source", "Database")
+                _sub(img, "Value",
+                     f'=First(Fields!{_safe(src)}.Value, '
+                     f'"{_safe(_blob_q.name)}")')
+                _sub(img, "MIMEType", "image/png")
+                _sub(img, "Sizing", "FitProportional")
+                _sub(img, "Top", f"{top:.2f}in")
+                _sub(img, "Left", f"{x:.2f}in")
+                _sub(img, "Height", f"{h:.2f}in")
+                _sub(img, "Width", f"{w:.2f}in")
+                _set_zindex(img, emitted)
+                emitted += 1
+                continue
+            # A chrome field bound to a DECLARED parameter (the trigger-
+            # computed subtitle idiom — ":P_Subtitle := :P_Subtitle ||
+            # ...") binds the parameter directly: SSRS cannot run the
+            # trigger, so the line renders blank until the deployment
+            # wires the value, but the SLOT stays at its declared spot
+            # (the computed-placeholder route emitted =Nothing and the
+            # subtitle line vanished entirely).
+            _pnm = next((p.name for p in (getattr(report, "parameters",
+                                                  None) or [])
+                         if (p.name or "").upper() == src.upper()), None)
+            if _pnm:
+                val = f"=Parameters!{_safe(_pnm)}.Value"
+                align = _declared_text_align(f, "Left")
+                _build_textbox(
+                    items_parent, nm, val,
+                    bold=bool(getattr(f, "bold", False)),
+                    font_size=f"{int(getattr(f, 'font_size', 10) or 10)}pt",
+                    fg=_chrome_fg(f), bg=_chrome_bg(f), text_align=align,
+                    vertical_align=_declared_vertical_align(f),
+                    border_color="#ffffff", padding="0pt",
+                    can_grow=_chrome_can_grow(f),
+                    font_family=(getattr(f, "font_family", "") or None),
+                )
+                tb = items_parent[-1]
+                tb.set("data-marginx", "1")
+                _sub(tb, "Top", f"{top:.3f}in")
+                _sub(tb, "Left", f"{x:.3f}in")
+                _sub(tb, "Width", f"{w:.3f}in")
+                _sub(tb, "Height", f"{h:.3f}in")
+                _set_zindex(tb, emitted)
+                emitted += 1
+                continue
+            try:
+                val = _field_value_for(f, report)
+            except Exception:  # noqa: BLE001
+                continue
+            if (not val or _has_bare_fields_ref(val)
+                    or val.strip() in ("=Nothing", "=")):
+                continue
+        else:
+            continue
+        align = _declared_text_align(f, "Left")
+        _build_textbox(
+            items_parent, nm, val,
+            bold=bool(getattr(f, "bold", False)),
+            font_size=f"{int(getattr(f, 'font_size', 10) or 10)}pt",
+            fg=_chrome_fg(f), bg=_chrome_bg(f), text_align=align,
+            vertical_align=_declared_vertical_align(f),
+            border_color="#ffffff", padding="0pt",
+            can_grow=_chrome_can_grow(f),
+            font_family=(getattr(f, "font_family", "") or None),
+        )
+        tb = items_parent[-1]
+        if kind == "field":
+            # Tagged so _drop_duplicated_header_margin_items can drop it
+            # if the body already renders the same value.
+            tb.set("data-marginx", "1")
+        _sub(tb, "Top", f"{top:.3f}in")
+        _sub(tb, "Left", f"{x:.3f}in")
+        _sub(tb, "Width", f"{w:.3f}in")
+        _sub(tb, "Height", f"{h:.3f}in")
+        _set_zindex(tb, emitted)
+        emitted += 1
+    return emitted
+
+
+# ---------------------------------------------------------------------------
+# DECLARED PAGE-SCOPED PRINT RULES  (<advancedLayout printObjectOnPage=...>)
+# ---------------------------------------------------------------------------
+# The attribute states which of the pages an object's ENCLOSING object spans
+# the object itself prints on. Most declared values are already what the body
+# flow does and need no special emission:
+#   "firstPage" — print where the flow puts it and nowhere else (a body object
+#                 is laid out exactly once per enclosing instance already);
+#   "lastPage"  — likewise for an object declared at the end of its frame;
+#   "allPage"   — the page-repeating column header, carried by the tablix
+#                 header machinery (a static member with RepeatOnNewPage).
+# The "allBut…" values are the ones a BODY object cannot express: they ask for
+# the object to be SUPPRESSED on one page of the span and printed on all the
+# others — the "(continued)" continuation marker Oracle prints beside a group
+# caption whenever that group runs past a page. SSRS expresses exactly that
+# with a page-number Hidden expression, and Globals!PageNumber is legal ONLY
+# inside a page band, so such an object has to reach the band to be gated at
+# all. Mapping (Hidden is TRUE when the object must NOT print):
+_PAGE_GATED_PRINT_RULES = {
+    "allbutfirstpage": "=Globals!PageNumber = 1",
+    "allbutlastpage": "=Globals!PageNumber = Globals!TotalPages",
+}
+
+
+def _declares_page_repeat(scope) -> bool:
+    """True when a DECLARED printObjectOnPage scope asks the object to print
+    at the top of every page its enclosing object spans -- i.e. what SSRS
+    calls RepeatOnNewPage. ``scope`` is the raw attribute (or the object
+    carrying it); anything else, including the undeclared default, is False.
+
+    "allButFirstPage" counts: it prints on every CONTINUATION page, which is
+    exactly the set of pages a repeat covers (page one already has the
+    object's in-flow copy)."""
+    if not isinstance(scope, str):
+        scope = getattr(scope, "print_on_page", "") or ""
+    return scope.strip().lower() in ("allpage", "allbutfirstpage")
+
+
+def _declared_left(x) -> float:
+    """A declared x IS the box's left edge (dialect rule: a declared
+    coordinate carries no padding and no inset).
+
+    The old ``max(0.02, x)`` floor silently invented a 0.02in inset for every
+    box declared flush with the frame's left edge -- truth-PDF measured on a
+    break report whose group caption and closing caption are both declared at
+    x=0.00000: Oracle prints them at 0.500in (the sheet margin), ours at
+    0.520in. Only a NEGATIVE coordinate is clamped, since SSRS rejects one."""
+    try:
+        return max(0.0, float(x or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _page_gated_print_objects(report):
+    """Declared BODY objects carrying a page-scoped print rule the body flow
+    cannot express (see ``_PAGE_GATED_PRINT_RULES``). Margin objects are
+    already page furniture and keep their own band handling."""
+    out = []
+
+    def walk(g):
+        for f in (getattr(g, "fields", None) or []):
+            rule = (getattr(f, "print_on_page", "") or "").strip().lower()
+            if (rule in _PAGE_GATED_PRINT_RULES
+                    and not getattr(f, "in_margin", False)
+                    and getattr(f, "visible", True)):
+                out.append(f)
+        for c in (getattr(g, "children", None) or []):
+            walk(c)
+    for lg in (getattr(report, "layout", None) or []):
+        walk(lg)
+    return out
+
+
+def _band_height_in(band) -> float:
+    """A page band's declared <Height> in inches (0.0 when unreadable)."""
+    if band is None:
+        return 0.0
+    e = band.find(_q("Height"))
+    try:
+        return float((e.text or "").replace("in", "").strip()) \
+            if e is not None and (e.text or "").strip() else 0.0
+    except ValueError:
+        return 0.0
+
+
+def _strip_body_copy_of_value(root, value: str) -> int:
+    """Remove the BODY's copy of a page-gated object's content.
+
+    A page-gated object is emitted into the page band; whatever the body
+    builders also made of it has to go or the marker prints on page one too
+    (the duplicate the gate exists to prevent). Body builders render it
+    either as its own textbox or as one TextRun inside a merged caption box,
+    so the removal is per TEXTRUN: drop the runs whose <Value> is exactly the
+    emitted value, then drop any textbox that is left with no runs at all.
+    Scoped to <Body> — the band copy we just wrote is never touched."""
+    body = root.find(".//" + _q("Body"))
+    if body is None or not value:
+        return 0
+    dropped = 0
+    emptied = []
+    for tb in list(body.iter(_q("Textbox"))):
+        hit = False
+        for para in list(tb.iter(_q("Paragraph"))):
+            runs = para.find(_q("TextRuns"))
+            if runs is None:
+                continue
+            for run in list(runs):
+                v = run.find(_q("Value"))
+                if v is not None and (v.text or "") == value:
+                    runs.remove(run)
+                    dropped += 1
+                    hit = True
+            if len(runs) == 0:
+                para_parent = tb.find(_q("Paragraphs"))
+                if para_parent is not None and para in list(para_parent):
+                    para_parent.remove(para)
+        # A textbox emptied by THIS removal paints nothing but its own box —
+        # drop it. Only boxes we actually took a run out of are considered:
+        # a run-less textbox some other builder emitted is none of our
+        # business and deleting it would be silent content loss.
+        if hit and not list(tb.iter(_q("TextRun"))):
+            emptied.append(tb)
+    for tb in emptied:
+        for parent in body.iter():
+            if tb in list(parent):
+                parent.remove(tb)
+                break
+    return dropped
+
+
+def _open_page_band_for(page, want_footer: bool, height_in: float):
+    """Create the PageHeader/PageFooter band a declared page-scoped object
+    needs, and pay for its height out of the margin on that edge.
+
+    Bands are only ever emitted for content (an empty one silently steals
+    printable height from every page), so a report with no declared chrome
+    reaches this pass with no band at all. Opening one here keeps the body's
+    printable area exactly where it was: TopMargin/BottomMargin give up the
+    band's height, so band + margin still sum to the declared page inset."""
+    tag = "PageFooter" if want_footer else "PageHeader"
+    band = ET.Element(_q(tag))
+    _sub(band, "Height", f"{height_in:.4f}in")
+    _sub(band, "PrintOnFirstPage", "true")
+    _sub(band, "PrintOnLastPage", "true")
+    _sub(band, "ReportItems")
+    # Emitted order is PageHeader, PageFooter, then the page dimensions.
+    idx = 0
+    if want_footer and page.find(_q("PageHeader")) is not None:
+        idx = list(page).index(page.find(_q("PageHeader"))) + 1
+    page.insert(idx, band)
+    m_el = page.find(_q("BottomMargin" if want_footer else "TopMargin"))
+    if m_el is not None:
+        try:
+            m = float((m_el.text or "0in").replace("in", "").strip())
+        except ValueError:
+            m = 0.0
+        m_el.text = _page_margin_in(max(0.0, m - height_in))
+    return band
+
+
+def _emit_page_gated_print_objects(root, report) -> int:
+    """Move declared body objects carrying an "allBut…" page print rule into
+    a page band at their declared geometry, gated by the page-number
+    expression that reproduces the rule.
+
+    The band is chosen by the object's own declared position: an object in
+    the top half of the section body belongs to the header band (anchored to
+    the band's FLOOR, i.e. as close to the body top as the band reaches), one
+    in the bottom half to the footer band (anchored to its ceiling). Band
+    heights are never changed — TopMargin + PageHeader height is the declared
+    body origin, so growing a band would push every body row down the page.
+    """
+    objs = _page_gated_print_objects(report)
+    if not objs:
+        return 0
+    page = root.find(".//" + _q("Page"))
+    if page is None:
+        return 0
+    sec = _section_by_kind(report, "section_main")
+    body_h = float(getattr(sec, "body_height", 0) or 0) \
+        if sec is not None else 0.0
+    # Body x is BODY-relative and the body is laid on the sheet at its
+    # declared origin (== the emitted LeftMargin); a page band's Left is
+    # relative to that same margin, so the shift is the difference between
+    # the two — zero on every report that states one origin for both.
+    _bx = _declared_body_origin_x(report)
+    _lm = _page_left_margin_for(report)
+    _paper_dx = (_bx if _bx is not None else _lm)
+    emitted = 0
+    for f in objs:
+        rule = (getattr(f, "print_on_page", "") or "").strip().lower()
+        hidden = _PAGE_GATED_PRINT_RULES.get(rule)
+        if not hidden:
+            continue
+        y = float(getattr(f, "y", 0) or 0)
+        want_footer = bool(body_h) and y > body_h / 2.0
+        band = page.find(_q("PageFooter" if want_footer else "PageHeader"))
+        if band is None:
+            # No band there yet — a report with no declared chrome carries
+            # none (an EMPTY band is never emitted). This object IS declared
+            # page furniture, so the band exists BECAUSE of it: open one
+            # exactly as tall as the object and pay for it out of the margin
+            # on that edge, so the printable area and every other declared
+            # paper position are unchanged.
+            band = _open_page_band_for(
+                page, want_footer,
+                max(0.15, float(getattr(f, "height", 0) or 0) or 0.2))
+        if band is None:
+            continue
+        items = band.find(_q("ReportItems"))
+        if items is None:
+            items = _sub(band, "ReportItems")
+        h = max(0.15, float(getattr(f, "height", 0) or 0) or 0.2)
+        band_h = _band_height_in(band)
+        top = 0.0 if want_footer else max(0.0, band_h - h)
+        # Re-use the margin-band emitter verbatim (declared fill gating,
+        # fonts, alignment, blob/image handling, publish-legality checks) by
+        # handing it a PAPER-positioned copy of the declared object and the
+        # band offset that lands it on the row chosen above.
+        proxy = copy.copy(f)
+        proxy.x = float(getattr(f, "x", 0) or 0) + _paper_dx
+        proxy.y = y
+        before = len(list(items))
+        if not _emit_margin_chrome(items, [proxy], report, y - top, "PG"):
+            continue
+        for el in list(items)[before:]:
+            el.attrib.pop("data-marginx", None)
+            nm = el.get("Name") or ""
+            if nm.startswith("MChrome_PG_"):
+                el.set("Name", _safe("PgPrint_" + nm[len("MChrome_PG_"):]))
+            # painted ON TOP of the band's own chrome, never under it
+            zi = el.find(_q("ZIndex"))
+            if zi is not None:
+                zi.text = str(1000 + emitted)
+            vis = _sub(el, "Visibility")
+            _sub(vis, "Hidden", hidden)
+            val = el.find(".//" + _q("Value"))
+            if val is not None and (val.text or ""):
+                _strip_body_copy_of_value(root, val.text)
+            emitted += 1
+    return emitted
+
+
+def _page_margin_in(v: float) -> str:
+    """A page margin is a DECLARED number — emit it at the precision it
+    carries. Two decimals when two are exact (a synthesized half-inch
+    sheet stays ``0.50in``), three when the declaration needs them: a
+    chrome band declared at y=0.2459 quantised to 0.25in moves the whole
+    sheet by the difference and forces the header band to swallow that
+    rounding to avoid clipping its own last item."""
+    return f"{v:.2f}in" if abs(v - round(v, 2)) < 5e-7 else f"{v:.3f}in"
+
+
+def _declared_chrome_top_margin(chrome_hdr) -> float:
+    """The page TopMargin a declared chrome band implies: the band's own
+    top offset, at the precision ``_page_margin_in`` will emit (so the
+    band-height arithmetic below is done on the number the RDL actually
+    carries, not on an unrounded one)."""
+    y0 = min(float(getattr(f, "y", 0) or 0) for f in chrome_hdr)
+    v = min(2.0, max(0.0, y0))
+    v2 = round(v, 2)
+    return v2 if abs(v - v2) < 5e-7 else round(v, 3)
+
+
+def _chrome_band_extent(chrome, band_top: float) -> float:
+    """Band-relative bottom of the boxes ``_emit_margin_chrome`` actually
+    writes — the floor below which a band would CLIP its own chrome.
+    Mirrors the emitter's effective heights exactly: a declared <line> is
+    a zero-height stroke, every other box gets the emitter's 0.15in
+    floor. This is a never-clip guard, NOT breathing room: it can only
+    matter when a declaration is thinner than what SSRS can draw."""
+    ext = 0.0
+    for f in chrome:
+        y = float(getattr(f, "y", 0) or 0)
+        h = float(getattr(f, "height", 0) or 0)
+        h = 0.0 if (getattr(f, "kind", "") or "") == "line" \
+            else max(0.15, h or 0.2)
+        ext = max(ext, (y - band_top) + h)
+    return max(0.0, ext)
+
+
+def _declared_chrome_header_height(chrome_hdr, report=None) -> float:
+    """Header band height for the declared-chrome path — DECLARED
+    geometry, never a content measurement.
+
+    The page's TopMargin IS the band's own top offset (see _build_page),
+    so the band's height is simply where the declared chrome ENDS minus
+    that margin: TopMargin + Height then lands exactly on the declared
+    chrome bottom, which is where the body begins. No slack may be added
+    here — every hundredth is spent pushing the body down on EVERY page
+    (truth-measured: a +0.12in cushion put one report's first body rule
+    at 1.1241in against the truth's 1.0067in, with the declared chrome
+    ending at exactly 1.0000in).
+
+    A source that also declares a body ORIGIN (``<section><body>
+    <location y=>``) states that end itself and it is never above the
+    chrome, so the two resolve as a max. Capped so a stray deep margin
+    object can never eat the page."""
+    y1 = max(float(getattr(f, "y", 0) or 0)
+             + float(getattr(f, "height", 0) or 0) for f in chrome_hdr)
+    tm = _declared_chrome_top_margin(chrome_hdr)
+    end = y1
+    if report is not None:
+        _by = _declared_body_origin_y(report)
+        if _by is not None:
+            end = max(end, _by)
+    return min(3.5, max(_chrome_band_extent(chrome_hdr, tm), end - tm))
+
+
+def _page1_has_cover(root) -> bool:
+    """True when the finished body's first page is a criteria COVER (the
+    letter-cover rect or the summary-header section) — Oracle prints no
+    page-header band on those pages; the band belongs to content pages."""
+    return any(el.get("Name") in ("Rect_CoverPage", "Rect_SummaryHeader")
+               for el in root.iter())
+
+
+def _declares_margin_band(report) -> bool:
+    """True when the source authored PAGE CHROME of its own: either a real
+    section <margin> band (objects tagged ``in_margin``), or loose
+    section_main-level texts/fields sitting OUTSIDE every frame (the other
+    dialect for margin furniture — a title text or parameter echo authored
+    directly on the section). Chrome-presence signal for the per-record
+    family: a certificate/letter source with NEITHER prints NO page-header
+    band in Oracle — every object lives inside its record frames, so the
+    synthesized title/run-on header must not be invented for it."""
+    def _wlk(g):
+        for f in (getattr(g, "fields", None) or []):
+            if getattr(f, "in_margin", False):
+                return True
+        return any(_wlk(c) for c in (getattr(g, "children", None) or []))
+    if any(_wlk(lg) for lg in (getattr(report, "layout", None) or [])):
+        return True
+    sm = _section_by_kind(report, "section_main")
+    return bool(sm is not None and (getattr(sm, "fields", None) or []))
+
+
 def _build_page(report: ParsedReport, page_height_in: float = 11.0,
                 footer_on_first_page: bool = True,
+                header_on_first_page: bool = True,
                 signature_in_footer: bool = True,
                 columns: int = 1, column_spacing: float = 0.0,
                 column_width_in: float = 0.0,
-                param_echo: Optional[list] = None) -> ET.Element:
+                param_echo: Optional[list] = None,
+                allow_synth_header: bool = True) -> ET.Element:
     """Page-level dimensions + optional header/footer. ``columns`` > 1 emits
     newspaper-style multi-column layout (the mailing-label tiling).
 
@@ -13371,7 +23101,13 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
     selection-criteria block (label + parameter value) in the top-left margin --
     used by the multi-section path, whose body builder otherwise drops these
     leading fields. When present, "Report run on" moves to the top-right and the
-    page number drops to the footer (matching the Oracle margin layout)."""
+    page number drops to the footer (matching the Oracle margin layout).
+
+    ``allow_synth_header``: False = never SYNTHESIZE the fallback centered
+    title/run-on band (declared <margin> chrome still emits 1:1). The
+    per-record family passes margin-band presence here — a certificate/
+    letter source without a <margin> band prints no page-header chrome in
+    Oracle, its title belongs where the BODY declares it."""
     page = ET.Element(_q("Page"))
     _echo = list(param_echo or [])
 
@@ -13437,16 +23173,83 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
             if not _mx or "Fields!" in _mv or _mv.strip() in ("=Nothing", "="):
                 continue
             _margin_extra.append((_mf, _mv))
-    if title_lines:
-        header_h = 0.20 + 0.22 * len(title_lines) + 0.30
+    # HEADER-INTERNAL dedupe (truth-measured on the emissions banner form):
+    # the title block already resolves display-constant parameter fields into
+    # literal SUBTITLE lines (_extract_title_lines), and the criteria banner
+    # emits its own run-date stamp -- so a margin field carrying the SAME
+    # content must not print a second copy in the same header. Exact-match
+    # only: a parameter ref whose default IS a title line, a literal that IS
+    # a title line, or an expression identical to one the banner emits.
+    if _margin_extra:
+        _pm_ref = re.compile(r"^=Parameters!([A-Za-z0-9_]+)\.Value$")
+        _title_set = {ln.strip() for ln in (title_lines or []) if ln.strip()}
+        _pdefs = {
+            (p.name or "").upper():
+                (getattr(p, "initial_value", "") or "").strip()
+            for p in (report.parameters or [])
+        }
+        _banner_exprs = set()
+        if _banner:
+            for _bk in ("date_expr", "value_expr"):
+                _bv = _banner.get(_bk)
+                if _bv:
+                    _banner_exprs.add(str(_bv).strip().lstrip("="))
+        _kept = []
+        for _mf, _mv in _margin_extra:
+            _s = _mv.strip()
+            if _s.lstrip("=") in _banner_exprs:
+                continue
+            _pmm = _pm_ref.match(_s)
+            if _pmm and _pdefs.get(_pmm.group(1).upper(), "") in _title_set:
+                continue
+            if (_s.startswith('="') and _s.endswith('"')
+                    and _s.count('"') == 2 and _s[2:-1].strip() in _title_set):
+                continue
+            _kept.append((_mf, _mv))
+        _margin_extra = _kept
+    _th_line = max(0.22, _title_style(report)[2] * 1.35 / 72.0)
+    # DECLARED page chrome: when the source authored a real <margin> band
+    # (title / logo / run-date at geometry), reproduce it 1:1 instead of
+    # synthesizing a centered-title header. The echo and banner paths keep
+    # their own verified layouts.
+    _chrome_hdr, _chrome_ftr = ([], []) if (_echo or _banner) \
+        else _margin_page_chrome(report, page_height_in)
+    _chrome_done = False
+    if _chrome_hdr:
+        # The band's own top offset IS the page TopMargin (emitted below),
+        # and TopMargin + Height is where SSRS starts the body — so the
+        # band must END exactly at the declared chrome bottom (or at the
+        # declared body origin when the source states one). Both are pure
+        # declaration: _declared_chrome_header_height adds no slack.
+        _ch_y0 = _declared_chrome_top_margin(_chrome_hdr)
+        _ch_h = _declared_chrome_header_height(_chrome_hdr, report)
+        ph = _sub(page, "PageHeader")
+        _sub(ph, "Height", f"{_ch_h:.4f}in")
+        _sub(ph, "PrintOnFirstPage",
+             "true" if header_on_first_page else "false")
+        _sub(ph, "PrintOnLastPage", "true")
+        ph_items = _sub(ph, "ReportItems")
+        if _emit_margin_chrome(ph_items, _chrome_hdr, report,
+                               _ch_y0, "H"):
+            _chrome_done = True
+        else:
+            # Nothing survived emission (no image asset, unresolvable
+            # tokens) — remove the empty band and synthesize as before.
+            page.remove(ph)
+    if _chrome_done:
+        pass
+    elif title_lines and allow_synth_header:
+        header_h = 0.20 + _th_line * len(title_lines) + 0.30
         header_h += 0.24 * len(_margin_extra)
         if _echo:
             header_h = max(header_h, max(p["ly"] for p in _echo) + 0.32)
         if _banner:
-            header_h = max(header_h, 0.10 + 0.22 * len(title_lines) + 0.42)
+            header_h = max(header_h,
+                           0.10 + _th_line * len(title_lines) + 0.42)
         ph = _sub(page, "PageHeader")
         _sub(ph, "Height", f"{header_h:.2f}in")
-        _sub(ph, "PrintOnFirstPage", "true")
+        _sub(ph, "PrintOnFirstPage",
+             "true" if header_on_first_page else "false")
         _sub(ph, "PrintOnLastPage", "true")
         ph_items = _sub(ph, "ReportItems")
         # Resolve any Oracle lexical/&TOKEN in each title line to SSRS
@@ -13462,27 +23265,29 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
         title_expr = "=" + " & vbCrLf & ".join(
             _title_atom(ln) for ln in title_lines
         )
-        _t_font, _t_color = _title_style(report)
+        _t_font, _t_color, _t_size = _title_style(report)
         _build_textbox(
             ph_items, "Tb_PageTitle", title_expr,
-            bold=True, font_size="11pt",
+            bold=True, font_size=f"{_t_size}pt",
             fg=_t_color,
             text_align="Center", vertical_align="Middle",
             border_color="#ffffff", padding="2pt",
             font_family=_t_font,
         )
         title_tb = ph_items[-1]
+        _t_line_h = max(0.22, _t_size * 1.35 / 72.0)
         _sub(title_tb, "Top", "0.05in")
         _sub(title_tb, "Left", "0.1in")
         _sub(title_tb, "Width", "7.3in")
-        _sub(title_tb, "Height", f"{0.22 * len(title_lines):.2f}in")
-        meta_y = 0.10 + 0.22 * len(title_lines)
+        _sub(title_tb, "Height", f"{_t_line_h * len(title_lines):.2f}in")
+        meta_y = 0.10 + _t_line_h * len(title_lines)
         for _mi, (_mf, _mv) in enumerate(_margin_extra):
             _build_textbox(
                 ph_items, f"Tb_MarginX{_mi}", _mv,
                 bold=bool(getattr(_mf, "bold", False)),
                 font_size=f"{int(getattr(_mf, 'font_size', 10) or 10)}pt",
-                fg="#111111", text_align="Center", vertical_align="Middle",
+                fg=_text_color(getattr(_mf, "color", "")),
+                text_align="Center", vertical_align="Middle",
                 border_color="#ffffff", padding="2pt",
             )
             _mtb = ph_items[-1]
@@ -13501,23 +23306,45 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
             # moves to the top-right and the page number drops to the footer to
             # match the Oracle margin layout.
             for i, pr in enumerate(_echo):
+                # DECLARED label styling — the truth prints these criteria
+                # labels in the report's own face (e.g. Courier bold), not
+                # a synthesized 9pt gray (fidelity-diff measured).
+                _elf = pr.get("lf")
+                _eface = (getattr(_elf, "font_family", "") or "").strip() \
+                    or None
+                _esz = int(getattr(_elf, "font_size", 0) or 0) or 9
                 _build_textbox(
                     ph_items, f"Tb_EchoL{i}", pr["label"],
-                    font_size="9pt", fg="#444444", bold=True,
-                    text_align="Left", vertical_align="Middle",
-                    border_color="#ffffff", padding="2pt",
+                    font_size=f"{_esz}pt",
+                    fg=_text_color(getattr(_elf, "color", "")),
+                    bold=bool(getattr(_elf, "bold", True)),
+                    font_family=_eface,
+                    text_align="Left",
+                    vertical_align=_declared_vertical_align(_elf),
+                    # NO INSET: the criteria echo lands at the source's
+                    # DECLARED label x/y below.
+                    border_color="#ffffff", padding="0pt",
                 )
                 _lb = ph_items[-1]
                 _sub(_lb, "Top", f"{pr['ly']:.2f}in")
                 _sub(_lb, "Left", f"{max(0.1, pr['lx']):.2f}in")
                 _sub(_lb, "Width", f"{max(0.6, pr['vx'] - pr['lx'] - 0.02):.2f}in")
                 _sub(_lb, "Height", "0.20in")
+                _evf = pr.get("vf")
+                _evface = (getattr(_evf, "font_family", "") or "").strip() \
+                    or None
+                _evsz = int(getattr(_evf, "font_size", 0) or 0) or 9
                 _build_textbox(
                     ph_items, f"Tb_EchoV{i}",
                     f"=Parameters!{_safe(pr['value'])}.Value",
-                    font_size="9pt", fg="#444444",
-                    text_align="Left", vertical_align="Middle",
-                    border_color="#ffffff", padding="2pt",
+                    font_size=f"{_evsz}pt",
+                    fg=_text_color(getattr(_evf, "color", "")),
+                    font_family=_evface,
+                    bold=bool(getattr(_evf, "bold", False)),
+                    text_align="Left",
+                    vertical_align=_declared_vertical_align(_evf),
+                    # NO INSET: declared value x below.
+                    border_color="#ffffff", padding="0pt",
                 )
                 _vb = ph_items[-1]
                 _sub(_vb, "Top", f"{pr['ly']:.2f}in")
@@ -13527,7 +23354,7 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
             _build_textbox(
                 ph_items, "Tb_RunOn",
                 '="Report run on: " & Format(Globals!ExecutionTime, "MM/dd/yyyy h:mm tt")',
-                font_size="9pt", fg="#444444",
+                font_size="9pt", fg=_BODY_INK,
                 text_align="Right", vertical_align="Middle",
                 border_color="#ffffff", padding="2pt",
             )
@@ -13570,7 +23397,7 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
             _build_textbox(
                 ph_items, "Tb_RunOn",
                 '="Report run on: " & Format(Globals!ExecutionTime, "MM/dd/yyyy h:mm tt")',
-                font_size="9pt", fg="#444444",
+                font_size="9pt", fg=_BODY_INK,
                 text_align="Left", vertical_align="Middle",
                 border_color="#ffffff", padding="2pt",
             )
@@ -13584,7 +23411,7 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
                 (_source_page_number_expr(report)
                  or '="Page " & Globals!PageNumber & " of "'
                     ' & Globals!TotalPages'),
-                font_size="9pt", fg="#444444",
+                font_size="9pt", fg=_BODY_INK,
                 text_align="Right", vertical_align="Middle",
                 border_color="#ffffff", padding="2pt",
             )
@@ -13593,19 +23420,63 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
             _sub(pg_tb, "Left", "4.2in")
             _sub(pg_tb, "Width", "3.2in")
             _sub(pg_tb, "Height", "0.20in")
-    else:
-        ph = _sub(page, "PageHeader")
-        _sub(ph, "Height", "0.25in")
-        _sub(ph, "PrintOnFirstPage", "true")
-        _sub(ph, "PrintOnLastPage", "true")
+    # NO EMPTY SPACER BAND. A band with nothing in it is furniture the source
+    # never declared, and SSRS charges its full height to EVERY page: an empty
+    # 0.25in header plus an empty 0.60in footer took 0.85in off an 11in sheet,
+    # leaving 9.15in of printable height for a body the source declares at
+    # 10.60in — which is why one record needed two pages where the truth
+    # prints one. Bands that actually carry chrome are emitted above; nothing
+    # is emitted here.
 
+    # DECLARED bottom-margin geometry: Oracle margin ys are PAPER-relative,
+    # so the footer band + BottomMargin are sized so the declared items land
+    # at their true paper position (truth-measured: the declared page number
+    # printed ~39pt higher than truth under the fixed 0.6in/0.5in chrome).
+    _pf_h = _PAGE_FOOTER_HEIGHT_IN
+    _bot_margin_in = _page_vmargin_for(report)
+    if _chrome_done and _chrome_ftr:
+        _cf_top = min(float(getattr(f, "y", 0) or 0) for f in _chrome_ftr)
+        _cf_bot = max(float(getattr(f, "y", 0) or 0)
+                      + float(getattr(f, "height", 0) or 0)
+                      for f in _chrome_ftr)
+        # SYMMETRIC to the header rule: the band spans exactly the declared
+        # chrome (top -> bottom), and BottomMargin is the paper left under
+        # it. No measure slack — a +0.06in cushion here is 0.06in of body
+        # the source never gave away, and it quietly shrank BottomMargin
+        # below the declared sheet edge.
+        _pf_h = min(1.5, max(_chrome_band_extent(_chrome_ftr, _cf_top),
+                             _cf_bot - _cf_top))
+        _bot_margin_in = min(
+            1.5, max(0.0, page_height_in - _cf_top - _pf_h))
     pf = _sub(page, "PageFooter")
-    _sub(pf, "Height", f"{_PAGE_FOOTER_HEIGHT_IN}in")
+    _sub(pf, "Height", f"{_pf_h:.4f}in")
+    # DECLARED templateSection: when page 1 is a criteria COVER it is a
+    # HEADER-section page, and a footer band whose every declared item is
+    # restricted to another section (Oracle's templateSection attribute) is
+    # furniture that section never prints there. `header_on_first_page` is
+    # False exactly when page 1 is that cover -- every caller derives it
+    # from _page1_has_cover -- so it is the cover signal here too.
+    # DECLARED templateSection: when page 1 is a criteria COVER it is a
+    # HEADER-section page, and a footer band whose every declared item is
+    # restricted to another section (Oracle's templateSection attribute) is
+    # furniture that section never prints there. `header_on_first_page` is
+    # False exactly when page 1 is that cover -- every caller derives it
+    # from _page1_has_cover -- so it is the cover signal here too.
+    if (footer_on_first_page and not header_on_first_page
+            and _chrome_done
+            and _chrome_excluded_from_section(_chrome_ftr, "section_header")):
+        footer_on_first_page = False
     # Suppress the footer on page 1 when page 1 is a cover sheet --
     # otherwise the signature image carried in the footer prints on
     # the cover, where it does not belong.
     _sub(pf, "PrintOnFirstPage", "true" if footer_on_first_page else "false")
     _sub(pf, "PrintOnLastPage", "true")
+    # Declared bottom-margin chrome (typically the page number at its
+    # authored x/width) — band-relative to the footer's own top.
+    if _chrome_done and _chrome_ftr:
+        pf_items = _sub(pf, "ReportItems")
+        _cf_y0 = min(float(getattr(f, "y", 0) or 0) for f in _chrome_ftr)
+        _emit_margin_chrome(pf_items, _chrome_ftr, report, _cf_y0, "F")
     # When the page header carries a selection-criteria echo OR an AIR criteria
     # banner, the Oracle page number lives in the bottom margin (centered), not
     # the top-right -- emit it in the footer so the header band stays clean.
@@ -13616,7 +23487,7 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
             (_source_page_number_expr(report)
              or '="Page " & Globals!PageNumber & " of "'
                 ' & Globals!TotalPages'),
-            font_size="9pt", fg="#444444",
+            font_size="9pt", fg=_BODY_INK,
             text_align="Center", vertical_align="Middle",
             border_color="#ffffff", padding="2pt",
         )
@@ -13651,12 +23522,65 @@ def _build_page(report: ParsedReport, page_height_in: float = 11.0,
         _sub(img, "Height", "0.45in")
         _sub(img, "Width", "1.5in")
 
+    # A synthesized EMPTY footer band is chrome the source never declared, and
+    # it costs its full height on every page (see the header note above) — drop
+    # it whenever nothing actually renders in it, on any stock.
+    _pf_items = pf.find(_q("ReportItems"))
+    if _pf_items is None or len(list(_pf_items)) == 0:
+        page.remove(pf)
+        _bot_margin_in = _page_vmargin_for(report)
     _sub(page, "PageHeight", f"{page_height_in:.2f}in")
     _sub(page, "PageWidth", f"{_page_width_for(report):.2f}in")
-    _sub(page, "LeftMargin", f"{_PAGE_HMARGIN_IN}in")
-    _sub(page, "RightMargin", f"{_PAGE_HMARGIN_IN}in")
-    _sub(page, "TopMargin", f"{_PAGE_MARGIN_IN}in")
-    _sub(page, "BottomMargin", f"{_PAGE_MARGIN_IN}in")
+    # The LEFT margin is the declared body origin (see _page_left_margin_for):
+    # body item coordinates are body-relative, so the page origin is what puts
+    # them at their true paper x. The RIGHT margin is only a placeholder here —
+    # _fit_body_to_page makes it the residual once the body width is final
+    # (Oracle's side margins are asymmetric whenever the body is not centred).
+    _sub(page, "LeftMargin", f"{_page_left_margin_for(report)}in")
+    _sub(page, "RightMargin", f"{_page_hmargin_for(report)}in")
+    # DECLARED top-margin geometry: with a declared chrome band the page's
+    # TopMargin IS the band's own top offset, so every margin item prints
+    # at its declared paper y (truth-measured: the title/run-on printed
+    # ~28pt lower under the fixed 0.5in margin).
+    _top_margin_in = _page_vmargin_for(report)
+    if _chrome_done:
+        # already clamped + rounded to the emitted precision by
+        # _declared_chrome_top_margin, which the band height was measured
+        # from — the two must be the SAME number or the body lands off by
+        # the rounding.
+        _top_margin_in = _ch_y0
+        # The declared chrome fixes where the body BEGINS (_ch_y0 + _ch_h);
+        # the source's own <section name="main"><body height=> says how tall
+        # that body is. The paper under it is the bottom margin — a
+        # synthesized half-inch there is height the DECLARATION already gave
+        # to the body, and a record sized from the declaration then misses
+        # the sheet by exactly the difference and paginates (measured: a
+        # 9.73in record on a 9.75in declared body had 9.58in of printable
+        # area and spilled a sliver page per record). RECLAIM ONLY — the
+        # margin may shrink to honour the declaration, never grow — and only
+        # while the source declares no footer chrome of its own, which sizes
+        # the bottom edge itself.
+        if not _chrome_ftr:
+            _decl_bh = _declared_record_body_height(report)
+            if _decl_bh:
+                _bot_margin_in = max(0.0, min(
+                    _bot_margin_in,
+                    page_height_in - (_ch_y0 + _ch_h) - _decl_bh))
+    else:
+        # NO declared chrome band: the page's top margin IS the topmost
+        # declared section body origin (_page_top_margin_for), the vertical
+        # twin of the LeftMargin rule above, and the bottom margin is the
+        # paper left under the deepest declared section body. Both are pure
+        # declaration; a source that states neither keeps the synthesized
+        # half-inch margins.
+        _decl_top = _page_top_margin_for(report)
+        _decl_bot = _page_bottom_margin_for(report)
+        if _decl_top is not None:
+            _top_margin_in = _decl_top
+        if _decl_bot is not None:
+            _bot_margin_in = _decl_bot
+    _sub(page, "TopMargin", _page_margin_in(_top_margin_in))
+    _sub(page, "BottomMargin", _page_margin_in(_bot_margin_in))
     if columns and columns > 1:
         # Newspaper multi-up: SSRS tiles the body's single data region across
         # ``columns`` columns then down -- the mailing-label render.
@@ -13786,8 +23710,9 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         body, ncols, colgap = _build_label_body(report, main, _label)
         root.append(body)
         _sub(root, "Width", f"{_label['cell_w']:.3f}in")
-        root.append(_build_page(report, page_height_in=11.0,
+        root.append(_build_page(report, page_height_in=_page_height_for(report),
                                 footer_on_first_page=True,
+                                header_on_first_page=not _page1_has_cover(root),
                                 signature_in_footer=False,
                                 columns=ncols, column_spacing=colgap,
                                 column_width_in=_label["cell_w"]))
@@ -13808,8 +23733,9 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         # design-time slack below/right of the tiny matrix footprint
         # (engine-measured: page 2 had zero words before this).
         _rdsub(root, "ConsumeContainerWhitespace", "true")
-        root.append(_build_page(report, page_height_in=11.0,
+        root.append(_build_page(report, page_height_in=_page_height_for(report),
                                 footer_on_first_page=True,
+                                header_on_first_page=not _page1_has_cover(root),
                                 signature_in_footer=False))
         root.append(_build_code())
         _sub(root, "Language", "en-US")
@@ -13859,8 +23785,9 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         body = _build_body(report, main)  # _build_body picks the nested Tablix
         root.append(body)
         _sub(root, "Width", "7.5in")
-        root.append(_build_page(report, page_height_in=11.0,
+        root.append(_build_page(report, page_height_in=_page_height_for(report),
                                 footer_on_first_page=True,
+                                header_on_first_page=not _page1_has_cover(root),
                                 signature_in_footer=False))
         root.append(_build_code())
         _sub(root, "Language", "en-US")
@@ -13890,8 +23817,9 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         # _build_packet_body already budgets its frames to this same width.
         _sub(root, "Width",
              f"{_page_width_for(report) - 2 * _PAGE_HMARGIN_IN - 0.02:.2f}in")
-        root.append(_build_page(report, page_height_in=11.0,
+        root.append(_build_page(report, page_height_in=_page_height_for(report),
                                 footer_on_first_page=True,
+                                header_on_first_page=not _page1_has_cover(root),
                                 signature_in_footer=False))
         root.append(_build_code())
         _sub(root, "Language", "en-US")
@@ -13936,13 +23864,32 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         chrome = (2 * _PAGE_MARGIN_IN
                   + _page_header_height(report)
                   + _PAGE_FOOTER_HEIGHT_IN)
-        page_height = max(11.0, req + chrome + _PER_RECORD_SLACK_IN)
+        # PAPER-declared FORM whose record outgrows one printable sheet: keep
+        # the paper at its declared size and let the record FLOW across pages
+        # (see _per_record_page_budget). Oversize rects get KeepTogether=false
+        # so the engine splits them in place instead of pushing them to a fresh
+        # page (the blank-leader-page failure mode).
+        page_height, _flow_h = _per_record_page_budget(report, req, chrome)
         root.append(body)
         _report_w = float(body.attrib.pop("data-body-width-in", "7.5"))
         _sub(root, "Width", f"{_report_w}in")
-        root.append(_build_page(report, page_height_in=page_height,
-                                footer_on_first_page=True,
-                                signature_in_footer=not _sig_in_body))
+        _page_el = _build_page(report, page_height_in=page_height,
+                               footer_on_first_page=True,
+                               header_on_first_page=not _page1_has_cover(root),
+                               signature_in_footer=not _sig_in_body,
+                               allow_synth_header=_declares_margin_band(report))
+        if _flow_h is not None:
+            # ...unless the record actually FITS the declared sheet once the
+            # synthesized furniture stops eating into it — then it prints one
+            # per sheet instead of flowing (see _fit_record_to_declared_sheet).
+            _sheet_vm = _fit_record_to_declared_sheet(report, body, _page_el)
+            if _sheet_vm is not None:
+                _apply_declared_sheet_chrome(_page_el, _sheet_vm, report)
+                _flow_h = None
+        if _flow_h is not None:
+            _flow_oversize_record_rects(body, _flow_h)
+            _fit_cover_to_one_page(body, _flow_h)
+        root.append(_page_el)
         root.append(_build_code())
         _sub(root, "Language", "en-US")
         _rdsub(root, "DrawGrid", "true")
@@ -13951,13 +23898,18 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         return root
 
     signature_in_body = False
+    _pr_body, _pr_flow_h = None, None
     if kind in ("certificate", "letter") and main is not None:
         # One page per record (permits, letters, single-document reports).
         body = _build_per_record_body(report, main)
-        # Grow PageHeight so ONE record plus the page chrome (top +
-        # bottom margins + header + footer) fits on a single physical
-        # page. Budgeting only max(11, content) left the wallet cards
-        # at the foot of the certificate spilling onto a second page.
+        # Budget the sheet exactly like the per-record FORM arm above
+        # (_per_record_page_budget): grow the page so ONE record plus the page
+        # chrome fits when the source declares no paper (budgeting only
+        # max(11, content) left the wallet cards at the foot of the certificate
+        # spilling onto a second page); honour SMALL-PAPER card/label stock the
+        # record fits; and when the source DECLARES a paper-sized body that one
+        # record outgrows, keep the declared paper and paginate the record
+        # across sheets instead of emitting one giant sheet per record.
         try:
             req = float(body.attrib.pop("data-required-page-height-in", "0"))
         except Exception:
@@ -13966,7 +23918,12 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
         chrome = (2 * _PAGE_MARGIN_IN
                   + _page_header_height(report)
                   + _PAGE_FOOTER_HEIGHT_IN)
-        page_height = max(11.0, req + chrome + _PER_RECORD_SLACK_IN)
+        page_height, _flow_h = _per_record_page_budget(report, req, chrome)
+        # The flow decision is finished at the shared page-build exit below:
+        # whether the record fits the declared sheet depends on which chrome
+        # bands actually carry anything, and that is only known once the page
+        # element exists.
+        _pr_body, _pr_flow_h = body, _flow_h
     elif kind == "tabular_details":
         # Multi-section dashboard (several independent tables down one page,
         # each bound to a different query) -> stack one Tablix per section so
@@ -13977,10 +23934,10 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
             body = _build_multi_section_body(report, sections)
         else:
             body = _build_body(report, main)
-        page_height = 11.0
+        page_height = _page_height_for(report)
     else:
         body = _build_body(report, main)
-        page_height = 11.0
+        page_height = _page_height_for(report)
 
     # A detected Oracle chart whose category + measure are real dataset
     # columns -> a REAL rendered SSRS Chart, placed below the body content
@@ -14026,12 +23983,41 @@ def _build_report_root(report: ParsedReport, target_db: str = "oracle") -> ET.El
     # None and stay byte-identical.
     _param_echo = (_leading_param_echo(report)
                    if (kind == "tabular_details" and _multi_sections) else None)
-    root.append(_build_page(
+    # A criteria COVER page prints with NO page-header band in the Oracle
+    # truth (the cover starts directly at "Report:"); the band belongs to
+    # the content pages. Driven by the cover's actual presence, not the
+    # archetype.
+    _has_cover = _page1_has_cover(root)
+    # PER-RECORD family (certificate/letter): the page-header band is
+    # chrome-presence-driven. A source that declares NO <margin> band
+    # prints NO title/run-on/page-number band in Oracle (its title is a
+    # BODY object) — synthesizing one invented an 18pt banner on every
+    # record page (adversarial-sweep finding). Declared margins still
+    # emit 1:1; other archetypes keep the synthesized fallback.
+    _synth_ok = (kind not in ("certificate", "letter")
+                 or _declares_margin_band(report))
+    _page_el = _build_page(
         report, page_height_in=page_height,
         footer_on_first_page=(kind not in ("certificate", "letter")),
+        header_on_first_page=not _has_cover,
         signature_in_footer=not signature_in_body,
         param_echo=_param_echo,
-    ))
+        allow_synth_header=_synth_ok,
+    )
+    # PER-RECORD flow decision, finished now that the chrome bands are real:
+    # a record that FITS the sheet its source declares (once empty synthesized
+    # bands and the synthesized margins stop eating into it) prints ONE per
+    # sheet; only a genuinely taller record flows across sheets.
+    if _pr_flow_h is not None:
+        _sheet_vmargin = _fit_record_to_declared_sheet(report, _pr_body,
+                                                       _page_el)
+        if _sheet_vmargin is not None:
+            _apply_declared_sheet_chrome(_page_el, _sheet_vmargin, report)
+            _pr_flow_h = None
+    if _pr_flow_h is not None:
+        _flow_oversize_record_rects(_pr_body, _pr_flow_h)
+        _fit_cover_to_one_page(_pr_body, _pr_flow_h)
+    root.append(_page_el)
     root.append(_build_code())
     _sub(root, "Language", "en-US")
     _rdsub(root, "DrawGrid", "true")
@@ -14208,20 +24194,88 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
     _blob_srcs.discard("")
 
     todo = []
+    _folded_ids: set = set()
 
-    def walk(g):
+    def _inline_list_children(g, ds_safe):
+        """Descendant repeating frames that are INLINE LISTS of this
+        frame: same dataset, exactly ONE data field, no deeper repeats —
+        the Oracle role-list idiom (PERMITTEE,/OWNER,/OPERATOR, stacked
+        beside the org block). Detaching them as their own breakdown
+        printed dangling fragments; they fold into the parent's row as a
+        Join(LookupSet(...)) list."""
+        out = []
+
+        def scan(n):
+            for c in (getattr(n, "children", None) or []):
+                ck = (getattr(c, "kind", "") or "").lower()
+                if ck == "repeating_frame":
+                    csrc = (getattr(c, "source_query", "") or "").upper()
+                    cds = _safe(group_owner.get(csrc, ""))
+                    cf = [f for f in (c.fields or [])
+                          if (f.kind or "") == "field"
+                          and (f.source or "").strip()]
+                    if (cds == ds_safe and len(
+                            {(f.source or "").upper() for f in cf}) == 1
+                            and not any(
+                                (getattr(cc, "kind", "") or "").lower()
+                                == "repeating_frame"
+                                for cc in (c.children or []))):
+                        out.append(c)
+                        _folded_ids.add(id(c))
+                        continue
+                scan(c)
+        scan(g)
+        return out
+
+    # Query objects per group, so the nested-region test below can tell a
+    # frame's own dataset from the record frame's.
+    _owner_q = _group_owner_queries(report)
+    # Datasets the record builder ALREADY rendered as a declared nested
+    # region, inside each parent record instance.
+    _in_record_ds = set(getattr(report, "_nested_regions_emitted", None) or ())
+
+    def _declared_nested_in(g, record_q):
+        """True when g is a NESTED REGION the record already renders.
+
+        A repeating frame declared INSIDE a repeating frame that a data region
+        renders prints inside every parent instance — above the rule that
+        closes it. Appending it here printed the child rows once, after the
+        whole body, under the group's closing rule and unlinked from the
+        parent they belong to (production-verified on a permit list: the
+        organisation block landed below the closing rule).
+
+        The test is DECLARED NESTING **and** in-place emission: a nested
+        frame the record builder could not place (no resolvable Oracle <link>
+        correlation, or a builder with no nested-region support) must still
+        reach this fallback. Misplaced beats missing — measured: gating on
+        declared nesting alone silently dropped whole blocks on two wild
+        reports."""
+        if record_q is None:
+            return False
+        cq = _owner_q.get((getattr(g, "source_query", "") or "").upper())
+        if cq is None or cq is record_q:
+            return False
+        return _safe(getattr(cq, "name", "") or "") in _in_record_ds
+
+    def walk(g, record_q=None):
         kind = (getattr(g, "kind", "") or "").lower()
-        if kind == "repeating_frame":
+        if kind == "repeating_frame" and id(g) not in _folded_ids:
             src = (getattr(g, "source_query", "") or "").upper()
             ds = group_owner.get(src, "")
             if (ds and _safe(ds) not in rendered_ds and _safe(ds) in declared_ds
+                    and not _declared_nested_in(g, record_q)
                     and int(getattr(g, "max_records_per_page", 0) or 0) != 1
                     and any((f.kind or "") == "field"
                             and (f.source or "").upper() not in _blob_srcs
                             for f in (g.fields or []))):
-                todo.append((g, _safe(ds)))
+                todo.append((g, _safe(ds),
+                             _inline_list_children(g, _safe(ds))))
+        if kind == "repeating_frame":
+            _own = _owner_q.get((getattr(g, "source_query", "") or "").upper())
+            if _own is not None and _safe(_own.name or "") in rendered_ds:
+                record_q = _own          # this frame IS a rendered record
         for c in (getattr(g, "children", None) or []):
-            walk(c)
+            walk(c, record_q)
 
     for lg in (getattr(report, "layout", None) or []):
         if getattr(lg, "kind", "") == "section_main":
@@ -14307,9 +24361,29 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
                 return f'={_fn}(Fields!{_ohit}.Value, "{_safe(_own)}")'
         return None
 
-    for bi, (frm, ds) in enumerate(todo):
+    def _list_key_field(frm, ds):
+        """The parent group's key column for an inline-list LookupSet:
+        an ID-ish emitted field, preferring one sharing the group name's
+        stem (G_Org -> ORG_ID over SITE_ID). None -> no safe key."""
+        stem = re.sub(r"(?i)^g_", "",
+                      (getattr(frm, "source_query", "") or "")).upper()
+        stem0 = stem.split("_")[0] if stem else ""
+        fmap = _ds_field_name.get(ds, {})
+        idc = [c for c in fmap if c.upper().endswith("ID")]
+        if not idc:
+            return None
+        idc.sort(key=lambda c: (0 if stem0 and stem0 in c.upper() else 1,
+                                len(c)))
+        return fmap[idc[0]]
+
+    for bi, (frm, ds, inlines) in enumerate(todo):
         fx = float(getattr(frm, "x", 0) or 0)
-        row_h = max(0.18, float(getattr(frm, "height", 0) or 0.19))
+        # DECLARED row PITCH: the frame's own height plus the gutter it
+        # declares between consecutive instances. A bare height printed the
+        # breakdown stack 1.4pt (8%) tight per line against the truth.
+        row_h = (float(getattr(frm, "height", 0) or 0.19)
+                 + max(0.0, float(getattr(frm, "vert_space", 0) or 0)))
+        row_h = max(0.10, row_h)
         members = [f for f in (frm.fields or [])
                    if (f.kind or "") in ("field", "text")]
         if not members:
@@ -14340,12 +24414,32 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
         # onto each other (engine-render verified on a permit list; the
         # exact defect the group-header band had).
         _bd_line_h = 0.20
-        _bd_ys = sorted({round(float(getattr(f, "y", 0) or 0), 2)
-                         for f in members})
-        _bd_line_of = {y: i for i, y in enumerate(_bd_ys)}
-        row_h = max(row_h, _bd_line_h * max(1, len(_bd_ys)) + 0.02)
+        # ...at their DECLARED y, not stacked at a synthesized line height:
+        # Oracle states each line's offset inside the frame and the truth
+        # steps its ink by exactly that.
+        _bd_y0 = min((float(getattr(f, "y", 0) or 0) for f in members),
+                     default=0.0)
+        _bd_tops = sorted({round(float(getattr(f, "y", 0) or 0) - _bd_y0, 5)
+                           for f in members})
+
+        def _bd_geom(f):
+            """(top, height) of one breakdown member from the DECLARATION.
+
+            A member tiles down to the NEXT declared line; the bottom-most
+            one keeps its own declared height (the synthesized line height
+            stands in only when the source declares none, and never acts as
+            a floor -- that floor inflated a 0.18994in declared pitch to
+            0.20in)."""
+            top = max(0.0, float(getattr(f, "y", 0) or 0) - _bd_y0)
+            nxt = next((t for t in _bd_tops if t > top + 0.005), None)
+            h = float(getattr(f, "height", 0) or 0)
+            if nxt is not None:
+                return top, max(0.10, nxt - top)
+            return top, max(0.10, h if h > 0.01 else _bd_line_h)
+        row_h = max(row_h, max((_bd_geom(f)[0] + _bd_geom(f)[1]
+                                for f in members), default=_bd_line_h))
         trow = _sub(rows, "TablixRow")
-        _sub(trow, "Height", f"{row_h:.2f}in")
+        _sub(trow, "Height", f"{row_h:.4f}in")
         cell = _sub(_sub(_sub(trow, "TablixCells"), "TablixCell"),
                     "CellContents")
         rect = _sub(cell, "Rectangle")
@@ -14368,11 +24462,13 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
                 rri, f"Bd_{bi}_{mi}", value,
                 bold=bool(getattr(f, "bold", False)),
                 font_size=f"{int(getattr(f, 'font_size', 0) or 9)}pt",
-                fg="#111111",
-                text_align=("Right" if (getattr(f, "align", "") or "")
-                            .lower() in ("end", "right") else "Left"),
-                vertical_align="Middle", border_color="#ffffff",
-                padding="1pt", can_grow=False)
+                fg=_text_color(getattr(f, "color", "")),
+                text_align=("Right" if _declared_align(f)
+                            in ("end", "right") else "Left"),
+                vertical_align=_declared_vertical_align(f),
+                border_color="#ffffff",
+                # NO INSET: the member lands at its DECLARED x/width below.
+                padding="0pt", can_grow=False)
             tbx = rri[-1]
             # Neighbour width clamp within the row: declared member widths
             # overlap the next member's x on some frames (a permit-list
@@ -14388,11 +24484,49 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
             _w = max(0.3, float(f.width or 0.5))
             if _wcap is not None:
                 _w = max(0.3, min(_w, _wcap))
-            _line = _bd_line_of.get(round(float(f.y or 0), 2), 0)
-            _sub(tbx, "Top", f"{_line * _bd_line_h:.2f}in")
+            _mtop, _mh = _bd_geom(f)
+            _sub(tbx, "Top", f"{_mtop:.4f}in")
             _sub(tbx, "Left", f"{max(0.0, _mx0 - fx):.2f}in")
             _sub(tbx, "Width", f"{_w:.2f}in")
-            _sub(tbx, "Height", f"{_bd_line_h:.2f}in")
+            _sub(tbx, "Height", f"{_mh:.4f}in")
+        # INLINE ROLE LISTS: each folded child frame renders as ONE
+        # textbox at its declared spot — the group's values joined line
+        # by line (PERMITTEE,\nOWNER,\nOPERATOR beside the org block),
+        # exactly how the Oracle truth prints them.
+        for ii, c in enumerate(inlines):
+            cf = next((f for f in (c.fields or [])
+                       if (f.kind or "") == "field"
+                       and (f.source or "").strip()), None)
+            if cf is None:
+                continue
+            hit = _ds_field_name.get(ds, {}).get((cf.source or "").upper())
+            key = _list_key_field(frm, ds)
+            if not hit or not key:
+                continue
+            _sep = next(((t.text or "").strip()
+                         for t in (c.fields or [])
+                         if (t.kind or "") == "text"
+                         and (t.text or "").strip()), "")
+            _join = (_sep + "\" & vbCrLf & \"") if _sep else "\" & vbCrLf & \""
+            val = (f"=Join(LookupSet(Fields!{key}.Value, "
+                   f"Fields!{key}.Value, Fields!{hit}.Value, "
+                   f'"{ds}"), "{_join}")')
+            _build_textbox(
+                rri, f"Bd_{bi}_List{ii}", val,
+                bold=bool(getattr(cf, "bold", False)),
+                font_size=f"{int(getattr(cf, 'font_size', 0) or 9)}pt",
+                fg=_text_color(getattr(cf, "color", "")), text_align="Left",
+                vertical_align="Top", border_color="#ffffff",
+                # NO INSET: declared member geometry below.
+                padding="0pt", can_grow=True)
+            tbx = rri[-1]
+            _ctop, _ch = _bd_geom(cf)
+            _sub(tbx, "Top", f"{_ctop:.4f}in")
+            _sub(tbx, "Left",
+                 f"{max(0.0, float(cf.x or 0) - fx):.2f}in")
+            _sub(tbx, "Width",
+                 f"{max(0.5, float(cf.width or 0.6) + 0.15):.2f}in")
+            _sub(tbx, "Height", f"{_ch:.4f}in")
         # Every member may decline (unmappable sources, empty labels) —
         # an EMPTY <ReportItems> is schema-invalid ("has incomplete
         # content") and kills the whole report at load. Emit nothing
@@ -14409,13 +24543,50 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
         _sub(tablix, "DataSetName", ds)
         _sub(tablix, "Top", f"{y:.2f}in")
         _sub(tablix, "Left", f"{max(0.05, fx):.2f}in")
-        _sub(tablix, "Height", f"{row_h:.2f}in")
+        _sub(tablix, "Height", f"{row_h:.4f}in")
         _sub(tablix, "Width", f"{width:.2f}in")
         _sub(_sub(tablix, "Style"), "Border")
         y += row_h + 0.10
 
     if body_h_el is not None:
         body_h_el.text = f"{y + 0.05:.2f}in"
+
+
+def _trailer_right_limit(root: ET.Element) -> float:
+    """Rightmost inch a BODY-level item may reach: the narrower of the report's
+    own declared <Width> and the page's printable span. Anything past either
+    edge paginates a near-blank companion page after every content page, so a
+    box that widens to fit its wording must be bounded by this."""
+    def _in(v, default=None):
+        try:
+            return float((v or "").replace("in", ""))
+        except (TypeError, ValueError):
+            return default
+    lim = _in(root.findtext(_q("Width")), 0.0) or 0.0
+    page = root.find(_q("Page"))
+    if page is not None:
+        pw = _in(page.findtext(_q("PageWidth")), 8.5)
+        lm = _in(page.findtext(_q("LeftMargin")), _PAGE_HMARGIN_IN)
+        rm = _in(page.findtext(_q("RightMargin")), _PAGE_HMARGIN_IN)
+        printable = pw - lm - rm - 0.02
+        if printable > 1.0:
+            lim = min(lim, printable) if lim > 0 else printable
+    return lim if lim > 1.0 else 5.2
+
+
+def _prints_at_report_start(g) -> bool:
+    """True when this layout group is a LEADING section -- Oracle's
+    <section name="header"> cover page, which prints ONCE, BEFORE the body.
+
+    Nothing declared there is report-END content: its summary fields are
+    placed on the cover (and rendered by the cover builder), and its
+    boilerplate captions/titles caption the cover, not a trailer. The
+    report-end trailer pass therefore skips these subtrees entirely, so it
+    can never recycle cover wording into a body trailer nor synthesize a
+    grand total for a summary the declaration only ever places up front.
+    <section name="main"> (whose bottom frames carry the declared
+    report-total band) and <section name="trailer"> are unaffected."""
+    return (getattr(g, "kind", "") or "").lower() == "section_header"
 
 
 def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
@@ -14450,6 +24621,8 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
     placed = set()
 
     def _collect(g):
+        if _prints_at_report_start(g):
+            return
         for f in (getattr(g, "fields", None) or []):
             s = (getattr(f, "source", "") or "").upper()
             if s:
@@ -14473,9 +24646,10 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
         for it in (getattr(q, "items", None) or []):
             if getattr(it, "name", ""):
                 owner.setdefault(it.name.upper(), q.name)
-    _SS = {"count": "Count", "sum": "Sum", "avg": "Avg", "average": "Avg",
-           "min": "Min", "max": "Max", "stddev": "StDev", "variance": "Var",
-           "% of total": "Sum"}
+    # canonical Oracle->SSRS aggregate map — the full-word spellings
+    # (minimum/maximum/average) map correctly, not to the Sum fallback
+    # (a Min/Max-based FY-range subtitle summed the years otherwise)
+    _SS = _ssrs_summary_fn
 
     # An aggregate OUTSIDE a data region needs an explicit dataset scope unless
     # the report has exactly one dataset (SSRS rule). So a grand total whose
@@ -14518,7 +24692,7 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
         SSRS aggregate -> None (caller skips honestly)."""
         if depth > 4:
             return None
-        fn = _SS.get((f.agg_function or "").lower(), "Sum")
+        fn = _SS(f.agg_function)
         src = (f.agg_source or "").strip()
         own = owner.get(src.upper())
         if own:
@@ -14542,6 +24716,18 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
     def _expr(f):
         r = _resolve_chain(f)
         if r is None:
+            # A grand total whose SOURCE is a report FORMULA column (the
+            # computed per-row value idiom, e.g. a net-of-two-columns CF):
+            # compile the formula inline against the query that resolves
+            # every reference and aggregate THAT expression, scoped to the
+            # query — the summary is real declared content, not dangling.
+            fn = _SS(f.agg_function)
+            src = (f.agg_source or "").strip()
+            for q in (getattr(report, "queries", None) or []):
+                fx = _formula_expr_for_column(report, q, src)
+                if fx:
+                    e = f'={fn}({fx[1:]}, "{_safe(q.name)}")'
+                    return (e, False, fn, src, q.name)
             return None
         fn, src, own = r
         if not own and _multi_ds:
@@ -14549,36 +24735,129 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
         _chained = (f.agg_source or "").strip().upper() not in owner
         e = (f'={fn}(Fields!{_safe(src)}.Value, "{_safe(own)}")' if own
              else f'={fn}(Fields!{_safe(src)}.Value)')
-        return (e, _chained, fn, src)
+        return (e, _chained, fn, src, own)
 
     # The layout's OWN wording beats a name-derived label: Oracle prints
     # "Total Inspections:" (the boilerplate text sitting beside the summary
     # field in the trailer frame), while the summary NAME yields the
     # fabricated "Insp Total". Pair each summary-bound layout field with
     # the nearest same-band label text to its left that ends with ':'.
+    # Values are ("lit", text) or ("expr", vb) — a trailer line whose
+    # left-hand "label" is itself a FORMULA field (the FY-range subtitle
+    # idiom) pairs with that formula's compiled expression instead.
     _layout_label: dict = {}
+    _layout_y: dict = {}         # summary name -> declared layout y
+    _used_label_texts = set()    # id() of texts consumed as pair labels
+    _frame_reg: dict = {}        # id(group) -> {"texts", "summ"} for frames
+    _rep_summ_names = {(f.name or "").upper() for f in rep_summ}
+    # Declared HORIZONTAL placement of each line's boxes: the summary-bound
+    # layout field, and the boilerplate/formula field that captions it. Kept
+    # as the layout objects themselves so the emit pass can read x/width and
+    # the EFFECTIVE declared alignment (elasticity-aware) off them.
+    _layout_box: dict = {}       # summary name -> value LayoutField
+    _layout_lbl_box: dict = {}   # summary name -> label LayoutField
+
+    def _label_formula_expr(colname):
+        """Compile a left-hand FORMULA field (e.g. the FY-range subtitle)
+        into a body-scope-safe VB label expression: every :ref must be a
+        report-scoped summary that resolves to a dataset-scoped aggregate
+        (First/Min/Max/Sum...). None when anything doesn't resolve — the
+        caller falls back honestly to the synthesized label."""
+        cu = (colname or "").upper()
+        if not cu:
+            return None
+        f2 = next((ff for ff in formulas
+                   if (getattr(ff, "name", "") or "").upper() == cu), None)
+        if f2 is None:
+            return None
+
+        def _ref(nm):
+            s2 = _summ_by_name.get((nm or "").upper())
+            if s2 is not None:
+                r2 = _resolve_chain(s2)
+                if r2:
+                    fn2, src2, own2 = r2
+                    if own2:
+                        return (f'{fn2}(Fields!{_safe(src2)}.Value, '
+                                f'"{_safe(own2)}")')
+                    if not _multi_ds:
+                        return f"{fn2}(Fields!{_safe(src2)}.Value)"
+            raise ValueError(f"unresolvable ref {nm!r}")
+        try:
+            tr = translate_formula_to_vb(
+                getattr(f2, "plsql_body", "") or "", _ref)
+        except Exception:  # noqa: BLE001
+            return None
+        if tr.get("ok") and tr.get("expr"):
+            return tr["expr"]
+        return None
 
     def _pair_labels(g):
+        if _prints_at_report_start(g):
+            return
         flds = list(getattr(g, "fields", None) or [])
         texts = [t for t in flds
                  if (getattr(t, "kind", "") or "") == "text"
-                 and (getattr(t, "text", "") or "").strip().endswith(":")]
+                 and (getattr(t, "text", "") or "").strip()]
         for f in flds:
             srcu = (getattr(f, "source", "") or "").upper()
             if not srcu or (getattr(f, "kind", "") or "") != "field":
                 continue
-            best = None
             fy = float(getattr(f, "y", 0) or 0)
             fx = float(getattr(f, "x", 0) or 0)
-            for t in texts:
-                ty = float(getattr(t, "y", 0) or 0)
-                tx = float(getattr(t, "x", 0) or 0)
-                if abs(ty - fy) <= 0.1 and tx < fx:
-                    if best is None or tx > float(getattr(best, "x", 0) or 0):
-                        best = t
+            if srcu in _rep_summ_names:
+                _layout_y.setdefault(srcu, fy)
+                _layout_box.setdefault(srcu, f)
+                reg = _frame_reg.setdefault(
+                    id(g), {"texts": texts, "summ": set()})
+                reg["summ"].add(srcu)
+            best = None
+            # colon-suffixed labels first (the classic caption idiom);
+            # then any same-band left text — declared trailer wording
+            # often has NO colon ("- Total Crushed" beside its count).
+            for _want_colon in (True, False):
+                for t in texts:
+                    _tt = (t.text or "").strip()
+                    if _want_colon != _tt.endswith(":"):
+                        continue
+                    ty = float(getattr(t, "y", 0) or 0)
+                    tx = float(getattr(t, "x", 0) or 0)
+                    if abs(ty - fy) <= 0.1 and tx < fx \
+                            and (fx - tx) <= 3.0:
+                        if best is None or \
+                                tx > float(getattr(best, "x", 0) or 0):
+                            best = t
+                if best is not None:
+                    break
             if best is not None:
-                _layout_label.setdefault(
-                    srcu, (best.text or "").strip().rstrip(":").strip())
+                # keep the DECLARED punctuation (colon or none) — the
+                # emit path must not invent one
+                _layout_label.setdefault(srcu, ("lit",
+                                                (best.text or "").strip()))
+                _layout_lbl_box.setdefault(srcu, best)
+                _used_label_texts.add(id(best))
+            elif srcu in _rep_summ_names:
+                # no text label on the band: the declared left-hand
+                # FORMULA field IS the line's wording (FY-range subtitle)
+                _fbest = None
+                for t2 in flds:
+                    if t2 is f or (getattr(t2, "kind", "") or "") != "field":
+                        continue
+                    if not (getattr(t2, "source", "") or ""):
+                        continue
+                    ty2 = float(getattr(t2, "y", 0) or 0)
+                    tx2 = float(getattr(t2, "x", 0) or 0)
+                    if abs(ty2 - fy) <= 0.1 and tx2 < fx \
+                            and (fx - tx2) <= 3.0:
+                        if _fbest is None or \
+                                tx2 > float(getattr(_fbest, "x", 0) or 0):
+                            _fbest = t2
+                if _fbest is not None:
+                    _lx3 = _label_formula_expr(
+                        getattr(_fbest, "source", ""))
+                    if _lx3:
+                        _layout_label.setdefault(srcu, ("expr", _lx3))
+                        _layout_lbl_box.setdefault(srcu, _fbest)
         for c in (getattr(g, "children", None) or []):
             _pair_labels(c)
 
@@ -14586,19 +24865,85 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
         _pair_labels(_lg)
 
     existing = {(v.text or "") for v in root.iter(_q("Value"))}
+    # Summaries CONSUMED BY SECTION TOTALS: an aggregate over the same
+    # column inside an UNGROUPED data region bound to the summary's own
+    # dataset (a section footer / trailing total row) IS the report-level
+    # total, already displayed — re-emitting it below the body fabricated
+    # a humanized summary-name dump page. Grouped regions are excluded
+    # (their sums are per-group partials, not the report total).
+    _consumed = set()
+    _agg_re = re.compile(
+        r"(?i)\b(Sum|CountDistinct|Count|Min|Max|Avg|StDev|Var)\(\s*"
+        r"(?:Val\(\s*)?Fields!(\w+)\.Value")
+    for _tx in root.iter(_q("Tablix")):
+        _dsn = (_tx.findtext(_q("DataSetName")) or "").upper()
+        if not _dsn:
+            continue
+        _rh = _tx.find(_q("TablixRowHierarchy"))
+        if _rh is not None and next(_rh.iter(_q("GroupExpression")), None) is not None:
+            continue
+        for _v in _tx.iter(_q("Value")):
+            for _m in _agg_re.finditer(_v.text or ""):
+                _consumed.add((_dsn, _m.group(1).upper(), _m.group(2).upper()))
     # De-dup grand totals that already render (e.g. resolved via a layout &token).
+    # (declared_y, combined_value_expr, agg_expr, label_only_expr|None,
+    #  (label_LayoutField|None, value_LayoutField|None))
+    # The last two carry the line's DECLARED shape: when the source declares a
+    # caption box and a value box the emit pass can print them as the declared
+    # PAIR instead of folding both into one stacked box.
     todo = []
+    _emitted_names = set()
     for f in rep_summ:
         r = _expr(f)
         if r is None:
             continue
-        e, _chained, _fn, _src = r
-        if e in existing or e in [t[1] for t in todo]:
+        e, _chained, _fn, _src, _own = r
+        if e in existing or e in [t[2] for t in todo]:
             continue
-        _ll = _layout_label.get((f.name or "").upper())
+        if ((_own or "").upper(), (_fn or "").upper(),
+                (_src or "").upper()) in _consumed:
+            continue
+        _fnm = (f.name or "").upper()
+        _fy_key = _layout_y.get(_fnm, float("inf"))
+        _boxes = (_layout_lbl_box.get(_fnm), _layout_box.get(_fnm))
+        _ll = _layout_label.get(_fnm)
+        if _ll and _ll[0] == "expr":
+            # the declared left-hand FORMULA field is the line's wording
+            # (compiled to body-scope-safe aggregates)
+            todo.append((_fy_key, f'={_ll[1][1:]} & "  " & {e[1:]}', e,
+                         f"={_ll[1][1:]}", _boxes))
+            _emitted_names.add(_fnm)
+            continue
+        _ll = _ll[1] if _ll else None
         if _ll:
-            todo.append((_ll, e))
-            continue
+            # DECLARED trailer wording, verbatim (its own punctuation, no
+            # invented colon). A &token label resolves through the standard
+            # resolver — parameter/lexical tokens compose into the label
+            # expression; a Fields!-carrying resolution is unsafe at body
+            # scope, so fall back to the synthesized label then.
+            if "&" in _ll:
+                try:
+                    _lv, _lx2 = _resolve_text_expression(_ll, report)
+                except Exception:  # noqa: BLE001
+                    _lv, _lx2 = "", False
+                # body-scope safety: every Fields! must be First()-wrapped
+                # (the _cover_text_value rule) — bare refs are unsafe here
+                _lsafe = _lx2 and all(
+                    _lv[max(0, _m.start() - 6):_m.start()] == "First("
+                    for _m in re.finditer(r"Fields!", _lv))
+                if _lsafe:
+                    todo.append((_fy_key, f'={_lv[1:]} & "  " & {e[1:]}', e,
+                                 f"={_lv[1:]}", _boxes))
+                    _emitted_names.add(_fnm)
+                    continue
+                # unresolvable token label -> synthesized fallback below
+            else:
+                _sep = "  " if _ll.endswith(":") else "  "
+                todo.append((_fy_key,
+                             f'="{_q_safe(_ll)}{_sep}" & {e[1:]}', e,
+                             f'="{_q_safe(_ll)}"', _boxes))
+                _emitted_names.add(_fnm)
+                continue
         if _chained:
             # The raw name is an auto-generated summary-of-summary blob
             # (CS_CountCountUSER_IDPerReport -> "Countcountuser Idperreport");
@@ -14610,9 +24955,97 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
                            flags=re.IGNORECASE)
             label = re.sub(r"[_]+", " ", label).strip().title() \
                 or (f.name or "Total")
-        todo.append((label, e))
+        # SYNTHESIZED wording: nothing in the layout captions this line, so
+        # there is no declared caption box to honour — the label rides in the
+        # value box and the pair split does not apply.
+        todo.append((_fy_key, f'="{_q_safe(label)}:  " & {e[1:]}', e,
+                     None, (None, _boxes[1])))
+        _emitted_names.add(_fnm)
+    # Declared trailer literals that paired with NO summary (the all-caps
+    # report-total band caption idiom): texts directly owned by the frames
+    # whose grand-total fields DID emit, printed verbatim as their own
+    # lines. Tokens resolve through the standard resolver under the same
+    # body-scope safety rule; unresolvable ones skip honestly.
+    for reg in _frame_reg.values():
+        if not (reg["summ"] & _emitted_names):
+            continue
+        for t in reg["texts"]:
+            if id(t) in _used_label_texts or getattr(t, "in_margin", False):
+                continue
+            _tt = " ".join((t.text or "").split())
+            if not _tt:
+                continue
+            _ty = float(getattr(t, "y", 0) or 0)
+            if "&" in _tt:
+                try:
+                    _lv3, _lx4 = _resolve_text_expression(_tt, report)
+                except Exception:  # noqa: BLE001
+                    _lv3, _lx4 = "", False
+                _lsafe3 = _lx4 and all(
+                    _lv3[max(0, _m.start() - 6):_m.start()] == "First("
+                    for _m in re.finditer(r"Fields!", _lv3))
+                if not _lsafe3:
+                    continue
+                _lit_val = f"={_lv3[1:]}"
+            else:
+                _lit_val = f'="{_q_safe(_tt)}"'
+            if _lit_val not in [t2[1] for t2 in todo]:
+                # a caption line declares ONE box -> it prints at that box's
+                # own x/width/justification, no value box beside it
+                todo.append((_ty, _lit_val, _lit_val, None, (None, t)))
     if not todo:
         return
+    # DECLARED y-order: the trailer prints its lines exactly as the source
+    # stacks them (stable for entries without layout geometry).
+    todo.sort(key=lambda t2: t2[0])
+
+    # DECLARED rules belonging to this report-END block: a <line> owned by a
+    # frame whose SUBTREE also carries one of the fields the trailer prints,
+    # and which no repeating frame encloses (a rule inside a repeating frame
+    # prints per record, not once at the end). They interleave with the
+    # stacked lines in declared y-order, at their own declared endpoints —
+    # already-emitted rules (the per-group ones) are skipped by name.
+    _rule_pool = []
+    try:
+        _done_rules = {(_ln.get("Name") or "") for _ln in root.iter(_q("Line"))}
+        _want = {n for n in _emitted_names if n}
+        for _t2 in todo:
+            _vf = _t2[4][1] if _t2[4] else None
+            for _attr in ("source", "name"):
+                _v = (getattr(_vf, _attr, "") or "").upper()
+                if _v:
+                    _want.add(_v)
+
+        def _pool_walk(g, in_rep):
+            if _prints_at_report_start(g):
+                return set()
+            _rep = in_rep or ((getattr(g, "kind", "") or "").lower()
+                              == "repeating_frame")
+            _own, _rules = set(), []
+            for _f in (getattr(g, "fields", None) or []):
+                if getattr(_f, "in_margin", False):
+                    continue
+                if _is_declared_rule(_f):
+                    _rules.append(_f)
+                    continue
+                for _attr in ("source", "name"):
+                    _v = (getattr(_f, _attr, "") or "").upper()
+                    if _v:
+                        _own.add(_v)
+            for _c in (getattr(g, "children", None) or []):
+                _own |= _pool_walk(_c, _rep)
+            if not _rep and (_own & _want):
+                for _f in _rules:
+                    if _declared_rule_name(_f) in _done_rules:
+                        continue
+                    _rule_pool.append((float(getattr(_f, "y", 0) or 0), _f))
+            return _own
+
+        for _lg2 in (getattr(report, "layout", None) or []):
+            _pool_walk(_lg2, False)
+        _rule_pool.sort(key=lambda z: z[0])
+    except Exception:  # noqa: BLE001 -- a rule must never sink the trailer
+        _rule_pool = []
 
     ri = body.find(_q("ReportItems"))
     if ri is None:
@@ -14624,22 +25057,504 @@ def _ensure_summary_totals_emitted(root: ET.Element, report) -> None:
     except ValueError:
         body_h = 0.0
 
-    y = body_h + 0.20
-    for i, (label, e) in enumerate(todo):
+    # IN-FLOW placement: right below the LAST body item's static bottom
+    # (a growing tablix pushes the totals down at run time — SSRS reflow),
+    # not below the full declared body height, which parked the trailer on
+    # its own near-blank page.
+    def _fin2(el, tag):
+        try:
+            return float((el.findtext(_q(tag)) or "0").replace("in", ""))
+        except ValueError:
+            return 0.0
+    _bottom = 0.0
+    for _it in list(ri):
+        if _it.tag in (_q("Tablix"), _q("Rectangle"), _q("Textbox"),
+                       _q("Image"), _q("List"), _q("Subreport")):
+            _bottom = max(_bottom, _fin2(_it, "Top") + _fin2(_it, "Height"))
+    # THE GAP ABOVE THE TRAILER IS DECLARED. The block's own anchor (its
+    # topmost declared object) minus the declared bottom of the body content
+    # above it IS the air Oracle leaves there — no synthesized cushion.
+    # Truth-PDF measured on a 70-page break report: the declaration puts
+    # 0.700in between the group-subtotal rule and the report-total rule and
+    # Oracle prints exactly 0.700in; the flat 0.15in stand-in printed 0.94in.
+    # The stand-in remains for a block the layout does not place at all.
+    _blk_ys = [t2[0] for t2 in todo if t2[0] < 1e17] + [r2[0] for r2
+                                                        in _rule_pool]
+    _blk_anchor = min(_blk_ys) if _blk_ys else None
+    _decl_gap = None
+    if _blk_anchor is not None:
+        _prev_bot = 0.0
+
+        def _above(o):
+            """(bottom) of a declared object that ends ABOVE the block, else
+            None. An object that STARTS at or below the anchor belongs to the
+            block itself (its own topmost rule is declared AT the anchor with
+            zero height); one that ends below it ENCLOSES the block."""
+            _oy = float(getattr(o, "y", 0) or 0)
+            _ob = _oy + float(getattr(o, "height", 0) or 0)
+            if _oy < _blk_anchor - 1e-6 and _ob <= _blk_anchor + 1e-6:
+                return _ob
+            return None
+
+        def _prev_walk(g):
+            nonlocal _prev_bot
+            # the RECORD FRAME's own declared height is the band's bottom
+            # edge, even when its last field stops short of it
+            if (getattr(g, "kind", "") or "") in ("frame", "repeating_frame"):
+                _gb = _above(g)
+                if _gb is not None:
+                    _prev_bot = max(_prev_bot, _gb)
+            for _f in (getattr(g, "fields", None) or []):
+                if getattr(_f, "in_margin", False):
+                    continue
+                _fb = _above(_f)
+                if _fb is not None:
+                    _prev_bot = max(_prev_bot, _fb)
+            for _c in (getattr(g, "children", None) or []):
+                _prev_walk(_c)
+        for _lg3 in (getattr(report, "layout", None) or []):
+            _prev_walk(_lg3)
+        if _prev_bot > 0.0:
+            _decl_gap = max(0.0, _blk_anchor - _prev_bot)
+    y = ((_bottom + (0.15 if _decl_gap is None else _decl_gap))
+         if _bottom > 0 else (body_h + 0.20))
+    # A trailer line carries DECLARED wording -- an echoed multi-word caption
+    # can be far longer than the nominal 5.0in stack width, and a CanGrow=false
+    # 0.22in box WRAPS it and paints clipped glyph slivers of the second line
+    # (render-verified). Size each line to its own wording with the shared AFM
+    # estimator, bounded by the free space to the container's printable right
+    # edge; when even that is too narrow, let the box GROW instead of clipping
+    # and advance the stack by the taller box. This trailer is emitted BELOW
+    # every body item (_bottom), so nothing sits beside or under it -- widening
+    # and deepening here cannot collide with a neighbour.
+    _TRAIL_L, _TRAIL_W, _TRAIL_H, _TRAIL_PT = 0.10, 5.0, 0.22, 9.0
+    # The trailer boxes are emitted with NO inset (an Oracle box has none), so
+    # nothing is reserved off their interior -- the whole declared width is
+    # usable text width. Reserving 4pt here made every line ask for 0.056in it
+    # did not need, widening (and sometimes CanGrow-wrapping) boxes that fit.
+    _TRAIL_PAD = 0.0
+    _limit = _trailer_right_limit(root)
+    _avail = max(_TRAIL_W, _limit - _TRAIL_L - 0.04)
+
+    def _line_font(lf):
+        """(pt, bold, _build_textbox kwargs) for one trailer line.
+
+        The trailer prints its lines at the font the SOURCE declares on
+        them (a 10pt caption is not a 9pt one, an unweighted caption is
+        not bold); the house stack font is only the fallback for a line
+        with no declared object behind it."""
+        _kw = _declared_font_style(lf, f"{_TRAIL_PT:g}pt", default_bold=True)
+        try:
+            _pt = float(str(_kw["font_size"]).replace("pt", ""))
+        except ValueError:
+            _pt = _TRAIL_PT
+        return max(1.0, _pt), bool(_kw["bold"]), _kw
+
+    def _need_in(rdl_value, pt=None, bold=True):
+        """Inches this RDL value needs on one line at its own font."""
+        # A quoted trailing call argument is machinery, not display text (the
+        # dataset scope of an aggregate, a Format mask) -- counting it inflated
+        # the estimate by the dataset name on every value box.
+        _expr_txt = re.sub(r',\s*"(?:[^"]|"")*"\s*\)', ")", rdl_value)
+        _lits = "".join(m.group(1) for m in
+                        re.finditer(r'"((?:[^"]|"")*)"',
+                                    _expr_txt)).replace('""', '"')
+        # a computed operand contributes an honest fixed reserve (its run-time
+        # text length is unknowable here)
+        if re.search(r"[A-Za-z0-9]",
+                     re.sub(r'"(?:[^"]|"")*"', "", _expr_txt)):
+            _lits += "0,000,000"
+        # +0.04in cushion: the estimate is metric-compatible, not identical,
+        # and a miss of one glyph re-creates the wrap-and-clip this sizing
+        # exists to kill (the CanGrow fallback only arms when it does NOT fit).
+        return _afm_text_width(_lits, pt or _TRAIL_PT, bold,
+                               _RDL_DEFAULT_FONT_IS_SANS) \
+            + _TRAIL_PAD + 0.04
+
+    def _anchored_box(lf):
+        """(x, width, SSRS align) when the layout ANCHORS this box, else None.
+
+        Oracle justifies text inside the object's own declared box, so an
+        explicit end/right (or centre) justification is meaningful only when
+        that box is honoured -- folding such a line into one left-anchored
+        stack box discards the anchor and prints a right-half total flush
+        left. An undeclared justification is Oracle's own flush-left default,
+        which the stacked fallback already reproduces, so it stays there.
+        """
+        if lf is None:
+            return None
+        al = _ssrs_text_align(_declared_align(lf))
+        if al not in ("Right", "Center"):
+            return None
+        try:
+            bx = float(getattr(lf, "x", 0) or 0)
+            bw = float(getattr(lf, "width", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if bw <= 0.05 or bx < -1e-6 or bx + bw > _limit + 0.01:
+            return None
+        return (bx, bw, al)
+
+    def _usable_box(lf, hi):
+        """The caption half of a declared pair: its own x/width plus whatever
+        justification it declares (default flush-left, as Oracle prints it).
+        None when it has no real box or does not sit left of ``hi``."""
+        if lf is None:
+            return None
+        try:
+            bx = float(getattr(lf, "x", 0) or 0)
+            bw = float(getattr(lf, "width", 0) or 0)
+        except (TypeError, ValueError):
+            return None
+        if bw <= 0.05 or bx < -1e-6 or bx + bw > hi + 0.01:
+            return None
+        return (bx, bw, _ssrs_text_align(_declared_align(lf)) or "Left")
+
+    def _box_y(lf, fallback=None):
+        """The DECLARED y of a layout object, else ``fallback``."""
+        try:
+            return float(getattr(lf, "y", None))
+        except (TypeError, ValueError):
+            return fallback
+
+    def _box_h(lf):
+        """The DECLARED height of a layout object, else the stack default.
+
+        A declared height is the height (same dialect as the declared
+        width): the descender rescue that runs after every builder opens a
+        box that is too short for its font, and it does so without moving
+        a neighbour -- so nothing here needs a synthesized floor."""
+        try:
+            h = float(getattr(lf, "height", 0) or 0)
+        except (TypeError, ValueError):
+            return _TRAIL_H
+        return h if h > 0.05 else _TRAIL_H
+
+    # Declared HORIZONTAL neighbours of the block, keyed by declared line: a
+    # box that has to widen for its own wording may only grow into space no
+    # OTHER declared trailer object occupies on that same declared line.
+    _decl_spans = []
+    for _t3 in todo:
+        for _o in (_t3[4] or ()):
+            _ub = _usable_box(_o, _limit)
+            _oy = _box_y(_o)
+            if _ub is None or _oy is None:
+                continue
+            _decl_spans.append((_oy, _oy + _box_h(_o),
+                                _ub[0], _ub[0] + _ub[1]))
+
+    def _lat_bounds(bx, bw, by, bh):
+        """(lo, hi) growth bounds for a box declared at (bx, by, bw, bh):
+        the free span between the declared neighbours that share its
+        declared line. Boxes on other declared lines never bound it."""
+        lo, hi = 0.0, _limit
+        if by is None:
+            return lo, hi
+        for (_oy0, _oy1, _ox0, _ox1) in _decl_spans:
+            if _oy1 <= by + 1e-6 or _oy0 >= by + bh - 1e-6:
+                continue                       # a different declared line
+            if _ox1 <= bx + 1e-6:
+                lo = max(lo, _ox1)
+            elif _ox0 >= bx + bw - 1e-6:
+                hi = min(hi, _ox0)
+        return lo, min(hi, _limit)
+
+    def _fit(box, rdl_value, lo, hi, style_src=None):
+        """Grow a declared box to hold its own wording without moving the edge
+        its justification anchors to: a right-anchored box grows leftward, a
+        left-anchored one rightward, both clamped to the free span [lo, hi].
+        Returns (x, width, height, can_grow)."""
+        bx, bw, al = box
+        _pt, _bd, _ = _line_font(style_src)
+        need = _need_in(rdl_value, _pt, _bd)
+        if need > bw:
+            if al == "Right":
+                bx2 = max(lo, bx + bw - need)
+                bw = bx + bw - bx2
+                bx = bx2
+            elif al == "Left":
+                bw = min(need, hi - bx)
+            else:
+                half = (need - bw) / 2.0
+                bx2 = max(lo, bx - half)
+                bw = min(need, hi - bx2)
+                bx = bx2
+        grow = need > bw + 1e-6
+        h = _box_h(style_src)
+        if grow:
+            lines = max(1, int(math.ceil(need / max(bw - _TRAIL_PAD, 0.1))))
+            h = max(h, lines * _pt * 1.25 / 72.0 + 0.06)
+        return bx, bw, h, grow
+
+    def _emit_line(name, rdl_value, x, w, h, grow, align, top,
+                   mask_src=None, style_src=None):
         _build_textbox(
-            ri, f"Tb_GrandTotal_{i}",
-            f'="{_q_safe(label)}:  " & {e[1:]}',
-            bold=True, font_size="9pt", fg="#111111",
-            text_align="Left", vertical_align="Middle",
-            border_color="#ffffff", padding="2pt", can_grow=False)
+            ri, name, rdl_value,
+            **_line_font(style_src)[2],
+            fg=_text_color(getattr(style_src, "color", "")),
+            text_align=align,
+            vertical_align=_declared_vertical_align(style_src),
+            # NO INSET: the line is placed at its DECLARED x/width below.
+            border_color="#ffffff", padding="0pt", can_grow=grow)
         tb = ri[-1]
-        _sub(tb, "Top", f"{y:.2f}in")
-        _sub(tb, "Left", "0.10in")
-        _sub(tb, "Width", "5.0in")
-        _sub(tb, "Height", "0.22in")
-        y += 0.26
-    if body_h_el is not None:
+        # 3dp: the declared offsets INSIDE the block are ~0.01in apart, and
+        # 2dp rounding fused two declared lines into one.
+        _sub(tb, "Top", f"{top:.3f}in")
+        _sub(tb, "Left", f"{x:.3f}in")
+        _sub(tb, "Width", f"{w:.3f}in")
+        _sub(tb, "Height", f"{h:.3f}in")
+        # A value standing alone in its own box is no longer inside a
+        # concatenation, so the inline-mask post-pass can't reach it -- carry
+        # the box's DECLARED formatMask as the textbox <Format> instead.
+        _net = _oracle_mask_to_net(
+            (getattr(mask_src, "format_mask", "") or "")) if mask_src else ""
+        if _net:
+            _stamp_format_on_textbox(tb, _net)
+
+    # ---- DECLARED VERTICAL PLACEMENT ------------------------------------
+    # Oracle re-flows the whole report-end block as a unit, but INSIDE it
+    # every object keeps the y its own declaration gives it. Truth-PDF
+    # measured on a report whose block declares three rules and five lines:
+    # each object lands at its declared offset from the block's first rule
+    # to within 0.0003in, and the block is exactly as tall as the
+    # declaration makes it (0.9574in declared, 0.9577in printed). A uniform
+    # synthesized stack instead ran 1.300in and dropped a caption declared
+    # beside a total onto a line of its own.
+    #
+    # So: the block's ANCHOR is its topmost declared object (rule or line),
+    # every box prints at anchor + (its declared y - anchor y), and boxes
+    # whose declared vertical spans OVERLAP share one printed row -- which
+    # is what puts a caption and the total declared beside it on one line
+    # without any same-line heuristic. An entry the layout does not place
+    # (a data-model-only report) keeps the stack, and a row can only ever
+    # push the next one DOWN, never bury it.
+    _decl_ys = [t2[0] for t2 in todo if t2[0] < 1e17]
+    _decl_ys += [r2[0] for r2 in _rule_pool]
+    _anchor = min(_decl_ys) if _decl_ys else None
+    _origin = y
+    _row_floor = y        # emitted bottom of every COMPLETED row
+    _row_bot = y          # emitted bottom of the row being filled
+    _row_decl_bot = None  # declared bottom of the row being filled
+    _rp = 0
+
+    def _top_for(dy):
+        """Emitted Top for a box declared at ``dy`` -- the block origin plus
+        the DECLARED offset, never above the last completed row. None when
+        nothing in the block is placed (caller keeps the stack cursor)."""
+        if _anchor is None or dy is None or dy >= 1e17:
+            return None
+        return max(_origin + (dy - _anchor), _row_floor)
+
+    def _flush_rules(before_y):
+        """Emit every declared trailer rule the source stacks ABOVE the
+        next line, at its own DECLARED offset inside the block (falling
+        back to the stack cursor when the block declares no geometry) and
+        at the rule's own declared endpoints."""
+        nonlocal _rp, _row_bot
+        while _rp < len(_rule_pool) and _rule_pool[_rp][0] < before_y:
+            _rt = _top_for(_rule_pool[_rp][0])
+            if _rt is None:
+                _rt = _row_bot
+            _emit_declared_rule(ri, _rule_pool[_rp][1], top=_rt,
+                                max_w=_limit, seq=_rp)
+            _row_bot = max(_row_bot, _rt)
+            _rp += 1
+
+    _seq = 0
+    for (_dy, val, _e, _lbl_val, _boxes) in todo:
+        _flush_rules(_dy)
+        _lbl_f, _val_f = _boxes
+        _vbox = _anchored_box(_val_f)
+        _lbox = _usable_box(_lbl_f, _vbox[0]) if (_vbox and _lbl_val) else None
+        if _vbox is None and _lbl_val is None and val == _e:
+            # SOLO DECLARED BOX: this line prints exactly ONE declared
+            # object's own content (a band caption, or a value with no
+            # caption beside it), so it belongs in that object's own
+            # declared box whatever justification it declares. An
+            # undeclared justification is Oracle's flush-left default
+            # INSIDE the declared box -- not a licence to re-anchor the box
+            # itself onto the synthesized stack (truth-measured: such a
+            # caption prints at declared Left 0.0in, ours at 0.10in).
+            _vbox = _usable_box(_val_f, _limit)
+        # Which declared boxes does this line print in? (used for the row
+        # grouping and the declared tops below)
+        if _vbox and _lbox:
+            _srcs = [_lbl_f, _val_f]
+        elif _vbox and not _lbl_val:
+            _srcs = [_val_f]
+        else:
+            _srcs = []
+        _lys = [_box_y(s, _dy) for s in _srcs] or [_dy]
+        _lys = [(_dy if v is None else v) for v in _lys]
+        _lo_y = min(_lys) if _lys else _dy
+        # a declared y INSIDE the row being filled = the same printed row
+        if (_row_decl_bot is None or _lo_y is None or _lo_y >= 1e17
+                or _lo_y >= _row_decl_bot):
+            _row_floor, _row_decl_bot = _row_bot, None
+        _decl_bot = max((_lys[i] + _box_h(_srcs[i])
+                         for i in range(len(_srcs))), default=None)
+        if _decl_bot is None and _lo_y is not None and _lo_y < 1e17:
+            _decl_bot = _lo_y + _TRAIL_H
+        if _decl_bot is not None:
+            _row_decl_bot = (_decl_bot if _row_decl_bot is None
+                             else max(_row_decl_bot, _decl_bot))
+        if _vbox and _lbox:
+            # DECLARED PAIR: caption box and value box each print at their own
+            # x/width/justification (Oracle's report-end trailer idiom), not
+            # merged into one flush-left line.
+            _ly, _vy = _lys[0], _lys[1]
+            _llo, _lhi = _lat_bounds(_lbox[0], _lbox[1], _ly, _box_h(_lbl_f))
+            lx, lw, lh, lg = _fit(_lbox, _lbl_val, _llo,
+                                  min(_lhi, _vbox[0]), _lbl_f)
+            _vlo, _vhi = _lat_bounds(_vbox[0], _vbox[1], _vy, _box_h(_val_f))
+            vx, vw, vh, vg = _fit(_vbox, _e, max(_vlo, lx + lw),
+                                  _vhi, _val_f)
+            _lt = _top_for(_ly)
+            _vt = _top_for(_vy)
+            _lt = _row_bot if _lt is None else _lt
+            _vt = _row_bot if _vt is None else _vt
+            _emit_line(f"Tb_GrandTotal_{_seq}", _lbl_val, lx, lw, lh, lg,
+                       _lbox[2], _lt, _lbl_f, style_src=_lbl_f)
+            _seq += 1
+            _emit_line(f"Tb_GrandTotal_{_seq}", _e, vx, vw, vh, vg,
+                       _vbox[2], _vt, _val_f, style_src=_val_f)
+            _seq += 1
+            _row_bot = max(_row_bot, _lt + lh, _vt + vh)
+            if _top_for(_ly) is None:
+                _row_bot += 0.04
+            continue
+        if _vbox and not _lbl_val:
+            # ONE declared box (a caption line, or a value with no caption
+            # beside it): it prints at that box's own x/width/justification.
+            _by = _lys[0]
+            _blo, _bhi = _lat_bounds(_vbox[0], _vbox[1], _by, _box_h(_val_f))
+            bx, bw, bh, bg = _fit(_vbox, val, _blo, _bhi, _val_f)
+            _bt = _top_for(_by)
+            _stacked = _bt is None
+            _bt = _row_bot if _stacked else _bt
+            _emit_line(f"Tb_GrandTotal_{_seq}", val, bx, bw, bh, bg, _vbox[2],
+                       _bt, _val_f if val == _e else None, style_src=_val_f)
+            _seq += 1
+            _row_bot = max(_row_bot, _bt + bh) + (0.04 if _stacked else 0.0)
+            continue
+        # Nothing anchors this line -> the stacked flush-left fallback. It
+        # still prints at the DECLARED y and font of the object it came
+        # from; only the box's x/width is synthesized.
+        _pt, _bd, _ = _line_font(_val_f)
+        _need = _need_in(val, _pt, _bd)
+        _w = _TRAIL_W if _need <= _TRAIL_W else min(_need, _avail)
+        _grow = _need > _w + 1e-6
+        _h = _TRAIL_H
+        if _grow:
+            _lines = max(1, int(math.ceil(_need / max(_w - _TRAIL_PAD, 0.1))))
+            _h = max(_TRAIL_H, _lines * _pt * 1.25 / 72.0 + 0.06)
+        _ft = _top_for(_dy)
+        _stacked = _ft is None
+        _ft = _row_bot if _stacked else _ft
+        _emit_line(f"Tb_GrandTotal_{_seq}", val, _TRAIL_L, _w, _h, _grow,
+                   "Left", _ft, style_src=_val_f)
+        _seq += 1
+        _row_bot = max(_row_bot, _ft + _h) + (0.04 if _stacked else 0.0)
+    # rules the source stacks BELOW the last trailer line (the heavy rule
+    # closing the report-total block)
+    if _rp < len(_rule_pool):
+        _flush_rules(float("inf"))
+        _row_bot += 0.06
+    y = _row_bot
+    if body_h_el is not None and y + 0.1 > body_h:
         body_h_el.text = f"{y + 0.1:.2f}in"
+
+
+# The reducer behind a nested region whose declared child <group> chain is
+# finer than the region itself (see _nested_region_column_blocks). SSRS has no
+# expression that groups a LookupSet, so the fold lives in the report's own
+# <Code> block: walk the correlated rows once, start a new BLOCK whenever the
+# declared break key changes, print the break-level lines ONCE per block and
+# stack the deeper frame's rows at its declared pitch. Every measurement is
+# passed in INCHES and converted on the caller's own line height, because the
+# engine ignores <LineHeight> and each declared font advances differently.
+_NDBREAK_CODE = (
+    "Public Function NDStr(ByVal o As Object) As String\n"
+    "  If o Is Nothing Then Return \"\"\n"
+    "  Return o.ToString()\n"
+    "End Function\n"
+    "\n"
+    "Public Function NDBreakBlock(ByVal keys As Object(), "
+    "ByVal onceVals As Object(), ByVal eachVals As Object(), "
+    "ByVal bodyIn As Double, ByVal gapIn As Double, ByVal baseIn As Double, "
+    "ByVal innerIn As Double, ByVal lhIn As Double) As String\n"
+    "  If keys Is Nothing OrElse keys.Length = 0 Then Return \"\"\n"
+    "  If lhIn <= 0.0 Then Return \"\"\n"
+    "  Dim sb As New System.Text.StringBuilder()\n"
+    "  Dim i As Integer = 0\n"
+    "  Dim step1 As Integer = CInt(System.Math.Round(innerIn / lhIn))\n"
+    "  If step1 < 1 Then step1 = 1\n"
+    "  Dim base1 As Integer = CInt(System.Math.Round(baseIn / lhIn))\n"
+    "  If base1 < 0 Then base1 = 0\n"
+    "  While i < keys.Length\n"
+    "    Dim j As Integer = i\n"
+    "    While j < keys.Length AndAlso NDStr(keys(j)) = NDStr(keys(i))\n"
+    "      j = j + 1\n"
+    "    End While\n"
+    "    Dim nrow As Integer = j - i\n"
+    "    Dim tall As Double = bodyIn\n"
+    "    If baseIn + nrow * innerIn > tall Then tall = baseIn + nrow * innerIn\n"
+    "    Dim n As Integer = CInt(System.Math.Round((tall + gapIn) / lhIn))\n"
+    "    If n < base1 + nrow * step1 Then n = base1 + nrow * step1\n"
+    "    If n < 1 Then n = 1\n"
+    "    Dim ln As String() = New String(n - 1) {}\n"
+    "    Dim k As Integer = 0\n"
+    "    For k = 0 To n - 1\n"
+    "      ln(k) = \"\"\n"
+    "    Next\n"
+    "    If onceVals IsNot Nothing AndAlso i < onceVals.Length Then\n"
+    "      Dim ob As String() = Split(NDStr(onceVals(i)), vbCrLf)\n"
+    "      For k = 0 To ob.Length - 1\n"
+    "        If k < n Then ln(k) = ob(k)\n"
+    "      Next\n"
+    "    End If\n"
+    "    If eachVals IsNot Nothing Then\n"
+    "      Dim r As Integer = 0\n"
+    "      For r = 0 To nrow - 1\n"
+    "        If i + r >= eachVals.Length Then Exit For\n"
+    "        Dim eb As String() = Split(NDStr(eachVals(i + r)), vbCrLf)\n"
+    "        For k = 0 To eb.Length - 1\n"
+    "          Dim s As Integer = base1 + r * step1 + k\n"
+    "          If s >= 0 AndAlso s < n AndAlso Len(eb(k)) > 0 Then\n"
+    "            If Len(ln(s)) > 0 Then\n"
+    "              ln(s) = ln(s) & \" \" & eb(k)\n"
+    "            Else\n"
+    "              ln(s) = eb(k)\n"
+    "            End If\n"
+    "          End If\n"
+    "        Next\n"
+    "      Next\n"
+    "    End If\n"
+    "    If sb.Length > 0 Then sb.Append(vbCrLf)\n"
+    "    sb.Append(String.Join(vbCrLf, ln))\n"
+    "    i = j\n"
+    "  End While\n"
+    "  Return sb.ToString()\n"
+    "End Function"
+)
+
+
+def _ensure_nested_break_code(root) -> None:
+    """Append the break-block reducer when any expression calls it.
+
+    APPENDS (never replaces): another pass may already have put its own
+    helper in the report's single <Code> element."""
+    if not any("Code.NDBreakBlock(" in (v.text or "")
+               for v in root.iter(_q("Value"))):
+        return
+    code = root.find(_q("Code"))
+    if code is None:
+        code = _sub(root, "Code")
+    have = code.text or ""
+    if "Function NDBreakBlock" in have:
+        return
+    code.text = (have.rstrip() + "\n\n" + _NDBREAK_CODE) if have.strip() \
+        else _NDBREAK_CODE
 
 
 _SUMLOOKUP_CODE = (
@@ -14699,18 +25614,21 @@ def _build_subtotal_tablix(name, dataset_name, key_expr, key_label, subtotals,
     hcells = _sub(hrow, "TablixCells")
     for i, (label, _e) in enumerate(cols):
         cc = _sub(_sub(hcells, "TablixCell"), "CellContents")
+        # Synthesized subtotal table == our own construction, so it carries
+        # no chrome of its own: the house tint + gray grid that used to ship
+        # here was a band no source declared.
         _build_textbox(cc, f"{name}_H{i}", '="' + _q_safe(label) + '"',
-                       bold=True, font_size="9pt", bg="#eef2f6", fg="#282828",
+                       bold=True, font_size="9pt", fg=_BODY_INK,
                        text_align="Left", vertical_align="Middle",
-                       border_color="#d0d0d0", padding="3pt", can_grow=False)
+                       border_color=None, padding="3pt", can_grow=False)
     drow = _sub(trows, "TablixRow"); _sub(drow, "Height", "0.22in")
     dcells = _sub(drow, "TablixCells")
     for i, (_l, expr) in enumerate(cols):
         cc = _sub(_sub(dcells, "TablixCell"), "CellContents")
         _build_textbox(cc, f"{name}_D{i}", expr,
-                       font_size="9pt", fg="#282828",
+                       font_size="9pt", fg=_BODY_INK,
                        text_align="Left" if i == 0 else "Right",
-                       vertical_align="Middle", border_color="#d0d0d0",
+                       vertical_align="Middle", border_color=None,
                        padding="3pt", can_grow=True)
     chm = _sub(_sub(tablix, "TablixColumnHierarchy"), "TablixMembers")
     for _ in cols:
@@ -14923,6 +25841,14 @@ def _source_page_number_expr(report):
         walk(lg)
     if not best:
         return None
+    return _page_builtin_text_expr(best)
+
+
+def _page_builtin_text_expr(best):
+    """Translate a boilerplate text holding Oracle page BUILTINS
+    (``&<PhysicalPageNumber>`` etc.) into an SSRS expression, keeping the
+    report's own wording verbatim. None when the text carries an unknown
+    angle-token (never guess)."""
     # Build the VB concatenation directly: the page BUILTINS use Oracle's
     # angle-token form, which the general &TOKEN resolver leaves alone.
     _BUILTIN = {
@@ -14966,8 +25892,16 @@ def _source_page_number_expr(report):
         return out
 
     parts, pos, saw = [], 0, False
-    for m in re.finditer(r"&<\s*([A-Za-z_]+)\s*>", best):
-        g = _BUILTIN.get(m.group(1).lower())
+    # Both token dialects: the angle form (&<PageNumber>) and the bare
+    # form (&PageNumber) — corpus reports use either for the same
+    # builtins. Bare matching is restricted to the KNOWN builtin names so
+    # a report's own &PARAM tokens never route through here.
+    _tok_re = (r"&<\s*([A-Za-z_]+)\s*>"
+               r"|&(PageNumber|PhysicalPageNumber|LogicalPageNumber|"
+               r"TotalPages|TotalPhysicalPages|TotalLogicalPages|"
+               r"CurrentDate)\b")
+    for m in re.finditer(_tok_re, best, re.I):
+        g = _BUILTIN.get((m.group(1) or m.group(2)).lower())
         if g is None:
             return None                      # unknown token -> don't guess
         parts.extend(_lit_atoms(best[pos:m.start()]))
@@ -15546,6 +26480,13 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
         target_db = "oracle"
     root = _build_report_root(report, target_db=target_db)
     _ensure_layout_images_emitted(root, report)
+    # DECLARED page-scoped print rules: a body object marked
+    # printObjectOnPage="allBut…" is a CONTINUATION marker — it must be
+    # absent from one page of its span and printed on the others, which only
+    # a page band can express (Globals!PageNumber is illegal in the body).
+    # Move it there at its declared geometry, gate it, and drop whatever copy
+    # the body builders made of it. Early, so every net below covers it.
+    _emit_page_gated_print_objects(root, report)
     # Publish-safety nets, in order: (1) repair dangling Fields! refs
     # (params / formulas / other-dataset columns / page builtins bound as
     # raw fields by secondary builders), THEN (2) scope any remaining
@@ -15571,6 +26512,11 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # alternating content/blank, one stray box on each blank). Clamp
     # WIDTHS only — nothing ever moves, and what is narrowed could never
     # print anyway.
+    # First reconcile the body itself with the sheet (grow <Width> to hold
+    # the widest item, cap it at the printable span, right margin = the
+    # residual) so the clamp below measures against the FINAL printable
+    # width instead of a stale symmetric default.
+    _fit_body_to_page(root, report)
     _clamp_body_items_to_printable_width(root)
     # HIDDEN expressions must obey the SERVER's dataset-scope rule: a
     # Fields!X ref inside a data region resolves ONLY against that region's
@@ -15592,6 +26538,11 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # (capped at the nearest right-neighbour / container edge), so no overlap or
     # page-spill is ever introduced (height untouched). See the function doc.
     _widen_clipped_constant_labels(root)
+    # Fidelity: DEEPEN constant labels whose Oracle-sized box clips the text
+    # line's descenders under SSRS padding/metrics -- only into provably free
+    # vertical space (nearest sibling below / container bottom), else strip
+    # the vertical paddings. Invisible boxes only, so no painted change.
+    _deepen_clipped_label_heights(root)
     # Report-level Oracle <summary> grand totals that the body builders skipped
     # (multi-section / flat) -> emit as labeled dataset-scoped aggregates below
     # the content. After the scope/repair passes so their explicit dataset scope
@@ -15602,6 +26553,24 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # per-key master-bound subtotal Tablix using LookupSet over Oracle's exact
     # <link> keys. After the grand-total pass so the body-height baseline is set.
     _ensure_group_subtotals_emitted(root, report)
+    # Nested-region break folding needs its reducer in the report's <Code>.
+    # AFTER the subtotal pass, which owns the same element and only writes
+    # into it while it is still empty.
+    _ensure_nested_break_code(root)
+    # Fidelity: Oracle lets a glyph OVERFLOW its declared box, SSRS CLIPS it, so
+    # any single-line textbox declared shorter than the font's own line box
+    # prints with its descenders sliced. Give every such box a full line box --
+    # by handing back our own vertical padding, or by deepening into provably
+    # free space. Runs after EVERY builder (breakdowns/totals/subtotals
+    # included) so no emit path escapes it, and before the body/page clamps so
+    # they measure the final geometry.
+    _unclip_short_line_boxes(root)
+    # ... and its CEILING: a fixed single-line box tall enough for the engine
+    # to START a second line but too short to PRINT one loses whatever word it
+    # moves down there. Cap the interior at exactly one line box, on the side
+    # the text is not anchored to, so no glyph moves. Immediately after the
+    # floor pass so the two agree on the final geometry.
+    _cap_fixed_single_line_boxes(root)
     # Publish-safety net: a BLOB column bound into a TEXTBOX prints raw
     # bytes at runtime — convert every pure blob-field textbox into a real
     # Source=Database <Image> in place. Builder-agnostic (secondary tables,
@@ -15642,6 +26611,14 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # after width reconciliation, and before dead-dataset pruning so a
     # chart-only dataset is retained by its Chart binding.
     _append_charts(root, report)
+    # Re-fit the body now that every builder, the tablix-width reconciler and
+    # the chart appender have settled their real widths: the first pass sees
+    # design-time widths (a tablix still carrying its pre-reconciliation
+    # span), so the body would keep slack the content never uses and the
+    # right margin would read 0 on a sheet whose truth margin is 1.25in.
+    # Width can only settle at >= the widest item, so nothing is ever clipped
+    # by this second pass.
+    _fit_body_to_page(root, report)
     # Datasets nothing references would still execute their SQL on every
     # render — prune them (after every net, so late-added refs are respected).
     _prune_dead_datasets(root)

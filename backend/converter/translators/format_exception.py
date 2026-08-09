@@ -47,6 +47,7 @@ from __future__ import annotations
 import re
 from typing import Callable, Optional
 
+from ..models import ORACLE_RENDERS_ITALIC
 from ..parsers.oracle_colors import resolve_color
 
 
@@ -346,7 +347,12 @@ def format_exception_styles(font: dict, visual: dict) -> dict:
 
     if "bold" in font:
         styles["FontWeight"] = "Bold" if _yes(font, "bold") else "Normal"
-    if "italic" in font:
+    if "italic" in font and (ORACLE_RENDERS_ITALIC or not _yes(font, "italic")):
+        # A conditional italic is DROPPED, not emitted as an always-Normal
+        # expression: the Oracle export dialect never paints an oblique face
+        # (see models.ORACLE_RENDERS_ITALIC -- 16 truth PDFs, 142,831 spans,
+        # zero italic). A conditional italic="no" still emits, because that
+        # one really does mean "upright here".
         styles["FontStyle"] = "Italic" if _yes(font, "italic") else "Normal"
     if "underline" in font:
         styles["TextDecoration"] = ("Underline" if _yes(font, "underline")

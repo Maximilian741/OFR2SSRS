@@ -98,6 +98,85 @@ def _collapse_iif(expr: str) -> str:
     return expr
 
 
+def _len_in(text: str, size_pt: float, bold: bool, sans: bool) -> float:
+    """Advance width of ``text`` in INCHES. Uses the converter's Standard-14
+    AFM tables when they can be imported (same estimator the emitter measures
+    with, so harness and emitter never disagree); falls back to a deliberately
+    GENEROUS 0.62-em average, which under-reports width and therefore only
+    ever shrinks a placeholder that is unambiguously too long."""
+    try:
+        from converter.generators.rdl import _afm_text_width  # noqa: PLC0415
+        return _afm_text_width(text, size_pt, bold, sans)
+    except Exception:  # noqa: BLE001 - the harness must not need the backend
+        return len(text) * 0.62 * size_pt / 72.0
+
+
+def _shrink_placeholder_to_box(out, tok_at, el, parent) -> None:
+    """Trim INVENTED placeholder text so it cannot be wider than the box the
+    DECLARATION sizes for the real value.
+
+    Why the harness owes this: the staticizer replaces a field reference with
+    the field's HUMANISED NAME, and a name is routinely several times longer
+    than the value it names. Measured on a receipts ledger: a payment-type
+    column is declared 0.375in wide, the truth PDF prints "CK" in it (13.9pt
+    of ink, comfortably inside the 27pt box) — the placeholder "PMNT TYPE"
+    needs 27.8pt for its FIRST WORD alone, so it wrapped, spilled out of the
+    row and was buried under the next row's opaque fill. That is a property of
+    the placeholder, not of the emitted geometry, and chasing it in the
+    converter means widening boxes the declaration deliberately made narrow.
+
+    What it deliberately does NOT touch: DECLARED string literals. Whether the
+    report's own boilerplate fits its own box is a real fidelity question, so
+    those pieces keep their full length and still overflow when they must.
+    A box that is genuinely too WIDE also still shows: the shrunken value is
+    laid out at the box's own anchor, so a box overhanging its neighbour still
+    prints its value over the neighbour's.
+    """
+    if not tok_at:
+        return
+    if any("\n" in (p or "") for p in out):
+        return                      # multi-line value: wrapping is the point
+    tb = parent.get(el)
+    while tb is not None and _local(tb.tag) != "Textbox":
+        tb = parent.get(tb)
+    if tb is None:
+        return
+    w = next((c.text for c in tb if _local(c.tag) == "Width"), "") or ""
+    w = w.strip()
+    if not w.endswith("in"):
+        return
+    try:
+        box_in = float(w[:-2])
+    except ValueError:
+        return
+    if box_in <= 0:
+        return
+    sizes, bold, sans = [], False, True
+    for st in tb.iter():
+        tag = _local(st.tag)
+        if tag == "FontSize" and (st.text or "").strip().endswith("pt"):
+            try:
+                sizes.append(float((st.text or "").strip()[:-2]))
+            except ValueError:
+                pass
+        elif tag == "FontWeight" and "bold" in (st.text or "").lower():
+            bold = True
+        elif tag == "FontFamily":
+            sans = "times" not in (st.text or "").lower()
+    size_pt = max(sizes) if sizes else 10.0
+
+    def _too_wide():
+        return _len_in("".join(out), size_pt, bold, sans) > box_in
+
+    guard = 0
+    while _too_wide() and guard < 400:
+        guard += 1
+        i = max(tok_at, key=lambda k: len(out[k]))
+        if len(out[i]) <= 1:
+            break               # nothing invented left to give
+        out[i] = out[i][:-1].rstrip() or out[i][:1]
+
+
 def staticize(rdl_xml: str) -> str:
     """Replace every =expression with a static value so the report needs no
     expression host. <Value> -> a readable placeholder derived from the first
@@ -176,6 +255,62 @@ def staticize(rdl_xml: str) -> str:
                 "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYPhf"
                 "DwAChwGA60e6kgAAAABJRU5ErkJggg==")
 
+    # Fields the RDL DECLARES numeric (rd:TypeName) — used to staticize
+    # single-token numeric refs as numbers instead of wide humanised names.
+    _NUM_T = ("Decimal", "Double", "Int", "Single", "Byte")
+    _numeric_fields = set()
+    for _fe in root.iter():
+        if _local(_fe.tag) != "Field":
+            continue
+        _tn = next((c.text or "" for c in _fe.iter()
+                    if _local(c.tag) == "TypeName"), "")
+        if any(t in _tn for t in _NUM_T) and _fe.get("Name"):
+            _numeric_fields.add(_fe.get("Name"))
+
+    def _eval_hidden(expr):
+        """Evaluate a PARAMETER-ONLY Hidden expression against the report's
+        staticized parameter defaults, so the layout render shows the same
+        conditional blocks a default-parameter server run would. Returns
+        "true"/"false", or None for data-dependent / unsupported
+        expressions (caller falls back to hidden — the variant-overlap
+        rule)."""
+        e = (expr or "").strip()
+        if not e.startswith("="):
+            return None
+        e = e[1:]
+        if any(k in e for k in ("Fields!", "Globals!", "ReportItems!",
+                                "Code.")):
+            return None
+        e = re.sub(r"Parameters!(\w+)\.Value",
+                   lambda m: '"%s"' % param_defaults.get(m.group(1), "x")
+                   .replace('"', ""), e)
+        # VB string literals -> Python literals FIRST (so operator rewrites
+        # never touch text inside quotes)
+        e = re.sub(r'"((?:[^"]|"")*)"',
+                   lambda m: repr(m.group(1).replace('""', '"')), e)
+        e = re.sub(r"<>", "!=", e)
+        e = re.sub(r"(?<![<>!=])=(?!=)", "==", e)
+        e = re.sub(r"\bNot\b", " not ", e)
+        e = re.sub(r"\bAnd\b", " and ", e)
+        e = re.sub(r"\bOr\b", " or ", e)
+        e = re.sub(r"\bTrue\b", "True", e, flags=re.I)
+        e = re.sub(r"\bFalse\b", "False", e, flags=re.I)
+        # anything beyond the safe subset (unknown identifiers) -> bail.
+        # Scan with string-literal CONTENTS removed — the values inside
+        # quotes are data, not identifiers.
+        bare = re.sub(r"'(?:[^'\\]|\\.)*'", "''", e)
+        idents = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", bare))
+        if idents - {"IIf", "True", "False", "not", "and", "or"}:
+            return None
+        try:
+            r = eval(e, {"__builtins__": {}},  # noqa: S307 - whitelisted tokens only
+                     {"IIf": lambda c, a, b: a if c else b})
+        except Exception:  # noqa: BLE001
+            return None
+        if isinstance(r, bool):
+            return "true" if r else "false"
+        return None
+
     for el in root.iter():
         txt = el.text or ""
         if not txt.startswith("="):
@@ -189,6 +324,33 @@ def staticize(rdl_xml: str) -> str:
             # replace each Fields!/Parameters! token with its humanised name, and
             # drop the VB glue (&, IIf, etc.). A bare =Nothing/empty -> "Sample".
             expr = txt[1:]
+            # A PURE numeric aggregate (=Sum(...), =Count(...) — no string
+            # literals mixed in) staticizes to a plausible NUMBER: the box
+            # is sized for "1,457", and the humanised token ("XYZ TOTAL")
+            # wraps/clips out of it, which the paint gate then flags as an
+            # overlap the deployed report doesn't have.
+            if (re.match(r"^\s*(Sum|Count|CountDistinct|Avg|Min|Max|"
+                         r"RunningValue)\s*\(", expr, re.I)
+                    and "&" not in expr):
+                el.text = "1,234"
+                continue
+            # Same for a bare reference to an ORACLE SUMMARY COLUMN — the
+            # generated "<fn>X..Per<group>" names (SumFeePerSite,
+            # CountIdPerYear) are numeric by construction, and their
+            # humanised token wraps out of the number-sized box.
+            if (re.match(r"^\s*(?:First\s*\(\s*)?Fields!(?:Sum|Count|Avg|"
+                         r"Min|Max)\w*Per\w+\.Value", expr)
+                    and "&" not in expr):
+                el.text = "1,234"
+                continue
+            # And for a single-token ref to a field the RDL itself DECLARES
+            # numeric (rd:TypeName Decimal/Double/Int...) — the box is
+            # sized for a number; the humanised name wraps 4 lines tall.
+            _m1 = re.match(r"^\s*(?:First\s*\(\s*)?Fields!(\w+)\.Value"
+                           r"\s*(?:,\s*\"[^\"]*\"\s*\))?\s*$", expr)
+            if _m1 and _m1.group(1) in _numeric_fields:
+                el.text = "1,234"
+                continue
             # Collapse value-or-fallback IIf()s to the displayed branch BEFORE
             # token extraction, so a field referenced in both the condition and
             # the else branch isn't humanised + concatenated twice.
@@ -203,6 +365,7 @@ def staticize(rdl_xml: str) -> str:
                 r'(Fields!\s*[A-Za-z0-9_]+\s*\.\s*Value)\s*,\s*"[^"]*"\s*\)',
                 r'\1', expr)
             out = []
+            _tok_at = []   # indices in `out` that are INVENTED placeholder text
             for m in re.finditer(
                     r'"((?:[^"]|"")*)"'                       # string literal
                     r'|(?:Fields!|Parameters!)([A-Za-z0-9_]+)'  # field/param token
@@ -213,6 +376,7 @@ def staticize(rdl_xml: str) -> str:
                 if nl is not None:
                     out.append("\n")  # honor multi-line values (vbCrLf etc.)
                 elif tok is not None:
+                    _tok_at.append(len(out))
                     _tu = tok.upper()
                     # An *_Ind boolean indicator field renders the Oracle ASTERISK
                     # it drives (the _Ind formula returns "*"/""); show "*" so the
@@ -235,9 +399,24 @@ def staticize(rdl_xml: str) -> str:
                     if expr[:m.start()].rstrip().endswith(","):
                         continue
                     out.append((lit or "").replace('""', '"'))
-            rendered = "".join(out).strip()
+            _shrink_placeholder_to_box(out, _tok_at, el, parent)
+            _joined = "".join(out)
+            rendered = _joined.strip()
             if not rendered:
                 rendered = "Sample"
+            else:
+                # Keep the declared edge whitespace RUNS verbatim. An inline
+                # styled TextRun ('Select ' before a bold 'Site' run) carries
+                # its run-boundary space at the literal's edge, and a prose
+                # clause carries its indentation there ('     a)  ...') — the
+                # engine advances by every one of those spaces, so collapsing
+                # the run to a single space made the verification render print
+                # the clause 4 space-widths left of where the report does.
+                # Only HORIZONTAL whitespace is restored; a leading/trailing
+                # vbCrLf still goes (it would grow the box a blank line).
+                _lead = re.match(r"[^\S\n]*", _joined).group(0)
+                _tail = re.search(r"[^\S\n]*\Z", _joined).group(0)
+                rendered = _lead + rendered + _tail
             # A staticized literal that itself begins with '=' (Oracle's
             # "= Vehicles in Yards" running-total label) would be re-parsed by
             # ReportViewer AS an expression -> "'Vehicles' is not declared".
@@ -246,16 +425,30 @@ def staticize(rdl_xml: str) -> str:
             # SPACE is trimmed before the '=' check. A zero-width space (U+200B,
             # not Unicode whitespace, so Trim keeps it) makes the first char
             # not '=' -> a plain literal that renders the label verbatim.
-            el.text = ("​" + rendered) if rendered.startswith("=") else rendered
+            el.text = (("​" + rendered) if rendered.lstrip().startswith("=")
+                       else rendered)
         elif t == "Hidden":
             # An EXPRESSION Hidden marks a CONDITIONAL item (a format-trigger
-            # variant frame, an optional enclosure line). On the real server
-            # at most one variant shows; forcing them all VISIBLE painted
-            # every variant onto the same spot and the overlap gate measured
-            # a defect the deployed report doesn't have. Layout mode renders
-            # the UNCONDITIONAL skeleton: expression-hidden items stay
-            # hidden. (Literal true/false Hidden never reaches this loop.)
-            el.text = "true"
+            # variant frame, an optional enclosure line). In PAGE BANDS and
+            # COVER rects, PARAMETER-ONLY conditions evaluate against the
+            # staticized defaults so a fully-conditional cover page renders
+            # like a default-parameter server run instead of BLANK. BODY
+            # items keep the always-hide rule: un-hiding body variant
+            # frames inflated per-record letters past their tuned page
+            # budget (an ARCHIVED known-good grant letter re-rendered with
+            # alternating blank pages and a mid-letter page 1 — harness
+            # drift, caught by rendering the archive first).
+            _cur = parent.get(el)
+            _in_band = False
+            while _cur is not None:
+                _t2 = _local(_cur.tag)
+                if _t2 in ("PageHeader", "PageFooter") or (
+                        _t2 == "Rectangle" and (_cur.get("Name") or "")
+                        in ("Rect_CoverPage", "Rect_SummaryHeader")):
+                    _in_band = True
+                    break
+                _cur = parent.get(_cur)
+            el.text = (_eval_hidden(txt) if _in_band else None) or "true"
         elif t in _COLOR:
             el.text = "White" if t == "BackgroundColor" else "Black"
         elif t in ("Hyperlink", "BookmarkLink"):
@@ -281,6 +474,16 @@ def staticize(rdl_xml: str) -> str:
                        or _safe_const.get(t, ""))
         else:
             el.text = ""
+    # A non-empty <Code> block makes the engine build the EXPRESSION HOST
+    # assembly even when every expression is already a literal -- and that
+    # is exactly what this mode exists to avoid (measured: the signed-DLL
+    # path then dies with "Failed to load expression host assembly ...
+    # Microsoft.ReportViewer.Common"). Nothing can still call into it after
+    # the pass above, so empty it. The real VB in that block is compiled by
+    # vb_expr_check.ps1 (System.CodeDom), which is the rail that proves it.
+    for _c in root.iter():
+        if _local(_c.tag) == "Code":
+            _c.text = ""
     return '<?xml version="1.0" encoding="utf-8"?>\n' + ET.tostring(root, encoding="unicode")
 
 

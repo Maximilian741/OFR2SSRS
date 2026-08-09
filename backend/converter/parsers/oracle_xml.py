@@ -31,7 +31,7 @@ from converter.models import (
     ReportParameter,
     TriggerCode,
 )
-from converter.parsers.oracle_colors import resolve_color
+from converter.parsers.oracle_colors import resolve_color, rule_color
 
 
 # ---------------------------------------------------------------------------
@@ -990,14 +990,77 @@ def _apply_visual_settings(target, el) -> None:
     if vs is None:
         return
     target.border_width = _float_attr(vs, "lineWidth")
+    # The RAW declaration, kept before the "this edge draws" fallback
+    # below overwrites it: 0.0 here means the source declared NO
+    # lineWidth, which is Oracle's device hairline (the truth exports
+    # stroke those at width 0). Consumers that must tell a declared 1pt
+    # from an undeclared width read this, not border_width.
+    try:
+        target.line_width = _float_attr(vs, "lineWidth")
+    except AttributeError:  # target predates the field
+        pass
+    # DECLARED stroke pattern (dash="dot"/"dash"/...). Truth-measured: the
+    # export strokes a dash declaration with a real PDF dash array at the
+    # declared width, painting ~half the ink of a solid edge.
+    try:
+        target.line_dash = _attr(vs, "dash").strip()
+    except AttributeError:  # target predates the field
+        pass
     target.border_pattern = _attr(vs, "linePattern")
-    # Color/style attributes (mapped to CSS by oracle_colors.resolve_color)
-    target.background_color = resolve_color(_attr(vs, "fillBackgroundColor"))
-    target.foreground_color = resolve_color(_attr(vs, "fillForegroundColor"))
+    # DIALECT RULE (truth-PDF measured): linePattern="solid" DRAWS the
+    # object's border even with no lineWidth attribute — the requisition
+    # form's row grid is repeating frames carrying only linePattern.
+    # Default the width to the 1pt hairline Oracle prints.
+    if (not target.border_width
+            and target.border_pattern
+            and target.border_pattern.lower() not in ("transparent", "")):
+        target.border_width = 1.0
+    # Color/style attributes (mapped to CSS by oracle_colors.resolve_color).
+    # DIALECT RULE (measured against the Oracle-rendered truth PDFs
+    # corpus-wide): fillBackgroundColor actually PAINTS only when the
+    # <visualSettings> also carries a fillPattern attribute — the attribute
+    # marks the fill as author-touched, even when its value is
+    # "transparent". Without it, the color is an unpainted template
+    # leftover (the classic blue r0g0b88 family). Decisive case: one
+    # report declares the same gray on 44 objects; the Oracle render
+    # paints exactly the 7 that carry a fillPattern attribute.
     target.fill_pattern = _attr(vs, "fillPattern").lower()
-    line_color = _attr(vs, "lineColor")
+    target.foreground_color = resolve_color(_attr(vs, "fillForegroundColor"))
+    # DIALECT REFINEMENT (truth-measured): fillPattern="solid" paints the
+    # FOREGROUND color as the box fill (corpus-wide, every solid box
+    # declares only fillForegroundColor: the accreditation band across
+    # half of each data row, the navy column-header frames, the gray
+    # totals rows). A pattern attribute with any OTHER value (typically
+    # "transparent") keeps the background rule above — the reports whose
+    # painted grays were truth-counted all declare "transparent".
+    _bg_paint = (resolve_color(_attr(vs, "fillBackgroundColor"))
+                 if _attr(vs, "fillPattern") else "")
+    if target.fill_pattern == "solid":
+        target.background_color = target.foreground_color or _bg_paint
+    else:
+        target.background_color = _bg_paint
+    # DIALECT: this export writes the stroke color as lineForegroundColor
+    # (truth-measured: a totals box declaring lineForegroundColor=darkblue
+    # prints a navy border, not black).
+    line_color = _attr(vs, "lineColor") or _attr(vs, "lineForegroundColor")
     edge_color = _attr(vs, "edgeLineColor") or line_color
     target.border_color = resolve_color(edge_color)
+    # DIALECT: hideXBorder attributes select WHICH edges of a
+    # solid-linePattern box actually paint (a row frame declaring
+    # linePattern="solid" + hideLeft/Right/Top prints ONLY its bottom
+    # rule — the per-row underline idiom, truth-PDF measured).
+    target.hidden_edges = _hidden_edges(vs)
+
+
+def _hidden_edges(vs) -> str:
+    """Comma-joined edges a <visualSettings> HIDES via the hideXBorder
+    dialect (e.g. "left,right,top"); "" when none are hidden."""
+    out = []
+    for edge in ("left", "right", "top", "bottom"):
+        if _attr(vs, f"hide{edge.capitalize()}Border").strip().lower() \
+                in ("yes", "true"):
+            out.append(edge)
+    return ",".join(out)
 
 
 def _parse_visual_settings(el):
@@ -1016,19 +1079,48 @@ def _parse_visual_settings(el):
             "line_color": "",
             "edge_line_color": "",
             "line_pattern": "",
+            "line_width": 0.0,
+            "line_dash": "",
+            "hidden_edges": "",
         }
-    line_color = _attr(vs, "lineColor")
+    # Same lineForegroundColor stroke-color dialect as
+    # _apply_visual_settings (truth-measured on a bordered totals box).
+    line_color = _attr(vs, "lineColor") or _attr(vs, "lineForegroundColor")
     edge_color_raw = _attr(vs, "edgeLineColor") or line_color
+    _pattern = _attr(vs, "fillPattern").lower()
+    _fg_paint = resolve_color(_attr(vs, "fillForegroundColor"))
+    # Same dialect rules as _apply_visual_settings: the fill paints only
+    # when a fillPattern attribute is present; pattern "solid" paints the
+    # FOREGROUND color (see the measured-rule comments there).
+    _bg_paint = (resolve_color(_attr(vs, "fillBackgroundColor"))
+                 if _attr(vs, "fillPattern") else "")
     return {
-        "background_color": resolve_color(_attr(vs, "fillBackgroundColor")),
-        "foreground_color": resolve_color(_attr(vs, "fillForegroundColor")),
-        "fill_pattern": _attr(vs, "fillPattern").lower(),
+        "background_color": ((_fg_paint or _bg_paint)
+                             if _pattern == "solid" else _bg_paint),
+        "foreground_color": _fg_paint,
+        "fill_pattern": _pattern,
         "line_color": resolve_color(line_color),
         "edge_line_color": resolve_color(edge_color_raw),
         # Oracle linePattern: "solid" (etc.) draws the box's border on the
         # printed output; "transparent"/absent draws none. Carried so the
         # generator can reproduce boxed form grids.
         "line_pattern": _attr(vs, "linePattern").lower(),
+        # Oracle lineWidth (points) exactly as DECLARED -- 0.0 when the
+        # attribute is absent. Deliberately NOT defaulted to a printable
+        # weight here (unlike the frame-level _apply_visual_settings, whose
+        # 1.0 fallback only serves as a "this edge draws" flag): the
+        # zero/one distinction IS the dialect. A declared width strokes at
+        # that width; an UNDECLARED width is Oracle's device hairline, which
+        # the truth exports stroke at width 0. Consumers decide the mapping.
+        "line_width": _float_attr(vs, "lineWidth"),
+        # Oracle dash="dot"/"dash"/"longDash"/... — the DECLARED stroke
+        # pattern. Truth-measured on two independent exports: a rule
+        # declaring dash="dot" is stroked with a real PDF dash array
+        # ("[ 1 ] 0") at the declared lineWidth, so it paints about half
+        # the ink of the solid bar a dash-blind emitter draws.
+        "line_dash": _attr(vs, "dash").strip(),
+        # hideXBorder dialect: which edges of a solid box do NOT paint.
+        "hidden_edges": _hidden_edges(vs),
     }
 
 
@@ -1064,6 +1156,73 @@ def _parse_conditional_formats(el) -> List[dict]:
     return out
 
 
+# Inline HTML markup embedded in boilerplate text segments. Oracle web-mode
+# text objects (webSettings containHTMLTags) intersperse literal <b>/<i>/<u>
+# tags between styled segments; the paper/PDF renderer never paints the tags
+# (the segment <font> attributes already carry the styling) — truth PDFs show
+# ZERO literal tags. Painting them verbatim is a defect, so strip exactly the
+# recognizable inline-markup tag forms and translate <br> to a newline.
+# Deliberately strict (no attributes, named tags only) so legitimate
+# angle-bracket prose ("x < 5", "<ERROR - ...>") is never eaten.
+_INLINE_BREAK_TAG_RE = re.compile(r"<br\s*/?\s*>", re.IGNORECASE)
+_INLINE_MARKUP_TAG_RE = re.compile(r"</?(?:b|i|u|em|strong)\s*>", re.IGNORECASE)
+
+
+def _strip_inline_markup_tags(text: str) -> str:
+    if "<" not in text:
+        return text
+    text = _INLINE_BREAK_TAG_RE.sub("\n", text)
+    return _INLINE_MARKUP_TAG_RE.sub("", text)
+
+
+# The exporter's pretty-print FRAME around a CDATA payload: a newline plus the
+# run of horizontal whitespace that indents the closing tag. Matched from the
+# TAIL, which is the only end with no payload after it, so its width names the
+# leading run's width too.
+_CDATA_FRAME_TAIL_RE = re.compile(r"\n([^\S\n]*)\Z")
+
+
+def _strip_export_indent_frame(raw: str) -> str:
+    """Drop the XML exporter's pretty-print frame around a CDATA payload.
+
+    Oracle's export writes every literal on its own indented line::
+
+        <string>
+        <![CDATA[payload]]>
+        </string>
+
+    so the parsed text arrives as ``"\\n" + INDENT + payload + "\\n" + INDENT``.
+    Everything INSIDE the CDATA is the author's ink -- the leading spaces that
+    indent a lettered clause, and the newline that ends the clause's line --
+    while the frame is the exporter's and prints nothing. Splitting them here
+    is what lets the generator keep declared indentation without also printing
+    the exporter's 14-space element indent.
+
+    Truth-measured: the corpus's multi-line payloads carry indentation ONLY at
+    a payload's first character (a census of every <string> in the truth
+    exports finds zero indented CONTINUATION lines), so a payload's own lines
+    are never contaminated by the frame.
+
+    Text with no such frame (a one-line ``<string><![CDATA[x]]></string>``, or
+    a payload that simply does not end on a newline) is returned untouched.
+    """
+    if not raw or "\n" not in raw:
+        return raw
+    m = _CDATA_FRAME_TAIL_RE.search(raw)
+    if m is None:
+        return raw
+    body = raw[:m.start()]
+    if body[:1] != "\n":
+        return body
+    # Drop the leading newline plus AT MOST the trailing run's own width of
+    # horizontal whitespace; anything past that width was written inside the
+    # CDATA and is declared indentation.
+    n, limit = 1, 1 + len(m.group(1))
+    while n < limit and body[n:n + 1] in (" ", "\t"):
+        n += 1
+    return body[n:]
+
+
 def _format_trigger_of(el) -> str:
     direct = _attr(el, "formatTrigger")
     if direct:
@@ -1071,6 +1230,15 @@ def _format_trigger_of(el) -> str:
     al = _find(el, "advancedLayout")
     if al is not None:
         return _attr(al, "formatTrigger")
+    return ""
+
+
+def _print_on_page_of(el) -> str:
+    """<advancedLayout printObjectOnPage="allPage|firstPage|..."> —
+    the page-repeat scope of a layout object (default/'' = defaultPage)."""
+    al = _find(el, "advancedLayout")
+    if al is not None:
+        return _attr(al, "printObjectOnPage")
     return ""
 
 
@@ -1108,7 +1276,13 @@ def _layout_field_from_element(el) -> LayoutField:
             seg_font = _find(ts, "font")
             if first_font is None:
                 first_font = seg_font
-            seg_text = "".join(s.text for s in _findall(ts, "string") if s.text)
+            # Each <string> carries its OWN pretty-print frame; strip it per
+            # string so the declared payloads concatenate exactly as authored
+            # (an interior frame used to inject the exporter's element indent
+            # between two segments of one sentence).
+            seg_text = "".join(_strip_export_indent_frame(s.text)
+                               for s in _findall(ts, "string") if s.text)
+            seg_text = _strip_inline_markup_tags(seg_text)
             segs.append(seg_text)
             # Per-segment style so a mixed-font <text> (e.g. an unbold caption +
             # a BOLD value beneath it) keeps each segment's real weight/size.
@@ -1123,7 +1297,9 @@ def _layout_field_from_element(el) -> LayoutField:
                 "underline": (_attr(seg_font, "underline").lower() == "yes"
                               if seg_font is not None else False),
                 "size": (_int_attr(seg_font, "size", 0) if seg_font is not None else 0) or 0,
-                "color": ((_attr(seg_font, "color") or _attr(seg_font, "foreground"))
+                "color": ((_attr(seg_font, "color")
+                           or _attr(seg_font, "foreground")
+                           or resolve_color(_attr(seg_font, "textColor")))
                           if seg_font is not None else ""),
             })
         text_value = "".join(segs).strip()
@@ -1160,7 +1336,11 @@ def _layout_field_from_element(el) -> LayoutField:
         if not underline:
             underline = _attr(font, "underline").lower() == "yes"
         if not color:
-            color = _attr(font, "color") or _attr(font, "foreground")
+            # Real exports write a field's ink as textColor too (same token
+            # family as the <textSegment> fonts) — a declared darkblue title
+            # field must not fall back to black.
+            color = (_attr(font, "color") or _attr(font, "foreground")
+                     or resolve_color(_attr(font, "textColor")))
 
     kind = "text" if tag == "text" else "field"
 
@@ -1174,6 +1354,37 @@ def _layout_field_from_element(el) -> LayoutField:
     if not vertical_elasticity:
         vertical_elasticity = _attr(el, "verticalElasticity")
     vertical_elasticity = (vertical_elasticity or "").strip().lower()
+
+    # Oracle <generalLayout horizontalElasticity="variable|expand|contract|
+    # fixed">: whether the box's WIDTH is sized to its content at run time.
+    # Same two read sites as the vertical flavour.
+    horizontal_elasticity = ""
+    if _gl is not None:
+        horizontal_elasticity = _attr(_gl, "horizontalElasticity")
+    if not horizontal_elasticity:
+        horizontal_elasticity = _attr(el, "horizontalElasticity")
+    horizontal_elasticity = (horizontal_elasticity or "").strip().lower()
+
+    # VERTICAL ANCHOR inside the declared box. Oracle top-anchors text and the
+    # paper-layout dialect declares no vertical justification at all (census of
+    # 314 real exports: verticalElasticity only -- a growth rule, not an
+    # anchor). Read every spelling a dialect might use so a declaration is
+    # HONORED rather than guessed at; on a real export this stays "" and the
+    # generator anchors Top. Note `valign` is read from <textSettings>/
+    # <generalLayout>/the element only -- never from the <webSource> HTML
+    # template, which is a different (browser) rendering entirely.
+    vertical_align = ""
+    for _src in (text_settings, _gl, el):
+        if _src is None:
+            continue
+        for _a in ("vertJustify", "verticalJustify", "verticalAlignment",
+                   "verticalAlign", "valign"):
+            vertical_align = _attr(_src, _a)
+            if vertical_align:
+                break
+        if vertical_align:
+            break
+    vertical_align = (vertical_align or "").strip().lower()
 
     vs_attrs = _parse_visual_settings(el)
 
@@ -1232,8 +1443,18 @@ def _layout_field_from_element(el) -> LayoutField:
         rotation=rotation,
         segments=segments,
         vertical_elasticity=vertical_elasticity,
+        vertical_align=vertical_align,
+        horizontal_elasticity=horizontal_elasticity,
         line_pattern=vs_attrs.get("line_pattern", ""),
+        line_width=float(vs_attrs.get("line_width", 0.0) or 0.0),
+        line_dash=vs_attrs.get("line_dash", ""),
+        hidden_edges=vs_attrs.get("hidden_edges", ""),
         conditional_formats=_parse_conditional_formats(el),
+        # <advancedLayout printObjectOnPage="allPage|firstPage|
+        # allButFirstPage|lastPage">: the page-repeat scope of THIS object
+        # (frames already carry it; a <text>/<field> declares it too and the
+        # "allButFirstPage" continuation marker is carried by a <text>).
+        print_on_page=_print_on_page_of(el),
     )
 
 
@@ -1308,7 +1529,20 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
             try:
                 rf_name = _attr(child, "name")
                 rf_source = _attr(child, "source")
-                key = rf_source or rf_name
+                # ONE DECLARED FRAME = ONE REGION. Oracle object names are
+                # unique per report, so keying on the declared NAME keeps
+                # every <repeatingFrame> element its own LayoutGroup at its
+                # own declared geometry. Keying on `source` first merged
+                # SIBLING frames bound to the SAME group -- a letter that
+                # declares one signature block inside its header band and a
+                # second, differently-placed one inside the body collapsed
+                # into a single region: the second frame's members were
+                # walked into the FIRST frame, so the body variant lost its
+                # content outright and the header variant inherited members
+                # declared ~7in below its own box (a latent full-page
+                # overlap, and a 0.40in frame emitted 8.57in tall).
+                # Nameless frames still fall back to `source`.
+                key = rf_name or rf_source
                 grp = groups_by_name.get(key)
                 if grp is None:
                     try:
@@ -1320,10 +1554,16 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                         kind="repeating_frame",
                         source_query=rf_source,
                         format_trigger=_format_trigger_of(child),
+                        print_on_page=_print_on_page_of(child),
                         page_break_before=_page_break_before(child),
                         page_break_after=_page_break_after(child),
                         print_direction=_attr(child, "printDirection"),
                         max_records_per_page=_max_rec,
+                        # Declared inter-instance gutter: the record pitch is
+                        # the frame height PLUS this, and a banded fill leaves
+                        # it unpainted.
+                        vert_space=_float_attr(
+                            child, "vertSpaceBetweenFrames"),
                     )
                     _apply_geometry(grp, child)
                     _apply_visual_settings(grp, child)
@@ -1343,6 +1583,7 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                     name=fr_name,
                     kind="frame",
                     format_trigger=_format_trigger_of(child),
+                    print_on_page=_print_on_page_of(child),
                     page_break_before=_page_break_before(child),
                     page_break_after=_page_break_after(child),
                 )
@@ -1401,12 +1642,48 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                     y=_float_attr(_gsrc, "y"),
                     width=_float_attr(_gsrc, "width"),
                     height=_float_attr(_gsrc, "height"),
-                    border_width=_bw or 1.0,
-                    border_color=(vs_attrs["edge_line_color"]
-                                  or vs_attrs["line_color"] or "#000000"),
+                    # A drawn RULE with no lineWidth attr renders as the
+                    # DEVICE HAIRLINE in Oracle's own PDFs (truth-measured:
+                    # 0-width strokes wherever no lineWidth is declared;
+                    # declared lineWidth maps 1:1 to stroke points). Keep
+                    # 0.0 = "undeclared" for <line> so emitters can pick the
+                    # hairline weight; boxes keep the 1pt border default.
+                    border_width=_bw or (0.0 if tag == "line" else 1.0),
+                    # Stroke ink follows the SAME declaration signal as the
+                    # width above: a declared color always wins; with none,
+                    # a declared-width stroke is solid black while the
+                    # undeclared-width DEVICE HAIRLINE prints at ~20% ink
+                    # (truth-measured, see oracle_colors.rule_color) — the
+                    # old flat black default painted those rules near-black.
+                    border_color=rule_color(
+                        vs_attrs["edge_line_color"] or vs_attrs["line_color"],
+                        width_declared=bool(_bw) or tag != "line"),
                     background_color=vs_attrs["background_color"],
                     fill_pattern=vs_attrs["fill_pattern"],
+                    # The dialect's draw-the-border marker (linePattern=
+                    # solid) travels on drawn boxes too, so emitters can
+                    # tell a bordered form frame from a padding rect.
+                    line_pattern=vs_attrs.get("line_pattern", ""),
+                    # The RAW declaration alongside the printable
+                    # border_width above: 0.0 means "no lineWidth attribute"
+                    # for boxes as well as rules, so an edge emitter can tell
+                    # a real declared stroke from the device hairline.
+                    line_width=float(vs_attrs.get("line_width", 0.0) or 0.0),
+                    # DECLARED dash pattern on a drawn rule/box. The truth
+                    # exports stroke it as a real PDF dash array at the
+                    # declared width -- about half the ink of a solid bar.
+                    line_dash=vs_attrs.get("line_dash", ""),
                     hyperlink=_hl,
+                    # A DRAWN graphic declares its page-repeat scope exactly
+                    # like a <field>/<text> does. The full-width rule Oracle
+                    # draws across the top of a break-report group band
+                    # carries printObjectOnPage="allPage" and reprints at the
+                    # top of every continuation page (truth-PDF measured on a
+                    # 70-page break report: the rule prints on 70/70 pages,
+                    # the column-header underlines only where their strip
+                    # prints). Dropping it here made the scope invisible to
+                    # every emitter downstream.
+                    print_on_page=_print_on_page_of(child),
                 )
                 target = current_group
                 if target is None:
@@ -1497,6 +1774,13 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                                            "xProductGroup", "crossProduct",
                                            "template")},
                 )
+                # A matrix object carries its OWN <visualSettings> like any
+                # other layout box; leaving it unparsed meant the emitter had
+                # no declared grid to honour and invented one. (Geometry is
+                # deliberately NOT applied here: the matrix spec is derived
+                # from its dimension frames, and giving the matrix group a
+                # box would change every extent/dominance walk.)
+                _apply_visual_settings(grp, child)
                 if current_group is not None:
                     current_group.children.append(grp)
                 else:
@@ -1536,10 +1820,71 @@ def _parse_layout(root, warnings: List[str],
             source_query=repeat_on,
             repeat_on=repeat_on,
         )
+        # The section's DECLARED page width/height ("<section name="main"
+        # width="10.00000">") — the authoritative paper size; the truth
+        # PDFs render at exactly this width, not at Letter.
+        section_group.width = _float_attr(section, "width")
+        section_group.height = _float_attr(section, "height")
+        # The section's <body width= height=> is the declared printable sheet
+        # (paper minus margin chrome). Stored separately from the section's
+        # own width/height (which, when present, declare the FULL paper): a
+        # paper-like body height tells the generator this section prints on a
+        # normal sheet, so oversize per-record content must paginate across
+        # sheets instead of growing the paper.
+        for _body_el in _findall(section, "body"):
+            section_group.body_width = _float_attr(_body_el, "width")
+            section_group.body_height = _float_attr(_body_el, "height")
+            # <body><location x= y=/> is the body rectangle's ORIGIN on the
+            # PAPER — i.e. the sheet's own left/top margin. Body coordinates
+            # restart at it, so every body object prints at location + its
+            # own declared x/y. Each axis is recorded ONLY when the export
+            # actually writes it: Oracle omits the attribute whose value is
+            # the default margin (many sections carry <location y="..."/>
+            # with no x at all), and a declared 0.0 is a real full-bleed
+            # origin that must not read the same as "omitted". None = the
+            # axis was not declared.
+            for _loc_el in _findall(_body_el, "location"):
+                section_group.body_location = (
+                    (_float_attr(_loc_el, "x")
+                     if _attr(_loc_el, "x").strip() else None),
+                    (_float_attr(_loc_el, "y")
+                     if _attr(_loc_el, "y").strip() else None))
+                break
+            break
         groups_by_name[f"__section__{section_name}"] = section_group
         root_groups.append(section_group)
         _walk_layout_node(section, section_group, groups_by_name,
                           root_groups, warnings, embedded_images)
+        # Tag every object authored inside <margin> (the page-chrome band:
+        # title, logo, run-date, page number). Oracle object names are
+        # unique per report (the server enforces it), so a name-keyed pass
+        # after the walk is exact without threading state through the
+        # recursive walker.
+        # The same pass records ``templateSection`` — Oracle's declaration of
+        # WHICH SECTION's pages the object belongs to. Every section prints
+        # its own margin band, so a stamp declared for one section must not
+        # appear on another section's pages.
+        _margin_names = set()
+        _margin_tsec = {}
+        for _mel in _findall(section, "margin"):
+            for _sub_el in _mel.iter():
+                _mn = _attr(_sub_el, "name")
+                if _mn:
+                    _margin_names.add(_mn)
+                    _ts = _attr(_sub_el, "templateSection").strip()
+                    if _ts:
+                        _margin_tsec[_mn] = _ts
+        if _margin_names:
+            def _tag_margin(grp):
+                for _fl in grp.fields:
+                    if _fl.name in _margin_names:
+                        _fl.in_margin = True
+                        _ts_name = _margin_tsec.get(_fl.name, "")
+                        if _ts_name:
+                            _fl.template_section = _ts_name
+                for _ch in grp.children:
+                    _tag_margin(_ch)
+            _tag_margin(section_group)
     pruned: List[LayoutGroup] = []
     for g in root_groups:
         if g.fields or g.children:

@@ -35,9 +35,28 @@ from converter.generators.rdl import _oracle_mask_to_net, _spelled_case  # noqa:
     ("MONTH DD, YYYY", "MMMM dd, yyyy"),
     ("HH24:MI:SS", "HH:mm:ss"),
     ("MM/DD/YYYY HH24:MI", "MM/dd/yyyy HH:mm"),
-    # Oracle FM/FX fill-mode modifiers are stripped; A.M./P.M. -> tt
-    ("FMMONTH dd, yyyy", "MMMM dd, yyyy"),
-    ("FMMONTH dd, yyyy hh:FMMI P.M.", "MMMM dd, yyyy hh:mm tt"),
+    # Oracle FM/FX is a fill-mode TOGGLE, not a strippable prefix: every
+    # occurrence flips padding suppression for the REST of the mask, so a
+    # numeric date element after an ODD number of them loses its leading
+    # zero and one after an EVEN number keeps it. A.M./P.M. -> tt.
+    #
+    # These two rows previously asserted the strip-and-ignore dialect
+    # ("MMMM dd, yyyy" / "MMMM dd, yyyy hh:mm tt"); the Oracle-rendered page
+    # chrome of a report whose mask is "fmMonth DD, RRRR HH:fmMI AM" prints
+    # "November 13, 2025 1:00 PM" -- a ONE-digit hour (fill on) beside a
+    # TWO-digit minute (fill off again at the second fm), which disproves it.
+    # The replacements are stricter: they pin the state of EVERY element.
+    ("FMMONTH dd, yyyy", "MMMM d, yyyy"),
+    ("FMMONTH dd, yyyy hh:FMMI P.M.", "MMMM d, yyyy h:mm tt"),
+    # The truth-measured mask itself, lower-case 'fm' as Oracle wrote it.
+    ("fmMonth DD, RRRR HH:fmMI AM", "MMMM d, yyyy h:mm tt"),
+    # Toggle ON then OFF mid-mask: MM loses its zero, DD keeps its own.
+    ("FMMM/FMDD/YYYY", "M/dd/yyyy"),
+    # A THIRD fm turns fill back ON -- the toggle is not a one-shot latch,
+    # so BOTH trailing time elements lose their padding.
+    ("FMMM/FMDD/FMYYYY HH24:MI", "M/dd/yyyy H:m"),
+    # No modifier at all: every element keeps Oracle's zero padding.
+    ("MM/DD/YYYY HH:MI", "MM/dd/yyyy hh:mm"),
     ("FM999G990D00", "###,##0.00"),
 ])
 def test_oracle_mask_to_net(mask, want):

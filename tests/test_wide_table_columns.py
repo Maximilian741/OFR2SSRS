@@ -76,13 +76,25 @@ def test_columns_follow_oracle_per_column_widths():
 
 
 def test_narrow_oracle_columns_are_not_stretched():
-    """A report whose Oracle columns are genuinely narrow renders them narrow
-    (floored at 0.5in for legibility), NOT stretched to a uniform 1.5in."""
+    """A report whose Oracle columns are genuinely narrow renders them at
+    their DECLARED width, NOT stretched to a uniform 1.5in and NOT propped
+    up to a 0.5in "legibility" floor.
+
+    The floor used to apply here too. Truth-measured on a landscape summary
+    report that declares a 0.4375in column: the truth PDF centres that
+    column's value on the 0.4375in box (centre 570.46pt vs the declared
+    box's own centre 570.31pt). A 0.5in floor would have moved that centre
+    +2.25pt and pushed every column after it right by the same. So the
+    floor is only honest where the declared set does NOT fit the printable
+    width and the widths are being scaled anyway -- which is what
+    test_wide_table_column_width_adapts covers. Here the declaration fits,
+    so the declaration IS the answer, to full precision.
+    """
     rdl = convert(_wide_xml(3))["rdl_xml"]   # 3 cols, each 0.3in in Oracle
     widths = [float(w) for w in re.findall(
         r"<TablixColumn>\s*<Width>([\d.]+)in", rdl)]
-    assert widths and all(w < 1.0 for w in widths), widths   # not stretched to 1.5
-    assert all(w >= 0.5 for w in widths), widths             # legibility floor
+    assert len(widths) == 3, widths
+    assert all(abs(w - 0.3) < 0.0005 for w in widths), widths
 
 
 def _row_xml(field_h: float) -> bytes:
@@ -106,11 +118,14 @@ def _detail_row_height(rdl: str) -> float:
     return hs[1] if len(hs) > 1 else hs[0]
 
 
-def test_tall_oracle_field_makes_a_taller_detail_row():
-    """The detail row follows the TALLEST Oracle detail field (a field Oracle
-    drew 0.6in tall keeps it), while ordinary <=0.28in fields stay at the 0.28in
-    default -- so the corpus is unchanged and only genuinely-tall fields grow."""
-    assert abs(_detail_row_height(convert(_row_xml(0.2))["rdl_xml"]) - 0.28) < 0.01
+def test_declared_record_frame_height_is_the_detail_row_height():
+    """The detail row is the record frame's DECLARED height -- a 0.6in frame
+    keeps 0.6in and a 0.2in frame keeps 0.2in.
+
+    (Supersedes the old 0.28in synthesized floor: truth-PDF measurement
+    showed a report declaring a 0.17212in frame renders 0.17212in rows, and
+    padding the row to 0.28in inflated its page count ~29%.)"""
+    assert abs(_detail_row_height(convert(_row_xml(0.2))["rdl_xml"]) - 0.20) < 0.01
     assert abs(_detail_row_height(convert(_row_xml(0.6))["rdl_xml"]) - 0.60) < 0.01
     assert abs(_detail_row_height(convert(_row_xml(0.9))["rdl_xml"]) - 0.90) < 0.01
 

@@ -37,8 +37,11 @@ DEFAULTS = {
     "subhdr_bg": "#d6d6d6",
     "subhdr_fg": "#03047e",
     "card_bg":   "#ffffff",
-    "ink":       "#282828",
-    "ink_soft":  "#282828",
+    # BODY TEXT ink is BLACK when the source declares no text colour --
+    # Oracle's device default for glyphs, truth-measured across the corpus
+    # (the old #282828 house tone printed 40/255 washed-out grey).
+    "ink":       "#000000",
+    "ink_soft":  "#000000",
     "rule":      "#777777",
 }
 

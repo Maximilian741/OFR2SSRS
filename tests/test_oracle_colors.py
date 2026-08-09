@@ -19,11 +19,18 @@ from converter.parsers.oracle_colors import resolve_color
     ("yellow",    "#FFFF00"),
     ("cyan",      "#00FFFF"),
     ("magenta",   "#FF00FF"),
-    ("gray",      "#808080"),
-    ("grey",      "#808080"),
-    ("darkblue",  "#00008B"),
-    ("darkgreen", "#006400"),
-    ("darkred",   "#8B0000"),
+    # Oracle "gray" is 25% ink -> 0.75 gray, truth-PDF measured (two
+    # reports render bare-gray bands at exactly 0.75; the CSS 50% value
+    # painted them twice as dark as the Oracle output).
+    ("gray",      "#BFBFBF"),
+    ("grey",      "#BFBFBF"),
+    # Oracle "dark<primary>" = the 50%-scale primary, truth-PDF measured:
+    # a darkgreen band renders (0,128,0) and darkblue titles #000080 in
+    # the Oracle output — the CSS DarkGreen/DarkBlue/DarkRed values
+    # painted visibly darker (band + landscape-log title proof).
+    ("darkblue",  "#000080"),
+    ("darkgreen", "#008000"),
+    ("darkred",   "#800000"),
     ("darkgray",  "#A9A9A9"),
     ("lightgray", "#D3D3D3"),
     ("silver",    "#C0C0C0"),
@@ -42,8 +49,8 @@ def test_named_colors(token, expected):
 
 def test_named_colors_are_case_insensitive():
     assert resolve_color("RED") == "#FF0000"
-    assert resolve_color("DarkBlue") == "#00008B"
-    assert resolve_color("  Gray  ") == "#808080"
+    assert resolve_color("DarkBlue") == "#000080"
+    assert resolve_color("  Gray  ") == "#BFBFBF"
 
 
 # ---------------------------------------------------------------------------

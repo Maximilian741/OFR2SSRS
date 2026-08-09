@@ -96,7 +96,14 @@ def test_field_font_carries_into_data_cell():
     assert amt["family"] == "Courier New" and amt["size"] == "12pt"
     nm = _cell_font(rdl, "NM")
     assert nm["family"] == "Times New Roman" and nm["size"] == "11pt"
-    assert nm["weight"] == "Bold" and nm["style"] == "Italic"
+    # Weight carries; SLANT DOES NOT. TRUTH (2026-08-08, whole truth
+    # corpus): 16 Oracle-driver PDFs / 142,831 non-blank spans contain ZERO
+    # italic-flagged spans and reference no *-Oblique font resource, while
+    # 32,604 spans are bold. Every declared-italic object locatable in a
+    # truth PDF prints upright. Stricter than the old style=="Italic": the
+    # cell must carry NO FontStyle at all, and the whole document none.
+    assert nm["weight"] == "Bold" and nm["style"] is None
+    assert "<FontStyle>Italic</FontStyle>" not in rdl
     ctr = _cell_font(rdl, "CTR")
     assert ctr["family"] is None       # no explicit face -> SSRS default
 
@@ -122,5 +129,9 @@ def test_per_record_field_font_carries_through():
     fams = re.findall(r"<FontFamily>([^<]*)</FontFamily>", rdl)
     assert "Times New Roman" in fams
     assert "Courier New" in fams
-    # the italic recipient line carries FontStyle=Italic
-    assert "<FontStyle>Italic</FontStyle>" in rdl
+    # ...and the declared italic on the recipient line is NOT painted: the
+    # Oracle export dialect never renders an oblique face (16 truth PDFs /
+    # 142,831 spans, zero italic-flagged, no *-Oblique font resource --
+    # models.ORACLE_RENDERS_ITALIC). Face + size still had to survive
+    # (asserted above), so this is the slant alone.
+    assert "<FontStyle>Italic</FontStyle>" not in rdl

@@ -930,14 +930,140 @@ def translate_format_trigger(body: str,
     return None
 
 
+# --------------------------------------------------------------------------
+# ROW-ALTERNATION (banded record) conditional fill
+# --------------------------------------------------------------------------
+#
+# Oracle bands a repeating record frame by counting records into a summary
+# column and testing its parity in the frame's format trigger.  The SHAPE is
+# what identifies it -- a ``MOD 2`` comparison guarding SRW fill calls -- so
+# the detector below matches structure only and never a counter, column or
+# report name.  Everything outside the shape declines, which keeps a report
+# that declares no such trigger completely unbanded.
+
+# ``<counter> MOD 2 <op> <0|1>``.  The counter may be a bind (``:X``), a
+# plain identifier, or a qualified one; only its PARITY test matters.
+_MOD2_COND_RE = re.compile(
+    r"(?is)^\(?\s*:?([A-Za-z_][\w.$#]*)\s+MOD\s+2\s*(=|<>|!=)\s*([01])\s*\)?$")
+
+_SRW_FILL_CALLS = ("set_foreground_fill_color", "set_background_fill_color",
+                   "set_fill_pattern")
+
+_TRANSPARENT_PATTERNS = ("transparent", "no_fill", "nofill", "none")
+
+
+class _NotAFillBranch(Exception):
+    """The branch does something other than set a fill."""
+
+
+def _alternation_branch_fill(calls_src: str):
+    """One IF branch's SRW calls -> the colour token that branch paints.
+
+    ``""`` = explicitly transparent, ``None`` = the branch declares no
+    fill decision at all.  Raises when the branch contains anything that
+    is not a fill call, so a trigger that also hides/bolds never turns
+    into a band.
+    """
+    fg = bg = None
+    pattern = None
+    seen = 0
+    for cm in re.finditer(r"(?is)srw\s*\.\s*(\w+)\s*\(\s*([^)]*)\s*\)\s*;?",
+                          calls_src):
+        fn = cm.group(1).lower()
+        arg = cm.group(2).strip().strip("'\"").strip()
+        if fn not in _SRW_FILL_CALLS:
+            raise _NotAFillBranch(fn)
+        seen += 1
+        if fn == "set_fill_pattern":
+            pattern = arg.lower()
+        elif fn == "set_foreground_fill_color":
+            fg = arg
+        else:
+            bg = arg
+    residue = re.sub(r"(?is)srw\s*\.\s*\w+\s*\([^)]*\)\s*;?", "", calls_src)
+    if residue.strip():
+        raise _NotAFillBranch("non-call residue")
+    if not seen:
+        return None
+    if pattern in _TRANSPARENT_PATTERNS:
+        return ""
+    if pattern != "solid":
+        # DIALECT: the fill pattern is what gates the paint.  With no solid
+        # pattern declared in the branch there is no paint decision to make.
+        return None
+    # DIALECT: under a SOLID pattern the FOREGROUND fill colour is the ink
+    # that covers the object (the background colour only shows through a
+    # patterned fill).
+    return fg if fg is not None else bg
+
+
+def translate_row_alternation_fill(body: str) -> Optional[dict]:
+    """Oracle's banded-record format trigger -> its two alternating fills.
+
+    Recognised STRUCTURALLY::
+
+        IF <counter> MOD 2 = 0 THEN
+          SRW.SET_FOREGROUND_FILL_COLOR('<tint>');
+          SRW.SET_FILL_PATTERN('solid');
+        ELSE
+          SRW.SET_FOREGROUND_FILL_COLOR('<base>');
+          SRW.SET_FILL_PATTERN('solid');
+        END IF;
+        RETURN(TRUE);
+
+    Returns ``{"even": <token>, "odd": <token>}`` -- ``even`` is the fill
+    for a counter whose value satisfies ``MOD 2 = 0`` (Oracle's counters
+    are 1-based running counts, so ``even`` bands the SECOND record and
+    every other one after it).  Each value is an Oracle colour token,
+    ``""`` for an explicitly transparent branch, or None where that branch
+    declares no fill.  Returns None for every other trigger body.
+    """
+    if not (body or "").strip():
+        return None
+    src = _strip_comments(_body_between_begin_end(body))
+    up = re.sub(r"\s+", " ", src).strip()
+    tail = r"\s*END\s*IF\s*;?\s*RETURN\s*\(?\s*TRUE\s*\)?\s*;?"
+    m = re.fullmatch(
+        r"(?is)IF\s+(.+?)\s+THEN\s+(.*?)\s*ELSE\s+(.*?)" + tail, up)
+    if m:
+        cond, then_src, else_src = m.group(1), m.group(2), m.group(3)
+    else:
+        m = re.fullmatch(r"(?is)IF\s+(.+?)\s+THEN\s+(.*?)" + tail, up)
+        if not m:
+            return None
+        cond, then_src, else_src = m.group(1), m.group(2), ""
+    cm = _MOD2_COND_RE.match(cond.strip())
+    if not cm:
+        return None
+    op, rhs = cm.group(2), cm.group(3)
+    # THEN fires on the EVEN parity when the test is "= 0" or "<> 1".
+    then_is_even = ((op == "=" and rhs == "0")
+                    or (op in ("<>", "!=") and rhs == "1"))
+    try:
+        then_fill = _alternation_branch_fill(then_src)
+        else_fill = _alternation_branch_fill(else_src) if else_src else None
+    except _NotAFillBranch:
+        return None
+    if then_fill is None and else_fill is None:
+        return None
+    if then_is_even:
+        return {"even": then_fill, "odd": else_fill}
+    return {"even": else_fill, "odd": then_fill}
+
+
 _SRW_STYLE_MAP = {
     "set_font_face": ("FontFamily", lambda a: a.strip("'\" ")),
     "set_font_size": ("FontSize", lambda a: f"{a.strip()}pt"),
     "set_font_weight": ("FontWeight",
                         lambda a: "Bold" if "BOLD" in a.upper() else "Normal"),
-    "set_font_style": ("FontStyle",
-                       lambda a: "Italic" if "ITALIC" in a.upper()
-                       else "Normal"),
+    # RECOGNIZED, NO SSRS MAPPING. srw.set_font_style('ITALIC') asks for an
+    # oblique face the Oracle export dialect never paints: 16 truth PDFs /
+    # 142,831 spans carry ZERO italic-flagged spans and no *-Oblique font
+    # resource, while bold IS honoured (see models.ORACLE_RENDERS_ITALIC).
+    # Emitting FontStyle here would make the SSRS render diverge from the
+    # truth exactly where a trigger fires. 'PLAIN' is a no-op for the same
+    # reason. Other srw style calls in the same trigger still translate.
+    "set_font_style": (None, None),
     "set_text_color": ("Color", lambda a: a.strip("'\" ").title()),
     "set_foreground_fill_color": ("BackgroundColor",
                                   lambda a: a.strip("'\" ").title()),

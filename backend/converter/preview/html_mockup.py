@@ -18,7 +18,8 @@ import html
 import re
 from typing import Dict, List, Optional
 
-from ..models import EmbeddedImage, LayoutField, LayoutGroup, ParsedReport
+from ..models import (ORACLE_RENDERS_ITALIC, EmbeddedImage, LayoutField,
+                      LayoutGroup, ParsedReport)
 
 
 # ---------------------------------------------------------------------------
@@ -234,14 +235,19 @@ def _find_section(layout: List[LayoutGroup], kind: str) -> Optional[LayoutGroup]
 # for a given element. They are deliberately grayscale so an uncolored report
 # from any source looks like a generic monochrome document, not like a
 # specific previously-seen report.
-_TAB_TITLE_RED   = "#1a1a1a"   # default title color (near-black, NOT red)
+# BODY TEXT ink. Undeclared text is BLACK -- Oracle's device default for
+# glyphs, truth-measured across the corpus (every truth PDF prints 100% of
+# its undeclared glyph spans at (0,0,0)). The old near-black house tones
+# (#1a1a1a / #111111 / #444444) render visibly washed out; a DECLARED colour
+# always overrides these at the emitter.
+_TAB_TITLE_RED   = "#000000"   # default title color (declared colour wins)
 _TAB_BAND_BG     = "#666666"   # neutral mid-gray group-header band
 _TAB_BAND_FG     = "#ffffff"
 _TAB_DETAIL_BG   = "#f5f5f5"   # very light gray detail block
 _TAB_SUBBAND_BG  = "#7a7a7a"
 _TAB_SUBBAND_FG  = "#ffffff"
-_TAB_INK         = "#111111"
-_TAB_INK_SOFT    = "#444444"
+_TAB_INK         = "#000000"
+_TAB_INK_SOFT    = "#000000"
 _TAB_INK_MUTED   = "#777777"
 _TAB_PAPER       = "#ffffff"
 _TAB_RULE_LIGHT  = "#d0d0d0"
@@ -254,6 +260,35 @@ def _attr(obj, name, default=""):
     if val is None or val == "":
         return default
     return val
+
+
+# Oracle horizontal-elasticity values that make the box's WIDTH a run-time
+# property (sized to the formatted content) rather than the declared design
+# width. Mirrors the generator's _declared_align so both views agree.
+_FLUID_WIDTH = ("variable", "contract")
+
+
+def _declared_align(f, default="left"):
+    """The object's EFFECTIVE declared alignment, lower-cased.
+
+    Oracle justifies text inside the box it actually FORMATS, and a fluid
+    width (horizontalElasticity variable/contract) re-sizes that box -- but
+    which edge survives depends on the justification, so only the one-sided
+    ones re-anchor:
+
+      * end/right + fluid -- the box contracts onto its content keeping the
+        declared LEFT edge, so the glyphs print flush at the declared x.
+      * center + fluid -- the contraction is symmetric about the declared
+        box's centre line, which survives, so a centred object still centres
+        inside its DECLARED box.
+
+    Both truth-PDF measured; mirrors the generator's _declared_align.
+    """
+    a = (getattr(f, "align", "") or default).strip().lower()
+    if a not in ("end", "right"):
+        return a
+    he = (getattr(f, "horizontal_elasticity", "") or "").strip().lower()
+    return "start" if he in _FLUID_WIDTH else a
 
 
 def _iter_layout(report):
@@ -1660,12 +1695,17 @@ def _render_header_summary_page(report, page_label="Page 1 — Header summary"):
     run_html = ("<div style=\"margin:0 0 24px;\">"
                 + "".join(run_rows_html_bits) + "</div>")
 
-    # Report Parameters heading
+    # Report Parameters heading. NO italic here (nor on the page-number
+    # furniture below, nor on the in-table action head): the Oracle export
+    # dialect never paints an oblique face -- 16 truth PDFs / 142,831 spans
+    # carry zero italic-flagged spans and reference no *-Oblique font
+    # resource, page furniture included (models.ORACLE_RENDERS_ITALIC).
+    # Printed ink in this preview must show what the truth prints.
     rp_heading = (
         '<div style="text-align:center; margin:14px 0 12px;">'
         '<span style="font-weight:bold; font-size:14px; color:' + _TAB_INK + '; '
-        'border-bottom:2px solid ' + _TAB_INK + '; padding-bottom:2px; '
-        'font-style:italic;">Report Parameters</span></div>'
+        'border-bottom:2px solid ' + _TAB_INK + '; padding-bottom:2px;'
+        '">Report Parameters</span></div>'
     )
 
     # Parameter list (label: value, label on right). Visible params only.
@@ -1752,7 +1792,7 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
         'color:' + _TAB_INK + ';">'
         '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
         + _esc(_sample_for_source("date", 0)) + ' 1:00 PM</span></div>'
-        '<div style="font-style:italic; color:#000079;">Page '
+        '<div style="color:#000079;">Page '
         + str(page_num) + ' of ' + str(total_pages) + '</div></div>'
     )
 
@@ -1783,7 +1823,7 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
         band_fg = _normalize_color(_attr(top_rep, "foreground_color", ""), "#FFFF00")
     else:
         band_bg = _band_bg(_attr(top_rep, "background_color", ""), "#ffffff")
-        band_fg = _normalize_color(_attr(top_rep, "foreground_color", ""), "#111111")
+        band_fg = _normalize_color(_attr(top_rep, "foreground_color", ""), "#000000")
     outer_pairs = _detail_field_pairs(top_rep)
     band_label_parts = []
     for label, src in outer_pairs[:2]:
@@ -1878,7 +1918,7 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
             action_head = (
                 '<div style="display:flex; padding:4px 12px 2px; '
                 'border-top:1px solid #bbbbbb; font-size:12px; '
-                'font-style:italic; color:' + _TAB_INK + ';">'
+                'color:' + _TAB_INK + ';">'
             )
             action_head_bits = []
             for label, _src in action_pairs[:3]:
@@ -2270,7 +2310,7 @@ def _render_multi_section_page(report, sections, page_label):
         '<div style="text-align:right;"><div>Report run on:&nbsp;'
         '<span style="font-weight:normal;">'
         + _esc(_sample_for_source("date", 0)) + ' 1:00 PM</span></div>'
-        '<div style="font-style:italic; color:#000079;">' + _esc(page_label)
+        '<div style="color:#000079;">' + _esc(page_label)
         + '</div></div></div>'
     )
 
@@ -2763,10 +2803,10 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
                  'font-weight:bold;color:' + title_color + ';text-align:center;'
                  'letter-spacing:0.4px;line-height:1.4;">' + _esc(ln) + '</div>')
     head += ('<div style="display:flex;justify-content:space-between;'
-             'align-items:baseline;margin:8px 0 10px;font-size:12px;color:#111;">'
+             'align-items:baseline;margin:8px 0 10px;font-size:12px;color:#000;">'
              '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
              + _esc(_sample_for_source("date", 0)) + ' 1:00 PM</span></div>'
-             '<div style="font-style:italic;color:#000079;">Page ' + str(page_num)
+             '<div style="color:#000079;">Page ' + str(page_num)
              + ' of ' + str(total_pages) + '</div></div>')
 
     def _render_caption_block(group, bg, fg, pad="10px 14px", fs="12px"):
@@ -2804,7 +2844,7 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
     elif band_bg:
         band = _render_caption_block(_outer, band_bg, "#fff")
     else:
-        band = _render_caption_block(_outer, "#ffffff", "#111111", pad="2px 0")
+        band = _render_caption_block(_outer, "#ffffff", "#000000", pad="2px 0")
     # A group whose master band is a COUNT CAPTION ("<grp> : N SITE(S)") instead
     # of data-field rows (a count-banded site listing) yields an EMPTY caption block (the
     # group key has no printed F_ field). Surface the Oracle group-band caption
@@ -2820,7 +2860,7 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
                 _gcap = _resolve_tokens(_ts, sample_idx).strip()
                 break
         if _gcap:
-            band = ('<div style="font-weight:bold;font-size:12px;color:#111;'
+            band = ('<div style="font-weight:bold;font-size:12px;color:#000;'
                     'padding:3px 0 4px;">' + _esc(_gcap) + '</div>')
     # ---- middle-group cards (white) ----
     # A middle group whose fields are ALL internal keys (*_ID) or bare dates
@@ -2834,7 +2874,7 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
         if not any(s and not s.upper().endswith(("_ID", "_DATE", "_DT"))
                    for s in _msrcs):
             continue
-        band += _render_caption_block(_mg, "#f3f3f3", "#111", pad="6px 14px", fs="11px")
+        band += _render_caption_block(_mg, "#f3f3f3", "#000", pad="6px 14px", fs="11px")
 
     # ---- column header strip: each detail column's OWN label at its x ----
     total_w = 7.5
@@ -2843,7 +2883,7 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
     # Navy column-header strip only when the source is themed; a plain report
     # gets plain black-on-white headers with a bottom rule (mirrors the RDL).
     _themed = _report_is_themed(report)
-    _hfg = "#fff" if _themed else "#111"
+    _hfg = "#fff" if _themed else "#000"
     _hwrap = ("height:22px;background:#00008B;" if _themed
               else "height:22px;background:#ffffff;border-bottom:2px solid #444;")
     hdr_html = ""
@@ -2868,7 +2908,7 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
             v = _sample_for_source(s, ri)
             cells += ('<div style="position:absolute;left:' + f"{pct(x):.1f}" + '%;'
                       'width:' + f"{pct(nxt)-pct(x):.1f}" + '%;font-size:11px;'
-                      'padding:3px 4px;color:#111;">' + _esc(v) + '</div>')
+                      'padding:3px 4px;color:#000;">' + _esc(v) + '</div>')
         wrap_html = ""
         for wi, (s, x, y, w) in enumerate(wrap):
             wv = _sample_for_source(s, ri)
@@ -2945,10 +2985,10 @@ def _render_tabbrkleft_page(report, page_num, total_pages):
                  'font-weight:bold;color:' + title_color + ';text-align:center;'
                  'letter-spacing:0.4px;line-height:1.4;">' + _esc(ln) + '</div>')
     head += ('<div style="display:flex;justify-content:space-between;'
-             'align-items:baseline;margin:8px 0 6px;font-size:12px;color:#111;">'
+             'align-items:baseline;margin:8px 0 6px;font-size:12px;color:#000;">'
              '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
              + _esc(_sample_for_source("date", 0)) + ' 1:00 PM</span></div>'
-             '<div style="font-style:italic;color:#000079;">Page ' + str(page_num)
+             '<div style="color:#000079;">Page ' + str(page_num)
              + ' of ' + str(total_pages) + '</div></div>')
 
     # An Oracle 2-rows-per-record table stacks a second field band (same column
@@ -2965,7 +3005,7 @@ def _render_tabbrkleft_page(report, page_num, total_pages):
     # Navy column headers only when the source is themed; plain reports get
     # plain black-on-white headers with a bottom rule (mirrors the RDL).
     _themed = _report_is_themed(report)
-    _hfg = "#fff" if _themed else "#111"
+    _hfg = "#fff" if _themed else "#000"
     _hbg = "#00008B" if _themed else "#ffffff"
     _hb = "" if _themed else "border-bottom:2px solid #444;"
     if not row2:
@@ -2989,7 +3029,7 @@ def _render_tabbrkleft_page(report, page_num, total_pages):
                 v = _sample_for_source(s, ri)
                 cells += ('<div style="position:absolute;left:' + f"{pct(x):.1f}" + '%;width:'
                           + f"{pct(nxt) - pct(x):.1f}" + '%;font-size:11px;padding:3px 4px;'
-                          'color:#111;overflow:hidden;white-space:nowrap;'
+                          'color:#000;overflow:hidden;white-space:nowrap;'
                           'text-overflow:ellipsis;">' + _esc(v) + '</div>')
             det += ('<div style="position:relative;height:22px;border-bottom:1px solid #ccc;">'
                     + cells + '</div>')
@@ -3050,7 +3090,7 @@ def _render_tabbrkleft_page(report, page_num, total_pages):
                 v = _sample_for_source(s, ri)
                 cells += ('<div style="position:absolute;left:' + f"{pct(x):.1f}" + '%;width:'
                           + f"{pct(nxt) - pct(x):.1f}" + '%;font-size:11px;padding:1px 4px;'
-                          'color:#111;overflow:hidden;white-space:nowrap;'
+                          'color:#000;overflow:hidden;white-space:nowrap;'
                           'text-overflow:ellipsis;">' + _esc(v) + '</div>')
             rec += _line(cells)
         det += ('<div style="background:' + bg + ';border-bottom:1px solid #ccc;">'
@@ -3129,14 +3169,14 @@ def _render_grouped_tabular_subtotal_page(report, spec, page_num, total_pages):
                  'font-weight:bold;color:' + title_color + ';text-align:center;'
                  'letter-spacing:0.4px;line-height:1.4;">' + _esc(ln) + '</div>')
     head += ('<div style="display:flex;justify-content:space-between;'
-             'align-items:baseline;margin:8px 0 10px;font-size:12px;color:#111;">'
+             'align-items:baseline;margin:8px 0 10px;font-size:12px;color:#000;">'
              '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
              + _esc(_sample_for_source("date", 0)) + ' 1:00 PM</span></div>'
-             '<div style="font-style:italic;color:#000079;">Page ' + str(page_num)
+             '<div style="color:#000079;">Page ' + str(page_num)
              + ' of ' + str(total_pages) + '</div></div>')
 
     _themed = _report_is_themed(report)
-    _hfg = "#fff" if _themed else "#111"
+    _hfg = "#fff" if _themed else "#000"
     _hwrap = ("height:20px;background:#00008B;" if _themed
               else "height:20px;background:#ffffff;border-bottom:2px solid #444;")
     cols = spec["col_headers"]
@@ -3153,7 +3193,7 @@ def _render_grouped_tabular_subtotal_page(report, spec, page_num, total_pages):
             else:
                 txt = _sample_for_source(val, gi)
             gh += ('<div style="position:absolute;left:' + f"{pct(x):.1f}" + '%;'
-                   'font-size:12px;font-weight:bold;color:#111;white-space:nowrap;">'
+                   'font-size:12px;font-weight:bold;color:#000;white-space:nowrap;">'
                    + _esc(txt) + '</div>')
         block = ('<div style="position:relative;height:20px;margin-top:'
                  + ('14px' if gi else '2px') + ';border-bottom:1px solid #000;">'
@@ -3185,7 +3225,7 @@ def _render_grouped_tabular_subtotal_page(report, spec, page_num, total_pages):
                 v = _dval(s, lbl, gi * 3 + ri)
                 cells += ('<div style="position:absolute;left:' + f"{pct(x):.1f}" + '%;width:'
                           + f"{pct(nxt) - pct(x):.1f}" + '%;font-size:11px;padding:2px 4px;'
-                          'color:#111;overflow:hidden;white-space:nowrap;'
+                          'color:#000;overflow:hidden;white-space:nowrap;'
                           'text-overflow:ellipsis;box-sizing:border-box;">' + _esc(v) + '</div>')
             block += ('<div style="position:relative;height:19px;border-bottom:1px solid #eee;">'
                       + cells + '</div>')
@@ -3198,14 +3238,14 @@ def _render_grouped_tabular_subtotal_page(report, spec, page_num, total_pages):
             for k, val, x, _w in line[:-1]:
                 txt = _resolve_tokens(val, gi) if k == "text" else _sample_for_source(val, gi)
                 ftr += ('<div style="position:absolute;left:' + f"{pct(x):.1f}" + '%;'
-                        'font-size:11px;color:#111;white-space:nowrap;">' + _esc(txt) + '</div>')
+                        'font-size:11px;color:#000;white-space:nowrap;">' + _esc(txt) + '</div>')
             # The total itself is always a number/count (matches the source CS_/
             # CF_/Sum aggregate), never a generic text sample.
             vtxt = (_resolve_tokens(vval, gi) if vk == "text"
                     else _sample_for_source("count", gi))
             ftr += ('<div style="position:absolute;left:' + f"{pct(vx):.1f}" + '%;width:'
                     + f"{pct(total_w) - pct(vx):.1f}" + '%;font-size:11px;font-weight:bold;'
-                    'color:#111;text-align:right;padding-right:4px;border-top:1px solid #000;">'
+                    'color:#000;text-align:right;padding-right:4px;border-top:1px solid #000;">'
                     + _esc(vtxt) + '</div>')
             block += ('<div style="position:relative;height:18px;">' + ftr + '</div>')
         return block
@@ -3270,12 +3310,12 @@ def _render_stacked_list_pages(report, sl):
                  'font-weight:bold;color:' + title_color + ';text-align:center;'
                  'letter-spacing:0.4px;line-height:1.4;">' + _esc(ln) + '</div>')
     head += ('<div style="display:flex;justify-content:space-between;'
-             'align-items:baseline;margin:8px 0 6px;font-size:12px;color:#111;">'
+             'align-items:baseline;margin:8px 0 6px;font-size:12px;color:#000;">'
              '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
              + _esc(_sample_for_source("date", 0)) + ' 1:00 PM</span></div>'
-             '<div style="font-style:italic;color:#000079;">Page 1 of 1</div></div>')
+             '<div style="color:#000079;">Page 1 of 1</div></div>')
 
-    hfg = sl.get("header_fg", "#111111")
+    hfg = sl.get("header_fg", "#000000")
     hbg = sl.get("header_bg", "#ffffff")
     _plain = hbg.lower() in ("#ffffff", "#fff")
     hbord = "border-bottom:2px solid #444;" if _plain else ""
@@ -3315,7 +3355,7 @@ def _render_stacked_list_pages(report, sl):
                 v = _resolve_tokens(s, ri) if kind == "text" else _sample_for_source(s, ri)
                 cells += ('<div style="position:absolute;left:' + f"{pct(cx):.1f}" + '%;width:'
                           + f"{pct(nxt) - pct(cx):.1f}" + '%;font-size:11px;padding:1px 4px;'
-                          'color:#111;overflow:hidden;white-space:nowrap;'
+                          'color:#000;overflow:hidden;white-space:nowrap;'
                           'text-overflow:ellipsis;">' + _esc(v) + '</div>')
             rec += _line(cells)
         det += ('<div style="background:' + bg + ';border-bottom:1px solid #ccc;">'
@@ -3842,7 +3882,7 @@ def _doc_collect_positioned(report, section="section_main", root=None,
                             "bold": bool(getattr(f, "bold", False)),
                             "size": int(getattr(f, "font_size", 0) or 9),
                             "color": _normalize_color(getattr(f, "color", "") or "", "#000000"),
-                            "align": (getattr(f, "align", "") or "left").lower(),
+                            "align": _declared_align(f),
                             "mask": getattr(f, "format_mask", "") or "",
                             "bg": bg})
                     for f in _row_txts:
@@ -3859,8 +3899,7 @@ def _doc_collect_positioned(report, section="section_main", root=None,
                             "size": int(getattr(f, "font_size", 0) or 9),
                             "color": _normalize_color(
                                 getattr(f, "color", "") or "", "#000000"),
-                            "align": (getattr(f, "align", "") or
-                                      "left").lower(),
+                            "align": _declared_align(f),
                             "_margin": False, "rotation": 0.0, "bg": bg})
             return  # tiled in place -- don't also emit this frame's single row
         for f in (g.fields or []):
@@ -3879,7 +3918,7 @@ def _doc_collect_positioned(report, section="section_main", root=None,
                       "underline": bool(getattr(f, "underline", False)),
                       "size": int(getattr(f, "font_size", 0) or 9),
                       "color": col,
-                      "align": (getattr(f, "align", "") or "left").lower(),
+                      "align": _declared_align(f),
                       # A field owned DIRECTLY by the section (not nested in a
                       # frame) is Oracle PAGE-MARGIN chrome -- the title band, a
                       # criteria/date banner, the header rule, the page number --
@@ -4527,7 +4566,13 @@ def _render_generic_document_page(report, idx, page_num, total_pages,
         style = ("position:absolute;z-index:2;left:" + left + ";top:" + top + ";width:" + width
                  + ";font-size:" + str(_fs_px) + "px;"
                  + ("font-weight:bold;" if e["bold"] else "")
-                 + ("font-style:italic;" if e.get("italic") else "")
+                 # A DECLARED italic paints upright: the Oracle export dialect
+                 # never renders an oblique face (models.ORACLE_RENDERS_ITALIC
+                 # -- 16 truth PDFs, 142,831 spans, zero italic, no *-Oblique
+                 # font resource; bold IS honoured). The mockup must show what
+                 # the truth prints, not what the source asked for.
+                 + ("font-style:italic;"
+                    if (e.get("italic") and ORACLE_RENDERS_ITALIC) else "")
                  + ("text-decoration:underline;" if _deco else "")
                  + "color:" + fg + ";text-align:" + align + ";line-height:1.25;"
                  + _bound_css

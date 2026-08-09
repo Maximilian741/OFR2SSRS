@@ -193,6 +193,28 @@ class EmbeddedImage:
 # Layout tree (groups / repeating frames / fields)
 # ---------------------------------------------------------------------------
 
+# ORACLE EXPORT DIALECT: a declared italic is NOT painted.
+#
+# TRUTH MEASUREMENT (whole truth corpus, 2026-08-08): 16 Oracle-produced PDFs
+# ("Oracle PDF driver" / "Oracle12c AS Reports Services"), 142,831 non-blank
+# text spans. ZERO spans carry the italic flag, and the PDFs' own font
+# resource dictionaries only ever declare Helvetica, Helvetica-Bold,
+# Times-Roman, Times-Bold, Courier-Bold and itcavantgardegothic -- not one
+# *-Oblique / *-Italic face is even referenced.
+#
+# Per-object cross-reference over the 5 truth-paired sources that declare
+# italic="yes" (35 declared-italic objects; 16 carry static text that can be
+# located in the truth): ALL 16 render UPRIGHT -- e.g. an italic+bold total
+# caption prints Helvetica-Bold, an italic remittance note prints Helvetica.
+# Weight is NOT dropped by the same driver (32,604 bold spans), so this is
+# specifically an italic-is-ignored dialect, not "styling is ignored".
+#
+# The declaration is still PARSED (LayoutField.italic below, and the per
+# segment dicts) so the model stays lossless and a future dialect that does
+# paint oblique only has to flip this flag; the emitters consult it instead
+# of the raw declaration.
+ORACLE_RENDERS_ITALIC = False
+
 # LayoutField.kind values:
 #   "text"  - boilerplate text (literal, may contain &TOKEN substitutions)
 #   "field" - data-bound field (source = column / formula / placeholder)
@@ -247,12 +269,47 @@ class LayoutField:
     # border on the printed output; "transparent"/"" draws none. Reproduces
     # boxed form grids 1:1.
     line_pattern: str = ""
+    # Oracle <visualSettings lineWidth="N">: the DECLARED stroke weight of
+    # this object's own edge, in points; 0.0 when the attribute is absent.
+    # The zero is meaningful, not missing data -- a no-lineWidth edge is
+    # Oracle's device hairline (truth exports stroke it at width 0), while
+    # a declared width strokes 1:1. Kept separate from ``border_width``,
+    # which drawn <rect>/<line> graphics use with a printable fallback.
+    line_width: float = 0.0
+    # Oracle <visualSettings dash="..."> — the DECLARED stroke pattern of
+    # this object's edge ("dot", "dash", "longDash", ...). Truth-measured:
+    # a dash declaration halves the ink Oracle paints, because the export
+    # strokes it with a real PDF dash array ("[ 1 ] 0" for dash="dot" on
+    # two independent reports, at the declared lineWidth) instead of a
+    # solid bar. Empty = a continuous stroke.
+    line_dash: str = ""
+    # hideXBorder dialect: comma-joined edges of a solid-linePattern box
+    # that do NOT paint (e.g. "left,right,top" = only the bottom rule).
+    hidden_edges: str = ""
     # Oracle <generalLayout verticalElasticity="..."> for a <text>: "variable"/
     # "expand" = the box GROWS to fit its content at run time (flowing prose);
     # "contract"/"fixed"/"" = the box is sized to its content and does NOT grow.
     # Used to decide whether stacked multi-font segments should collapse into one
     # TextRun (fixed boxes) vs. be left to flow+grow (growable full-width prose).
     vertical_elasticity: str = ""
+    # VERTICAL ANCHOR inside the declared box.  Oracle TOP-anchors text: the
+    # first line's ascent sits at the declared box top and any leftover height
+    # is slack BELOW it (truth-measured -- a declared title/subtitle pair keeps
+    # its declared top-to-top distance no matter how tall either box is).  The
+    # paper-layout dialect carries NO vertical-justify attribute at all (a
+    # census of 314 real exports found only verticalElasticity, which is a
+    # GROWTH rule, not an anchor; the `valign` hits all live inside <webSource>
+    # HTML templates), so this stays "" on every real export and the generator
+    # anchors Top.  Parsed anyway so a dialect that DOES declare one is honored
+    # instead of guessed at.  Values: "" | top | middle | bottom.
+    vertical_align: str = ""
+    # Oracle <generalLayout horizontalElasticity="...">: "variable"/"contract"
+    # = the box is SIZED TO ITS CONTENT at run time (its declared width is only
+    # a design-time hint), so a declared end/right/center justification has no
+    # fixed box left to justify against and the text prints at the box's left
+    # edge. "expand"/"fixed"/"" = the declared width is real and the declared
+    # justification applies inside it.
+    horizontal_elasticity: str = ""
     # Oracle <generalLayout><conditionalFormat><formatException>: declarative
     # conditional formatting, in DOCUMENT ORDER (Oracle applies the first
     # matching exception). Each entry:
@@ -263,6 +320,32 @@ class LayoutField:
     # The bold/colour/fill lives ONLY here -- the paired format-trigger PL/SQL
     # returns just TRUE/FALSE, so the trigger path can never recover it.
     conditional_formats: list = field(default_factory=list)
+    # True when the object was authored inside the section's <margin> band —
+    # Oracle's page chrome (title, logo, run-date, page number). Margin
+    # coordinates are PAPER-relative, unlike body coordinates which restart
+    # at the body origin; emitters use this to build the PageHeader/
+    # PageFooter from the declared layout instead of synthesizing one.
+    in_margin: bool = False
+    # Oracle ``templateSection="<section>"``: the object is RESTRICTED to that
+    # section's pages. A report's sections each print their own margin band,
+    # so a page-number/run-date stamp declared for the main section prints on
+    # main-section pages only — never on the header section's criteria page.
+    # Empty = undeclared, i.e. the object prints on every page of its band.
+    template_section: str = ""
+    # Oracle ``<advancedLayout printObjectOnPage="...">`` on a LAYOUT OBJECT
+    # (the LayoutGroup twin of the same attribute): which of the pages its
+    # enclosing object spans this object prints on.
+    #   ""/"defaultPage"  - wherever the flow puts it (the default);
+    #   "allPage"         - reprint at the top of every page it spans;
+    #   "firstPage"       - the first page of the enclosing object only —
+    #                       which is what a body flow already does, so it
+    #                       needs no special emission;
+    #   "allButFirstPage" - the CONTINUATION marker: absent from page one and
+    #                       printed on every later page. A body item cannot
+    #                       express that (SSRS forbids Globals!PageNumber
+    #                       outside the page bands), so the emitter moves such
+    #                       an object into the page band and gates it there.
+    print_on_page: str = ""
 
 
 # LayoutGroup.kind values:
@@ -287,8 +370,26 @@ class LayoutGroup:
     width: float = 0.0
     height: float = 0.0
     # Border attributes from <visualSettings lineWidth="N" linePattern="solid"/>
+    # NB: ``border_width`` is defaulted to 1.0 by the parser whenever a
+    # drawing linePattern is present but no lineWidth attribute is -- it
+    # doubles as a "this edge draws" flag, so it can NOT answer "was a
+    # width declared?".
     border_width: float = 0.0
     border_pattern: str = ""
+    # RAW <visualSettings lineWidth="N"> exactly as declared; 0.0 when the
+    # attribute is absent. Same dialect as LayoutField.line_width: the
+    # zero is meaningful, not missing data -- a no-lineWidth box edge is
+    # Oracle's device hairline (truth exports stroke it at width 0) while
+    # a declared width strokes 1:1. Kept beside ``border_width`` precisely
+    # because that field's 1.0 fallback erases the distinction.
+    line_width: float = 0.0
+    # Oracle <visualSettings dash="..."> on the frame's own edge. Same
+    # dialect as LayoutField.line_dash: a declared dash strokes as a real
+    # PDF dash array, painting roughly half the ink of a solid edge.
+    line_dash: str = ""
+    # hideXBorder dialect: comma-joined edges of a solid-linePattern box
+    # that do NOT paint (e.g. "left,right,top" = only the bottom rule).
+    hidden_edges: str = ""
     # Color/style attributes captured from <visualSettings> on the frame
     background_color: str = ""
     foreground_color: str = ""
@@ -304,6 +405,10 @@ class LayoutGroup:
     # The 6i style instead nests kind="matrix_col"/"matrix_row"/
     # "matrix_cell" child groups whose fields carry the dimensions/cells.
     matrix_attrs: Dict[str, str] = field(default_factory=dict)
+    # Oracle <advancedLayout printObjectOnPage="...">: page-repeat scope
+    # ("allPage" = reprint this object at the top of EVERY page the
+    # enclosing object spans — the page-repeating column-header idiom).
+    print_on_page: str = ""
     # Oracle <generalLayout pageBreakBefore="yes"/>: this frame starts a NEW
     # physical page. Load-bearing for reports that pack several logical pages
     # (e.g. a criteria cover + a stat table) into one <section>; without it
@@ -319,11 +424,32 @@ class LayoutGroup:
     # / "acrossDown" (tile labels across then down -> the mailing-label
     # multi-up shape). Drives the label archetype.
     print_direction: str = ""
+    # Oracle <repeatingFrame vertSpaceBetweenFrames="0.0500">: the declared
+    # blank GUTTER Oracle leaves between two consecutive instances of this
+    # frame. The record's row PITCH is therefore the frame's declared
+    # height PLUS this gap (truth-PDF measured to 0.01pt), and a banded
+    # fill paints the declared height only -- the gutter stays unpainted.
+    # 0 = not declared (frames butt together).
+    vert_space: float = 0.0
     # repeatingFrame maxRecordsPerPage: how many master records Oracle prints per
     # physical page. ==1 means ONE record fills a whole page -- the positional
     # FORM/invoice shape (a vendor block + line-item table per record), as
     # opposed to a tabular list (many records stacked per page). 0 = unset.
     max_records_per_page: int = 0
+    # Section groups only: the declared <body width= height=> of the section
+    # (the printable sheet MINUS the margin chrome). A paper-like body height
+    # (>= 8in) is the author saying "this section prints on a normal sheet" --
+    # per-record content taller than that must PAGINATE across sheets, not
+    # grow the paper (the Oracle-rendered truth PDFs stay at the declared
+    # paper size and flow the record). 0 = not declared.
+    body_width: float = 0.0
+    body_height: float = 0.0
+    # Section groups only: the declared <body><location x= y=/> -- the body
+    # rectangle's ORIGIN in PAPER coordinates, i.e. the sheet's own left/top
+    # margin. Body object coordinates restart at that origin, so a body object
+    # prints at location + its own declared x/y (truth-measured on the
+    # Oracle-rendered PDFs to 0.0003in). () when the export declares none.
+    body_location: tuple = ()
 
 
 # ---------------------------------------------------------------------------

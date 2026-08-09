@@ -505,14 +505,19 @@ def test_summary_section_value_columns_right_aligned():
     after the label) must be RIGHT-aligned -- matching the band's right-aligned
     "Number"/"Fees" caption and Oracle's numeric right-justify (verified against
     an accounting/summary report truth, where the counts align right). The label
-    column (col 0) stays left."""
+    column (col 0) stays left.
+
+    This positional right-align is the DEFAULT, not an override: a column whose
+    layout field declares its own justification is drawn as declared
+    (``_col_ta``). Both spellings below keep ``"Right"`` as the fallback that
+    applies when the layout declares nothing."""
     import inspect
     from converter.generators.rdl import _build_section_tablix as _f
     src = inspect.getsource(_f)
     assert '"Right" if ci > 0 else "Left"' in src, (
         "summary-section DETAIL value cells must right-align cols[1:]"
     )
-    assert "=Sum(Val(" in src and '_falign = "Right"' in src, (
+    assert "=Sum(Val(" in src and '_falign = _col_ta[i] or "Right"' in src, (
         "summary-section TOTAL value cells must Sum(Val(...)) and right-align "
         "(not Center)"
     )
@@ -625,19 +630,145 @@ def test_parser_reads_vertical_elasticity():
     assert _layout_field_from_element(chief).vertical_elasticity == "contract"
 
 
+def test_inline_html_markup_tags_never_paint():
+    """Oracle web-mode boilerplate embeds literal <b>/<i>/<u>/<br> tags between
+    styled segments (webSettings containHTMLTags); the paper renderer never
+    paints them (truth PDFs carry ZERO literal tags) — the segment <font>
+    attributes already hold the styling. The parser must strip exactly the
+    recognizable inline-markup tag forms (b/i/u/em/strong, and <br> -> newline)
+    while leaving legitimate angle-bracket prose untouched."""
+    import xml.etree.ElementTree as ET
+    from converter.parsers.oracle_xml import _layout_field_from_element
+
+    el = ET.fromstring(
+        '<text name="B_ACCT"><geometryInfo x="0" y="0" width="2" height="0.2"/>'
+        '<textSegment><font face="Arial" size="8"/><string>Account &lt;b&gt;</string></textSegment>'
+        '<textSegment><font face="Arial" size="8" bold="yes"/><string>&amp;CP_X</string></textSegment>'
+        '<textSegment><font face="Arial" size="8"/><string>&lt;/b&gt; (Remediation)&lt;br&gt;next</string></textSegment>'
+        '</text>')
+    lf = _layout_field_from_element(el)
+    joined = lf.text + "".join(s["text"] for s in (lf.segments or []))
+    assert "<b>" not in joined and "</b>" not in joined, (
+        "literal inline-markup tags must never survive into paintable text")
+    assert "\nnext" in lf.text, "<br> must translate to a newline, not vanish"
+
+    # Guard: legitimate less-than prose is NEVER eaten — an <ERROR - ...>
+    # sentinel and a math comparison must survive byte-for-byte.
+    prose = ET.fromstring(
+        '<text name="B_ERR"><geometryInfo x="0" y="0" width="2" height="0.2"/>'
+        '<textSegment><font face="Arial" size="8"/>'
+        '<string>&lt;ERROR - MISSING ADDRESS&gt; x &lt; 5 &lt;brains&gt;</string></textSegment>'
+        '</text>')
+    lf2 = _layout_field_from_element(prose)
+    assert "<ERROR - MISSING ADDRESS>" in lf2.text
+    assert "x < 5" in lf2.text
+    assert "<brains>" in lf2.text, "only exact b/i/u/em/strong/br tags strip"
+
+
+def test_exact_fit_label_partial_widens_into_gap_and_strips_padding():
+    """Oracle sizes some labels EXACTLY to their text (box width == metric text
+    width); SSRS's 2pt+2pt padding alone then clips the final glyph, and the
+    free gap before the right neighbour is smaller than the fully-padded widen
+    target. The net must still rescue the label: widen INTO the available gap
+    (never past the neighbour's guard gap) and strip the paddings."""
+    import xml.etree.ElementTree as ET
+    from converter.generators.rdl import (
+        _widen_clipped_constant_labels, _AFM_HELVETICA_BOLD)
+
+    text = "CUSTOMER NO"
+    bare = sum(_AFM_HELVETICA_BOLD[ord(c) - 32] for c in text) / 1000.0 * 12 / 72.0
+    L = 0.06
+    W = round(bare - 0.005, 4)          # exact-fit minus a hair -> clips w/ padding
+    nb_left = round(L + bare + 0.05, 4)  # gap fits bare text but NOT padded target
+    rdl = (
+        f'<?xml version="1.0"?><Report xmlns="{_RDL_NS}"><Body><ReportItems>'
+        f'<Textbox Name="L"><CanGrow>false</CanGrow><Paragraphs><Paragraph>'
+        f'<TextRuns><TextRun><Value>="{text}"</Value>'
+        f'<Style><FontFamily>Arial</FontFamily><FontSize>12pt</FontSize>'
+        f'<FontWeight>Bold</FontWeight></Style></TextRun></TextRuns>'
+        f'<Style><TextAlign>Left</TextAlign></Style></Paragraph></Paragraphs>'
+        f'<Style><PaddingLeft>2pt</PaddingLeft><PaddingRight>2pt</PaddingRight></Style>'
+        f'<Top>0in</Top><Left>{L}in</Left><Width>{W}in</Width><Height>0.2in</Height>'
+        f'</Textbox>'
+        f'<Textbox Name="NR"><CanGrow>false</CanGrow><Paragraphs><Paragraph>'
+        f'<TextRuns><TextRun><Value>=Fields!X.Value</Value>'
+        f'<Style><FontFamily>Arial</FontFamily><FontSize>12pt</FontSize></Style>'
+        f'</TextRun></TextRuns></Paragraph></Paragraphs>'
+        f'<Top>0in</Top><Left>{nb_left}in</Left><Width>0.5in</Width>'
+        f'<Height>0.2in</Height></Textbox>'
+        f'</ReportItems><Height>1in</Height></Body><Width>8in</Width></Report>')
+    root = ET.fromstring(rdl)
+    _widen_clipped_constant_labels(root)
+    got_w = _label_width(root)
+    assert got_w > W + 1e-6, "exact-fit label must partial-widen into the gap"
+    assert got_w + 1e-6 >= bare, "widened box must fit the bare text"
+    assert L + got_w <= nb_left - 0.04 + 1e-6, (
+        "partial widen must respect the neighbour guard gap")
+    pads = [p.text for p in root.iter(f"{{{_RDL_NS}}}PaddingLeft")
+            if p is not None] + [p.text for p in root.iter(f"{{{_RDL_NS}}}PaddingRight")]
+    lab = [tb for tb in root.iter(f"{{{_RDL_NS}}}Textbox") if tb.get("Name") == "L"][0]
+    lab_pads = [p.text for p in lab.iter(f"{{{_RDL_NS}}}PaddingLeft")] + \
+               [p.text for p in lab.iter(f"{{{_RDL_NS}}}PaddingRight")]
+    assert lab_pads and all(p == "0pt" for p in lab_pads), (
+        "paddings must be stripped so the bare text truly fits")
+
+
 def test_segment_collapse_protects_growable_wide_prose():
-    """Multi-font Oracle <text> boxes must collapse into ONE TextRun (inline
-    space-join on a one-line box, vbCrLf-join when stacked) so an inline
-    label+value like "expires <date>" or a name-over-address block is not split
-    into stacked CanGrow=false <Paragraph>s that overflow + clip the box. A
-    GROWABLE, ~full-printable-width prose box (verticalElasticity variable/expand)
-    is the exception -- it must keep flowing, never be folded onto one fixed line.
-    Source-locks the permit-certificate defect 3+4 fix + its letter-body guard."""
-    import inspect
-    from converter.generators.rdl import _emit_field_textbox as _f
-    src = inspect.getsource(_f)
-    assert "vertical_elasticity" in src
-    assert "_growable" in src and "_wide" in src and "_keep_stacked" in src, (
-        "segment collapse must gate on growable + full-width to protect prose bodies"
-    )
-    assert "vbCrLf" in src
+    """A multi-segment Oracle <text> must never be split into stacked
+    CanGrow=false <Paragraph>s that overflow + clip the box: an inline
+    label+value like "expires <date>" keeps its segments on ONE line, while a
+    GROWABLE, ~full-printable-width prose body keeps FLOWING and is never
+    folded onto one fixed line.
+
+    This used to be a source-token grep over _emit_field_textbox
+    (_growable / _wide / _keep_stacked).  That is blind to what actually
+    ships -- it passes whether or not the emitter is correct -- and the
+    mechanism it named has since been replaced: segments now flow as INLINE
+    RUNS inside a paragraph, and the *declaration's* own line breaks decide
+    the paragraph count (truth-measured; see test_inline_text_segments).
+    The replacement asserts the emitted RDL, which is strictly stronger:
+    every property the grep stood for is now checked on the output.
+    """
+    import importlib.util
+    import xml.etree.ElementTree as ET
+    from converter import convert
+
+    # Load the sibling module by path: the tests directory is not a package,
+    # so a plain import is not portable across pytest import modes.
+    _p = Path(__file__).with_name("test_inline_text_segments.py")
+    _spec = importlib.util.spec_from_file_location("_inline_seg_fixture", _p)
+    _mod = importlib.util.module_from_spec(_spec)
+    _spec.loader.exec_module(_mod)
+    NS, _source_xml = _mod.NS, _mod._source_xml
+
+    root = ET.fromstring(
+        convert(_source_xml().encode(), "INLINESEG.xml")["rdl_xml"].encode())
+    boxes = []
+    for tb in root.iter(f"{NS}Textbox"):
+        boxes.append([[(r.find(f"{NS}Value").text or "")
+                       for r in p.findall(f".//{NS}TextRun")]
+                      for p in tb.findall(f".//{NS}Paragraph")])
+
+    def _box(fragment):
+        hits = [b for b in boxes
+                if any(fragment in v for p in b for v in p)]
+        assert len(hits) == 1, f"{fragment!r} -> {len(hits)} boxes"
+        return hits[0]
+
+    # A one-line-tall box: its two declared segments stay on ONE line, so
+    # nothing overflows the box and clips the value.
+    short = _box("expires")
+    assert len(short) == 1, (
+        f"a one-line box must emit ONE paragraph, got {len(short)} stacked "
+        f"paragraphs -- they overflow a CanGrow=false box and clip it")
+    assert len(short[0]) > 1, "the declared segments must survive as runs"
+
+    # A growable, full-width prose body keeps flowing: it is NOT folded onto
+    # one line, and each DECLARED line is one paragraph.
+    prose = _box("any handling levied on the account.")
+    assert len(prose) == 1 and "vbCrLf" in prose[0][0], (
+        "a growable prose body must keep its declared line breaks")
+    flowing = _box("You may mail your payment")
+    assert len(flowing) == 1 and len(flowing[0]) == 3, (
+        "a sentence with no declared break must flow as inline runs of ONE "
+        f"paragraph; got {len(flowing)} paragraphs")
