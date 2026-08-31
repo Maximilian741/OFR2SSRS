@@ -190,3 +190,153 @@ def test_sheet_still_contains_oversize_declared_chrome():
     assert chrome_right >= 9.5 - 1e-9, (
         f"emitted chrome reaches only {chrome_right}in: a declared 9.5in-wide "
         "footer rule must keep its declared span")
+
+
+# ---------------------------------------------------------------------------
+# OVERSIZED LOGICAL SHEET: margin chrome authored past the physical cap
+# ---------------------------------------------------------------------------
+# Wild-corpus defect class (round 10): a section may declare a LOGICAL sheet
+# far wider than any emittable physical page (PageWidth caps at 17in), and
+# its <margin> band is authored in THAT sheet's coordinates -- a company-name
+# title centred on a 50in logical page sits at x~23.5in, past every physical
+# paper edge. Emitting it 1:1 put the string off-paper: zero ink in the
+# render, while the synthesized mockup heads dropped every margin string
+# except the one title candidate. The rule: a chrome box that overhangs the
+# emitted paper keeps its PAPER AXIS (same fraction of the sheet), a box
+# that already fits keeps its declared 1:1 position.
+
+
+def _oversheet_xml() -> bytes:
+    """Warehouse-style wide grid: 50in logical sheet, margin strings centred
+    on it (x=23.5), plus a left-anchored label+date pair that DOES fit."""
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<report name="STOCK_GRID" DTDVersion="9.0.2.0.10">
+  <data>
+    <dataSource name="Q_MAIN">
+      <select canParse="no"><![CDATA[SELECT ZONE_NAME, BIN_CODE, UNITS FROM STOCK]]></select>
+      <group name="G_MAIN">
+        <dataItem name="ZONE_NAME" datatype="vchar2" columnOrder="1" defaultLabel="Zone"/>
+        <dataItem name="BIN_CODE" datatype="vchar2" columnOrder="2" defaultLabel="Bin"/>
+        <dataItem name="UNITS" datatype="number" columnOrder="3" defaultLabel="Units"/>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+  <section name="main" width="50.00000" height="163.00000" orientation="landscape">
+    <body width="49.00000" height="161.00000">
+      <repeatingFrame name="R_G_MAIN" source="G_MAIN" printDirection="down"
+       minWidowRecords="1" columnMode="no">
+        <geometryInfo x="0.00000" y="0.50000" width="48.90000" height="0.25000"/>
+        <generalLayout verticalElasticity="expand"/>
+        <field name="F_ZONE_NAME" source="ZONE_NAME" minWidowLines="1" alignment="start">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="0.00000" y="0.50000" width="1.40000" height="0.25000"/></field>
+        <field name="F_BIN_CODE" source="BIN_CODE" minWidowLines="1" alignment="start">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="1.50000" y="0.50000" width="2.90000" height="0.25000"/></field>
+        <field name="F_UNITS" source="UNITS" minWidowLines="1" alignment="end">
+          <font face="Arial" size="10"/>
+          <geometryInfo x="4.50000" y="0.50000" width="0.75000" height="0.25000"/></field>
+      </repeatingFrame>
+      <text name="B_ZONE_LBL" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="0.00000" y="0.25000" width="1.40000" height="0.25000"/>
+        <textSegment><font face="Arial" size="10" bold="yes"/>
+          <string><![CDATA[Zone]]></string></textSegment>
+      </text>
+    </body>
+    <margin>
+      <text name="B_CO" minWidowLines="1">
+        <textSettings spacing="0"/>
+        <geometryInfo x="23.50000" y="0.11000" width="3.00000" height="0.24000"/>
+        <textSegment><font face="Tahoma" size="14" bold="yes"/>
+          <string><![CDATA[Interstate Fixture Works]]></string></textSegment>
+      </text>
+      <text name="B_ADDR" minWidowLines="1">
+        <textSettings spacing="0"/>
+        <geometryInfo x="23.75000" y="0.40000" width="2.50000" height="0.14000"/>
+        <textSegment><font face="Tahoma" size="8"/>
+          <string><![CDATA[12 Depot Yard Road, Plainsboro]]></string></textSegment>
+      </text>
+      <text name="B_TILL" minWidowLines="1">
+        <textSettings spacing="0"/>
+        <geometryInfo x="0.47000" y="0.69000" width="0.50000" height="0.19000"/>
+        <textSegment><font face="Tahoma" size="11"/>
+          <string><![CDATA[As of :]]></string></textSegment>
+      </text>
+      <field name="F_DT" source="CurrentDate" minWidowLines="1"
+       formatMask="MM/DD/RRRR" spacing="0" alignment="center">
+        <font face="Tahoma" size="11"/>
+        <geometryInfo x="1.01000" y="0.69000" width="1.35000" height="0.19000"/>
+      </field>
+    </margin>
+  </section>
+  </layout>
+</report>""".encode()
+
+
+def _mchrome_box(rdl: str, value_marker: str):
+    """(Left, Width) of the MChrome textbox whose Value carries the marker."""
+    for m in re.finditer(r'<Textbox Name="MChrome_[^"]*">', rdl):
+        block_end = rdl.find("</Textbox>", m.start())
+        block = rdl[m.start():block_end]
+        if value_marker in block:
+            left = re.search(r"<Left>([0-9.]+)in</Left>", block)
+            width = re.search(r"<Width>([0-9.]+)in</Width>", block)
+            if left and width:
+                return float(left.group(1)), float(width.group(1))
+    return None
+
+
+def test_oversheet_chrome_keeps_its_paper_axis_on_the_capped_page():
+    """Chrome authored past the physical cap must still ink: it lands at the
+    SAME FRACTION of the emitted sheet it held on the declared one (a centred
+    company line stays centred), and the containment invariant holds."""
+    rdl = convert(_oversheet_xml())["rdl_xml"]
+    pw, left, right, _w = _page_geometry(rdl)
+    assert pw <= 17.0 + 1e-9, f"physical cap not engaged (PageWidth {pw}in)"
+    chrome_right = _emitted_chrome_right_edge(rdl)
+    assert chrome_right > 0.0, "no page chrome was emitted to measure"
+    assert pw - left - right >= chrome_right - 1e-9, (
+        f"printable width {pw - left - right}in does not reach the emitted "
+        f"chrome's {chrome_right}in right edge -- the margin strings are "
+        "off-paper and never ink (the round-10 warehouse-grid class)")
+    co = _mchrome_box(rdl, "Interstate Fixture Works")
+    assert co is not None, "the margin company string was not emitted at all"
+    co_center = left + co[0] + co[1] / 2.0
+    # declared centre = (23.5 + 1.5) / 50 = exactly half the logical sheet
+    assert abs(co_center - pw / 2.0) <= 0.05, (
+        f"company line centre {co_center:.3f}in on a {pw}in sheet: a box "
+        "centred on the declared logical sheet must stay on that axis")
+    addr = _mchrome_box(rdl, "12 Depot Yard Road, Plainsboro")
+    assert addr is not None, "the margin address string was not emitted"
+    assert addr[0] + addr[1] <= pw - left - right + 1e-9, (
+        "address line clipped off the printable band")
+
+
+def test_oversheet_fitting_chrome_stays_declared_one_to_one():
+    """The axis remap is for OVERHANGING boxes only: a left-anchored label
+    that already fits the emitted paper keeps its declared position (sliding
+    it collided the label with its companion date box)."""
+    rdl = convert(_oversheet_xml())["rdl_xml"]
+    _pw, left, _right, _w = _page_geometry(rdl)
+    till = _mchrome_box(rdl, "As of :")
+    assert till is not None, "the fitting margin label was not emitted"
+    assert abs((left + till[0]) - 0.47) <= 0.02, (
+        f"fitting chrome moved: declared paper x 0.47in, emitted "
+        f"{left + till[0]:.3f}in -- boxes that fit must stay 1:1")
+
+
+def test_oversheet_margin_strings_reach_the_mockup_head_once():
+    """Mockup arm of the same class: the synthesized heads printed only the
+    ONE title candidate, so the margin address line never reached ink. Every
+    top-band margin static text must ink exactly once (no round-10
+    duplicate emission either)."""
+    res = convert(_oversheet_xml())
+    html = res["mockup_html"]
+    n_co = html.count("Interstate Fixture Works")
+    n_addr = html.count("12 Depot Yard Road, Plainsboro")
+    assert n_co == 1, (
+        f"margin company string ink count {n_co} (want exactly 1)")
+    assert n_addr == 1, (
+        f"margin address string ink count {n_addr} (want exactly 1)")

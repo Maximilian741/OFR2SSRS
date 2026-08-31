@@ -307,6 +307,16 @@ Three independent validators, all returning issues in the shape
   * `rdl.linked_detail_not_rendered.*` — a linked child query is bound to
     no region. AMBER: auxiliary children are a legitimate Oracle pattern,
     but a dropped detail section must still be visible.
+  * `rdl.unresolved_token_blank` — a declared `&TOKEN` caption that no
+    parameter, column or translatable formula satisfies is emitted as an
+    empty value, so it never prints as raw ink. AMBER, and **the verdict
+    moves**: a blanked caption and a caption that was never declared look
+    the same in the PDF, so silence here is a fidelity loss the operator
+    cannot see. Measured over the campaign corpus, 11 of 346 sources move
+    READY → AMBER on this rule, and on the production reports among them
+    the original Oracle output prints visible text at the blanked
+    position. Candidates are confirmed against the FINISHED document, so
+    the audit can never name more blanked items than the RDL carries.
 
 * `layout_audit.py` — a data-independent geometry auditor that flags
   clipping and overflow risk before any data is bound; its findings merge

@@ -96,3 +96,29 @@ def test_rdf_only_bundle_gets_rwconverter_hint():
     out = convert_bundle([("LEGACY.rdf", b"\x00\x01binarygarbage")])
     assert out.get("error") == "no_convertible_artifacts"
     assert "rwconverter" in (out.get("rdf_hint") or "")
+
+
+def test_a_failed_blank_measure_is_named_not_shown_as_a_clean_render():
+    """A measurement that FAILED must not read as a report with no blanks.
+
+    ``_measure_pdf`` reports ``blank_pages: []`` when the shared strict
+    measure raises -- the exact value a clean render produces -- so the
+    assessment sheet used to print the same "rendered, N pages" line either
+    way. The blank measure now raises loudly on a fault (see
+    ``blank_measure.InkMeasurementError``), and this is the caller that has to
+    say so rather than absorb it.
+    """
+    clean = {"results": [{"name": "A", "ok": True, "verdict": "READY",
+                          "effort": "automatic", "render_ok": True,
+                          "pages": 4, "blank_pages": []}],
+             "rendered": True, "tier": "community"}
+    broke = {"results": [{"name": "A", "ok": True, "verdict": "READY",
+                          "effort": "automatic", "render_ok": True,
+                          "pages": None, "blank_pages": [],
+                          "measure_error": "InkMeasurementError: boom"}],
+             "rendered": True, "tier": "community"}
+
+    assert "BLANK MEASURE FAILED" not in build_assessment_html(clean)
+    html = build_assessment_html(broke)
+    assert "BLANK MEASURE FAILED" in html
+    assert "InkMeasurementError" in html

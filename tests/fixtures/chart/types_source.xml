@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic Oracle Reports PAPER-layout fixture: a report declaring several
+     GRAPH TYPES at once. Shapes it pins down, all straight out of the Oracle
+     graph DTD (graphType enumeration, LegendArea, O1Title/Y1Title/Y2Title,
+     SeriesItems/Series):
+       * a graph element with geometryInfo and a graphDefinition CDATA holding
+         the real rw:graph src/groups/dataValues plus the Graph config comment
+       * graphType tokens from three different families (vertical bar, line,
+         pie) plus one declaring a feature with no faithful RDL analog
+       * declared chart title, category-axis title, value-axis title, legend
+         position and per-series colour
+       * a MULTI-VALUE binding (two dataValues columns -> two series)
+     Data is generic (regions/units/amounts); no client content. -->
+<report name="CHART_TYPES" DTDVersion="9.0.2.0.10">
+  <data>
+    <dataSource name="Q_1">
+      <select><![CDATA[SELECT region, units, amount FROM sales_by_region]]></select>
+      <group name="G_REGION">
+        <dataItem name="REGION" datatype="vchar2" width="30"/>
+        <dataItem name="UNITS" datatype="number" precision="9"/>
+        <dataItem name="AMOUNT" datatype="number" precision="12"/>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+    <section name="main">
+      <body width="7.5" height="10.0">
+        <frame name="M_HDR">
+          <geometryInfo x="0" y="0" width="6.0" height="0.25"/>
+          <text name="L_REGION"><geometryInfo x="0" y="0" width="2.0" height="0.2"/>
+            <textSegment><string><![CDATA[Region]]></string></textSegment></text>
+          <text name="L_UNITS"><geometryInfo x="2.0" y="0" width="2.0" height="0.2"/>
+            <textSegment><string><![CDATA[Units]]></string></textSegment></text>
+        </frame>
+        <repeatingFrame name="R_G_REGION" source="G_REGION">
+          <geometryInfo x="0" y="0.25" width="6.0" height="0.3"/>
+          <field name="F_REGION" source="REGION">
+            <geometryInfo x="0" y="0.25" width="2.0" height="0.2"/></field>
+          <field name="F_UNITS" source="UNITS">
+            <geometryInfo x="2.0" y="0.25" width="2.0" height="0.2"/></field>
+        </repeatingFrame>
+
+        <graph name="CT_BAR">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_BAR" src="G_REGION" groups="REGION" dataValues="UNITS">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="BAR_VERT_CLUST">
+<Title text="Units by Region" visible="true"/>
+<O1Title text="Region" visible="true"/>
+<Y1Title text="Units" visible="true"/>
+<LegendArea automaticPlacement="AP_NEVER" position="LAP_BOTTOM"/>
+<SeriesItems><Series id="0" color="#3366cc"/></SeriesItems>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_LINE">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_LINE" src="G_REGION" groups="REGION" dataValues="AMOUNT">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="LINE_VERT_ABS">
+<Title text="Amount Trend" visible="true"/>
+<Y1Title text="Amount" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_PIE">
+          <geometryInfo x="0.25" y="0.00" width="4.00" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_PIE" src="G_REGION" groups="REGION" dataValues="UNITS">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="PIE">
+<Title text="Unit Share" visible="true"/>
+<LegendArea position="LAP_RIGHT"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_DUAL">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_DUAL" src="G_REGION" groups="REGION" dataValues="UNITS,AMOUNT">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="BAR_VERT_STACK_2Y">
+<Title text="Units and Amount" visible="true"/>
+<Y1Title text="Units" visible="true"/>
+<Y2Title text="Amount" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+      </body>
+    </section>
+  </layout>
+</report>

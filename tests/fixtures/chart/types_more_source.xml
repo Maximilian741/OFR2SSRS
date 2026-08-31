@@ -1,0 +1,199 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic Oracle Reports PAPER-layout fixture: the graph families the
+     first types fixture leaves untested, so that EVERY branch of the
+     graphType decomposition has a fixture that is actually RENDERED.
+
+     The Oracle graphType vocabulary is compositional -- FAMILY[_ORIENTATION]
+     [_STACKING][_2Y] -- and the mapping decomposes it rather than matching a
+     table, so the branches are: the horizontal/vertical bar split, the three
+     stacking values (absolute / stacked / percent), the area family, the ring
+     family, and the fallback for a family the RDL Chart cannot draw. Those are
+     the tokens declared here; the vertical-bar, line, pie and stacked cases
+     live in types_source.xml.
+
+       CT_HBAR   BAR_HORIZ_CLUST     horizontal bar, absolute
+       CT_HSTK   BAR_HORIZ_STACK     horizontal bar, stacked (two values)
+       CT_HPCT   BAR_HORIZ_PERCENT   horizontal bar, percent (two values)
+       CT_VPCT   BAR_VERT_PERCENT    vertical bar, percent (two values)
+       CT_AREA   AREA_VERT_ABS       area, absolute
+       CT_ASTK   AREA_VERT_STACK     area, stacked (two values)
+       CT_APCT   AREA_VERT_PERCENT   area, percent (two values)
+       CT_RING   RING                ring / doughnut
+       CT_PAR    PARETO              a family with no faithful RDL analog
+
+     Data is generic (regions / units / amounts); no client content. -->
+<report name="CHART_TYPES_MORE" DTDVersion="9.0.2.0.10">
+  <data>
+    <dataSource name="Q_1">
+      <select><![CDATA[SELECT region, units, amount FROM sales_by_region]]></select>
+      <group name="G_REGION">
+        <dataItem name="REGION" datatype="vchar2" width="30"/>
+        <dataItem name="UNITS" datatype="number" precision="9"/>
+        <dataItem name="AMOUNT" datatype="number" precision="12"/>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+    <section name="main">
+      <body width="7.5" height="10.0">
+        <frame name="M_HDR">
+          <geometryInfo x="0" y="0" width="6.0" height="0.25"/>
+          <text name="L_REGION"><geometryInfo x="0" y="0" width="2.0" height="0.2"/>
+            <textSegment><string><![CDATA[Region]]></string></textSegment></text>
+          <text name="L_UNITS"><geometryInfo x="2.0" y="0" width="2.0" height="0.2"/>
+            <textSegment><string><![CDATA[Units]]></string></textSegment></text>
+        </frame>
+        <repeatingFrame name="R_G_REGION" source="G_REGION">
+          <geometryInfo x="0" y="0.25" width="6.0" height="0.3"/>
+          <field name="F_REGION" source="REGION">
+            <geometryInfo x="0" y="0.25" width="2.0" height="0.2"/></field>
+          <field name="F_UNITS" source="UNITS">
+            <geometryInfo x="2.0" y="0.25" width="2.0" height="0.2"/></field>
+        </repeatingFrame>
+
+        <graph name="CT_HBAR">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_HBAR" src="G_REGION" groups="REGION" dataValues="UNITS">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="BAR_HORIZ_CLUST">
+<Title text="Units by Region (horizontal)" visible="true"/>
+<O1Title text="Region" visible="true"/>
+<Y1Title text="Units" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_HSTK">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_HSTK" src="G_REGION" groups="REGION" dataValues="UNITS,AMOUNT">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="BAR_HORIZ_STACK">
+<Title text="Units and Amount (horizontal stacked)" visible="true"/>
+<O1Title text="Region" visible="true"/>
+<Y1Title text="Total" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_HPCT">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_HPCT" src="G_REGION" groups="REGION" dataValues="UNITS,AMOUNT">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="BAR_HORIZ_PERCENT">
+<Title text="Share of Total by Region (horizontal)" visible="true"/>
+<O1Title text="Region" visible="true"/>
+<Y1Title text="Percent" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_VPCT">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_VPCT" src="G_REGION" groups="REGION" dataValues="UNITS,AMOUNT">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="BAR_VERT_PERCENT">
+<Title text="Share of Total by Region" visible="true"/>
+<O1Title text="Region" visible="true"/>
+<Y1Title text="Percent" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_AREA">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_AREA" src="G_REGION" groups="REGION" dataValues="UNITS">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="AREA_VERT_ABS">
+<Title text="Units Area" visible="true"/>
+<O1Title text="Region" visible="true"/>
+<Y1Title text="Units" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_ASTK">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_ASTK" src="G_REGION" groups="REGION" dataValues="UNITS,AMOUNT">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="AREA_VERT_STACK">
+<Title text="Units and Amount Area" visible="true"/>
+<O1Title text="Region" visible="true"/>
+<Y1Title text="Total" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_APCT">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_APCT" src="G_REGION" groups="REGION" dataValues="UNITS,AMOUNT">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="AREA_VERT_PERCENT">
+<Title text="Area Share of Total" visible="true"/>
+<O1Title text="Region" visible="true"/>
+<Y1Title text="Percent" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_RING">
+          <geometryInfo x="0.25" y="0.00" width="4.00" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_RING" src="G_REGION" groups="REGION" dataValues="UNITS">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="RING">
+<Title text="Unit Ring" visible="true"/>
+<LegendArea position="LAP_RIGHT"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+
+        <graph name="CT_PAR">
+          <geometryInfo x="0.25" y="0.00" width="5.50" height="2.20"/>
+          <graphDefinition>
+          <![CDATA[<rw:graph id="CT_PAR" src="G_REGION" groups="REGION" dataValues="UNITS">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" graphType="PARETO">
+<Title text="Units Pareto" visible="true"/>
+<O1Title text="Region" visible="true"/>
+<Y1Title text="Units" visible="true"/>
+</Graph>
+-->
+</rw:graph>]]>
+          </graphDefinition>
+        </graph>
+      </body>
+    </section>
+  </layout>
+</report>

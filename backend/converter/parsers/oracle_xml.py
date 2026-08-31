@@ -39,13 +39,172 @@ from converter.parsers.oracle_colors import resolve_color, rule_color
 # ---------------------------------------------------------------------------
 
 def _decode(xml_bytes: bytes) -> str:
-    """Return a string view of the raw XML for the side-by-side panel."""
+    """Return a string view of the raw XML for the side-by-side panel (and
+    for every raw-text scan downstream: trigger/label reconstruction, the
+    embedded-report unwrap, kind classification).
+
+    The XML declaration's encoding is honored FIRST — the byte-level lxml
+    parse honors it, so this string must read the bytes the same way or the
+    two surfaces disagree. The old utf-8→cp1252→latin-1 guess chain silently
+    mojibaked every correctly-declared non-Latin code page (a WINDOWS-1251
+    Cyrillic or WINDOWS-1256 Arabic source decodes under cp1252 without
+    error — as Latin accent salad) while the parsed element text was
+    correct. A MIS-declared encoding is already repaired before this runs
+    (``_repair_misdeclared_encoding`` rewrites the declaration token), so
+    trusting the declaration here is safe. The guess chain remains the
+    fallback for undeclared/undecodable inputs."""
+    m = _XML_ENC_DECL_RE.search(xml_bytes[:2048])
+    if m:
+        declared = m.group(1).decode("ascii").strip().lower()
+        try:
+            return xml_bytes.decode(declared)
+        except (UnicodeDecodeError, LookupError):
+            pass                    # unknown or lying declaration -> guess
     for enc in ("utf-8", "windows-1252", "latin-1"):
         try:
             return xml_bytes.decode(enc)
         except UnicodeDecodeError:
             continue
     return xml_bytes.decode("utf-8", errors="replace")
+
+
+# The encoding name an XML declaration may carry (XML spec EncName production);
+# a template artifact like encoding="&Encoding" deliberately does NOT match.
+_XML_ENC_DECL_RE = re.compile(
+    rb'<\?xml[^>]{0,120}?encoding=["\']([A-Za-z][A-Za-z0-9._-]*)["\']')
+
+
+def _char_source_byte(ch: str, codec: str = ""):
+    """The single byte ``ch`` occupies in a one-byte legacy code page, or None.
+
+    ``codec`` is the code page the text was actually READ with; mapping the
+    character back through ITS OWN code page is what makes the signature in
+    ``_mojibake_damage`` script-agnostic.  Every single-byte code page --
+    Cyrillic, Greek, Arabic, Hebrew, Baltic, Latin -- spends the same
+    0x80-0xFF byte range on its own letters, so a reading of the file is
+    only measurable against the bytes of the code page that produced it.
+    Scoring every script through cp1252 saw the accented-Latin damage and
+    nothing else: the letters of any other script are not cp1252 characters
+    at all, so they mapped to None and scored zero.  A character the code
+    page cannot represent, or one it spends more than a single byte on
+    (a multi-byte declared codec), did not come from one legacy byte.
+
+    With no codec (the plain-text query) fall back to cp1252 -- its
+    0x80-0x9F block maps punctuation/letters like the Euro sign and curly
+    quotes -- and then to the Latin-1 identity below U+0100."""
+    if codec:
+        try:
+            enc = ch.encode(codec)
+        except (UnicodeEncodeError, LookupError):
+            return None
+        return enc[0] if len(enc) == 1 else None
+    try:
+        return ord(ch.encode("cp1252"))
+    except UnicodeEncodeError:
+        cp = ord(ch)
+        return cp if cp < 0x100 else None
+
+
+def _mojibake_damage(text: str, codec: str = "") -> int:
+    """How many characters of ``text`` look like decode damage.
+
+    ``codec`` is the code page ``text`` was read with (see
+    ``_char_source_byte``); pass it whenever it is known, so the measurement
+    is made against the file's real bytes instead of a Latin guess.
+
+    Two damage classes, counted per CHARACTER involved so a worse reading of
+    the same bytes scores strictly higher:
+    - U+FFFD replacement characters (1 each);
+    - runs of characters whose code-page bytes spell a VALID multi-byte
+      UTF-8 sequence -- the structural signature of UTF-8 bytes read through
+      a single-byte code page (each 2-4 char run counts its full length).
+
+    The signature is a property of the BYTES, not of a script or a character
+    repertoire, which is what makes the same measurement valid for every
+    code page.  In a mis-declared reading EVERY non-ASCII character is part
+    of such a run (a 2-byte codepoint scores 2), because the file really is
+    UTF-8; in real text a run needs a lead-class byte (0xC2-0xF4) chained to
+    continuation-class bytes (0x80-0xBF), which every code page spends
+    mostly on punctuation, symbols and a handful of isolated letters (9 of
+    the 64 in cp1253, 12 in cp1252, 15 in cp1256, 31 in cp1251) -- measured
+    on random letter soup, the densest text that shape can produce, the
+    signature covers 9-21% of the letters in those code pages against 200%
+    for the mis-declared reading.  Only the ORDER of two readings of the
+    same bytes is ever used, so that margin is what the decision rests on
+    (and the caller reaches this only for bytes that are valid UTF-8
+    file-wide)."""
+    dmg = text.count("�")
+    i, n = 0, len(text)
+    while i < n:
+        b = _char_source_byte(text[i], codec)
+        if b is not None and 0xC2 <= b <= 0xF4:
+            need = 1 if b < 0xE0 else (2 if b < 0xF0 else 3)
+            run_ok = i + need < n
+            if run_ok:
+                for k in range(1, need + 1):
+                    b2 = _char_source_byte(text[i + k], codec)
+                    if b2 is None or not (0x80 <= b2 <= 0xBF):
+                        run_ok = False
+                        break
+            if run_ok:
+                dmg += need + 1
+                i += need + 1
+                continue
+        i += 1
+    return dmg
+
+
+def _repair_misdeclared_encoding(xml_bytes: bytes):
+    """Two-stage decode fallback for a MIS-DECLARED XML encoding.
+
+    Oracle Reports exports frequently declare a legacy code page
+    (WINDOWS-1252 / ISO-8859-1) -- but a file that has since been re-saved
+    as UTF-8 (e.g. by a source-control web UI) keeps the stale declaration.
+    libxml2 honours the declaration, silently decoding the UTF-8 bytes as
+    the code page, so every accented character inflates into a 2-3 char
+    mojibake run ("A-tilde"-pairs); the inflated strings then mis-size every
+    glyph estimate downstream (a wild banking caption's trailing colon
+    clipped because its box was measured for the inflated string).
+
+    Stage 1 is the declaration itself (trusted by default).  Stage 2 fires
+    only when ALL of these hold, so a genuinely legacy-encoded file is
+    byte-untouched:
+    - the declaration names a non-UTF-8 encoding,
+    - the bytes contain at least one high byte AND are valid UTF-8
+      (a real legacy file with accents fails UTF-8 validation), and
+    - the declared decode measures MORE mojibake damage than the UTF-8
+      decode (``_mojibake_damage``; an undecodable/unknown declared codec
+      counts as maximally damaged).  BOTH readings are measured through the
+      DECLARED code page, so the comparison is about the file's bytes and
+      behaves identically whatever script the report is written in.
+    The repair rewrites only the declaration's encoding token to UTF-8 (the
+    bytes already are), so the tolerant byte-level parse below reads the
+    text the way it was written.  Returns (bytes, note-or-None)."""
+    m = _XML_ENC_DECL_RE.search(xml_bytes[:2048])
+    if not m:
+        return xml_bytes, None
+    declared = m.group(1).decode("ascii").strip().lower()
+    if declared in ("utf-8", "utf8"):
+        return xml_bytes, None
+    if not any(b > 127 for b in xml_bytes):
+        return xml_bytes, None          # pure ASCII: declaration is moot
+    try:
+        utf8_text = xml_bytes.decode("utf-8")
+    except UnicodeDecodeError:
+        return xml_bytes, None          # not UTF-8 -> trust the declaration
+    try:
+        declared_text = xml_bytes.decode(declared)
+    except (UnicodeDecodeError, LookupError):
+        declared_text = None
+    if (declared_text is not None
+            and (_mojibake_damage(declared_text, declared)
+                 <= _mojibake_damage(utf8_text, declared))):
+        return xml_bytes, None          # declared reading is no worse -> keep
+    fixed = xml_bytes[:m.start(1)] + b"UTF-8" + xml_bytes[m.end(1):]
+    note = (f"source declares encoding {declared.upper()} but its bytes are "
+            "valid UTF-8 (the declared decode reads as mojibake); parsed as "
+            "UTF-8")
+    return fixed, note
 
 
 def _attr(el, name: str, default: str = "") -> str:
@@ -193,6 +352,11 @@ def _parse_data_items(group_el, warnings: List[str]) -> List[DataItem]:
             descriptor = _find(di, "dataDescriptor")
             expression = _attr(descriptor, "expression") if descriptor is not None else ""
             datatype = _attr(di, "datatype") or _attr(di, "oracleDatatype", "vchar2")
+            # Keep the DEFAULT distinguishable from a declaration: an absent
+            # datatype attribute is not a declaration of "character".
+            datatype_declared = bool(
+                (di.get("datatype") or "").strip()
+                or (di.get("oracleDatatype") or "").strip())
             # Oracle NUMBER scale/precision (on the descriptor, occasionally the
             # dataItem) decide Int32 vs Decimal -- see DataItem.ssrs_datatype.
             scale = precision = None
@@ -203,6 +367,13 @@ def _parse_data_items(group_el, warnings: List[str]) -> List[DataItem]:
                     scale = _int_attr(src, "scale", 0)
                 if precision is None and (src.get("precision") or "") != "":
                     precision = _int_attr(src, "precision", 0)
+            # Object-column (ADT) attribute breakout: Oracle Reports links an
+            # attribute item to its object-typed parent column via
+            # <dataItemPrivate parentColumn="...">. Retained so the generator
+            # can project the attribute as real SQL instead of a stub.
+            private = _find(di, "dataItemPrivate")
+            parent_column = (
+                _attr(private, "parentColumn") if private is not None else "")
             items.append(
                 DataItem(
                     name=_attr(di, "name"),
@@ -212,6 +383,8 @@ def _parse_data_items(group_el, warnings: List[str]) -> List[DataItem]:
                     label=_attr(di, "defaultLabel"),
                     scale=scale,
                     precision=precision,
+                    parent_column=parent_column,
+                    datatype_declared=datatype_declared,
                 )
             )
         except Exception as exc:  # pragma: no cover - defensive
@@ -303,7 +476,12 @@ def _parse_queries(data_el, warnings: List[str]) -> List[DataQuery]:
                     for c in _select_columns(sql):
                         if c and c not in seen:
                             seen.add(c)
-                            items.append(DataItem(name=c))
+                            # Recovered from the SELECT list: the source
+                            # declares no datatype for it at all, so the
+                            # character default here is a fallback, never a
+                            # declaration.
+                            items.append(DataItem(name=c,
+                                                  datatype_declared=False))
                     if items:
                         warnings.append(
                             f"dataSource {_attr(ds, 'name')}: no <dataItem> "
@@ -1549,6 +1727,10 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                         _max_rec = int(_attr(child, "maxRecordsPerPage") or 0)
                     except (TypeError, ValueError):
                         _max_rec = 0
+                    try:
+                        _min_wid = int(_attr(child, "minWidowRecords") or 0)
+                    except (TypeError, ValueError):
+                        _min_wid = 0
                     grp = LayoutGroup(
                         name=rf_name or rf_source or "group",
                         kind="repeating_frame",
@@ -1559,6 +1741,7 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                         page_break_after=_page_break_after(child),
                         print_direction=_attr(child, "printDirection"),
                         max_records_per_page=_max_rec,
+                        min_widow_records=_min_wid,
                         # Declared inter-instance gutter: the record pitch is
                         # the frame height PLUS this, and a banded fill leaves
                         # it unpainted.
@@ -1794,6 +1977,70 @@ def _walk_layout_node(node, current_group: Optional[LayoutGroup],
                               warnings, embedded_images)
 
 
+# Declared coordinate units -> inches. Oracle stamps the report's authoring
+# unit on the root (<report unitOfMeasurement="centimeter">); every
+# geometryInfo/section/body/location number is authored IN that unit. The
+# whole pipeline downstream (page sizing, band math, the RDL itself) is in
+# inches, so an unhonored declaration inflates every page 2.54x (a letter
+# sheet declared 21.59x27.94 CENTIMETERS -- exactly 8.5x11in -- emitted as a
+# 21.59in-wide logical sheet, tripping the physical-paper cap and its
+# oversized-sheet chrome remap into overlaps the source never declared).
+# Stroke widths (lineWidth) and font sizes are POINTS in every dialect and
+# are never scaled.
+_UNIT_TO_INCH = {
+    "inch": 1.0,
+    "centimeter": 1.0 / 2.54,
+    "point": 1.0 / 72.0,
+}
+
+
+def _normalize_layout_units(root, layout: List[LayoutGroup],
+                            warnings: List[str]) -> None:
+    """Scale every parsed layout geometry into inches per the root's
+    declared ``unitOfMeasurement``. No-op for inch (the default). An
+    unknown unit is left 1:1 with an honest warning rather than guessing
+    a factor."""
+    unit = (_attr(root, "unitOfMeasurement") or "").strip().lower()
+    if not unit:
+        return
+    factor = _UNIT_TO_INCH.get(unit)
+    if factor is None:
+        warnings.append(
+            f"unrecognized unitOfMeasurement=\"{unit}\" — geometry kept "
+            f"1:1 (inches)")
+        return
+    if factor == 1.0:
+        return
+
+    def _scale_field(f: LayoutField) -> None:
+        f.x *= factor
+        f.y *= factor
+        f.width *= factor
+        f.height *= factor
+
+    def _scale_group(g: LayoutGroup) -> None:
+        g.x *= factor
+        g.y *= factor
+        g.width *= factor
+        g.height *= factor
+        g.vert_space *= factor
+        g.body_width *= factor
+        g.body_height *= factor
+        if g.body_location:
+            g.body_location = tuple(
+                (v * factor if v is not None else None)
+                for v in g.body_location)
+        for f in g.fields:
+            _scale_field(f)
+        for c in g.children:
+            _scale_group(c)
+
+    for g in layout:
+        _scale_group(g)
+    warnings.append(
+        f"layout geometry declared in {unit} — normalized to inches")
+
+
 def _parse_layout(root, warnings: List[str],
                   embedded_images: List[EmbeddedImage]) -> List[LayoutGroup]:
     layout_el = _find(root, "layout")
@@ -1876,6 +2123,15 @@ def _parse_layout(root, warnings: List[str],
                         _margin_tsec[_mn] = _ts
         if _margin_names:
             def _tag_margin(grp):
+                # GROUPS declared inside <margin> are page chrome too — a
+                # margin band can hold a whole frame tree (frames, even a
+                # repeatingFrame carrying the running master header), and
+                # the body/record emitters must be able to see that the
+                # SUBTREE is chrome, not just its leaf fields (the fields
+                # alone left the frame walking into the body, printing a
+                # second offset copy of every margin object).
+                if grp.name in _margin_names:
+                    grp.in_margin = True
                 for _fl in grp.fields:
                     if _fl.name in _margin_names:
                         _fl.in_margin = True
@@ -1927,9 +2183,202 @@ def _extract_embedded_report(raw_xml: str) -> Optional[str]:
     return raw_xml[m.start():end + len("</report>")]
 
 
+# ---------------------------------------------------------------------------
+# Chart / graph declarations
+# ---------------------------------------------------------------------------
+# Oracle declares a chart in three interchangeable ways, all keyed on the same
+# standard names:
+#   paper   <graph name=..><geometryInfo/><graphDefinition><![CDATA[
+#              <rw:graph src=.. groups=.. dataValues=..>
+#              <!-- <Graph ..>..config..</Graph> --></rw:graph>]]></...>
+#   inline  <graph src=.. series=.. dataValues=.. graphType=..><Graph/></graph>
+#   web     <rw:graph ..> OUTSIDE the <report> block (a .jsp web source)
+# Declared binding semantics (Oracle Reports graph model, DTD-documented):
+#   src         the GROUP the graph feeds from (picks the dataset)
+#   groups      the CATEGORY (ordinal / O1) column(s)
+#   series      the SERIES column(s); with no groups declared the series
+#               column IS the category (the tutorial web form declares only
+#               series + dataValues)
+#   dataValues  the VALUE (Y1) column(s)
+# The <Graph> configuration block is the same document in every dialect; every
+# value below is read from a DECLARED element/attribute, never inferred.
+_CHART_TAGS = ("graph", "chart", "graphobject", "chartobject")
+
+# Oracle's textRotation tokens -> the RDL TextOrientation they name.
+_GRAPH_ROTATION = {
+    "TR_HORIZ": "Horizontal",
+    "TR_HORIZ_ROTATE_90": "Rotated90",
+    "TR_HORIZ_ROTATE_270": "Rotated270",
+}
+
+# Oracle's LegendArea position tokens -> the RDL ChartLegend Position.
+_GRAPH_LEGEND_POS = {
+    "LAP_TOP": "TopCenter",
+    "LAP_BOTTOM": "BottomCenter",
+    "LAP_RIGHT": "RightCenter",
+    "LAP_LEFT": "LeftCenter",
+}
+
+
+def _graph_attr(attrs: str, name: str) -> str:
+    """Read one attribute out of a raw start-tag attribute string."""
+    m = re.search(r'\b' + name + r'\s*=\s*"([^"]*)"', attrs or "", re.I)
+    if m:
+        return m.group(1)
+    m = re.search(r"\b" + name + r"\s*=\s*'([^']*)'", attrs or "", re.I)
+    return m.group(1) if m else ""
+
+
+def _graph_columns(value: str) -> List[str]:
+    """A binding attribute names one or more columns, comma separated."""
+    return [p.strip() for p in re.split(r"[,\s]+", value or "") if p.strip()]
+
+
+def _parse_graph_config(blob: str) -> dict:
+    """Read Oracle's <Graph> configuration block (the paper dialect keeps it
+    inside the graphDefinition CDATA, the web dialect inside an HTML comment
+    after <rw:graph>). Returns only what the block DECLARES."""
+    cfg: dict = {
+        "type": "", "title": "", "title_visible": True, "subtitle": "",
+        "footnote": "", "cat_axis_title": "", "cat_axis_rotation": "",
+        "val_axis_title": "", "val_axis_title2": "", "x_axis_title": "",
+        "legend_position": "", "legend_visible": None, "series_colors": {},
+        "series_on_y2": False, "fitline": False, "custom_layout": "",
+        "three_d": False,
+    }
+    if not blob:
+        return cfg
+
+    def _tag(name):
+        m = re.search(r"<" + name + r"\b([^>]*)>", blob, re.I)
+        return m.group(1) if m else None
+
+    g = _tag("Graph")
+    if g is not None:
+        cfg["type"] = _graph_attr(g, "graphType")
+        cfg["custom_layout"] = _graph_attr(g, "customLayout")
+        for a in ("depthAngle", "pieDepth", "pieTilt", "depthRadius"):
+            try:
+                if float(_graph_attr(g, a) or 0):
+                    cfg["three_d"] = True
+            except ValueError:
+                pass
+    for key, tag in (("title", "Title"), ("subtitle", "Subtitle"),
+                     ("footnote", "Footnote"),
+                     ("cat_axis_title", "O1Title"),
+                     ("val_axis_title", "Y1Title"),
+                     ("val_axis_title2", "Y2Title"),
+                     ("x_axis_title", "X1Title")):
+        a = _tag(tag)
+        if a is None:
+            continue
+        cfg[key] = _graph_attr(a, "text")
+        if tag == "Title":
+            cfg["title_visible"] = (
+                _graph_attr(a, "visible") or "true").strip().lower() != "false"
+        if tag == "O1Title":
+            cfg["cat_axis_rotation"] = _graph_attr(a, "textRotation")
+    la = _tag("LegendArea")
+    if la is not None:
+        cfg["legend_position"] = _graph_attr(la, "position")
+        vis = _graph_attr(la, "visible")
+        if vis:
+            cfg["legend_visible"] = vis.strip().lower() != "false"
+    for m in re.finditer(r"<Series\b([^>]*)>", blob, re.I):
+        a = m.group(1)
+        try:
+            sid = int(_graph_attr(a, "id") or -1)
+        except ValueError:
+            sid = -1
+        col = _graph_attr(a, "color")
+        if sid >= 0 and re.fullmatch(r"#[0-9A-Fa-f]{6}", col or ""):
+            cfg["series_colors"][sid] = col
+        if (_graph_attr(a, "assignedToY2") or "").lower() == "true":
+            cfg["series_on_y2"] = True
+        ft = (_graph_attr(a, "fitlineType") or "").upper()
+        if ft and ft != "FT_NONE":
+            cfg["fitline"] = True
+    return cfg
+
+
+def _graph_declined_features(cfg: dict, values: List[str]) -> List[str]:
+    """Name every DECLARED graph feature the RDL Chart has no faithful analog
+    for, so the caller can DECLINE it out loud instead of silently drawing
+    something else. Derived from the graph DTD's own vocabulary."""
+    out: List[str] = []
+    t = re.sub(r"[^A-Z0-9]+", "_", (cfg.get("type") or "").upper()).strip("_")
+    if "2Y" in t or cfg.get("series_on_y2") or cfg.get("val_axis_title2"):
+        out.append("secondary value axis (Y2)")
+    if cfg.get("three_d") or t.startswith("THREED"):
+        out.append("3-D graph rendering")
+    if t.startswith("STOCK") and len(values) < 4:
+        out.append(f"stock graph type {t} (fewer than 4 declared values)")
+    elif t in ("PARETO", "SPECTRAL", "PIE_BAR", "RING_BAR") or \
+            t.startswith("HIST") or t.endswith("_MULTI") or \
+            t.endswith("_MULTI_PROP"):
+        out.append(f"graph type {t}")
+    if cfg.get("subtitle"):
+        out.append("graph subtitle")
+    if cfg.get("footnote"):
+        out.append("graph footnote")
+    if cfg.get("custom_layout"):
+        out.append("custom graph layout")
+    if cfg.get("fitline"):
+        out.append("series fitline")
+    cols = cfg.get("series_colors") or {}
+    if cols and set(cols) != set(range(max(cols) + 1)):
+        # The RDL paints declared colours through a custom PALETTE (measured:
+        # a per-series Style is ignored by the engine), and a palette has no
+        # holes -- a partially coloured series set cannot be reproduced.
+        out.append("per-series colours (declared for only some series)")
+    return out
+
+
+def _chart_record(attrs: str, cfg: dict, *, default_type: str) -> dict:
+    """Assemble one chart record from a rw:graph attribute string plus its
+    <Graph> configuration block."""
+    groups = _graph_columns(_graph_attr(attrs, "groups"))
+    series = _graph_columns(_graph_attr(attrs, "series"))
+    values = _graph_columns(_graph_attr(attrs, "dataValues")) or \
+        _graph_columns(_graph_attr(attrs, "value"))
+    # groups is the category; with no groups declared the series column is
+    # the category (the web tutorial form).
+    category = (groups[0] if groups else (series[0] if series else ""))
+    series_col = series[0] if (groups and series) else ""
+    return {
+        "id": _graph_attr(attrs, "id") or _graph_attr(attrs, "name"),
+        "src": _graph_attr(attrs, "src"),
+        "title": cfg.get("title") or "",
+        "title_visible": bool(cfg.get("title_visible", True)),
+        "category": category,
+        "series": series_col,
+        "plot_value": values[0] if values else "",
+        "plot_values": values,
+        "type": (_graph_attr(attrs, "graphType") or _graph_attr(attrs, "chartType")
+                 or cfg.get("type") or _graph_attr(attrs, "type")
+                 or default_type),
+        "cat_axis_title": cfg.get("cat_axis_title") or "",
+        "cat_axis_rotation": _GRAPH_ROTATION.get(
+            (cfg.get("cat_axis_rotation") or "").upper(), ""),
+        "val_axis_title": cfg.get("val_axis_title") or "",
+        "legend_position": _GRAPH_LEGEND_POS.get(
+            (cfg.get("legend_position") or "").upper(), ""),
+        "legend_visible": cfg.get("legend_visible"),
+        "series_colors": dict(cfg.get("series_colors") or {}),
+        "declined": _graph_declined_features(cfg, values),
+    }
+
+
 def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
     """Parse an Oracle Reports XML byte string into a ParsedReport."""
     warnings: List[str] = []
+    # Mis-declared encoding repair BEFORE anything reads the bytes: the
+    # byte-level lxml parse below honours the XML declaration, so a stale
+    # legacy declaration over UTF-8 bytes would silently mojibake every
+    # accented string (and inflate every glyph estimate downstream).
+    xml_bytes, _enc_note = _repair_misdeclared_encoding(xml_bytes)
+    if _enc_note:
+        warnings.append(_enc_note)
     raw_xml = _decode(xml_bytes)
     # Keep the FULL source: a .jsp web source carries the chart as a
     # <rw:graph> OUTSIDE the <report> block we unwrap below, so the chart
@@ -1946,7 +2395,14 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
         xml_bytes = embedded.encode("utf-8")
 
     # Use a tolerant parser; recover=True keeps going past malformed bits.
-    parser = etree.XMLParser(recover=True, huge_tree=True, resolve_entities=False)
+    # remove_comments/remove_pis: comment and processing-instruction nodes
+    # carry a non-string .tag, so every downstream child-iteration would have
+    # to special-case them — and nothing a source hides in a comment is
+    # report content. Dropping them AT PARSE means no walk can ever trip on
+    # one and no source comment can be copied into the shipped RDL.
+    parser = etree.XMLParser(recover=True, huge_tree=True,
+                             resolve_entities=False,
+                             remove_comments=True, remove_pis=True)
     try:
         root = etree.fromstring(xml_bytes, parser=parser)
     except etree.XMLSyntaxError:
@@ -2014,6 +2470,7 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
 
     embedded_images = []
     layout = _parse_layout(root, warnings, embedded_images)
+    _normalize_layout_units(root, layout, warnings)
 
     # Document-level image payloads. Oracle's XML export has TWO styles:
     # <binaryData> nested inside the <image> element (handled during the
@@ -2048,13 +2505,19 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
     # must NEVER be silently dropped -- capture it so the user is told to
     # recreate it. Generic: keyed on the standard element/attribute names.
     charts = []
-    _CHART_TAGS = ("graph", "chart", "graphobject", "chartobject")
+    _seen_keys = set()
+
+    def _chart_key(rec):
+        return ((rec.get("id") or "").strip().upper(),
+                (rec.get("category") or "").strip().upper(),
+                tuple(v.upper() for v in (rec.get("plot_values") or [])))
+
     for el in root.iter():
         ln = _localname(el).lower()
         if ln not in _CHART_TAGS:
             continue
         # A chart object nests an inner config element (Oracle's <Graph>
-        # inside <graph>); count the OUTERMOST object once -- skip any
+        # inside <graph>); build the OUTERMOST object once -- skip any
         # graph/chart whose ancestor is also a graph/chart.
         anc = el.getparent()
         nested = False
@@ -2065,50 +2528,79 @@ def parse_oracle_xml(xml_bytes: bytes) -> ParsedReport:
             anc = anc.getparent()
         if nested:
             continue
-        title = ""
+        # The paper dialect hides the real bindings + <Graph> config inside a
+        # <graphDefinition> CDATA; the inline dialect declares them on the
+        # element itself. Read the CDATA first, then fall back to the element.
+        blob = ""
         for sub in el.iter():
-            if _localname(sub).lower() == "title":
-                title = _attr(sub, "text") or (sub.text or "").strip()
-                if title:
-                    break
-        charts.append({
-            "title": title,
-            "category": _attr(el, "series") or _attr(el, "src") or "",
-            "plot_value": _attr(el, "dataValues") or _attr(el, "value") or "",
-            "type": _attr(el, "graphType") or _attr(el, "chartType")
-                    or _attr(el, "type") or "chart",
-        })
+            if _localname(sub).lower() == "graphdefinition":
+                blob = "".join(sub.itertext())
+                break
+        attrs = ""
+        if blob:
+            mm = re.search(r"<(?:rw:)?graph\b([^>]*)>", blob, re.I)
+            if mm:
+                attrs = mm.group(1)
+        if not attrs:
+            attrs = " ".join(
+                '%s="%s"' % (k.split("}")[-1], str(v).replace('"', "&quot;"))
+                for k, v in el.attrib.items())
+            blob = blob or etree.tostring(el, encoding="unicode")
+        rec = _chart_record(attrs, _parse_graph_config(blob),
+                            default_type="chart")
+        rec["name"] = _attr(el, "name") or rec.get("id") or ""
+        # Declared box + the section that owns it: an Oracle graph is a
+        # layout object like any other, so its geometryInfo IS its size and
+        # position and the section decides where it prints.
+        geom = _find(el, "geometryInfo")
+        gsrc = geom if geom is not None else el
+        if any(_attr(gsrc, a) for a in ("x", "y", "width", "height")):
+            rec["geometry"] = {
+                "x": _float_attr(gsrc, "x"), "y": _float_attr(gsrc, "y"),
+                "width": _float_attr(gsrc, "width"),
+                "height": _float_attr(gsrc, "height")}
+        sec = el.getparent()
+        while sec is not None and _localname(sec).lower() != "section":
+            sec = sec.getparent()
+        rec["section"] = (_attr(sec, "name") if sec is not None else "") or ""
+        charts.append(rec)
+        _seen_keys.add(_chart_key(rec))
     # Web-source charts: a .jsp keeps the graph as <rw:graph src=.. series=..
     # dataValues=..> in the WEB layout, OUTSIDE the <report> block we parsed
     # above -- so the tree walk never sees it. Scan the full original source
     # (real-artifact verified: Oracle's emprevb.jsp "Employees by Salary").
-    _seen_cat = {(c.get("category") or "", c.get("plot_value") or "")
-                 for c in charts}
+    # A paper graph carries the SAME rw:graph inside its CDATA, so the record
+    # built above dedupes this pass (id + bindings).
     for m in re.finditer(r"<rw:graph\b([^>]*)>", _full_source or "", re.I):
-        attrs = m.group(1)
-
-        def _ga(nm, _a=attrs):
-            mm = re.search(nm + r'\s*=\s*"([^"]*)"', _a, re.I)
-            return mm.group(1) if mm else ""
-        cat = _ga("series") or _ga("src")
-        pv = _ga("dataValues") or _ga("groups")
-        if (cat, pv) in _seen_cat:
+        # The <Graph> config sits in an HTML comment right after the tag.
+        rec = _chart_record(m.group(1),
+                            _parse_graph_config(
+                                _full_source[m.end():m.end() + 8000]),
+                            default_type="graph")
+        # This pass reads RAW TEXT, so it also sees tag-shaped prose inside
+        # comments. A real web-layout graph always DECLARES what it plots; a
+        # match with neither a category nor a value declares no graph.
+        if not rec["category"] and not rec["plot_values"]:
             continue
-        _seen_cat.add((cat, pv))
-        # Title: the <Graph> config is in an HTML comment right after the tag.
-        tail = _full_source[m.end():m.end() + 4000]
-        tm = re.search(r'<Title[^>]*\btext\s*=\s*"([^"]*)"', tail, re.I)
-        charts.append({
-            "title": tm.group(1) if tm else "",
-            "category": cat,
-            "plot_value": pv,
-            "type": (_ga("graphType") or "graph"),
-        })
+        if _chart_key(rec) in _seen_keys:
+            continue
+        _seen_keys.add(_chart_key(rec))
+        charts.append(rec)
+
+    # Declared coordinates are authored in the report's unitOfMeasurement;
+    # chart geometry normalizes through the SAME table as every other box.
+    _cfac = _UNIT_TO_INCH.get(
+        (_attr(root, "unitOfMeasurement") or "").strip().lower(), 1.0)
+    if _cfac != 1.0:
+        for c in charts:
+            if c.get("geometry"):
+                c["geometry"] = {k: v * _cfac
+                                 for k, v in c["geometry"].items()}
 
     if charts:
         warnings.append(
-            f"{len(charts)} chart/graph object(s) detected -- not auto-built "
-            "(recreate as an SSRS Chart in Report Builder)")
+            f"{len(charts)} chart/graph object(s) detected -- translated to "
+            "SSRS Chart(s) from the declared bindings")
 
     # WEB-SOURCE (.jsp) reports keep their authored layout as an
     # <rw:dataArea> HTML table, not a paper <layout> — previously the

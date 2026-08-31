@@ -1522,6 +1522,103 @@ def test_lexical_with_static_default_inlines_that_default():
     assert "lexical ref &amp;P_Dias" in m2.group(1)
 
 
+# A lexical used as the WHOLE parenthesized table source — "FROM (&P_SRC)" /
+# ", (&P_SRC)" — whose declared parameter carries a full SELECT statement as
+# its static initialValue (a wild-corpus idiom: the calling form passes the
+# query text at run time, the report ships a working default). The default
+# may itself carry binds, escaped literals, and a trailing ";".
+_TABLE_SOURCE_SPLICE_XML = (
+    '<?xml version="1.0"?><report name="SPLICE_TS" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<userParameter name="P_Bind" datatype="character"/>'
+    '<userParameter name="P_Src" datatype="character" width="4000" '
+    "initialValue=\"SELECT c1 AS col_a, c2 AS col_b FROM base_t "
+    "WHERE c3 = :P_Bind AND c4 = &apos;x&apos;&apos;y&apos; ;\"/>"
+    '<userParameter name="P_Days" datatype="character" initialValue="2,3,4"/>'
+    '<dataSource name="Q_1"><select><![CDATA[select col_a, col_b\n'
+    'from (&P_Src)\n'
+    'where col_b in (&P_Days)]]></select></dataSource>'
+    '<dataSource name="Q_2"><select><![CDATA[select t2.col_c\n'
+    'from other_t t2, (&P_Src) s\n'
+    'where t2.col_c = s.col_a]]></select></dataSource>'
+    '<dataSource name="Q_3"><select><![CDATA[select col_d from (&P_Src\n'
+    'union select c9 as col_d from u_t)]]></select></dataSource>'
+    '</data>'
+    '<layout><section name="main"><groupLeft name="M_t"><group>'
+    '<field name="F1" source="COL_A"/><field name="F2" source="COL_B"/>'
+    '</group></groupLeft></section></layout></report>'
+).encode()
+
+
+def test_lexical_table_source_static_default_inlines():
+    """A static-default lexical in TABLE-SOURCE position ("FROM (&P_X)" or
+    ", (&P_X)") inlines its declared SELECT-shaped initialValue at CONVERT
+    time — static SQL, no expression, no runtime splice (the fire-158
+    invariant holds). The SQL front-end runs on the substituted text, so
+    binds INSIDE the default become declared QueryParameters and the result
+    parses under the real grammar. Without a usable default the honest
+    tablesource BLOCKER survives."""
+    import html as _html
+    import json as _json
+    import re
+    from converter import convert
+    from converter.validators.no_prompt_gate import audit_no_prompt
+    from converter.validators.sql_syntax import grammar_available, parse_check
+
+    out = convert(_TABLE_SOURCE_SPLICE_XML)
+    rdl = out["rdl_xml"]
+    cts = [_html.unescape(c) for c in
+           re.findall(r"<CommandText>(.*?)</CommandText>", rdl, re.S)]
+    assert len(cts) >= 2
+    for ct in cts:
+        # fire-158: CommandText stays STATIC SQL, never an expression
+        assert not ct.lstrip().startswith("=")
+    ct1 = next(c for c in cts if "in (" in c.lower())
+    ct2 = next(c for c in cts if "other_t" in c.lower())
+    ct3 = next(c for c in cts if "u_t" in c.lower())
+    # FROM (&P_Src) -> the declared default spliced inside the parens
+    assert re.search(r"(?is)\bfrom\s*\(\s*SELECT\b", ct1)
+    assert "base_t" in ct1 and "lexical default &P_Src" in ct1
+    assert "lexical ref &P_Src" not in ct1
+    # the comma-join form ", (&P_Src) s" inlines identically
+    assert re.search(r"(?is),\s*\(\s*SELECT\b", ct2)
+    assert "lexical ref &P_Src" not in ct2
+    # the continued-statement idiom "(&P_Src UNION ...)" splices verbatim —
+    # Oracle substitutes lexical TEXT, so the default becomes the first
+    # set-operator branch (the wild FROM-position corpus shape)
+    assert re.search(r"(?is)\(\s*SELECT\b.*\bunion\b", ct3)
+    assert "lexical ref &P_Src" not in ct3
+    # the default's trailing ";" must NOT survive inside the parens
+    # (judge CODE only — the disclosure comments legitimately contain ";")
+    _strip = lambda s: re.sub(r"--[^\n]*|/\*.*?\*/", " ", s, flags=re.S)  # noqa: E731
+    assert ";" not in _strip(ct1) and ";" not in _strip(ct2)
+    # a pure numeric-list default in value position inlines too
+    assert re.search(r"(?is)\bin\s*\(\s*2,3,4\s*/\*", ct1)
+    # a bind INSIDE the inlined default is a declared QueryParameter
+    assert ":P_Bind" in ct1
+    assert re.search(r'<QueryParameter Name=":P_Bind">\s*'
+                     r"<Value>=Parameters!P_Bind\.Value</Value>", rdl)
+    # the operator sees the disclosure, not a fatal verdict
+    pf = _json.dumps(out["preflight"])
+    assert "lexical_default_inlined" in pf
+    assert "lexical_tablesource" not in pf
+    assert out["preflight"].get("verdict") in ("READY", "AMBER")
+    # design-time safety: the five-leg no-prompt audit stays clean
+    assert audit_no_prompt(rdl) == []
+    # and the emitted SQL parses under the real Oracle grammar
+    if grammar_available():
+        for ct in (ct1, ct2, ct3):
+            ok, err = parse_check(ct)
+            assert ok, err
+
+    # NO usable static default in table-source position -> honest BLOCKER
+    src2 = _TABLE_SOURCE_SPLICE_XML.replace(
+        b"SELECT c1 AS col_a, c2 AS col_b FROM base_t "
+        b"WHERE c3 = :P_Bind AND c4 = &apos;x&apos;&apos;y&apos; ;", b"")
+    out2 = convert(src2)
+    assert "lexical_tablesource" in _json.dumps(out2["preflight"])
+
+
 def test_geometryless_groupleft_routes_tabular():
     """The minimal DTD-1.0 grammar (<groupLeft><field/> with no geometry
     anywhere) is a group-left TABULAR listing — the card path stacked every
@@ -1688,11 +1785,21 @@ def test_chart_report_emits_real_ssrs_chart():
     out = convert(xml)
     x = out["rdl_xml"]
     assert '<Chart Name="Chart_1">' in x
+    # STRICTER than "a Chart_1 exists": ONE declaration is ONE chart. Both
+    # emit paths used to fire for the same declaration, so a single declared
+    # graph produced TWO <Chart> elements (measured on the chart fixtures).
+    assert len(_re.findall(r"<Chart Name=", x)) == 1
     assert "=Sum(Fields!SAL.Value)" in x
     assert _re.search(r"<GroupExpression>=Fields!EMP\.Value", x)
     assert "Pay by Person" in x
     fr = out.get("fidelity_report") or {}
-    assert any("auto-built" in n for n in fr.get("needs_attention", []))
+    # STRICTER than matching the word "auto-built" (wording the note no
+    # longer uses): the note must NAME the chart and the column it plots,
+    # and the chart category must count it exactly once.
+    _notes = fr.get("needs_attention", [])
+    assert any("chart/graph" in n and "Pay by Person" in n and "SAL" in n
+               for n in _notes), _notes
+    assert fr["categories"]["charts"]["count"] == 1
 
 
 def test_linked_detail_honesty_and_report_level_summaries():
@@ -3130,6 +3237,79 @@ def test_header_margin_item_not_duplicated_when_body_renders_it():
     assert ph.findtext(_q("Height")) == "0.73in"
 
 
+# A margin band whose FIELD lands in the page FOOTER: the data-marginx tag
+# it carries is outside the PageHeader reconciliation walk, so only the
+# serialization-time sweep can remove it (the 48-report upload-fatal class).
+_MFOOT_XML = (
+    '<?xml version="1.0"?><report name="MFOOT_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<userParameter name="P_RUNBY" datatype="character">'
+    '<userParameterValue value="Ops"/></userParameter>'
+    '<dataSource name="Q_M"><select><![CDATA[select a from t]]></select>'
+    '<group name="G_M"><dataItem name="A" datatype="vchar2"/>'
+    '</group></dataSource>'
+    '</data>'
+    '<layout><section name="main">'
+    '<margin>'
+    '<text name="B_MT"><geometryInfo x="1.0" y="0.25" width="5.5" '
+    'height="0.25"/><textSegment><font face="Arial" size="12" bold="yes"/>'
+    '<string><![CDATA[Quarterly Activity Roster]]></string></textSegment>'
+    '</text>'
+    '<field name="F_RUNBY" source="P_RUNBY"><font face="Arial" size="8"/>'
+    '<geometryInfo x="0.3" y="10.3" width="2.0" height="0.18"/></field>'
+    '</margin>'
+    '<frame name="M_B"><geometryInfo x="0" y="1.0" width="7.5" height="3"/>'
+    '<repeatingFrame name="R_M" source="G_M" printDirection="down">'
+    '<geometryInfo x="0.2" y="1.2" width="7.2" height="0.2"/>'
+    '<field name="F_A" source="A"><geometryInfo x="0.2" y="1.2" '
+    'width="3" height="0.2"/></field></repeatingFrame></frame>'
+    '</section></layout></report>'
+).encode()
+
+
+def test_internal_marker_attributes_never_ship_anywhere_in_the_tree():
+    """Internal build markers (data-*) are foreign attributes in the
+    reportdefinition namespace — XSD-INVALID, i.e. upload-fatal. The
+    per-pass cleanups only walk the regions they know (data-marginx was
+    stripped by the PageHeader reconciliation ONLY, so a FOOTER margin
+    field shipped the marker on 48 corpus reports). The serialization-time
+    sweep must leave the WHOLE tree clean, and the footer item itself must
+    still function (the parameter echo reaches the PageFooter)."""
+    import xml.etree.ElementTree as _ET
+    from converter import convert
+
+    rdl = convert(_MFOOT_XML)["rdl_xml"]
+    root = _ET.fromstring(rdl.encode("utf-8"))
+    leaked = sorted({k for el in root.iter() for k in el.attrib
+                     if k.split("}")[-1].startswith("data-")})
+    assert leaked == [], f"internal marker(s) leaked into the RDL: {leaked}"
+    ns = root.tag.split("}")[0][1:]
+    pf = root.find(f"{{{ns}}}Page").find(f"{{{ns}}}PageFooter")
+    assert pf is not None, "footer margin band was not emitted"
+    assert any("Parameters!P_RUNBY.Value" in (v.text or "")
+               for v in pf.iter(f"{{{ns}}}Value")), \
+        "footer margin field lost its parameter echo"
+
+
+def test_internal_marker_invariant_raises_when_the_sweep_is_disabled():
+    """PROVE THE GATE CAN FAIL: with the choke-point sweep disabled, the
+    footer marker survives every other pass and the serialized-document
+    invariant must RAISE at generate time — the converter must never ship
+    an XSD-invalid RDL silently."""
+    import pytest
+    from converter.generators import rdl as _R
+    from converter.parsers.oracle_xml import parse_oracle_xml
+
+    parsed = parse_oracle_xml(_MFOOT_XML)
+    orig = _R._strip_internal_markers
+    _R._strip_internal_markers = lambda root: None
+    try:
+        with pytest.raises(AssertionError, match="internal marker"):
+            _R.generate_rdl(parsed, target_db="oracle")
+    finally:
+        _R._strip_internal_markers = orig
+
+
 def test_sql_grammar_validator_flags_only_converter_introduced_breakage():
     """Real-grammar SQL validation, judged DIFFERENTIALLY.
 
@@ -3699,18 +3879,64 @@ def test_simplified_tabular_shorthand_converts():
     rdl = out["rdl_xml"]
     assert "ITEM_CODE" in rdl.upper() and "ITEM_DESC" in rdl.upper()
     assert out["mockup_html"].strip(), "mockup must render the shorthand too"
-    # The shorthand's label= wording is parsed onto the DATA ITEMS (see
-    # parse: item.label == "Code"/"Description") but the record-list
-    # builder this shape currently routes through emits bare value boxes
-    # without a header band, so the wording does not reach the RDL yet.
-    # KNOWN RESIDUAL: route simplified_* groups to the TABULAR builder
-    # (whose _icaps already reads item.label) and then assert here that
-    # "Code"/"Description" appear in the RDL.
     from converter.parsers.oracle_xml import parse_oracle_xml
     rep = parse_oracle_xml(xml)
     labels = {getattr(i, "label", "") for q in rep.queries
               for i in (q.items or [])}
     assert {"Code", "Description"} <= labels,         "shorthand labels must at least survive the parse"
+    # RESIDUAL CLOSED (wild-class fix): the shorthand's declared region
+    # type routes the report to the TABULAR archetype, so the authored
+    # label= captions reach BOTH surfaces. Before the fix the report fell
+    # through detect_report_kind to 'certificate': the per-record path
+    # stacked both 0-geometry fields at one spot (engine-measured 305pt2
+    # of overpaint per page), page-broke per record, and dropped both
+    # captions; the mockup printed a literal "(no repeating frames)".
+    from converter.preview.html_mockup import detect_report_kind
+    assert detect_report_kind(rep) == "tabular_details"
+    assert "Code" in rdl and "Description" in rdl, \
+        "authored label= captions must reach the RDL header band"
+    assert 'Name="Tablix_Main"' in rdl, "shorthand must emit a real data grid"
+    assert 'Name="Tablix_Record"' not in rdl, \
+        "shorthand must never take the per-record document path"
+    mock = out["mockup_html"]
+    assert "Code" in mock and "Description" in mock, \
+        "authored captions must reach the mockup too"
+    assert "(no repeating frames)" not in mock
+
+
+def test_simplified_tabular_shorthand_in_header_section_routes_tabular():
+    """The docs dialect nests <tabular> inside <section name=\"header\"> --
+    the report's FIRST section in that grammar, not a page-furniture band.
+    Routing must not depend on which section carries the shorthand region:
+    keying the tabular route off section_main only would leave this shape
+    on the certificate path (whole region dropped, labels lost, sample
+    pages blank/jumbled -- the wild-class defect)."""
+    from converter import convert
+    from converter.parsers.oracle_xml import parse_oracle_xml
+    from converter.preview.html_mockup import detect_report_kind
+
+    xml = (b'<?xml version="1.0"?>'
+           b'<report name="shorthand_hdr" DTDVersion="9.0.2.0.0">'
+           b'<data><dataSource name="Q_s"><select>'
+           b'select item_code, item_desc from stock'
+           b'</select></dataSource></data>'
+           b'<layout><section name="header">'
+           b'<tabular name="M_s" template="neutral.tdf">'
+           b'<labelAttribute font="Arial" fontSize="10" fontStyle="bold"/>'
+           b'<field name="F_c" source="item_code" label="Code" font="Arial"/>'
+           b'<field name="F_d" source="item_desc" label="Description"'
+           b' font="Arial"/>'
+           b'</tabular></section></layout></report>')
+    rep = parse_oracle_xml(xml)
+    assert detect_report_kind(rep) == "tabular_details"
+    out = convert(xml)
+    rdl = out["rdl_xml"]
+    assert out["preflight"]["verdict"] != "BLOCKER"
+    assert 'Name="Tablix_Main"' in rdl and 'Name="Tablix_Record"' not in rdl
+    assert "Code" in rdl and "Description" in rdl
+    mock = out["mockup_html"]
+    assert "Code" in mock and "Description" in mock
+    assert "(no repeating frames)" not in mock
 
 
 def test_format_trigger_elsif_chains_and_boolean_constants_translate():
@@ -5993,3 +6219,123 @@ def test_cover_note_pairs_with_label_and_keeps_declared_style():
     assert abs((l_top - n_top) - 0.20) <= 0.02, (
         f"declared 0.20in label->note row offset emitted as "
         f"{l_top - n_top:.2f}in")
+
+
+# ---------------------------------------------------------------------------
+# XML Comment/PI nodes — the non-element-node totality class.
+#
+# A Comment or ProcessingInstruction node's .tag is a FUNCTION, not a string.
+# One annotation comment appended into the tablix hierarchy made every later
+# geometry walk that string-ops .tag raise AttributeError, and convert()'s
+# crash net silently degraded four wild reports to the near-empty fallback
+# RDL (XSD-valid = worse than failing loudly). Guards, in layers:
+#   1. every tree walk skips non-element nodes (isinstance(el.tag, str));
+#   2. the parser drops source-document comments/PIs at parse;
+#   3. a serialization-time choke point strips any non-element node a future
+#      pass might append, backed by a generate-time invariant.
+# All fixtures below are synthetic (invented ZZQC* names).
+# ---------------------------------------------------------------------------
+
+def test_tree_walks_skip_non_element_nodes():
+    """Every geometry walk must SKIP Comment/PI nodes, not crash on them.
+    Pre-fix this raised AttributeError ('function' object has no attribute
+    'split') inside _clamp_body_items_to and its sibling walks."""
+    from converter.generators import rdl as _R
+
+    root = ET.Element(_R._q("Report"))
+    root.append(ET.Comment(" hazard at root "))
+    ET.SubElement(root, _R._q("Width")).text = "8.00in"
+    page = ET.SubElement(root, _R._q("Page"))
+    ET.SubElement(page, _R._q("PageWidth")).text = "8.5in"
+    ET.SubElement(page, _R._q("LeftMargin")).text = "0.25in"
+    ET.SubElement(page, _R._q("RightMargin")).text = "0.25in"
+    body = ET.SubElement(root, _R._q("Body"))
+    items = ET.SubElement(body, _R._q("ReportItems"))
+    items.append(ET.Comment(" hazard among item siblings "))
+    tb = ET.SubElement(items, _R._q("Textbox"))
+    tb.set("Name", "T1")
+    ET.SubElement(tb, _R._q("Left")).text = "0in"
+    ET.SubElement(tb, _R._q("Width")).text = "9.99in"
+    tb.append(ET.Comment(" hazard inside an item "))
+    tb.append(ET.ProcessingInstruction("probe", "data"))
+
+    # The walks that crashed (or share the same .tag string-op pattern):
+    _R._clamp_body_items_to(root, 7.5)          # the reported crash site
+    _R._body_items_right_edge(root)
+    _R._page_band_items_right_edge(root)
+    _R._clamp_body_items_to_printable_width(root)
+    _R._fit_body_to_page(root)
+
+    st = ET.Element(_R._q("Style"))
+    ET.SubElement(st, _R._q("PaddingLeft")).text = "2pt"
+    st.append(ET.Comment(" hazard among style children "))
+    ET.SubElement(st, _R._q("FontSize")).text = "8pt"
+    _R._reorder_style_children(st)
+
+    # ...and the choke point removes every non-element node before shipping.
+    _R._strip_non_element_nodes(root)
+    survivors = [el for el in root.iter() if not isinstance(el.tag, str)]
+    assert survivors == [], \
+        "non-element nodes survived the serialization-time sweep"
+
+
+def test_no_comment_invariant_raises_on_a_doctored_document():
+    """PROVE THE GATE CAN FAIL: the serialized-document invariant must
+    RAISE on a comment or PI, and pass a clean body."""
+    import pytest
+    from converter.generators import rdl as _R
+
+    _R._assert_no_comment_nodes("<Report><Body /></Report>")  # clean: passes
+    with pytest.raises(AssertionError, match="comment"):
+        _R._assert_no_comment_nodes("<Report><!-- leak --><Body/></Report>")
+    with pytest.raises(AssertionError, match="comment"):
+        _R._assert_no_comment_nodes("<Report><?probe x?><Body/></Report>")
+
+
+_ZZQC_COMMENT_XML = b"""<?xml version="1.0"?>
+<report name="ZZQC_COMMENT_PROBE" DTDVersion="9.0.2.0.10">
+<!-- source-document comment: must never reach the RDL -->
+<data>
+ <dataSource name="Q_MAIN">
+  <!-- source comment between data nodes -->
+  <select><![CDATA[SELECT zzqc_col_a, zzqc_col_b FROM zzqc_things]]></select>
+  <group name="G_MAIN">
+   <dataItem name="zzqc_col_a" datatype="vchar2" defaultLabel="ColA"/>
+   <dataItem name="zzqc_col_b" datatype="number" defaultLabel="ColB"/>
+  </group>
+ </dataSource>
+</data>
+<layout>
+<!-- layout comment -->
+ <section name="main" width="8.5" height="11">
+  <body>
+   <frame name="M_frame" x="0" y="0" width="8" height="10">
+    <!-- frame comment between layout items -->
+    <repeatingFrame name="R_1" source="G_MAIN" x="0" y="0.5" width="8"
+      height="0.5" printDirection="down">
+     <field name="F_zzqc_col_a" source="zzqc_col_a"
+       x="0" y="0" width="3" height="0.2"/>
+     <field name="F_zzqc_col_b" source="zzqc_col_b"
+       x="3.2" y="0" width="3" height="0.2"/>
+    </repeatingFrame>
+   </frame>
+  </body>
+ </section>
+</layout>
+</report>"""
+
+
+def test_source_document_comments_never_reach_the_rdl():
+    """A source peppered with XML comments converts FULLY (no fallback) and
+    the shipped RDL carries no comment at all."""
+    from converter import convert
+
+    r = convert(_ZZQC_COMMENT_XML, target_db="oracle")
+    assert r.get("conversion_error") is None, (
+        f"comment-bearing source degraded to the fallback RDL: "
+        f"{r.get('conversion_error')}")
+    rdl = r["rdl_xml"]
+    assert "<!--" not in rdl, "an XML comment leaked into the shipped RDL"
+    assert "source-document comment" not in rdl
+    # And it really converted: the declared columns landed.
+    assert "zzqc_col_a" in rdl.lower() and "zzqc_col_b" in rdl.lower()

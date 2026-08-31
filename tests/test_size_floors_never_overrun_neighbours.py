@@ -477,3 +477,80 @@ def test_a_declared_literal_is_never_trimmed_to_fit():
     assert literal in got, (got, "the declared literal survives verbatim")
     assert "SOME COLUMN" not in got, (
         got, "the invented placeholder is what gave way")
+
+
+# ---------------------------------------------------------------------------
+# fixture C -- the width floor vs a declared column separator
+#
+# DECLARES:
+#   a day-style index column 0.298in wide, CENTER justified, whose right
+#   edge carries a zero-width vertical <line> at exactly x=0.398in, and a
+#   second column starting at that same x. Engine-render measured: the
+#   0.40in width floor widened the box past the separator and the centered
+#   value's last digit printed 0.4pt beyond the declared rule -- the rule
+#   cut its glyphs on every page. The floor may only consume space up to
+#   the nearest declared sibling on the same band.
+# ---------------------------------------------------------------------------
+
+def _emit_narrow_member(with_neighbours: bool):
+    """Drive the REAL record-frame walk (_emit_frame_rect, which computes
+    the declared bounds and places every member) over a frame declaring a
+    0.298in-wide centered field whose right edge carries a zero-width
+    vertical separator <line> and an abutting neighbour box. Returns the
+    (left, width) the walk emitted for the narrow field."""
+    import re as _re
+
+    import converter.generators.rdl as R           # noqa: PLC0415
+    from converter.models import LayoutField, LayoutGroup   # noqa: PLC0415
+    from converter.parsers.oracle_xml import parse_oracle_xml  # noqa: PLC0415
+
+    rep = parse_oracle_xml(_SEP_REP)
+    fields = [LayoutField(name="F_IDX", kind="field", source="NARROWNUM",
+                          align="center", x=5.100, y=2.40, width=0.298,
+                          height=0.19, font_size=9)]
+    if with_neighbours:
+        fields.append(LayoutField(name="B_SEP", kind="line", x=5.398,
+                                  y=2.30, width=0.0, height=0.40))
+        fields.append(LayoutField(name="B_NB", kind="text", text="Neigh",
+                                  x=5.398, y=2.40, width=0.6, height=0.19,
+                                  font_size=9))
+    g = LayoutGroup(name="M_X", kind="frame", x=0.0, y=2.0, width=8.5,
+                    height=1.0, fields=fields)
+    parent = ET.Element(R._q("ReportItems"))
+    R._emit_frame_rect(parent, g, 0.0, 0.0, 8.5, rep, [], "T", [0], False)
+    x = ET.tostring(parent, encoding="unicode")
+    for m in _re.finditer(r'<Textbox Name="([^"]+)">(.{0,2000}?)</Textbox>',
+                          x, _re.S):
+        if "Fields!NARROWNUM" in m.group(2):
+            left = float(_re.search(r"<Left>([\d.]+)in</Left>",
+                                    m.group(2)).group(1))
+            width = float(_re.search(r"<Width>([\d.]+)in</Width>",
+                                     m.group(2)).group(1))
+            return left, width
+    raise AssertionError("the walk must emit the narrow field")
+
+
+_SEP_REP = (
+    '<?xml version="1.0"?><report name="FLOORS_S" DTDVersion="9.0.2.0.10">'
+    '<data><dataSource name="Q_1">'
+    '<select><![CDATA[SELECT NARROWNUM FROM T]]></select>'
+    '<group name="G_1">'
+    '<dataItem name="NARROWNUM" oracleDatatype="number" width="4"/>'
+    '</group></dataSource></data><layout>'
+    '<section name="main" width="8.5" height="11.0">'
+    '<body width="8.5" height="9.5"><location x="0.0" y="0.0"/>'
+    '</body></section></layout></report>'
+).encode()
+
+
+def test_width_floor_stops_at_a_declared_separator():
+    _left, width = _emit_narrow_member(with_neighbours=True)
+    assert width <= 0.298 + 0.005, (
+        "the 0.40in floor may not push the box across the separator the "
+        "source declares at its right edge", width)
+
+
+def test_width_floor_still_applies_with_room():
+    _left, width = _emit_narrow_member(with_neighbours=False)
+    assert width >= 0.40 - 1e-6, (
+        "with no declared neighbour the readability floor is kept", width)

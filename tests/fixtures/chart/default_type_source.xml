@@ -1,0 +1,136 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- Synthetic Oracle Reports PAPER-layout fixture: a graph that declares NO
+     graphType at all -- the DEFAULT path of the type mapping.
+
+     This is the shape a real chart-bearing Oracle source declares. Builder-
+     written <Graph> blocks carry version/customLayout, the view-format noise
+     (MarkerText / X1Axis / Y1Axis / SliceLabel / Y2Axis) and the titles, but
+     leave graphType off entirely whenever the report keeps the builder's
+     default graph. Every explicit-type fixture in this directory therefore
+     exercises a branch the corpus does not use, while the branch the corpus
+     DOES use had no fixture at all.
+
+     Shapes it pins down (all from the Oracle graph DTD):
+       * a <graph> layout object in the TRAILER section, declared BEFORE the
+         main section, with a bare <body> (no width/height attributes)
+       * <geometryInfo> + <generalLayout verticalElasticity="expand"/>
+       * the real bindings inside a <graphDefinition> CDATA: src = the group,
+         groups = the CATEGORY column, dataValues = a group SUMMARY column
+         (report-computed, never a select-list column)
+       * a <Graph> config block with NO graphType, plus Title / O1Title /
+         Y1Title and the builder's view-format elements
+     Data is generic (sites / readings); no client content. -->
+<report name="DEFAULT_GRAPH" DTDVersion="9.0.2.0.10">
+  <data>
+    <dataSource name="Q_1">
+      <select><![CDATA[SELECT s.site_id, r.reading_id, r.reading_value
+ FROM site s, reading r WHERE r.site_id = s.site_id]]></select>
+      <group name="G_SITE_ID">
+        <dataItem name="SITE_ID" datatype="number" columnOrder="11" width="22"
+         defaultWidth="100000" defaultHeight="10000" columnFlags="33"
+         defaultLabel="Site">
+          <dataDescriptor expression="SITE.SITE_ID"
+           descriptiveExpression="SITE_ID" order="1" width="22" precision="4"/>
+        </dataItem>
+        <summary name="CountREADING_IDPerSITE_ID" source="READING_ID"
+         function="count" precision="8" reset="G_SITE_ID" compute="report"
+         defaultWidth="100000" defaultHeight="10000" columnFlags="552"
+         defaultLabel="Count:">
+          <displayInfo x="0.00000" y="0.00000" width="0.00000" height="0.00000"/>
+        </summary>
+        <group name="G_READING">
+          <dataItem name="READING_ID" datatype="number" columnOrder="12"
+           width="22" defaultWidth="100000" defaultHeight="10000"
+           columnFlags="33" defaultLabel="Reading">
+            <dataDescriptor expression="READING.READING_ID"
+             descriptiveExpression="READING_ID" order="2" width="22"
+             precision="8"/>
+          </dataItem>
+          <dataItem name="READING_VALUE" datatype="number" columnOrder="13"
+           width="22" defaultWidth="100000" defaultHeight="10000"
+           columnFlags="33" defaultLabel="Value">
+            <dataDescriptor expression="READING.READING_VALUE"
+             descriptiveExpression="READING_VALUE" order="3" width="22"
+             precision="10"/>
+          </dataItem>
+        </group>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+  <section name="trailer">
+    <body>
+      <graph name="CT_1">
+        <geometryInfo x="0.37500" y="0.00000" width="5.43750" height="3.06250"
+        />
+        <generalLayout verticalElasticity="expand"/>
+        <graphDefinition>
+        <![CDATA[<rw:graph id="CT_1" src="G_SITE_ID" groups="SITE_ID" dataValues="CountREADING_IDPerSITE_ID">
+<!--
+<?xml version="1.0" ?>
+<Graph version="11.1.1.0" customLayout="">
+<MarkerText>
+<X1ViewFormat>
+<ViewFormat currencySymbol="$"/>
+</X1ViewFormat>
+<Y1ViewFormat>
+<ViewFormat currencySymbol="$"/>
+</Y1ViewFormat>
+<Y2ViewFormat>
+<ViewFormat currencySymbol="$"/>
+</Y2ViewFormat>
+</MarkerText>
+<O1Title text="Site" visible="true"/>
+<SliceLabel>
+<ViewFormat currencySymbol="$"/>
+</SliceLabel>
+<Title text="Readings by Site" visible="true"/>
+<X1Axis>
+<ViewFormat currencySymbol="$"/>
+</X1Axis>
+<Y1Axis majorTickStepAutomatic="true">
+<ViewFormat currencySymbol="$"/>
+</Y1Axis>
+<Y1Title text="Number of Readings" visible="true"/>
+<Y2Axis majorTickStepAutomatic="true">
+<ViewFormat currencySymbol="$"/>
+</Y2Axis>
+</Graph>
+
+-->
+</rw:graph>]]>
+        </graphDefinition>
+      </graph>
+    </body>
+  </section>
+  <section name="main">
+    <body>
+      <frame name="M_G_SITE_ID_GRPFR">
+        <geometryInfo x="0.00000" y="0.00000" width="6.87500" height="0.75000"/>
+        <text name="L_SITE_ID">
+          <geometryInfo x="0.00000" y="0.00000" width="2.00000"
+           height="0.18750"/>
+          <textSegment><string><![CDATA[Site]]></string></textSegment>
+        </text>
+        <text name="L_COUNT">
+          <geometryInfo x="2.00000" y="0.00000" width="1.50000"
+           height="0.18750"/>
+          <textSegment><string><![CDATA[Readings]]></string></textSegment>
+        </text>
+        <repeatingFrame name="R_G_SITE_ID" source="G_SITE_ID">
+          <geometryInfo x="0.00000" y="0.18750" width="6.87500"
+           height="0.37500"/>
+          <field name="F_SITE_ID" source="SITE_ID">
+            <geometryInfo x="0.00000" y="0.18750" width="2.00000"
+             height="0.18750"/>
+          </field>
+          <field name="F_COUNT_PER_SITE" source="CountREADING_IDPerSITE_ID">
+            <geometryInfo x="2.00000" y="0.18750" width="1.50000"
+             height="0.18750"/>
+          </field>
+        </repeatingFrame>
+      </frame>
+    </body>
+  </section>
+  </layout>
+</report>

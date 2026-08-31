@@ -419,10 +419,19 @@ def _select_columns(sql: str) -> List[str]:
 
     Pure regex; handles aliases (AS NAME or trailing NAME) and bare
     table.col references. Anything we can't parse cleanly is skipped.
+
+    The keyword search and the split run on the comment/literal-blanked
+    text (``_blank_sql_comments``): a leading ``--`` comment containing
+    the word "select" otherwise wins the search and the "columns" are
+    invented from COMMENT WORDS (wild-corpus verified); a FROM inside a
+    string literal truncates the list the same way. Names extracted are
+    identifiers, so they read identically from the blanked text.
     """
     if not sql:
         return []
-    m = re.search(r"\bSELECT\b(.+?)\bFROM\b", sql, re.IGNORECASE | re.DOTALL)
+    from .generators.rdl import _blank_sql_comments
+    det = _blank_sql_comments(sql, blank_literals=True)
+    m = re.search(r"\bSELECT\b(.+?)\bFROM\b", det, re.IGNORECASE | re.DOTALL)
     if not m:
         return []
     body = m.group(1)
@@ -483,13 +492,28 @@ def _select_columns(sql: str) -> List[str]:
 
 
 def _bind_params_in_sql(sql: str) -> List[str]:
-    """Return bind variable names referenced in the SQL, in order."""
+    """Return the DISTINCT bind variable names referenced in the SQL, in order.
+
+    Scans the comment/literal-blanked text: a ``:NAME`` inside a comment or
+    a string literal (``'HH24:MI'``) is not a bind, and declaring one makes
+    the parameter count disagree with the statement at execution.
+
+    Bind identity is CASE-INSENSITIVE: Oracle bind names are ordinary
+    unquoted identifiers, so ``:P_Begin_Date`` and ``:P_BEGIN_DATE`` are one
+    bind that a statement may legally spell both ways. Folding on UPPER()
+    keeps the sub-report stub at exactly one QueryParameter (and one
+    ReportParameter) per bind -- one per SPELLING hands the provider more
+    parameters than the statement has binds (ORA-01036 at Refresh Fields).
+    The first spelling seen is the canonical one; the SQL is not rewritten."""
     seen = set()
     out = []
-    for m in re.finditer(r":([A-Za-z_][A-Za-z0-9_]*)", sql or ""):
+    from .generators.rdl import _blank_sql_comments
+    for m in re.finditer(r":([A-Za-z_][A-Za-z0-9_]*)",
+                         _blank_sql_comments(sql or "",
+                                             blank_literals=True)):
         n = m.group(1)
-        if n not in seen:
-            seen.add(n)
+        if n.upper() not in seen:
+            seen.add(n.upper())
             out.append(n)
     return out
 
@@ -499,9 +523,14 @@ def _lexical_refs_in_sql(sql: str) -> List[str]:
     the SQL, in order. A lexical splices a raw SQL FRAGMENT (a whole WHERE /
     ORDER BY clause) at parse time -- SSRS has no direct equivalent. We surface
     them so the build can tell the user exactly which knob controls filtering.
-    Skips the XML entity escapes (&amp;/&lt;/&gt;/&quot;/&apos;)."""
+    Skips the XML entity escapes (&amp;/&lt;/&gt;/&quot;/&apos;). Scans the
+    comment/literal-blanked text — an ``&NAME`` inside a comment or literal
+    ('AT&T') is not a lexical."""
     seen, out = set(), []
-    for m in re.finditer(r"&([A-Za-z_][A-Za-z0-9_]*)", sql or ""):
+    from .generators.rdl import _blank_sql_comments
+    for m in re.finditer(r"&([A-Za-z_][A-Za-z0-9_]*)",
+                         _blank_sql_comments(sql or "",
+                                             blank_literals=True)):
         n = m.group(1)
         if n.lower() in ("amp", "lt", "gt", "quot", "apos", "nbsp"):
             continue
@@ -568,18 +597,28 @@ def _trim_to_first_statement(sql: str) -> str:
     """
     if not sql:
         return sql
-    m = re.search(r"\bSELECT\b", sql, re.IGNORECASE)
+    # All keyword/terminator searches run on the comment-blanked text
+    # (positions map 1:1 onto sql): a '-- select ...' comment must not win
+    # the SELECT search, and a ';' inside a comment must not terminate the
+    # statement early. Comment-only blanking — these blobs are often docx
+    # prose, where an apostrophe is not a string-literal delimiter. The
+    # RETURNED text is always sliced from the ORIGINAL blob.
+    from .generators.rdl import _blank_sql_comments
+    det = _blank_sql_comments(sql)
+    m = re.search(r"\bSELECT\b", det, re.IGNORECASE)
     if not m:
         return sql.strip()
     body = sql[m.start():]
+    det_body = det[m.start():]
     cut = len(body)
-    semi = body.find(";")
+    semi = det_body.find(";")
     if semi != -1:
         cut = min(cut, semi)
-    kw = re.search(r"(?im)^[ \t]*(FUNCTION|PROCEDURE|PACKAGE|DECLARE|BEGIN)\b", body)
+    kw = re.search(r"(?im)^[ \t]*(FUNCTION|PROCEDURE|PACKAGE|DECLARE|BEGIN)\b",
+                   det_body)
     if kw:
         cut = min(cut, kw.start())
-    slash = re.search(r"(?m)^[ \t]*/[ \t]*$", body)
+    slash = re.search(r"(?m)^[ \t]*/[ \t]*$", det_body)
     if slash:
         cut = min(cut, slash.start())
     return body[:cut].strip()
@@ -621,8 +660,13 @@ def compose_subreport_rdl(child_name: str,
         if not os.path.isfile(a):
             continue
         candidate = _sql_from_artifact(a)
-        # Quick gate: must contain SELECT ... FROM
-        if re.search(r"\bSELECT\b.+?\bFROM\b", candidate or "",
+        # Quick gate: must contain SELECT ... FROM in CODE position — a
+        # commented-out "select ... from" alone is not runnable SQL.
+        # (Comment-only blanking: these blobs can be docx prose, where an
+        # apostrophe is not a literal delimiter.)
+        from .generators.rdl import _blank_sql_comments
+        if re.search(r"\bSELECT\b.+?\bFROM\b",
+                     _blank_sql_comments(candidate or ""),
                      re.IGNORECASE | re.DOTALL):
             sql = candidate
             break
@@ -641,10 +685,19 @@ def compose_subreport_rdl(child_name: str,
     # Neutralize Oracle lexical refs (&P_CRITERIA) so the stub CommandText is
     # valid SQL -- the same rule the real generator applies. A raw "&NAME"
     # reaches Oracle as a syntax error; a comment keeps the statement runnable.
+    # Only CODE-position refs are touched: an "&NAME" inside a comment or a
+    # string literal is not a lexical, and splicing a comment into a literal
+    # corrupts the statement.
     if sql and lexicals:
-        sql = re.sub(r"&([A-Za-z_][A-Za-z0-9_]*)",
-                     r"/* lexical ref &\1 -- wire as dynamic WHERE at deploy time */",
-                     sql)
+        from .generators.rdl import _blank_sql_comments
+        _lex_det = _blank_sql_comments(sql, blank_literals=True)
+
+        def _neutralize(m):
+            if _lex_det[m.start()] != "&":
+                return m.group(0)
+            return (f"/* lexical ref &{m.group(1)} -- wire as dynamic "
+                    f"WHERE at deploy time */")
+        sql = re.sub(r"&([A-Za-z_][A-Za-z0-9_]*)", _neutralize, sql)
 
     # 2. Build the RDL XML. Keep it minimal but schema-valid so the
     #    user can upload it to SSRS without errors.

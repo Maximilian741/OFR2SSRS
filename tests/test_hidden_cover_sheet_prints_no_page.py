@@ -130,19 +130,15 @@ def _cover_rect(rdl: str) -> str:
                     "Rectangle")
 
 
-def _blank_pages(pdf_path: str) -> list:
-    """Pages with no residual text once page chrome is stripped."""
-    from pypdf import PdfReader
-    out = []
-    for i, page in enumerate(PdfReader(pdf_path).pages):
-        txt = (page.extract_text() or "").strip()
-        residual = "".join(
-            ln for ln in txt.splitlines()
-            if not ln.strip().lower().startswith(("page ", "report run on"))
-        ).strip()
-        if len(residual) < 8:
-            out.append(i + 1)
-    return out
+def _blank_pages(pdf_path: str, rdl_xml: str = None, mode: str = None) -> list:
+    """Pages with no CONTENT text once page furniture is stripped.
+
+    Shared measure — tools/renderlab/blank_measure.py. The furniture comes
+    from the ARTIFACT (the RDL's own page-band wording, any language) plus the
+    lines the document repeats on every sheet; the two English literals this
+    used to be built from are only a fallback."""
+    from blank_measure import measure_pdf
+    return measure_pdf(pdf_path, rdl_xml=rdl_xml, mode=mode)["blank"]
 
 
 def _force_sheets_visible(rdl: str) -> str:
@@ -245,7 +241,7 @@ def test_hidden_cover_sheet_prints_no_page_and_visible_one_prints_whole(
     p1.write_text(rdl, encoding="utf-8")
     res = render_rdl(p1, tmp_path / "default.pdf", rows=3)
     assert res["ok"], f"MS engine refused the RDL:\n{res['log'][-1200:]}"
-    blanks = _blank_pages(res["pdf"])
+    blanks = _blank_pages(res["pdf"], rdl, res.get("mode"))
     assert blanks == [], (
         f"blank page(s) {blanks} under the shipped defaults — a sheet whose "
         "every object is hidden must consume no page")
@@ -257,7 +253,8 @@ def test_hidden_cover_sheet_prints_no_page_and_visible_one_prints_whole(
     p2.write_text(_force_sheets_visible(rdl), encoding="utf-8")
     res2 = render_rdl(p2, tmp_path / "visible.pdf", rows=3)
     assert res2["ok"], f"MS engine refused the RDL:\n{res2['log'][-1200:]}"
-    assert _blank_pages(res2["pdf"]) == [], (
+    assert _blank_pages(res2["pdf"], _force_sheets_visible(rdl),
+                        res2.get("mode")) == [], (
         "the visible continuation sheet must not drag a blank page with it")
     pages = [(pg.extract_text() or "") for pg in PdfReader(res2["pdf"]).pages]
     assert len(pages) == n_default + 1, (

@@ -1,0 +1,210 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<report name="I18N_CJK" DTDVersion="9.0.2.0.10">
+  <data>
+    <userParameter name="P_REGION" datatype="character" width="40"
+     precision="10" initialValue="関東地方" label="地域"
+     defaultWidth="0" defaultHeight="0"/>
+    <userParameter name="P_YEAR" datatype="number" width="4" precision="10"
+     initialValue="2024" label="年度" defaultWidth="0"
+     defaultHeight="0"/>
+    <userParameter name="P_TITLE_NOTE" datatype="character" width="60"
+     precision="10" initialValue="環境監視管理課" label="副題"
+     display="no" defaultWidth="0" defaultHeight="0"/>
+    <dataSource name="Q_1">
+      <select>
+      <![CDATA[SELECT STN_CODE, REGION_NAME, READING_VAL, EVENT_DATE
+FROM ZZQX_I18N_OBS
+WHERE REGION_NAME = :P_REGION
+  AND OBS_YEAR = :P_YEAR
+ORDER BY STN_CODE]]>
+      </select>
+      <displayInfo x="0" y="0" width="1.5" height="0.5"/>
+      <group name="G_1">
+        <displayInfo x="0" y="0" width="1.5" height="3"/>
+        <dataItem name="STN_CODE" datatype="vchar2" columnOrder="1"
+         width="20" defaultWidth="60000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="観測所">
+          <dataDescriptor expression="STN_CODE"
+           descriptiveExpression="STN_CODE" order="1" width="20"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="REGION_NAME" datatype="vchar2" columnOrder="2"
+         width="40" defaultWidth="100000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="地域">
+          <dataDescriptor expression="REGION_NAME"
+           descriptiveExpression="REGION_NAME" order="2" width="40"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="READING_VAL" datatype="number" columnOrder="3"
+         width="22" precision="10" scale="2" defaultWidth="80000"
+         defaultHeight="10000" columnFlags="0" defaultLabel="測定値">
+          <dataDescriptor expression="READING_VAL"
+           descriptiveExpression="READING_VAL" order="3" width="22"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+        <dataItem name="EVENT_DATE" datatype="date" columnOrder="4"
+         width="10" defaultWidth="60000" defaultHeight="10000"
+         columnFlags="0" defaultLabel="日付">
+          <dataDescriptor expression="EVENT_DATE"
+           descriptiveExpression="EVENT_DATE" order="4" width="10"/>
+          <dataItemPrivate adtName="" schemaName=""/>
+        </dataItem>
+      </group>
+    </dataSource>
+  </data>
+  <layout>
+  <section name="main" width="8.50000" height="11.00000">
+    <body width="8.00000">
+      <location x="0.25000"/>
+      <text name="B_NOTE" minWidowLines="1">
+        <textSettings justify="start" spacing="0"/>
+        <geometryInfo x="0.00000" y="0.00000" width="6.50000"
+         height="0.45000"/>
+        <visualSettings fillPattern="transparent"/>
+        <textSegment>
+          <font face="MS Gothic" size="10"/>
+          <string>
+          <![CDATA[本報告書は観測システムにより自動的に作成され、選択された地域の月次測定値のすべてを含みます。数値は毎月末に集計されます。]]>
+          </string>
+        </textSegment>
+      </text>
+      <repeatingFrame name="R_1" source="G_1" printDirection="down"
+       minWidowRecords="1" columnMode="no">
+        <geometryInfo x="0.00000" y="0.55000" width="7.90000"
+         height="0.70000"/>
+        <generalLayout verticalElasticity="expand"/>
+        <visualSettings fillPattern="transparent"/>
+        <text name="B_STN" minWidowLines="1">
+          <textSettings justify="start" spacing="0"/>
+          <geometryInfo x="0.00000" y="0.60000" width="1.30000"
+           height="0.19000"/>
+          <visualSettings fillPattern="transparent"/>
+          <textSegment>
+            <font face="MS Gothic" size="10" bold="yes"/>
+            <string>
+            <![CDATA[観測所:]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_STN_CODE" source="STN_CODE" minWidowLines="1"
+         spacing="0" alignment="start">
+          <font face="MS Gothic" size="10"/>
+          <geometryInfo x="1.40000" y="0.60000" width="1.60000"
+           height="0.19000"/>
+          <generalLayout verticalElasticity="expand"/>
+          <visualSettings fillPattern="transparent"/>
+        </field>
+        <text name="B_DATE" minWidowLines="1">
+          <textSettings justify="start" spacing="0"/>
+          <geometryInfo x="3.20000" y="0.60000" width="1.30000"
+           height="0.19000"/>
+          <visualSettings fillPattern="transparent"/>
+          <textSegment>
+            <font face="MS Gothic" size="10" bold="yes"/>
+            <string>
+            <![CDATA[日付:]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_EVENT_DATE" source="EVENT_DATE" minWidowLines="1"
+         formatMask="YYYY&quot;年&quot;MM&quot;月&quot;DD&quot;日&quot;" spacing="0" alignment="start">
+          <font face="MS Gothic" size="10"/>
+          <geometryInfo x="4.60000" y="0.60000" width="2.20000"
+           height="0.19000"/>
+          <generalLayout verticalElasticity="expand"/>
+          <visualSettings fillPattern="transparent"/>
+        </field>
+        <text name="B_REG" minWidowLines="1">
+          <textSettings justify="start" spacing="0"/>
+          <geometryInfo x="0.00000" y="0.90000" width="1.30000"
+           height="0.19000"/>
+          <visualSettings fillPattern="transparent"/>
+          <textSegment>
+            <font face="MS Gothic" size="10" bold="yes"/>
+            <string>
+            <![CDATA[地域:]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_REGION_NAME" source="REGION_NAME" minWidowLines="1"
+         spacing="0" alignment="start">
+          <font face="MS Gothic" size="10"/>
+          <geometryInfo x="1.40000" y="0.90000" width="2.60000"
+           height="0.19000"/>
+          <generalLayout verticalElasticity="expand"/>
+          <visualSettings fillPattern="transparent"/>
+        </field>
+        <text name="B_VAL" minWidowLines="1">
+          <textSettings justify="start" spacing="0"/>
+          <geometryInfo x="4.20000" y="0.90000" width="1.30000"
+           height="0.19000"/>
+          <visualSettings fillPattern="transparent"/>
+          <textSegment>
+            <font face="MS Gothic" size="10" bold="yes"/>
+            <string>
+            <![CDATA[測定値:]]>
+            </string>
+          </textSegment>
+        </text>
+        <field name="F_READING_VAL" source="READING_VAL" minWidowLines="1"
+         formatMask="9,999,990" spacing="0" alignment="end">
+          <font face="MS Gothic" size="10"/>
+          <geometryInfo x="5.60000" y="0.90000" width="1.10000"
+           height="0.19000"/>
+          <generalLayout verticalElasticity="expand"/>
+          <visualSettings fillPattern="transparent"/>
+        </field>
+      </repeatingFrame>
+    </body>
+    <margin>
+      <text name="B_TITLE" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="2.00000" y="0.15000" width="4.50000"
+         height="0.35000"/>
+        <textSegment>
+          <font face="MS Gothic" size="16" bold="yes"/>
+          <string>
+          <![CDATA[月次観測報告書]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_TITLE_NOTE" source="P_TITLE_NOTE" minWidowLines="1"
+       spacing="0" alignment="center">
+        <font face="MS Gothic" size="11"/>
+        <geometryInfo x="2.00000" y="0.52000" width="4.50000"
+         height="0.20000"/>
+        <generalLayout horizontalElasticity="variable"/>
+      </field>
+      <text name="B_RUN" minWidowLines="1">
+        <textSettings spacing="0"/>
+        <geometryInfo x="0.30000" y="0.80000" width="1.60000"
+         height="0.19000"/>
+        <textSegment>
+          <font face="MS Gothic" size="10"/>
+          <string>
+          <![CDATA[出力日:]]>
+          </string>
+        </textSegment>
+      </text>
+      <field name="F_DATE1" source="CurrentDate" minWidowLines="1"
+       formatMask="YYYY&quot;年&quot;MM&quot;月&quot;DD&quot;日&quot;" spacing="0" alignment="start">
+        <font face="MS Gothic" size="10"/>
+        <geometryInfo x="2.00000" y="0.80000" width="2.30000"
+         height="0.19000"/>
+        <generalLayout horizontalElasticity="variable"/>
+      </field>
+      <text name="B_PAGENUM" minWidowLines="1">
+        <textSettings justify="center" spacing="0"/>
+        <geometryInfo x="3.40000" y="10.50000" width="1.70000"
+         height="0.19000"/>
+        <textSegment>
+          <font face="MS Gothic" size="10"/>
+          <string>
+          <![CDATA[ページ &<PhysicalPageNumber>]]>
+          </string>
+        </textSegment>
+      </text>
+    </margin>
+  </section>
+  </layout>
+</report>

@@ -1,40 +1,226 @@
 /* =========================================================
-   Oracle2SSRS — "Whitepaper"
-   A paper-clean Swiss engineering surface. Structure from fine
-   hairline rules + confident type, not gradients or glass.
-   One accent (oxblood ink-red). Dark code wells for syntax.
-   Original class names preserved so the JS keeps working.
+   COLOUR LAYER — one token system, two themes.
+
+   Rules of the road (there are tests for each of them):
+     1. Every colour in this stylesheet is declared HERE and
+        nowhere else. Component rules may only say var(--token).
+        A literal hex/rgb in a component rule is a bug —
+        tests/test_theme_tokens.py fails the build for it.
+     2. The COMPLETE light palette lives on bare :root.
+     3. Dark redefines only the tokens, and does it TWICE:
+          @media (prefers-color-scheme: dark) -> :root:not([data-theme="light"])
+          :root[data-theme="dark"]
+        so the operating-system preference works with no clicks,
+        and the explicit toggle still wins in EITHER direction
+        (dark on a light machine, light on a dark machine).
+        The two dark blocks must stay identical in their token
+        values — a test compares them.
+     4. Contrast is measured, never eyeballed. Every pair used
+        for text or for a control edge is asserted in
+        tests/test_theme_contrast.py, in both themes.
+     5. Colour is never the only carrier of meaning. Status
+        tokens exist so an icon + a word can be TINTED, not so
+        the tint can replace them.
    ========================================================= */
-
 :root {
-  --paper:#fbfaf8; --surface-0:#ffffff; --surface-1:#f4f2ee; --surface-2:#efece6;
-  --ink:#1a1714; --ink-2:#57514a; --ink-3:#8a8178; --ink-faint:#b0a89d;
-  --accent:#b4452f; --accent-hi:#9a3826; --accent-wash:#fbefeb;
-  --good:#3f6b3a; --good-wash:#eef3ec;
-  --warn:#8a6212; --warn-wash:#f7f0de;
-  --bad:#a23a2e;  --bad-wash:#f8ecea;
-  --line:#e6e2db; --line-strong:#d6d0c7; --focus-ring:rgba(180,69,47,0.40);
-  --code-bg:#211e1b; --code-ink:#e9e4dc; --code-border:#322d28; --code-gutter:#1a1815;
+  color-scheme: light;
 
-  /* legacy names mapped onto the system so any stray rule still resolves */
+  /* --- surfaces. Depth model, identical in both themes:
+         cards sit ABOVE the page, wells sit BELOW it. --- */
+  --surface-0:#ffffff;    /* cards, top bar        (raised) */
+  --paper:#fbfaf8;        /* page background       (ground) */
+  --surface-1:#f4f2ee;    /* sidebar, subtle in-card fills  */
+  --surface-2:#efece6;    /* wells: preview desk, deep insets */
+
+  /* The simulated sheet in the report preview. This is DOCUMENT content,
+     not chrome: an SSRS page prints on white paper whatever theme the
+     operator is using, so this token deliberately does not flip. */
+  --doc-paper:#ffffff; --doc-ink:#111111;
+  --scrim:rgba(26,23,20,.45);          /* modal backdrop */
+
+  /* --- ink ramp. Every step below is >=4.5:1 on all four surfaces.
+         There is no lighter "decorative" step: the one token that used to
+         sit below --ink-faint was painting the arrow glyphs between the
+         pipeline steps in the How-it-works dialog — real 13.5px text, at
+         2.58:1 — while it was exempt from measurement for being decorative.
+         Anything with glyphs in it takes a rung of THIS ramp. --- */
+  --ink:#1a1714;          /* body text           */
+  --ink-2:#57514a;        /* secondary prose     */
+  --ink-3:#635c53;        /* labels, meta        */
+  --ink-faint:#6e675e;    /* hints, placeholders, connector glyphs */
+  --on-solid:#ffffff;     /* text on a filled accent/status button */
+
+  /* --- lines --- */
+  --line:#e6e2db;         /* hairline dividers   (decorative) */
+  --line-strong:#d6d0c7;  /* stronger dividers   (decorative) */
+  /* The EDGE OF A CONTROL — WCAG 1.4.11 wants 3:1 and the old #8c857b
+     cleared it by 0.09 on a well (3.09:1 against --surface-2) and by 0.26
+     in the sidebar. A non-text indicator that only just passes is one
+     rounding away from failing and is HARD TO SEE long before that, so the
+     edge was darkened until the worst surface has real headroom:
+     3.97:1 on --surface-2, 4.19:1 on --surface-1, 4.68:1 on a card. */
+  --field-border:#7a7369;
+  --focus-ring:#b4452f;   /* solid, >=3:1 against every surface */
+
+  /* --- accent (oxblood ink-red; one accent, used sparingly) --- */
+  --accent:#b4452f; --accent-hi:#9a3826; --accent-wash:#fbefeb; --accent-line:#e8c3b9;
+
+  /* --- status --- */
+  --good:#3f6b3a; --good-wash:#eef3ec; --good-line:#b7cdb2;
+  --warn:#8a6212; --warn-hi:#6f4f0e; --warn-wash:#f7f0de; --warn-line:#ddc98f;
+  --bad:#a23a2e;  --bad-wash:#f8ecea;  --bad-line:#e3b8b1;
+
+  /* --- code wells. Dark in BOTH themes: the syntax palette is a dark
+         one, and a code listing reads as an inset object either way. --- */
+  --code-bg:#211e1b; --code-ink:#e9e4dc; --code-border:#322d28; --code-gutter:#1a1815;
+  /* A listing that scrolls sideways is a tab stop (scroll_regions.js), and
+     its ring is drawn INSIDE the box — on the well, which is dark in BOTH
+     themes. The theme's own --focus-ring is a light-theme colour, so there
+     it measured 3.03:1: over the 3:1 line by 0.03. Same arrangement as
+     --tour-focus on the guided-tour card: the pinned surface pins its own
+     ring. One value for both themes, chosen to clear 3:1 with headroom on
+     everything an INSET ring can touch — the well itself (4.09:1 light,
+     4.67:1 dark) and, where the box's rounded corner has already cut the
+     well away, the card behind it (4.06:1 light, 3.91:1 dark). A lighter
+     salmon measured 6.23:1 on the well and 2.66:1 on that white corner,
+     which tests/test_theme_contrast_live.py caught on the served page. */
+  --code-focus:#c4624f;
+
+  /* --- syntax palette (frontend/static/js/highlight.js).
+         This replaced the prism-tomorrow stylesheet the page used to fetch
+         from a CDN: the machine this ships to may be offline, and a code
+         listing that needs the internet to be readable is not readable at
+         work. The well is dark in BOTH themes, so one palette serves both
+         and these are pinned here rather than repeated in the dark blocks
+         (same arrangement as the tour tokens above). Every entry is
+         measured >=4.5:1 against BOTH well colours in
+         tests/test_offline_assets.py. Syntax colour is decoration only —
+         it tints text that is already fully legible in --code-ink, so it
+         never carries meaning on its own. --- */
+  --syn-comment:#9a938a;   /* comments, CDATA, prolog, doctype */
+  --syn-punct:#bdb6ad;     /* brackets, commas, angle brackets */
+  --syn-tag:#e8a07f;       /* XML element names                */
+  --syn-attr:#e2c98a;      /* XML attribute names              */
+  --syn-string:#a8cf9a;    /* strings and attribute values     */
+  --syn-number:#e8b57a;    /* numbers and booleans             */
+  --syn-keyword:#c9a8dc;   /* SQL keywords                     */
+  --syn-operator:#8fcfc9;  /* operators, bind variables        */
+
+  /* --- guided tour (frontend/static/js/demo_mode.js) ---
+         The SPOTLIGHT ring is drawn over the page, so it follows the theme
+         and owes 3:1 on every surface. The TOOLTIP is a spotlight card that
+         stays dark in both themes, like a code well, so its own colours are
+         pinned here once and never redefined below.
+         That pinning is why the card needs its OWN focus ring: the theme's
+         --focus-ring is a light-theme colour, and on this card it measured
+         2.76:1 in light mode. --tour-focus is pinned with the card, and
+         tests/test_theme_contrast.py will not let the card claim it without
+         a rule in demo_mode.js that actually paints it. --- */
+  --tour-ring:#b4452f;
+  --tour-bg:#1d2733; --tour-ink:#f2f6fa; --tour-line:#3d4c5e;
+  --tour-title:#ffd479; --tour-muted:#9fb0c1;
+  --tour-cta:#f6a821; --tour-cta-ink:#1d2733;
+  --tour-focus:#e8836a;   /* keyboard ring INSIDE the card: 5.67:1 on it */
+
+  --shadow-sm:0 1px 1px rgba(26,23,20,.04);
+  --shadow-md:0 1px 2px rgba(26,23,20,.05),0 1px 1px rgba(26,23,20,.04);
+  --shadow-lg:0 8px 28px rgba(26,23,20,.12),0 1px 2px rgba(26,23,20,.06);
+
+  /* legacy names mapped onto the system so any stray rule still resolves.
+     These are var() ALIASES on purpose: they follow the theme for free,
+     so they never need repeating in the dark blocks below. */
   --bg:var(--paper); --panel:var(--surface-0); --panel-2:var(--surface-1); --panel-3:var(--surface-2);
   --border:var(--line); --border-strong:var(--line-strong);
   --text:var(--ink); --text-muted:var(--ink-2); --text-soft:var(--ink-3); --text-dim:var(--ink-faint);
+  --muted:var(--ink-3); --ok:var(--good); --err:var(--bad);
   --side-bg:var(--surface-0); --side-bg-2:var(--surface-1); --side-border:var(--line);
   --side-text:var(--ink); --side-text-muted:var(--ink-2); --side-heading:var(--ink);
   --accent-2:var(--accent); --accent-3:var(--accent);
   --tab-mockup:var(--accent); --tab-rdl:var(--accent); --tab-side:var(--accent);
   --tab-live:var(--accent); --tab-validate:var(--accent); --tab-deploy:var(--accent);
 
-  --shadow-sm:0 1px 1px rgba(26,23,20,.04);
-  --shadow-md:0 1px 2px rgba(26,23,20,.05),0 1px 1px rgba(26,23,20,.04);
-  --shadow-lg:0 8px 28px rgba(26,23,20,.12),0 1px 2px rgba(26,23,20,.06);
   --glow-violet:none; --glow-cyan:none; --glow-magenta:none;
   --radius:6px; --radius-sm:4px; --radius-lg:8px;
+  /* No @font-face and no webfont stylesheet: the page fetches nothing from
+     the internet (see the head of index.html). Inter and JetBrains Mono
+     stay FIRST so a machine that already has them installed still uses
+     them; the rest of each stack is what Windows ships, so an offline
+     workstation gets Segoe UI and Cascadia Mono with no request at all. */
   --font-sans:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
   --font-display:"Inter",system-ui,sans-serif;
   --font-mono:"JetBrains Mono",ui-monospace,"SF Mono","Cascadia Mono",Consolas,monospace;
   --topbar-h:56px; --side-w:300px;
+}
+
+/* ---------------------------------------------------------
+   DARK — the operator's machine already asked for it.
+   Guarded with :not([data-theme="light"]) so choosing Light
+   explicitly overrides a dark operating system.
+   --------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    /* O2S-DARK-TOKENS-START */
+    color-scheme: dark;
+    --surface-0:#262220;
+    --paper:#1e1b18;
+    --surface-1:#191614;
+    --surface-2:#131110;
+    --doc-paper:#ffffff; --doc-ink:#111111;
+    --scrim:rgba(0,0,0,.62);
+    --ink:#f2eee8;
+    --ink-2:#cfc7bc;
+    --ink-3:#a89f94;
+    --ink-faint:#958c81;
+    --on-solid:#17140f;
+    --line:#332e2a;
+    --line-strong:#423c36;
+    --field-border:#8c8177;
+    --focus-ring:#e8836a;
+    --accent:#e8836a; --accent-hi:#f19a83; --accent-wash:#33201b; --accent-line:#5a3428;
+    --good:#86c07c; --good-wash:#1c2619; --good-line:#33502c;
+    --warn:#dcae54; --warn-hi:#e8bf6f; --warn-wash:#2b2314; --warn-line:#57451f;
+    --bad:#f08a7a; --bad-wash:#2e1c17; --bad-line:#5e3128;
+    --code-bg:#131110; --code-ink:#e9e4dc; --code-border:#332e2a; --code-gutter:#0e0c0b;
+    --tour-ring:#e8836a;
+    --shadow-sm:0 1px 1px rgba(0,0,0,.30);
+    --shadow-md:0 1px 2px rgba(0,0,0,.36),0 1px 1px rgba(0,0,0,.30);
+    --shadow-lg:0 10px 30px rgba(0,0,0,.55),0 1px 2px rgba(0,0,0,.40);
+    /* O2S-DARK-TOKENS-END */
+  }
+}
+
+/* ---------------------------------------------------------
+   DARK — the operator asked for it explicitly. No media query,
+   so it wins on a light machine too. Keep identical to above.
+   --------------------------------------------------------- */
+:root[data-theme="dark"] {
+  /* O2S-DARK-TOKENS-START */
+  color-scheme: dark;
+  --surface-0:#262220;
+  --paper:#1e1b18;
+  --surface-1:#191614;
+  --surface-2:#131110;
+  --doc-paper:#ffffff; --doc-ink:#111111;
+  --scrim:rgba(0,0,0,.62);
+  --ink:#f2eee8;
+  --ink-2:#cfc7bc;
+  --ink-3:#a89f94;
+  --ink-faint:#958c81;
+  --on-solid:#17140f;
+  --line:#332e2a;
+  --line-strong:#423c36;
+  --field-border:#8c8177;
+  --focus-ring:#e8836a;
+  --accent:#e8836a; --accent-hi:#f19a83; --accent-wash:#33201b; --accent-line:#5a3428;
+  --good:#86c07c; --good-wash:#1c2619; --good-line:#33502c;
+  --warn:#dcae54; --warn-hi:#e8bf6f; --warn-wash:#2b2314; --warn-line:#57451f;
+  --bad:#f08a7a; --bad-wash:#2e1c17; --bad-line:#5e3128;
+  --code-bg:#131110; --code-ink:#e9e4dc; --code-border:#332e2a; --code-gutter:#0e0c0b;
+  --tour-ring:#e8836a;
+  --shadow-sm:0 1px 1px rgba(0,0,0,.30);
+  --shadow-md:0 1px 2px rgba(0,0,0,.36),0 1px 1px rgba(0,0,0,.30);
+  --shadow-lg:0 10px 30px rgba(0,0,0,.55),0 1px 2px rgba(0,0,0,.40);
+  /* O2S-DARK-TOKENS-END */
 }
 
 * { box-sizing:border-box; }
@@ -61,9 +247,13 @@ code,pre,.mono,.tabular,.summary-row b,.fidelity-score{
 ::-webkit-scrollbar-thumb:hover{ background:var(--ink-3); }
 
 /* ---------- Top bar ---------- */
+/* min-height, not height: the bar carries the theme control now, and at a
+   320px viewport its three segments have to wrap onto a second row rather
+   than be clipped out of reach. */
 .topbar{
   display:flex; justify-content:space-between; align-items:center;
-  height:var(--topbar-h); padding:0 20px;
+  flex-wrap:wrap; gap:10px 16px;
+  min-height:var(--topbar-h); padding:8px 20px;
   background:var(--surface-0); color:var(--ink);
   border-bottom:1px solid var(--line);
 }
@@ -78,7 +268,10 @@ code,pre,.mono,.tabular,.summary-row b,.fidelity-score{
 .brand-text{ display:flex; flex-direction:column; line-height:1.15; }
 .brand-name{ font-family:var(--font-display); font-size:15px; font-weight:600; letter-spacing:-0.01em; color:var(--ink); }
 .brand-tag{ font-size:11.5px; color:var(--ink-3); letter-spacing:.01em; }
-.topbar-meta{ display:flex; align-items:center; gap:10px; }
+/* Wraps, so adding the theme control does not push the status pill off the
+   right edge of a 320px viewport. Measured: without this, .topbar-meta is
+   396px wide inside a 320px page. */
+.topbar-meta{ display:flex; align-items:center; justify-content:flex-end; flex-wrap:wrap; gap:8px 10px; min-width:0; }
 .topbar-howto{
   font-size:12px; color:var(--ink-2); background:transparent;
   border:1px solid var(--line); border-radius:var(--radius);
@@ -95,6 +288,52 @@ code,pre,.mono,.tabular,.summary-row b,.fidelity-score{
 .topbar-pill.busy::before{ background:var(--warn); }
 .topbar-pill.ok::before{ background:var(--good); }
 .topbar-pill.err::before{ background:var(--bad); }
+
+/* ---------- Theme control (system / light / dark) ----------
+   Three REAL radio inputs in a fieldset. That buys the whole
+   accessibility contract from the platform instead of re-inventing it:
+   a group name from the legend, arrow-key navigation, a checked state
+   exposed to assistive tech, and a label a screen reader can read.
+   The inputs are moved off-screen, never display:none — a hidden input
+   is not focusable and would drop the control out of the tab order.
+   The selected segment is marked by a RAISED SURFACE AND A BORDER, not
+   by colour alone. */
+.sr-only{
+  position:absolute; width:1px; height:1px; margin:-1px; padding:0;
+  overflow:hidden; clip:rect(0 0 0 0); clip-path:inset(50%);
+  white-space:nowrap; border:0;
+}
+.theme-toggle{
+  position:relative; display:inline-flex; align-items:stretch; gap:2px;
+  margin:0; padding:2px; border:1px solid var(--field-border);
+  border-radius:var(--radius); background:var(--surface-1);
+}
+.theme-radio{
+  position:absolute; top:0; left:0; width:1px; height:1px;
+  opacity:0; margin:0; pointer-events:none;
+}
+.theme-option{
+  display:inline-flex; align-items:center; justify-content:center; gap:5px;
+  min-height:26px; min-width:26px; padding:3px 9px; cursor:pointer;
+  border:1px solid transparent; border-radius:var(--radius-sm);
+  font-size:11.5px; font-weight:600; letter-spacing:.02em;
+  color:var(--ink-2); white-space:nowrap;
+}
+.theme-option:hover{ color:var(--ink); background:var(--surface-2); }
+.theme-radio:checked + .theme-option{
+  background:var(--surface-0); color:var(--ink);
+  border-color:var(--field-border); box-shadow:var(--shadow-sm);
+}
+/* Ring first for engines with no :focus-visible, then withdraw it for
+   pointer focus where the modern selector is understood. */
+.theme-radio:focus + .theme-option{
+  outline:2px solid var(--focus-ring); outline-offset:2px;
+}
+.theme-radio:focus:not(:focus-visible) + .theme-option{ outline:none; }
+.theme-radio:focus-visible + .theme-option{
+  outline:2px solid var(--focus-ring); outline-offset:2px;
+}
+.theme-glyph{ font-size:12px; line-height:1; }
 
 /* ---------- Layout ---------- */
 .layout{ display:grid; grid-template-columns:var(--side-w) 1fr; min-height:calc(100vh - var(--topbar-h)); }
@@ -117,11 +356,17 @@ code,pre,.mono,.tabular,.summary-row b,.fidelity-score{
 .muted-note b,.conn-note b{ color:var(--ink); font-weight:600; }
 
 /* drop zone */
+/* A real <button>, so it needs the button reset: full width, our own font,
+   and block-stacked children. */
 .drop-zone{
-  background:var(--surface-1); border:1.5px dashed var(--line-strong); border-radius:var(--radius);
+  display:block; width:100%; font:inherit; color:inherit;
+  background:var(--surface-1); border:1.5px dashed var(--field-border); border-radius:var(--radius);
   padding:22px 14px; text-align:center; cursor:pointer; transition:border-color .12s, background .12s;
 }
-.drop-zone:hover,.drop-zone:focus{ border-color:var(--ink-3); background:var(--surface-2); outline:none; }
+.drop-zone > span{ display:block; }
+/* Hover only. Focus is NOT styled like hover: a keyboard user could not
+   tell the two apart, and the ring below is what marks focus. */
+.drop-zone:hover{ border-color:var(--ink-3); background:var(--surface-2); }
 .drop-zone.drag{ border-color:var(--accent); border-style:solid; background:var(--accent-wash); }
 .drop-icon{ font-size:22px; color:var(--ink-3); line-height:1; }
 .drop-title{ font-size:13px; font-weight:600; color:var(--ink); margin-top:8px; }
@@ -132,12 +377,15 @@ code,pre,.mono,.tabular,.summary-row b,.fidelity-score{
 /* inputs */
 .conn-input,select.conn-input,input[type=text],input[type=password],input[type=email],input[type=number],textarea,select{
   width:100%; font-family:var(--font-sans); font-size:12.5px; color:var(--ink);
-  background:var(--surface-0); border:1px solid var(--line-strong); border-radius:var(--radius);
+  background:var(--surface-0); border:1px solid var(--field-border); border-radius:var(--radius);
   padding:7px 9px; transition:border-color .12s, box-shadow .12s;
 }
 textarea{ resize:vertical; line-height:1.5; }
 .conn-input::placeholder,input::placeholder,textarea::placeholder{ color:var(--ink-faint); }
-.conn-input:focus,input:focus,textarea:focus,select:focus{ outline:none; border-color:var(--accent); box-shadow:0 0 0 2px var(--focus-ring); }
+/* The field's own edge thickens on focus. The RING that proves focus is
+   the one :focus-visible rule at the foot of this file -- this rule must
+   never take the outline away, or the ring goes with it. */
+.conn-input:focus,input:focus,textarea:focus,select:focus{ border-color:var(--accent); box-shadow:0 0 0 2px var(--focus-ring); }
 .batch-file{ font-size:11px; max-width:100%; }
 .batch-check{ font-size:11px; display:block; margin:6px 0; color:var(--ink-2); }
 label.burst-field input,label.burst-field textarea,label.burst-field select{ margin-top:4px; }
@@ -146,14 +394,14 @@ label.burst-field input,label.burst-field textarea,label.burst-field select{ mar
 .btn{
   display:inline-flex; align-items:center; justify-content:center; gap:7px;
   font-family:var(--font-sans); font-size:12.5px; font-weight:600;
-  border:1px solid var(--line-strong); border-radius:var(--radius);
+  border:1px solid var(--field-border); border-radius:var(--radius);
   background:var(--surface-0); color:var(--ink); padding:8px 13px;
   transition:background .12s, border-color .12s, color .12s;
 }
 .btn:hover{ background:var(--surface-1); border-color:var(--ink-3); }
 .btn:active{ transform:translateY(.5px); }
-.btn-primary{ background:var(--accent); border-color:var(--accent); color:#fff; width:100%; margin-top:10px; }
-.btn-primary:hover{ background:var(--accent-hi); border-color:var(--accent-hi); color:#fff; }
+.btn-primary{ background:var(--accent); border-color:var(--accent); color:var(--on-solid); width:100%; margin-top:10px; }
+.btn-primary:hover{ background:var(--accent-hi); border-color:var(--accent-hi); color:var(--on-solid); }
 .btn-ghost{ background:transparent; border-color:var(--line); color:var(--ink-2); }
 .btn-ghost:hover{ background:var(--surface-1); border-color:var(--line-strong); color:var(--ink); }
 .btn-tiny{
@@ -223,9 +471,11 @@ body.show-advanced .tab-adv{ display:inline-flex; }
 }
 /* "What each view is for" table in the How-it-works modal */
 .howto-views{ border-collapse:collapse; width:100%; font-size:13px; }
-.howto-views td{ padding:6px 10px 6px 0; vertical-align:top;
-  border-bottom:1px solid rgba(128,128,128,.18); }
-.howto-views td:first-child{ white-space:nowrap; padding-right:14px; }
+.howto-views th,.howto-views td{ padding:6px 10px 6px 0; vertical-align:top;
+  text-align:left; font-weight:inherit; border-bottom:1px solid var(--line); }
+.howto-views th[scope="col"]{ font-weight:600; color:var(--ink-3);
+  font-size:11px; text-transform:uppercase; letter-spacing:.06em; }
+.howto-views th[scope="row"]{ white-space:nowrap; padding-right:14px; }
 
 /* Big highlighted code = tens of thousands of spans; without this, every
    tab un-hide re-lays-out the whole block (~1s frozen UI on real reports).
@@ -235,8 +485,20 @@ body.show-advanced .tab-adv{ display:inline-flex; }
   contain-intrinsic-size:auto 4000px;
 }
 .code-block code{ font-family:var(--font-mono); background:none; border:none; padding:0; color:inherit; }
-/* prism-tomorrow already targets a dark well — keep it; just align the canvas */
+/* The syntax theme. This used to be prism-tomorrow.min.css, fetched from
+   cdnjs on every page load; it is now painted from the token layer, which
+   also means the highlighting finally follows the same colour system as
+   the rest of the app instead of shipping its own. The class names are the
+   ones frontend/static/js/highlight.js emits. */
 pre[class*="language-"]{ background:var(--code-bg) !important; margin:0; }
+.token.comment,.token.prolog,.token.doctype,.token.cdata{ color:var(--syn-comment); }
+.token.punctuation{ color:var(--syn-punct); }
+.token.tag{ color:var(--syn-tag); }
+.token.attr-name,.token.property{ color:var(--syn-attr); }
+.token.attr-value,.token.string,.token.entity{ color:var(--syn-string); }
+.token.number,.token.boolean{ color:var(--syn-number); }
+.token.keyword,.token.function{ color:var(--syn-keyword); }
+.token.operator,.token.variable{ color:var(--syn-operator); }
 pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
   font-family:var(--font-mono) !important; font-size:12.5px !important; text-shadow:none !important;
 }
@@ -262,14 +524,26 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
 .mockup-host{ background:var(--surface-2); padding:22px; overflow:auto; max-height:74vh; display:block; text-align:center; }
 .mockup-host > *{ background:transparent; box-shadow:none; text-align:left; }
 /* Every page sheet: fixed paper width, never shrunk, always stacked. */
-.mockup-host .o2s-page{ display:block; margin:0 auto 26px; background:#fff; box-shadow:var(--shadow-lg); flex:none; }
+.mockup-host .o2s-page{ display:block; margin:0 auto 26px; background:var(--doc-paper); color:var(--doc-ink); box-shadow:var(--shadow-lg); flex:none; }
 .mockup-host .o2s-desk{ display:block; width:100%; }
-.mockup-cta-bar{ display:flex; justify-content:space-between; align-items:center; gap:14px; margin-top:14px; padding:13px 16px; background:var(--accent-wash); border:1px solid #f0d9d2; border-radius:var(--radius); }
+.mockup-cta-bar{ display:flex; justify-content:space-between; align-items:center; gap:14px; margin-top:14px; padding:13px 16px; background:var(--accent-wash); border:1px solid var(--accent-line); border-radius:var(--radius); }
 .cta-text{ font-size:12.5px; color:var(--ink-2); }
 .cta-text b{ color:var(--ink); }
 .cta-text code{ font-family:var(--font-mono); font-size:11px; background:var(--surface-0); border:1px solid var(--line); border-radius:3px; padding:1px 5px; }
-.cta-btn{ font-size:12.5px; font-weight:600; color:#fff; background:var(--accent); border:1px solid var(--accent); border-radius:var(--radius); padding:8px 14px; white-space:nowrap; }
+.cta-btn{ font-size:12.5px; font-weight:600; color:var(--on-solid); background:var(--accent); border:1px solid var(--accent); border-radius:var(--radius); padding:8px 14px; white-space:nowrap; }
 .cta-btn:hover{ background:var(--accent-hi); }
+/* Fix-first variant: the report is NOT deploy-ready (BLOCKER/RED verdict or
+   a partial-artifact source) — the bar points at Validation, not download. */
+.mockup-cta-bar.cta-fix-first{ background:var(--warn-wash); border-color:var(--warn-line); }
+.mockup-cta-bar.cta-fix-first .cta-btn{ background:var(--warn); border-color:var(--warn); color:var(--on-solid); }
+.mockup-cta-bar.cta-fix-first .cta-btn:hover{ background:var(--warn-hi); }
+/* "+ Add a sub-report" row at the foot of the Sub-Reports tab */
+.subreport-add-row{
+  margin-top:14px; display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+}
+.subreport-add-row .btn{ width:auto; }
+/* Was the button's title= tooltip. On screen, so it works without a mouse. */
+.subreport-add-hint{ font-size:11.5px; color:var(--ink-2); min-width:0; }
 
 /* ---------- Summary card ---------- */
 .summary-card{ border:1px solid var(--line); border-radius:var(--radius); overflow:hidden; }
@@ -278,10 +552,19 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
 .summary-row span{ color:var(--ink-3); }
 .summary-row b{ color:var(--ink); font-weight:600; }
 .summary-row.warn-row b{ color:var(--warn); }
+/* The fidelity explanation and its per-report detail. These replaced a
+   title= tooltip, so they have to READ as ordinary text in the card: same
+   row rhythm, same divider, no hover required. */
+.summary-note{
+  margin:0; padding:6px 11px 8px; font-size:11px; line-height:1.45;
+  color:var(--ink-2); background:var(--surface-1);
+  border-bottom:1px solid var(--line);
+}
+.summary-note-detail{ color:var(--ink); }
 .preflight-banner{ margin-top:10px; padding:9px 11px; border-radius:var(--radius); font-size:12px; line-height:1.5; border:1px solid var(--line); background:var(--surface-1); color:var(--ink-2); }
-.preflight-banner.ok{ background:var(--good-wash); border-color:#d3e3cf; color:var(--good); }
-.preflight-banner.warn{ background:var(--warn-wash); border-color:#ecddb6; color:var(--warn); }
-.preflight-banner.bad{ background:var(--bad-wash); border-color:#eccfca; color:var(--bad); }
+.preflight-banner.ok{ background:var(--good-wash); border-color:var(--good-line); color:var(--good); }
+.preflight-banner.warn{ background:var(--warn-wash); border-color:var(--warn-line); color:var(--warn); }
+.preflight-banner.bad{ background:var(--bad-wash); border-color:var(--bad-line); color:var(--bad); }
 
 .side-foot{ margin-top:auto; padding-top:8px; }
 .version-pill{ font-family:var(--font-mono); font-size:10px; color:var(--ink-3); background:var(--surface-0); border:1px solid var(--line); border-radius:var(--radius-sm); padding:2px 7px; }
@@ -342,7 +625,7 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
 .ds-verdict{ font-size:11px; font-weight:600; text-transform:uppercase; letter-spacing:.05em; }
 .ds-ready .ds-verdict{ color:var(--good); } .ds-warn .ds-verdict{ color:var(--warn); } .ds-blocker .ds-verdict{ color:var(--bad); }
 .ds-steps{ font-size:12px; color:var(--ink-2); } .ds-steps b{ color:var(--ink); }
-.ds-btn{ font-size:12px; font-weight:600; color:#fff; background:var(--accent); border:1px solid var(--accent); border-radius:var(--radius); padding:7px 13px; }
+.ds-btn{ font-size:12px; font-weight:600; color:var(--on-solid); background:var(--accent); border:1px solid var(--accent); border-radius:var(--radius); padding:7px 13px; }
 .ds-btn:hover{ background:var(--accent-hi); }
 .ds-drillnote{ font-size:11.5px; color:var(--ink-2); } .ds-drillnote b{ color:var(--ink); }
 
@@ -373,7 +656,7 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
 .burst-host{ display:flex; flex-direction:column; gap:14px; }
 .burst-section,.burst-block,.burst-callout{ border:1px solid var(--line); border-radius:var(--radius); padding:14px 16px; background:var(--surface-0); }
 .burst-section h3,.burst-block h3{ font-size:13px; font-weight:600; margin:0 0 8px; color:var(--ink); }
-.burst-callout{ background:var(--accent-wash); border-color:#f0d9d2; }
+.burst-callout{ background:var(--accent-wash); border-color:var(--accent-line); }
 .burst-callout code,.burst-hint code,.burst-steps code{ font-family:var(--font-mono); font-size:11px; background:var(--surface-1); border:1px solid var(--line); border-radius:3px; padding:1px 5px; color:var(--ink); }
 .burst-steps{ margin:6px 0; padding-left:0; list-style:none; counter-reset:bstep; }
 .burst-steps li{ position:relative; padding:4px 0 4px 26px; font-size:12.5px; color:var(--ink-2); line-height:1.5; }
@@ -401,7 +684,7 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
 
 /* ---------- How-it-works modal ---------- */
 .howto-modal{ position:fixed; inset:0; z-index:50; display:flex; align-items:center; justify-content:center; padding:24px; }
-.howto-backdrop{ position:absolute; inset:0; background:rgba(26,23,20,.35); }
+.howto-backdrop{ position:absolute; inset:0; background:var(--scrim); }
 .howto-panel{ position:relative; max-width:760px; width:100%; max-height:86vh; overflow:auto; background:var(--surface-0); border:1px solid var(--line); border-radius:var(--radius-lg); box-shadow:var(--shadow-lg); padding:28px 30px; }
 .howto-close{ position:absolute; top:14px; right:16px; font-size:20px; line-height:1; color:var(--ink-3); background:transparent; border:none; }
 .howto-close:hover{ color:var(--ink); }
@@ -414,15 +697,27 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
 .howto-pipe-step{ flex:1; min-width:120px; border:1px solid var(--line); border-radius:var(--radius); padding:11px 12px; background:var(--surface-1); }
 .howto-pipe-step .o2s-num{ display:inline-grid; place-items:center; width:20px; height:20px; border-radius:50%; background:var(--surface-0); border:1px solid var(--line-strong); font-family:var(--font-mono); font-size:11px; color:var(--ink-2); margin-bottom:6px; }
 .howto-pipe-step small{ display:block; font-size:11px; color:var(--ink-3); margin-top:3px; }
+/* The arrow between two steps is a 13.5px GLYPH, not a rule or an icon —
+   it is read like any other character on the card, so it takes the lightest
+   ink that is still legible instead of a decorative grey. Measured on
+   --surface-0 (the dialog card): the old grey was 2.58:1 in light and
+   2.64:1 in dark; this is 5.58:1 / 4.76:1. */
 .howto-pipe-arr{ align-self:center; color:var(--ink-faint); }
 
 /* ---------- Sub-reports ---------- */
-.subreports-intro,.subreport-hint{ font-size:12.5px; color:var(--ink-2); line-height:1.6; }
+.subreports-intro,.subreport-hint,.panel-intro{ font-size:12.5px; color:var(--ink-2); line-height:1.6; }
+/* One-line "what this view is for" under a panel title. The teaching
+   surfaces (Validation, Deploy Checklist, RDL, Side-by-Side) are read by
+   someone who is not an SSRS expert, so each says what it is in plain
+   words before it shows anything technical. */
+.panel-intro{ margin:0 0 12px; }
+.panel-intro b{ color:var(--ink); font-weight:600; }
+.panel-intro code{ font-family:var(--font-mono); font-size:11px; background:var(--surface-1); border:1px solid var(--line); border-radius:3px; padding:0 4px; color:var(--ink); }
 .subreport-slots,.subreports-host,.live-host{ display:flex; flex-direction:column; gap:12px; }
 
 /* ---------- Toast ---------- */
-.toast{ position:fixed; bottom:22px; left:50%; transform:translateX(-50%); z-index:60; background:var(--ink); color:#fff; font-size:12.5px; padding:10px 16px; border-radius:var(--radius); box-shadow:var(--shadow-lg); }
-.toast.ok{ background:var(--good); } .toast.err{ background:var(--bad); }
+.toast{ position:fixed; bottom:22px; left:50%; transform:translateX(-50%); z-index:60; background:var(--ink); color:var(--paper); font-size:12.5px; padding:10px 16px; border-radius:var(--radius); box-shadow:var(--shadow-lg); }
+.toast.ok{ background:var(--good); color:var(--on-solid); } .toast.err{ background:var(--bad); color:var(--on-solid); }
 
 /* ---------- responsive ---------- */
 @media (max-width:900px){
@@ -438,12 +733,22 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
 .render-host{ background:var(--surface-2); padding:22px; overflow:auto;
   max-height:74vh; display:block; text-align:center; }
 .render-host img{ display:block; margin:0 auto 26px; max-width:100%;
-  background:#fff; box-shadow:var(--shadow-lg); }
+  background:var(--doc-paper); box-shadow:var(--shadow-lg); }
 .render-empty{ color:var(--muted); padding:48px 12px; }
 .render-page-label{ color:var(--muted); font-size:12px; margin:0 0 6px; }
 .render-bar{ display:flex; align-items:center; justify-content:space-between;
   gap:12px; margin:0 auto 18px; max-width:820px; text-align:left;
-  font-size:12.5px; color:var(--muted); }
+  font-size:12.5px; color:var(--muted); flex-wrap:wrap; }
+/* The render view's TEXT alternative: the page images are pictures, and
+   these two buttons are the routes to the same report as words. */
+.render-bar-text{ line-height:1.45; }
+.render-bar-actions{ display:flex; gap:8px; flex-wrap:wrap; }
+
+/* A view that names itself. Panels that open with a card get their h2 from
+   .panel-toolbar; the Preview panel opens with the mode toggle, so its
+   heading sits above that. */
+.view-title{ font-size:14px; font-weight:600; letter-spacing:-0.005em;
+  color:var(--ink); margin:0 0 10px; }
 
 /* Frontend-mode toolbar: render status + the sample-row count that drives
    the engine's synthesized data. Sits above whichever host is showing. */
@@ -462,9 +767,577 @@ pre[class*="language-"],pre[class*="language-"] code,code[class*="language-"]{
 .render-loading{ display:flex; flex-direction:column; align-items:center;
   gap:14px; padding:64px 16px; color:var(--muted); font-size:13.5px; }
 .render-spinner{ width:28px; height:28px; border-radius:50%;
-  border:3px solid var(--border); border-top-color:var(--accent, #b33);
+  border:3px solid var(--line); border-top-color:var(--accent);
   animation:o2s-spin 0.9s linear infinite; }
 @keyframes o2s-spin{ to{ transform:rotate(360deg); } }
-.mockup-fallback-note{ background:#fff4e5; border:1px solid #e0a960;
-  color:#7a4a00; padding:10px 14px; margin:0 0 14px; font-size:13px;
+.mockup-fallback-note{ background:var(--warn-wash); border:1px solid var(--warn-line);
+  color:var(--warn); padding:10px 14px; margin:0 0 14px; font-size:13px;
   line-height:1.5; border-radius:6px; }
+
+/* =========================================================
+   KEYBOARD + STRUCTURE LAYER
+   Everything here exists so the app can be OPERATED without a
+   mouse and READ without hearing. Rules of the road (each has
+   a test in tests/test_a11y_structure.py):
+
+     1. Focus is never invisible. There is exactly ONE ring
+        design -- 2px solid, 2px of offset -- drawn with
+        var(--focus-ring), and it is applied with :focus-visible
+        so it appears for keyboard use and stays out of the way
+        for mouse clicks. No rule anywhere may say outline:none
+        without putting a ring back.
+        One COLOUR exception, and it proves the rule: a surface
+        that is pinned to one colour in both themes (the
+        guided-tour card) has to pin its ring too, because a
+        ring that follows the theme cannot stay 3:1 on a surface
+        that does not. That is --tour-focus, and
+        tests/test_theme_contrast.py measures every such ring
+        against the surface it is actually drawn on.
+     2. Focus never looks like hover. Hover changes the fill;
+        focus draws the ring. A keyboard user has to be able to
+        tell where they ARE, not just where the pointer was.
+     3. Every target is at least 24x24 CSS px (WCAG 2.2, 2.5.8).
+        Small type is fine; a small HIT AREA is not.
+     4. Headings are heading ELEMENTS. The classes below only
+        undo the browser's default heading margins so promoting
+        a styled <div> to an <h2> changes nothing visually.
+   ========================================================= */
+
+/* ---------- Skip link ----------
+   Off-screen until focused, then parked over the top bar. It is the first
+   focusable element in the document, so one Tab from a fresh page load
+   jumps past ~15 sidebar controls straight to the report views. */
+.skip-link{
+  position:absolute; left:8px; top:-64px; z-index:200;
+  display:inline-flex; align-items:center; min-height:44px;
+  padding:10px 16px; font-size:13px; font-weight:600;
+  color:var(--on-solid); background:var(--accent);
+  border:1px solid var(--accent-hi); border-radius:var(--radius);
+  box-shadow:var(--shadow-lg); text-decoration:none;
+  transition:top .12s;
+}
+.skip-link:focus{ top:8px; color:var(--on-solid); text-decoration:none; }
+@media (prefers-reduced-motion: reduce){ .skip-link{ transition:none; } }
+
+/* main is focusable ONLY as a skip-link destination (tabindex="-1" in the
+   markup, so it is never a tab stop of its own). It KEEPS the ring on
+   purpose: after using the skip link the ring is the only thing that says
+   "you landed here", and there is nothing else on screen to say it. */
+.main:focus-visible{ outline-offset:-3px; }
+
+/* ---------- The one focus ring ----------
+   :focus-visible, so it shows for keyboard and assistive tech and not on
+   every mouse click. Two offsets, because a 2px outline drawn hard against
+   a control's own border can read as part of the control: the offset puts
+   page background between them so the ring is legible on any surface.
+   var(--focus-ring) is the token the theme layer keeps >=3:1 in BOTH
+   themes -- never hardcode a colour here. */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible,
+details:focus-visible,
+[tabindex]:focus-visible{
+  outline:2px solid var(--focus-ring);
+  outline-offset:2px;
+  border-radius:var(--radius-sm);
+}
+/* Engines without :focus-visible still get a ring rather than nothing. */
+@supports not selector(:focus-visible){
+  a:focus,button:focus,input:focus,select:focus,textarea:focus,
+  summary:focus,[tabindex]:focus{
+    outline:2px solid var(--focus-ring); outline-offset:2px;
+  }
+}
+/* The drop zone is a large dashed box; a ring hugging its edge disappears
+   into the dash. Push it out. */
+.drop-zone:focus-visible{ outline-offset:3px; }
+
+/* ---------- Headings that used to be divs ----------
+   ONLY the user-agent margins. The class above each of these already owns
+   the size, weight, colour and case -- restating any of that here (or
+   setting it to `inherit`) is how a promoted heading silently changes size,
+   which is exactly what a screenshot caught the first time round. */
+h1.brand-name,h2.side-heading,h2.side-heading-title,h2.panel-title,
+h3.sxs-head,h3.howto-h,h2.ingest-head-title,h3.query-name{ margin:0; }
+h1.brand-name{ line-height:1.15; }
+h2.side-heading{ margin:0 0 9px; }
+h3.howto-h{ margin:0 0 6px; }
+/* These two sit INSIDE an already-styled wrapper, so they take the
+   wrapper's type rather than bringing their own. */
+h2.side-heading-title{
+  font:inherit; color:inherit; letter-spacing:inherit; text-transform:inherit;
+}
+/* A heading that is also the field's <label>: it must still look like the
+   heading, and clicking it must still focus the control. */
+.side-heading label{ display:block; cursor:pointer; color:inherit;
+  font:inherit; letter-spacing:inherit; text-transform:inherit; }
+/* Visible label for a control whose section heading says something else. */
+.field-label{
+  display:block; margin:0 0 5px; font-size:11.5px; color:var(--ink-2);
+}
+
+/* ---------- Tab strip ----------
+   .tabbar is the nav landmark; .tablist is the ARIA widget inside it. The
+   flex behaviour moved down one level, so the strip looks unchanged. */
+.tablist{
+  display:flex; align-items:center; gap:2px; flex-wrap:wrap; min-width:0;
+}
+.tab:focus-visible{ outline-offset:-3px; border-radius:0; }
+
+/* ---------- Target size: 24x24 CSS px minimum (WCAG 2.2, 2.5.8) ----------
+   Type stays small -- the HIT AREA is what grows. Every one of these was
+   measured under 24px tall before this block existed. */
+.btn-tiny,.sample-chip,.advanced-toggle,.topbar-howto,.linkish{
+  min-height:24px;
+}
+.btn-tiny,.advanced-toggle{ display:inline-flex; align-items:center; }
+.sample-chip{
+  display:flex; align-items:center; width:100%; text-align:left;
+  gap:8px; font-family:var(--font-sans); font-size:12px; color:var(--ink);
+  padding:5px 9px; background:var(--surface-0);
+  border:1px solid var(--line); border-radius:var(--radius-sm);
+}
+.sample-chip:hover{ background:var(--surface-1); border-color:var(--line-strong); }
+/* A file input's own button is drawn by the browser; padding on the input
+   is what lifts the whole row to the minimum. */
+.batch-file{ min-height:24px; padding:3px 0; }
+/* One per detected seal/logo placeholder, built in renderImageSlots(). */
+.image-slot-input{
+  max-width:150px; font-size:11px; min-height:24px; padding:2px 0;
+}
+/* The checkbox is 13px in every engine, so the LABEL carries the target:
+   the whole row is clickable and at least 24px tall. */
+.batch-check{
+  display:flex; align-items:center; gap:8px; min-height:24px;
+  padding:2px 0; cursor:pointer;
+}
+.batch-check input{ width:18px; height:18px; min-width:18px; min-height:18px;
+  flex:none; margin:0; accent-color:var(--accent); }
+/* The row itself is the target: clicking anywhere in the 24px-tall
+   label toggles the box, which is what a pointer hit-test measures. */
+.batch-check > span{ flex:1; min-width:0; }
+/* The "Sync scroll" switch on the Side-by-Side view. Same story as
+   .batch-check: the checkbox itself is 13px in every engine, so the LABEL
+   is the target and it has to clear 24px. This one was measured at
+   79.8x19 -- it only exists inside a tab panel that is hidden on load,
+   which is exactly how it survived the first target-size pass. */
+.switch{ min-height:24px; padding:2px 0; cursor:pointer; }
+.switch input{
+  width:18px; height:18px; min-width:18px; min-height:18px; flex:none;
+  margin:0; accent-color:var(--accent);
+}
+/* "pick individual files instead" is an ACTION (it opens a file picker),
+   so it is a button that looks like a link -- not an <a href="#"> that
+   goes nowhere and announces itself as a link. */
+.linkish{
+  display:inline-flex; align-items:center; padding:2px 0;
+  font-family:inherit; font-size:11px; color:var(--accent);
+  background:none; border:none; text-decoration:underline;
+  text-underline-offset:2px;
+}
+.linkish:hover{ color:var(--accent-hi); }
+/* The modal close button is an icon-only control: it needs the area even
+   though the glyph is small. */
+.howto-close{ min-width:32px; min-height:32px; display:inline-flex;
+  align-items:center; justify-content:center; }
+
+/* ---------- File inputs that a <label> button wraps ----------
+   These used to be `hidden`, which takes them OUT of the tab order: the
+   visible "Add artifact(s)" label was then mouse-only. Clipped instead of
+   hidden keeps them focusable, and :focus-within rings the label. */
+.file-input-hidden{
+  position:absolute; width:1px; height:1px; margin:-1px; padding:0;
+  overflow:hidden; clip:rect(0 0 0 0); clip-path:inset(50%); border:0;
+}
+.subreport-add{ position:relative; }
+.subreport-add:focus-within{
+  outline:2px solid var(--focus-ring); outline-offset:2px;
+}
+
+/* ---------- Elements promoted from <div> to a real tag ----------
+   These carry no visual design of their own (the panel styling above owns
+   that); the rules only undo the user-agent defaults that a <button> or an
+   <h3> brings with it, so the tag change is not a redesign. */
+h3.query-name{ font-size:13px; font-weight:600; color:var(--ink); margin:0; }
+.subreport-mini-drop{
+  display:block; width:100%; text-align:left; font:inherit; color:inherit;
+  background:var(--surface-1); border:1px dashed var(--field-border);
+  border-radius:var(--radius); padding:9px 11px; cursor:pointer;
+}
+.subreport-mini-drop > span{ display:block; }
+.subreport-mini-drop:hover{ background:var(--surface-2); border-color:var(--ink-3); }
+.subreport-mini-drop.drag{ border-style:solid; border-color:var(--accent); background:var(--accent-wash); }
+
+/* ---------- Reflow: nothing gets clipped out of reach at 320px ---------- */
+.deploy-status,.render-toolbar{ flex-wrap:wrap; }
+.deploy-status > *,.render-toolbar > *{ min-width:0; }
+
+/* =========================================================
+   REFLOW LAYER — 320 CSS px, and 200% zoom.
+
+   WCAG 1.4.10 Reflow, 1.4.4 Resize Text, 1.4.12 Text Spacing.
+   The contract, measured in a browser by
+   tests/test_reflow_small_viewports.py at 320x800 and at 640x432
+   (a 1280x864 desk screen zoomed to 200%):
+
+     A. The PAGE never scrolls sideways, and neither does the
+        region that holds the views. Reading a sentence must
+        never cost a horizontal scroll.
+     B. Wide content — RDL XML, generated T-SQL, tables, the
+        rendered pages — scrolls INSIDE ITS OWN BOX, and that
+        box is a tab stop so it can be scrolled by keyboard
+        (scroll_regions.js labels it; the ring comes from the
+        focus layer above).
+     C. Nothing is silently CLIPPED. Panel cards are drawn with
+        overflow:hidden for their rounded corners, so a string
+        that cannot wrap inside one is not merely ugly — it is
+        gone, with no scrollbar to say so.
+
+   Each rule below is here because something measurably failed.
+   ========================================================= */
+
+/* A1. Long unbreakable strings wrap instead of being clipped away.
+       Measured at 320px before this rule: the preflight rule name
+       `sql.lexical_where_dropped.P_WHERE_INV` rendered 300px wide inside
+       a 263px card, and a connection string in the deploy checklist ran
+       to 408px — both cut off by the card's own overflow:hidden with no
+       way to reach the rest.
+       `anywhere` rather than `break-word` on the code-ish elements is
+       deliberate: only `anywhere` also lowers the element's min-content
+       width, which is what stops one long token forcing a flex or grid
+       parent wider than the viewport. Prose keeps `break-word` so normal
+       sentences still break between words. */
+.tab-panels,.sidebar,.howto-panel,.activity-panel{ overflow-wrap:break-word; }
+.tab-panels code,.tab-panels kbd,.tab-panels samp,.tab-panels a,
+.sidebar code,.howto-panel code,.activity-panel code{ overflow-wrap:anywhere; }
+
+/* A2. A block of prose is a block. .burst-meta wears the pill styling
+       above, which is display:inline-flex — as a paragraph that means
+       max-content width and no wrapping at all: measured 676px wide
+       inside a 263px card on the Sub-Reports tab, clipped at both
+       viewport sizes. */
+.burst-meta{ display:block; line-height:1.55; padding:5px 9px; }
+
+/* B. Preformatted content is the one thing that legitimately stays wide
+      (breaking SQL or XML mid-line would change what it says), so it
+      scrolls in its own box instead of pushing the page. Measured: the
+      T-SQL preview on the Live Data tab was 2,948px wide with
+      overflow:visible and dragged the whole views region out to 2,970px. */
+.tab-panels pre,.howto-panel pre{ max-width:100%; overflow-x:auto; }
+
+/* B2. A box that scrolls is a tab stop (scroll_regions.js adds the
+       tabindex), so its focus ring has to be VISIBLE. These boxes fill
+       their card edge to edge, and the card clips for its rounded corners:
+       measured, the standard ring at outline-offset:2px is drawn at
+       19..729px inside a card that clips at 22..726px, so both sides of it
+       disappear. Drawn just INSIDE instead — the same trick the skip-link
+       target uses — it lands on the dark code well where it is unmissable. */
+.tab-panels [data-scrollable="x"]:focus-visible{ outline-offset:-3px; }
+@supports not selector(:focus-visible){
+  .tab-panels [data-scrollable="x"]:focus{ outline-offset:-3px; }
+}
+/* B3. ...and an inset ring lands on the box's OWN fill. For a code well
+       that fill is dark in BOTH themes, so the light theme's --focus-ring
+       was drawn there at 3.03:1 — a pass by 0.03, which is not a margin.
+       The well pins its own ring (the --tour-focus arrangement) and the
+       indicator clears 3.9:1 on every surface an inset ring can land on. Colour comes from the token
+       layer; the rule is scoped to the wells themselves so no other
+       scrolling box (a white table wrap, the preview desk) is touched. */
+.code-block:focus-visible,
+.issue-excerpt:focus-visible,
+.audit-snippet:focus-visible,
+.activity-cmd:focus-visible{ outline-color:var(--code-focus); }
+@supports not selector(:focus-visible){
+  .code-block:focus,
+  .issue-excerpt:focus,
+  .audit-snippet:focus,
+  .activity-cmd:focus{ outline-color:var(--code-focus); }
+}
+
+/* C. Tables scroll in their own wrapper rather than stretching the card.
+      .extras-table-wrap already does; the one in the How-it-works dialog
+      holds its row headers on one line, which is right on a desk screen
+      and wrong at 320px, so the nowrap is released when it cannot fit. */
+@media (max-width:640px){
+  .howto-views th[scope="row"]{ white-space:normal; }
+}
+
+/* =========================================================
+   STATUS LAYER — visible, persistent, never a colour alone.
+
+   The daily operator of this tool is deaf. Two rules follow
+   from that, and tests/test_status_surface.py enforces both:
+
+     1. NOTHING IMPORTANT IS TRANSIENT. A toast is a courtesy
+        copy. The status strip under the tab bar is the record:
+        what is running, how the last thing ended, and — after a
+        failure — what happened, why, and what to do next. It
+        stays until it is dismissed or superseded.
+     2. NOTHING IS SAID WITH COLOUR ALONE. Every state carries
+        three signals: a GLYPH, a WORD, and a SHAPE (the left
+        edge of the card: dashed while working, solid when done,
+        double for a warning, thick for a failure). Strip the
+        colour and the meaning survives — which is also what a
+        colour-blind operator, a greyscale print and a cheap
+        projector all get.
+   ========================================================= */
+.activity{ padding:14px 22px 0; }
+.activity-title{
+  margin:0 0 7px; font-size:11px; font-weight:600; text-transform:uppercase;
+  letter-spacing:.06em; color:var(--ink-3);
+}
+/* The live regions themselves are invisible plumbing: no padding, no
+   border, no background. They must never be display:none (a live region
+   that is not in the accessibility tree announces nothing), so "empty"
+   has to mean "zero height", which is what an unstyled block already is. */
+.activity-live{ display:block; }
+.activity-live + .activity-live .activity-card{ margin-top:8px; }
+
+.activity-card{
+  display:grid; grid-template-columns:auto 1fr; gap:2px 10px;
+  padding:10px 12px; border:1px solid var(--line);
+  border-left-width:3px; border-radius:var(--radius);
+  background:var(--surface-1);
+}
+.activity-glyph{
+  grid-row:1 / span 2; align-self:start;
+  font-size:15px; line-height:1.3; width:1.1em; text-align:center;
+}
+.activity-head{
+  display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;
+  font-size:13px; color:var(--ink);
+}
+/* The WORD. Never dropped, never replaced by the tint. */
+.activity-state{
+  font-size:10.5px; font-weight:700; text-transform:uppercase;
+  letter-spacing:.06em;
+}
+.activity-headline{ font-weight:600; }
+.activity-subject{ font-family:var(--font-mono); font-size:11.5px; color:var(--ink-2); }
+.activity-lines{ grid-column:2; min-width:0; }
+.activity-line{
+  margin:4px 0 0; font-size:12px; line-height:1.5; color:var(--ink-2);
+}
+.activity-line b{ color:var(--ink); font-weight:600; }
+.activity-line code{
+  font-family:var(--font-mono); font-size:11px; background:var(--surface-0);
+  border:1px solid var(--line); border-radius:3px; padding:1px 5px; color:var(--ink);
+}
+/* A copyable command belongs ON SCREEN. "logged to the browser console" is
+   not an instruction a report writer can follow. */
+.activity-cmd{
+  display:block; margin:6px 0 0; padding:7px 9px; overflow-x:auto;
+  font-family:var(--font-mono); font-size:11px; line-height:1.45;
+  color:var(--code-ink); background:var(--code-bg);
+  border:1px solid var(--code-border); border-radius:var(--radius-sm);
+  white-space:pre-wrap; word-break:break-word;
+}
+.activity-actions{ grid-column:2; display:flex; gap:8px; flex-wrap:wrap; margin-top:8px; }
+.activity-dismiss{
+  min-height:24px; display:inline-flex; align-items:center; padding:2px 9px;
+  font-family:inherit; font-size:11px; font-weight:600; color:var(--ink-2);
+  background:var(--surface-0); border:1px solid var(--field-border);
+  border-radius:var(--radius-sm);
+}
+.activity-dismiss:hover{ background:var(--surface-1); color:var(--ink); }
+
+/* ---- the five states: glyph + word + SHAPE, then colour on top ---- */
+.activity-card[data-state="idle"]{ border-left-style:solid; border-left-color:var(--line-strong); }
+.activity-card[data-state="idle"] .activity-glyph,
+.activity-card[data-state="idle"] .activity-state{ color:var(--ink-3); }
+
+.activity-card[data-state="working"]{
+  border-left-style:dashed; border-left-color:var(--accent);
+}
+.activity-card[data-state="working"] .activity-glyph,
+.activity-card[data-state="working"] .activity-state{ color:var(--accent); }
+
+.activity-card[data-state="done"]{
+  background:var(--good-wash); border-color:var(--good-line);
+  border-left-style:solid; border-left-color:var(--good);
+}
+.activity-card[data-state="done"] .activity-glyph,
+.activity-card[data-state="done"] .activity-state{ color:var(--good); }
+
+.activity-card[data-state="warn"]{
+  background:var(--warn-wash); border-color:var(--warn-line);
+  border-left-style:double; border-left-width:5px; border-left-color:var(--warn);
+}
+.activity-card[data-state="warn"] .activity-glyph,
+.activity-card[data-state="warn"] .activity-state{ color:var(--warn); }
+
+.activity-card[data-state="failed"]{
+  background:var(--bad-wash); border-color:var(--bad-line);
+  border-left-style:solid; border-left-width:6px; border-left-color:var(--bad);
+}
+.activity-card[data-state="failed"] .activity-glyph,
+.activity-card[data-state="failed"] .activity-state{ color:var(--bad); }
+
+/* ---- progress. Never a bare bar: the label beside it says the same
+       thing in words, and an indeterminate bar SAYS it is indeterminate
+       rather than pretending to know a percentage. ---- */
+.activity-progress{ grid-column:2; margin-top:8px; }
+.activity-bar{
+  height:6px; border-radius:3px; background:var(--surface-2);
+  border:1px solid var(--line); overflow:hidden;
+}
+.activity-bar-fill{
+  display:block; height:100%; width:0; background:var(--accent);
+  transition:width .18s linear;
+}
+.activity-bar[data-determinate="no"] .activity-bar-fill{
+  width:40%; animation:o2s-indeterminate 1.4s ease-in-out infinite;
+}
+@keyframes o2s-indeterminate{
+  0%{ transform:translateX(-105%); } 100%{ transform:translateX(255%); }
+}
+.activity-progress-label{
+  margin:5px 0 0; font-size:11.5px; line-height:1.45; color:var(--ink-2);
+}
+
+/* ---- the durable record ---- */
+.activity-history{ margin-top:9px; }
+.activity-history-title{
+  margin:0 0 5px; font-size:10.5px; font-weight:600; text-transform:uppercase;
+  letter-spacing:.06em; color:var(--ink-3);
+}
+.activity-log{
+  list-style:none; margin:0; padding:0; max-height:22vh; overflow-y:auto;
+  border-top:1px solid var(--line);
+}
+.activity-log li{
+  display:flex; align-items:baseline; gap:8px; flex-wrap:wrap;
+  padding:5px 2px; border-bottom:1px solid var(--line);
+  font-size:11.5px; line-height:1.45; color:var(--ink-2);
+}
+.activity-log li:last-child{ border-bottom:none; }
+.activity-log .log-glyph{ width:1.1em; text-align:center; }
+.activity-log .log-state{
+  font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+}
+.activity-log li[data-state="done"] .log-glyph,
+.activity-log li[data-state="done"] .log-state{ color:var(--good); }
+.activity-log li[data-state="failed"] .log-glyph,
+.activity-log li[data-state="failed"] .log-state{ color:var(--bad); }
+.activity-log li[data-state="warn"] .log-glyph,
+.activity-log li[data-state="warn"] .log-state{ color:var(--warn); }
+.activity-log li[data-state="working"] .log-glyph,
+.activity-log li[data-state="working"] .log-state{ color:var(--accent); }
+.activity-log .log-time{ font-family:var(--font-mono); font-size:10.5px; color:var(--ink-3); }
+.activity-log .log-text{ flex:1; min-width:0; color:var(--ink-2); }
+
+/* ---- inline status lines elsewhere in the app (batch, burst pack,
+       sub-report cards). Same vocabulary, smaller box: the glyph and the
+       word come from JS, these rules only tint what is already legible
+       without them. ---- */
+.inline-status{ display:inline-flex; align-items:baseline; gap:6px; flex-wrap:wrap; }
+.inline-status .inline-glyph{ width:1.1em; text-align:center; }
+.inline-status .inline-state{
+  font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+}
+.inline-status[data-state="done"] .inline-glyph,
+.inline-status[data-state="done"] .inline-state{ color:var(--good); }
+.inline-status[data-state="failed"] .inline-glyph,
+.inline-status[data-state="failed"] .inline-state{ color:var(--bad); }
+.inline-status[data-state="warn"] .inline-glyph,
+.inline-status[data-state="warn"] .inline-state{ color:var(--warn); }
+.inline-status[data-state="working"] .inline-glyph,
+.inline-status[data-state="working"] .inline-state{ color:var(--accent); }
+
+/* ---- the top-bar pill. It keeps its dot only while it has no glyph;
+       two markers for one state reads as two states. ---- */
+.topbar-pill.has-glyph::before{ display:none; }
+.topbar-pill .pill-glyph{ font-size:12px; line-height:1; }
+.topbar-pill.busy .pill-glyph{ color:var(--warn); }
+.topbar-pill.ok .pill-glyph{ color:var(--good); }
+.topbar-pill.err .pill-glyph{ color:var(--bad); }
+.topbar-pill.warn::before{ background:var(--warn); }
+.topbar-pill.warn .pill-glyph{ color:var(--warn); }
+/* The pill now says the SAME headline the status card says (it is a
+   projection of that card, never its own wording), so it has to be able to
+   carry a sentence without dragging the top bar past a 320px viewport.
+   The full text stays in title= and aria-label. */
+.topbar-pill .pill-word{
+  max-width:22ch; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+}
+
+/* ---- verdict surfaces: READY / AMBER / RED / BLOCKER ----
+       Painted off a data-verdict ATTRIBUTE, not off a colour word in a
+       class name, so the verdict a rule reacts to is the verdict the JS
+       decided — and so a later rename of the presentational classes cannot
+       silently unpaint it. Before this existed, .pf-ready and .pf-blocker
+       had no rule at all and a BLOCKER banner painted exactly like a READY
+       one. The glyph and the words are in the markup either way: this is
+       colour ON TOP of a signal that already works without it. */
+.preflight-banner[data-verdict]{ border-left-width:3px; border-left-style:solid; }
+.preflight-banner[data-verdict="ready"]{
+  background:var(--good-wash); border-color:var(--good-line);
+  color:var(--good); border-left-color:var(--good);
+}
+.preflight-banner[data-verdict="runtime"],
+.preflight-banner[data-verdict="partial"]{
+  background:var(--warn-wash); border-color:var(--warn-line);
+  color:var(--warn); border-left-color:var(--warn);
+  border-left-style:double; border-left-width:5px;
+}
+.preflight-banner[data-verdict="blocker"]{
+  background:var(--bad-wash); border-color:var(--bad-line);
+  color:var(--bad); border-left-color:var(--bad); border-left-width:6px;
+}
+.preflight-banner b{ display:block; }
+.preflight-banner > span{ display:block; margin-top:2px; color:var(--ink-2); }
+
+/* The deploy strip carries the same verdict, so it carries the same shape:
+   a READY edge is a hairline, a warning is doubled, a blocker is thick.
+   The glyphs differ too (JS) — they used to be the same "!" for both
+   warning and blocker, which left colour as the only difference. */
+.deploy-status[data-verdict="runtime"]{ border-left-style:double; border-left-width:5px; }
+.deploy-status[data-verdict="blocker"]{ border-left-width:6px; }
+
+/* ---- reduced motion. Every moving thing here has a text equivalent
+       beside it already, so the honest response to the preference is to
+       stop moving and keep the words. ---- */
+@media (prefers-reduced-motion: reduce){
+  .render-spinner{
+    animation:none; border-style:dashed; border-top-color:var(--accent);
+  }
+  .activity-bar-fill{ transition:none; }
+  .activity-bar[data-determinate="no"] .activity-bar-fill{
+    animation:none; width:100%; background:var(--surface-2);
+    border-top:3px dashed var(--accent);
+  }
+}
+
+/* The state WORD on the deploy strip. It used to say the verdict only in a
+   sentence, with the same "!" glyph for a warning and for a blocker. */
+.ds-left{
+  display:flex; align-items:baseline; gap:9px; flex-wrap:wrap; min-width:0;
+}
+.ds-state{
+  font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.06em;
+}
+.deploy-status.ds-ready .ds-state{ color:var(--good); }
+.deploy-status.ds-warn .ds-state{ color:var(--warn); }
+.deploy-status.ds-blocker .ds-state{ color:var(--bad); }
+
+/* Severity glyph + word in the findings list and its counters. */
+.sev-chip,.sev-head,.pf-sev{ display:inline-flex; align-items:baseline; gap:5px; }
+.sev-chip[data-severity="error"],.sev-head[data-severity="error"]{ color:var(--bad); }
+.sev-chip[data-severity="warning"],.sev-head[data-severity="warning"]{ color:var(--warn); }
+.sev-chip[data-severity="info"],.sev-head[data-severity="info"]{ color:var(--ink-2); }
+
+/* The render toolbar line and every other inline status: the text half. */
+.inline-text{ min-width:0; }
+
+/* The loading card's words ARE the status; the spinner beside them is
+   aria-hidden decoration that stops moving under prefers-reduced-motion. */
+.render-loading-text{ margin:0; max-width:46em; text-align:center; }
+
+/* After a failure the previous conversion is still on screen. The failure
+   card says so in words; this is the same fact for the eye, drawn with a
+   SHAPE (a dashed rule) so it does not depend on noticing a tint. */
+body.o2s-stale .tab-panels{
+  border-top:2px dashed var(--warn); }

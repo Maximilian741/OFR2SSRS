@@ -115,6 +115,11 @@ def test_matrix_mockup_shows_a_pivot_grid_not_scattered_fields():
 
 
 def test_matrix_renders_through_ms_engine():
+    """Publish + page proof, measured on the engine PDF (render-verified on
+    the four wild cross-tab reports of both dialects: pages sane, ZERO
+    strict-blank pages, ZERO paint pairs): the pivot must land on the page —
+    corner label, column-header member, row-header member, measure cell —
+    with no blank sheet and no painted-over ink."""
     sys.path.insert(0, str(ROOT / "tools" / "renderlab"))
     try:
         from render import render_rdl, lib_ready  # type: ignore
@@ -123,9 +128,26 @@ def test_matrix_renders_through_ms_engine():
     if not lib_ready():
         pytest.skip("renderlab DLLs not fetched")
     import tempfile
+    from render_overlap import pdf_overlaps  # type: ignore
+    from run_corpus import _measure_pdf      # type: ignore
     rdl = convert(FIX.read_bytes())["rdl_xml"]
     with tempfile.TemporaryDirectory() as td:
         rp = Path(td) / "m.rdl"
         rp.write_text(rdl, encoding="utf-8")
         res = render_rdl(rp, Path(td) / "m.pdf", rows=3)
         assert res["ok"], res.get("log", "")[-400:]
+        # Pass the ARTIFACT: the blank measure derives this report's page
+        # furniture from its own page bands instead of two English literals.
+        m = _measure_pdf(res["pdf"], rdl, res.get("mode"))
+        assert m["pages"] >= 1
+        assert m["blank"] == [], (
+            "a rendered matrix must not print strict-blank pages", m)
+        assert pdf_overlaps(res["pdf"]) == [], "matrix render must paint 0"
+        from pypdf import PdfReader
+        txt = "\n".join((p.extract_text() or "")
+                        for p in PdfReader(res["pdf"]).pages)
+        # the pivot's members all reach the page: corner (row-dim name),
+        # column header, row header, and the staticized numeric measure cell
+        assert "Product" in txt and "Region" in txt, txt[:200]
+        assert "1,234" in txt, ("measure cell missing from the page",
+                                txt[:200])

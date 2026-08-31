@@ -189,3 +189,34 @@ def test_preflight_truly_empty_report_keeps_no_bound_items_red():
     rules = [i["rule"] for i in preflight_audit(_bodyonly_rdl(tb))["issues"]]
     assert "rdl.no_bound_items" in rules, rules
     assert "rdl.positional_document" not in rules, rules
+
+
+def test_preflight_scoped_parenthesized_aggregate_not_flagged():
+    """A grand-total textbox outside any data region whose aggregate operand
+    is PARENTHESIZED arithmetic — Sum((((F!A + F!B) + ...)), "D1") — is
+    correctly scoped and must NOT raise rdl.unscoped_aggregate. The old
+    [^()]* matcher was structurally blind to parens in the operand and
+    flagged valid grand totals as false BLOCKERs (wild-corpus verified).
+    A genuinely unscoped aggregate ref must STILL flag."""
+    from converter.validators.preflight import preflight_audit
+
+    scoped = ('<Textbox Name="Tot"><Paragraphs><Paragraph><TextRuns><TextRun>'
+              '<Value>="Total: " &amp; Sum((((Fields!X.Value + Fields!X.Value)'
+              ' + Fields!X.Value)), "D1")</Value>'
+              '</TextRun></TextRuns></Paragraph></Paragraphs></Textbox>')
+    rules = [i["rule"] for i in preflight_audit(_bodyonly_rdl(scoped))["issues"]]
+    assert not any(r.startswith("rdl.unscoped_aggregate") for r in rules), rules
+
+    unscoped = ('<Textbox Name="Tot"><Paragraphs><Paragraph><TextRuns>'
+                '<TextRun><Value>=Sum((Fields!X.Value + Fields!X.Value))'
+                '</Value></TextRun></TextRuns></Paragraph></Paragraphs>'
+                '</Textbox>')
+    rules2 = [i["rule"] for i in preflight_audit(_bodyonly_rdl(unscoped))["issues"]]
+    assert any(r.startswith("rdl.unscoped_aggregate") for r in rules2), rules2
+
+    # mixed: one scoped ref does NOT excuse a second raw ref of the same field
+    mixed = ('<Textbox Name="Tot"><Paragraphs><Paragraph><TextRuns><TextRun>'
+             '<Value>=Sum(Fields!X.Value, "D1") + Fields!X.Value</Value>'
+             '</TextRun></TextRuns></Paragraph></Paragraphs></Textbox>')
+    rules3 = [i["rule"] for i in preflight_audit(_bodyonly_rdl(mixed))["issues"]]
+    assert any(r.startswith("rdl.unscoped_aggregate") for r in rules3), rules3

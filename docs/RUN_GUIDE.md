@@ -94,7 +94,7 @@ auditor. The banner is the worst finding:
 | Verdict | Meaning | What to do |
 |---|---|---|
 | **READY** | No blocking or data-correctness findings. | Deploy. |
-| **AMBER** | Cosmetic or informational findings (layout clip risk, an auxiliary dataset that never renders, a linked detail intentionally unused). | Deploy; review the notes. |
+| **AMBER** | The report opens, publishes and runs, but something on the page is not faithful — a layout clip risk, an auxiliary dataset that never renders, a linked detail intentionally unused, **or declared text that will not print at all**. Not all of these are cosmetic: read them. | Deploy; review every note. |
 | **RED** | A data-correctness risk that will not error at run time — the worst kind. | Fix or consciously accept before go-live. |
 | **BLOCKER** | The report will fail to publish or is not a convertible source at all. | Must fix. |
 
@@ -123,6 +123,19 @@ Rules you are most likely to see:
 - `rdl.linked_detail_not_rendered.*` (**AMBER**) — a linked child query
   is never bound to any region. Legitimate for auxiliary queries (LOV /
   formula feeders); a data loss if that detail was supposed to print.
+- `rdl.unresolved_token_blank` (**AMBER**) — a declared boilerplate token
+  (`&P_SUBTITLE`, `&CP_...`) that no parameter, dataset column or
+  translatable formula can satisfy. It is emitted as an empty value, so
+  the token never prints as raw ink — but the text it stood for **does
+  not print either**, and a blanked caption looks identical in the PDF to
+  a caption that was never declared. This one is **not cosmetic**: the
+  commonest sources are a parameter a PL/SQL trigger computes at run time
+  (a criteria subtitle, a "run by" identity), a placeholder column a
+  format trigger fills (a letter paragraph, a licence holder's name) and
+  a field belonging to a sibling dataset (a letter's signature block).
+  The message names the token, the report item and what to supply. Check
+  it against the original report's output before go-live; it lifts the
+  banner off READY on purpose.
 
 ---
 
@@ -242,5 +255,5 @@ fidelity scores, effort tiers). The community tier processes batches of
 ---
 
 *Everything in this guide is exercised by the automated test suite
-(791 tests at last count), including publish + render through Microsoft's
+(1,377 tests at last count), including publish + render through Microsoft's
 own ReportViewer engine.*

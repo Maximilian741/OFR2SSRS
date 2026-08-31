@@ -24,6 +24,7 @@ from .validators.layout_audit import audit_layout
 from .deployment import build_checklist
 from .audit import build_audit_trail
 from .fidelity import build_fidelity_report
+from .fidelity import ATTENTION_THRESHOLD as _FIDELITY_ATTENTION
 from .ai_assist import build_prompts
 from .bursting import detect_bursting, build_burst_query, build_powershell_dds_script, build_email_burst_query, build_email_powershell_script, build_service_account_checklist, build_email_config_template
 from .subreports import detect_subreport_links, is_drillthrough_only
@@ -325,6 +326,19 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
     except Exception as e:  # noqa: BLE001
         conversion_error = f"RDL generation: {type(e).__name__}: {e}"
         rdl_xml = _fallback_rdl(parsed, conversion_error)
+    # Declared tokens that resolved to nothing renderable. Captured HERE,
+    # immediately after the build that produced them, because later passes
+    # (mockup, sub-report) resolve against the same report object. Skipped
+    # when generation RAISED: the findings are confirmed against the
+    # finished document, and a build that never finished has none to
+    # confirm against -- reporting the raw candidates would be a guess.
+    _blank_tokens = []
+    if conversion_error is None:
+        try:
+            from .generators.rdl import blank_token_findings
+            _blank_tokens = blank_token_findings(parsed)
+        except Exception:  # noqa: BLE001 -- an audit must never sink convert
+            _blank_tokens = []
     # Render BOTH preview modes so the UI can toggle between
     # frontend (filled with sample data) and backend (Report
     # Builder skeleton with field-name placeholders).
@@ -450,15 +464,14 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
             preflight["issues"] = list(preflight.get("issues") or []) + _cov
     except Exception:  # noqa: BLE001 - disclosure must never sink convert()
         pass
-    # CHART/GRAPH DISCLOSURE. No artifact in the entire production or wild
-    # corpus carries an Oracle graph element (census 2026-08-05: zero hits
-    # for <graph>/<chart>/OGD/GraphType across every file ever given), so
-    # there is no real example to build or verify a Chart translation
-    # against — and speculative conversion code that has never seen a true
-    # input is exactly how silent wrong output ships. Until a real
-    # chart-bearing report arrives, the contract is DISCLOSURE: say the
-    # chart exists and that it is not yet translated, never drop it
-    # silently.
+    # CHART/GRAPH DISCLOSURE. A declared <graph>/<rw:graph> is translated to a
+    # real SSRS <Chart> from its own declaration (type, category/series/value
+    # bindings, titles, legend, colours, box). Two things still have to be
+    # said out loud, because a chart must never be silently dropped NOR
+    # silently redrawn as something else:
+    #   * a graph whose bindings resolve to nothing in any query is NOT built;
+    #   * a DECLARED graph feature with no faithful RDL analog is DECLINED by
+    #     name (the parser/generator record these on the chart record).
     try:
         _src_txt = xml_bytes.decode("utf-8", errors="replace")             if isinstance(xml_bytes, (bytes, bytearray)) else str(xml_bytes)
         import re as _re
@@ -466,20 +479,59 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
             r'<\s*(?:rw:)?(?:graph|chart)\b|fileFormat="ogd"|'
             r"oracle\.graphics", _src_txt, _re.I)
         if _chart_hits:
+            _charts = list(getattr(parsed, "charts", None) or [])
+            _built = [c for c in _charts if c.get("built")]
+            _unbuilt = [c for c in _charts if not c.get("built")]
+            _declined = []
+            for _c in _charts:
+                for _d in (_c.get("declined") or []):
+                    if _d not in _declined:
+                        _declined.append(_d)
+            if not _charts:
+                _msg = ("The source contains graph/chart markup that declares "
+                        "no chart bindings — nothing was built from it. "
+                        "Everything else converts normally.")
+            elif _unbuilt:
+                _msg = ("%d of %d declared graph/chart object(s) could NOT be "
+                        "built: their category/value bindings do not resolve "
+                        "to a column or summary of any query, so the chart "
+                        "will not appear in the RDL. Everything else "
+                        "converts normally."
+                        % (len(_unbuilt), len(_charts)))
+            else:
+                _msg = ("%d declared graph/chart object(s) translated to SSRS "
+                        "Chart(s) from the declared bindings — verify against "
+                        "the source graph in Report Builder."
+                        % len(_built))
+            if _declined:
+                _msg += (" Declared graph feature(s) with no faithful RDL "
+                         "equivalent, NOT reproduced: " + "; ".join(_declined)
+                         + ".")
             preflight = dict(preflight)
             preflight["issues"] = list(preflight.get("issues") or []) + [{
-                "severity": "AMBER",
+                "severity": "AMBER" if (_unbuilt or _declined) else "INFO",
                 "rule": "source.chart_element",
-                "message": (
-                    "The source report contains a graph/chart element. "
-                    "Chart translation is not implemented yet (no "
-                    "chart-bearing report has been available to verify "
-                    "against) — the chart will NOT appear in the RDL. "
-                    "Everything else converts normally. Share this report "
-                    "so chart support can be built against it."),
+                "message": _msg,
             }]
     except Exception:  # noqa: BLE001 - disclosure must never sink convert()
         pass
+
+    # CROSS-TAB: an Oracle cross-tab behaviour the RDL Tablix construct
+    # genuinely cannot express is DISCLOSED, never dropped in silence. The
+    # generator measured the limit against the real report engine; see
+    # declared_matrix_limits(). Informational only — the pivot itself is
+    # emitted and uploads fine, so the verdict is untouched.
+    try:
+        from .generators.rdl import declared_matrix_limits
+        _mx_limits = declared_matrix_limits(parsed)
+        if _mx_limits:
+            preflight = dict(preflight)
+            preflight["issues"] = list(preflight.get("issues") or []) + [
+                {"severity": "INFO", "rule": _l["rule"],
+                 "message": _l["message"]} for _l in _mx_limits]
+    except Exception:  # noqa: BLE001 - disclosure must never sink convert()
+        pass
+
     # Honest verdict for PARTIAL Oracle artifacts (wild-corpus verified):
     # a customization overlay or a data-model-only export is not a full
     # report. Tell the user plainly instead of shipping a near-blank RDL
@@ -489,6 +541,47 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
         preflight = dict(preflight)
         preflight["source_kind"] = source_kind["kind"]
         preflight["source_kind_message"] = source_kind["message"]
+
+    # UNRESOLVABLE DECLARED TOKENS. A boilerplate caption like "TOTAL &P_X"
+    # whose token no parameter/column/translatable formula satisfies is
+    # emitted as =Nothing so the page never shows raw "&P_X" ink -- but a
+    # blanked caption and a caption that was never declared look identical
+    # in the PDF, so without this the operator is never told a declaration
+    # was dropped. AMBER on the established scale: the RDL opens, publishes
+    # and renders, and no query or section fails at run time -- only
+    # declared text is missing from the page (same class as a layout clip).
+    try:
+        if _blank_tokens:
+            preflight = dict(preflight)
+            _issues = list(preflight.get("issues", []))
+            for _bt in _blank_tokens:
+                _obj = _bt.get("object") or "report item"
+                # name the Oracle-side object too when it differs, so the
+                # operator can find the declaration as well as the textbox
+                _src_obj = _bt.get("declared_object") or ""
+                if _src_obj and _src_obj != _obj:
+                    _obj = f"{_obj}, declared as {_src_obj}"
+                _decl = _bt.get("declared_text") or ""
+                _issues.append({
+                    "severity": "AMBER",
+                    "rule": "rdl.unresolved_token_blank",
+                    "message": (
+                        f"Token &{_bt.get('token')} in <{_obj}> could not be "
+                        f"resolved to a parameter, dataset column or "
+                        f"translatable formula; it renders BLANK (never as "
+                        f"raw text). Supply the value at deploy time"
+                        + (f' -- declared text: "{_decl}"' if _decl else "")
+                        + (f". {_bt.get('note')}" if _bt.get("note") else ".")
+                    ),
+                })
+            preflight["issues"] = _issues
+            _sev = {"BLOCKER": 3, "RED": 2, "AMBER": 1}
+            _worst = max((_sev.get(i.get("severity"), 0) for i in _issues),
+                         default=0)
+            preflight["verdict"] = {3: "BLOCKER", 2: "RED", 1: "AMBER",
+                                    0: "READY"}[_worst]
+    except Exception:  # noqa: BLE001 -- must never break a convert
+        pass
 
     # Static layout audit: flag CanGrow=false textboxes whose declared content
     # can't fit (clip risk) -- the class the placeholder-data render is blind to.
@@ -611,6 +704,47 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
             fidelity_report["score"] = 0.0
             fidelity_report.setdefault("needs_attention", []).append(
                 _unsupported_note)
+
+    # FIDELITY <-> PREFLIGHT CONSISTENCY (one story across surfaces): the
+    # fidelity headline the UI presents is the WORST of the binding score
+    # and the display-coverage axis. A report can be upload-READY with a
+    # sub-1.0 headline (e.g. layout columns that never display) — without
+    # this disclosure the verdict banner/badge said "0 findings" while the
+    # fidelity card said 67%. Emit an INFO finding that names the measured
+    # numbers whenever either axis is below the fidelity module's OWN
+    # needs-attention threshold. Purely informational: the verdict is
+    # NEVER changed by this block, and a full-coverage report gets nothing.
+    try:
+        if isinstance(preflight, dict) and isinstance(fidelity_report, dict):
+            _fscore = fidelity_report.get("score")
+            _fdisp = ((fidelity_report.get("categories") or {})
+                      .get("layout_fields") or {}).get("display_coverage")
+            _axes = [_v for _v in (_fscore, _fdisp)
+                     if isinstance(_v, (int, float))]
+            if _axes and min(_axes) < _FIDELITY_ATTENTION:
+                _parts = []
+                if isinstance(_fscore, (int, float)) \
+                        and _fscore < _FIDELITY_ATTENTION:
+                    _parts.append(f"source binding {round(_fscore * 100)}%")
+                if isinstance(_fdisp, (int, float)) \
+                        and _fdisp < _FIDELITY_ATTENTION:
+                    _parts.append(
+                        f"layout display coverage {round(_fdisp * 100)}%")
+                preflight = dict(preflight)
+                preflight["issues"] = list(preflight.get("issues") or []) + [{
+                    "severity": "INFO",
+                    "rule": "fidelity.needs_attention",
+                    "message": (
+                        f"Conversion fidelity headline is "
+                        f"{round(min(_axes) * 100)}% "
+                        f"({'; '.join(_parts)}) — below full coverage. The "
+                        f"report still uploads and runs, but part of the "
+                        f"source did not reach the output 1:1. The "
+                        f"Conversion fidelity card (Extras tab) lists the "
+                        f"exact items."),
+                }]
+    except Exception:  # noqa: BLE001 - disclosure must never sink convert()
+        pass
 
     # GENERIC LABEL OVERRIDES: any literal label the generator produced
     # (report/band titles, cover-hyperlink text, bundle titles a bare-SQL

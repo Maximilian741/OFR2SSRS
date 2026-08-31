@@ -9,6 +9,9 @@
   "use strict";
 
   var INJECTED_FLAG = "data-ai-apply-injected";
+  // Several apply-panels can be on screen at once, and each needs its own
+  // id so its <label for> points at ITS textarea and not a neighbour's.
+  var AI_APPLY_SEQ = 0;
 
   function toast(msg, kind) {
     // Prefer the host app's toast if present; otherwise fall back to alert.
@@ -24,8 +27,9 @@
     div.style.cssText =
       "position:fixed;bottom:20px;right:20px;z-index:99999;" +
       "padding:8px 14px;border-radius:6px;font-family:sans-serif;font-size:13px;" +
-      "color:#fff;background:" + (kind === "err" ? "#b00020" : "#2a7d2a") + ";" +
-      "box-shadow:0 2px 8px rgba(0,0,0,0.25);";
+      "color:var(--on-solid,#fff);background:" +
+      (kind === "err" ? "var(--bad,#b00020)" : "var(--good,#2a7d2a)") + ";" +
+      "box-shadow:var(--shadow-lg,0 2px 8px rgba(0,0,0,0.25));";
     document.body.appendChild(div);
     setTimeout(function () { try { div.remove(); } catch (e) {} }, 3500);
   }
@@ -53,21 +57,29 @@
       "margin-top:10px;padding:10px;border:1px solid var(--border,#ccc);" +
       "border-radius:6px;background:var(--surface-2,#f7f7f7);";
 
-    var label = document.createElement("div");
+    // A real <label for>, not a styled div: the visible instruction IS the
+    // field's name, and without the pairing the textarea is announced as
+    // nothing at all. The id is unique per panel because several of these
+    // panels can be on screen at once.
+    var uid = "ai-apply-" + (AI_APPLY_SEQ += 1);
+    var label = document.createElement("label");
+    label.htmlFor = uid;
     label.textContent =
       "Paste the AI's T-SQL response below, then click Apply. " +
       "Target: " + (kind || "udf") + " — " + (name || "?");
     label.style.cssText =
-      "font-size:12px;margin-bottom:6px;color:var(--text-muted,#555);";
+      "display:block;font-size:12px;margin-bottom:6px;color:var(--text-muted,#555);";
     wrap.appendChild(label);
 
     var ta = document.createElement("textarea");
+    ta.id = uid;
     ta.rows = 6;
     ta.placeholder = "CREATE FUNCTION dbo.fn_..." + "\n  (...) RETURNS ... AS BEGIN ... END";
     ta.style.cssText =
       "width:100%;box-sizing:border-box;font-family:Consolas,Menlo,monospace;" +
       "font-size:12px;padding:6px;border:1px solid var(--border,#ccc);" +
-      "border-radius:4px;background:#fff;color:#111;resize:vertical;";
+      "border-radius:4px;background:var(--surface-0,#fff);color:var(--ink,#111);" +
+      "resize:vertical;";
     wrap.appendChild(ta);
 
     var actions = document.createElement("div");
@@ -77,9 +89,13 @@
     btn.type = "button";
     btn.className = "btn";
     btn.textContent = "Apply this translation";
+    // One of these per prompt: the visible words alone do not say WHICH.
+    btn.setAttribute("aria-label",
+      "Apply this translation for " + (kind || "udf") + " " + (name || ""));
     btn.style.cssText =
       "padding:5px 12px;font-size:13px;border-radius:4px;cursor:pointer;" +
-      "border:1px solid var(--accent,#356aff);background:var(--accent,#356aff);color:#fff;";
+      "border:1px solid var(--accent,#356aff);background:var(--accent,#356aff);" +
+      "color:var(--on-solid,#fff);";
     actions.appendChild(btn);
 
     var status = document.createElement("span");
@@ -113,7 +129,7 @@
           var msg = (res.json && (res.json.error || res.json.issues)) || ("HTTP " + res.status);
           if (Array.isArray(msg)) msg = msg.join("; ");
           status.textContent = "Failed: " + msg;
-          status.style.color = "#b00020";
+          status.style.color = "var(--bad,#b00020)";
           toast("Apply failed: " + msg, "err");
           btn.disabled = false;
           return;
@@ -135,14 +151,14 @@
           badge.textContent = "Applied ✓";
           badge.style.cssText =
             "margin-left:6px;padding:2px 6px;font-size:11px;border-radius:10px;" +
-            "background:#2a7d2a;color:#fff;";
+            "background:var(--good,#2a7d2a);color:var(--on-solid,#fff);";
           summary.appendChild(badge);
         }
         status.textContent = info.where || "applied";
-        status.style.color = "#2a7d2a";
+        status.style.color = "var(--good,#2a7d2a)";
       }).catch(function (err) {
         status.textContent = "Network error";
-        status.style.color = "#b00020";
+        status.style.color = "var(--bad,#b00020)";
         toast("Network error: " + err, "err");
         btn.disabled = false;
       });

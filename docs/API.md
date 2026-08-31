@@ -396,8 +396,12 @@ The shape returned by every successful `/api/convert*` call:
 `preflight.verdict` is the deployment gate; `fidelity_report.score` is
 `1.0` when nothing was silently dropped, and
 `fidelity_report.categories.layout_fields.display_coverage` is the
-stricter "how much of the layout actually displays" ratio. See the
-[run guide](RUN_GUIDE.md) for what each verdict and rule means.
+stricter "how much of the layout actually displays" ratio. Whenever
+either fidelity axis is below full coverage, `preflight.issues[]` also
+carries one `severity: "INFO"` finding (rule `fidelity.needs_attention`)
+naming the measured numbers, so the preflight surface and the fidelity
+card always tell one story; INFO findings never change the verdict. See
+the [run guide](RUN_GUIDE.md) for what each verdict and rule means.
 
 ### `validation_issues[]` — `ValidationIssue`
 

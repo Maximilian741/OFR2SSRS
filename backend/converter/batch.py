@@ -60,20 +60,21 @@ def _effort(verdict: str, fidelity: Optional[float],
     return "assisted"
 
 
-def _measure_pdf(pdf_path: str) -> Dict[str, Any]:
+def _measure_pdf(pdf_path: str, rdl_xml: str = "",
+                 mode: Optional[str] = None) -> Dict[str, Any]:
+    """Blank-page count for the assessment, via the shared strict measure
+    (tools/renderlab/blank_measure.py — already on sys.path, since a PDF only
+    exists here because the renderlab engine produced it).
+
+    Page furniture is derived from the ARTIFACT: the wording the RDL declares
+    in its page bands, in whatever language the report is written, plus the
+    lines the document repeats on every sheet. The two English literals this
+    used to strip are kept only as a fallback — on their own they let a blank
+    sheet hide behind any page header whose wording differed."""
     try:
-        from pypdf import PdfReader
-        r = PdfReader(pdf_path)
-        blanks = []
-        for i, page in enumerate(r.pages):
-            txt = (page.extract_text() or "").strip()
-            residual = "".join(
-                ln for ln in txt.splitlines()
-                if not ln.strip().lower().startswith(("page ", "report run on"))
-            ).strip()
-            if len(residual) < 8:
-                blanks.append(i + 1)
-        return {"pages": len(r.pages), "blank_pages": blanks}
+        from blank_measure import measure_pdf  # type: ignore
+        m = measure_pdf(pdf_path, rdl_xml=rdl_xml or None, mode=mode)
+        return {"pages": m["pages"], "blank_pages": m["blank"]}
     except Exception as e:  # noqa: BLE001
         return {"pages": None, "blank_pages": [],
                 "measure_error": f"{type(e).__name__}: {e}"}
@@ -141,7 +142,8 @@ def batch_convert(items: List[Tuple[str, bytes]],
                         1 for ln in (res.get("log") or "").splitlines()
                         if ln.startswith("WARN"))
                     if res.get("ok") and res.get("pdf"):
-                        row.update(_measure_pdf(res["pdf"]))
+                        row.update(_measure_pdf(res["pdf"], row["rdl_xml"],
+                                                res.get("mode")))
                     if not res.get("ok"):
                         row["effort"] = "assisted" \
                             if row["effort"] in ("automatic", "light-touch") \
@@ -185,8 +187,15 @@ def build_assessment_html(batch: Dict[str, Any],
         if rendered:
             if r.get("render_ok") is True:
                 blanks = r.get("blank_pages") or []
-                render_s = (f"✓ {r.get('pages', '?')} pages"
-                            + (f", BLANK {blanks}" if blanks else ""))
+                # A measure that FAILED reports no blank pages, exactly as a
+                # clean render does. Say which one happened: "no blanks" and
+                # "not measured" must never look the same on this sheet.
+                if r.get("measure_error"):
+                    render_s = ("✓ rendered, BLANK MEASURE FAILED: "
+                                + str(r["measure_error"])[:120])
+                else:
+                    render_s = (f"✓ {r.get('pages', '?')} pages"
+                                + (f", BLANK {blanks}" if blanks else ""))
             elif r.get("render_ok") is False:
                 render_s = "✗ engine rejected"
         notes = "; ".join(

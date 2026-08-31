@@ -70,6 +70,15 @@ def _sample_value(col: str, typ: str, idx: int):
     dataset — that's what makes Lookup() joins land."""
     t = (typ or "").lower()
     u = col.upper()
+    # Synthetic tile-index columns (ms_layout.staticize rewrites the
+    # row-major label groups =Ceiling(RowNumber(Nothing)/N) and
+    # =(RowNumber(Nothing)-1) Mod N to these fields): carry RowNumber's
+    # documented semantics -- the sequential feed order -- so grouping by
+    # them reproduces the across-then-down grid in the layout render.
+    m_tile = re.fullmatch(r"O2S_TILE_(ROW|COL)_(\d+)", u)
+    if m_tile:
+        n = max(1, int(m_tile.group(2)))
+        return (idx // n) + 1 if m_tile.group(1) == "ROW" else idx % n
     # Columns that feed <Image Source="Database"> need byte[] — synthetic
     # strings make the engine warn rsInvalidImageData. NULL renders an
     # empty image box (same as a server with no blob), which is what a

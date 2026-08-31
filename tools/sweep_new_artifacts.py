@@ -53,9 +53,16 @@ def main() -> int:
     except Exception:
         render_rdl, have_engine = None, False
     try:
-        import pdfplumber
+        # THE SHARED STRICT MEASURE — tools/renderlab/blank_measure.py. This
+        # tool used to carry its own rule ("fewer than three extracted words
+        # below one inch = blank"), which is the same defect the shared
+        # measure exists to kill twice over: it counts EXTRACTED WORDS, so a
+        # report whose glyphs do not decode reads however the extractor's
+        # mojibake happens to split, and it never looks at the artifact, so
+        # page furniture counts as content in every language.
+        from blank_measure import measure_pdf
     except Exception:
-        pdfplumber = None
+        measure_pdf = None
 
     print(f"{'artifact':40} {'verdict':8} {'mock_pg':>7} {'render':6} "
           f"{'pdf_pg':>6} {'blank':>5}  notes")
@@ -82,14 +89,13 @@ def main() -> int:
                 res = render_rdl(rp, Path(td) / "r.pdf", rows=3)
                 if res["ok"]:
                     rend = "ok"
-                    if pdfplumber:
-                        with pdfplumber.open(res["pdf"]) as pdf:
-                            bl = [i + 1 for i, pg in enumerate(pdf.pages)
-                                  if len([w for w in pg.extract_words()
-                                          if 1.0 < w["top"] / 72]) < 3]
-                            npdf, blanks = len(pdf.pages), (bl or "-")
-                            if bl:
-                                issues += 1
+                    if measure_pdf:
+                        m = measure_pdf(res["pdf"], rdl_xml=rdl,
+                                        mode=res.get("mode"))
+                        bl = m["blank"]
+                        npdf, blanks = m["pages"], (bl or "-")
+                        if bl:
+                            issues += 1
                 else:
                     rend = "FAIL"
                     issues += 1

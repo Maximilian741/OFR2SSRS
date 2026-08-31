@@ -1,8 +1,13 @@
 """Mailing-label / multi-up archetype: a repeating frame with
 printDirection="acrossDown" + a boilerplate label cell must convert to a
-one-cell Tablix tiled via newspaper Page Columns -- NOT a tall one-per-row
-table (which left a trailing blank page). Real-artifact verified (a 2-up
-mailing-label report). Must NOT hijack matrices/normal tables.
+ROW-MAJOR grouped Tablix (column group =(RowNumber(Nothing)-1) Mod N, row
+group =Ceiling(RowNumber(Nothing)/N)) -- NOT newspaper Page Columns (SSRS
+fills those DOWN-then-across and slices a body wider than one column at the
+column edge: engine-measured, every record stacked left + address lines
+split mid-word) and NOT a tall one-per-row table (trailing blank page).
+Real-artifact verified (a 2-up mailing-label report; see
+test_across_down_fill_order for the engine probes). Must NOT hijack
+matrices/normal tables.
 """
 from __future__ import annotations
 
@@ -61,12 +66,34 @@ def test_label_spec_detected():
     assert spec["fields"]
 
 
-def test_label_emits_tiled_tablix_with_page_columns():
+def test_label_emits_row_major_tiled_tablix():
+    """STRICTER replacement for the old page-Columns assertion: newspaper
+    Columns fill DOWN-then-across and slice the body at the column edge
+    (engine-measured, see module docstring), so the label archetype must
+    emit the ROW-MAJOR grouped Tablix and no page Columns at all."""
     rdl = convert(_LABEL_XML)["rdl_xml"]
     assert '<Tablix Name="Tablix_Labels">' in rdl
-    m = re.search(r"<Columns>(\d+)</Columns>", rdl)
-    assert m and int(m.group(1)) >= 2, "expected newspaper multi-column tiling"
-    assert "<ColumnSpacing>" in rdl
+    mc = re.search(
+        r"<GroupExpression>=\(RowNumber\(Nothing\) - 1\) Mod (\d+)"
+        r"</GroupExpression>", rdl)
+    mr = re.search(
+        r"<GroupExpression>=Ceiling\(RowNumber\(Nothing\) / (\d+)\)"
+        r"</GroupExpression>", rdl)
+    assert mc and mr, "expected the row-major tile group expressions"
+    # 3.0in tiles on the declared 8.5in body => 2 across, and BOTH groups
+    # must agree on N or the transpose math breaks.
+    assert int(mc.group(1)) == int(mr.group(1)) == 2
+    # The down-fill construct must be GONE: page Columns transpose the fill
+    # order AND slice the multi-tile body at the newspaper column edge.
+    assert "<Columns>" not in rdl and "<ColumnSpacing>" not in rdl
+    # The root Width must budget ALL tiles (>= 2 x 3.0in) -- the defective
+    # construct emitted ONE tile's width (3.06in), which shrank the
+    # printable area and the residual right margin sliced the grid (the
+    # measured splice-gap defect). A source-declared body width wider than
+    # the grid may win (declared body width IS the body width), so the
+    # measurement is a floor, not equality.
+    mw = re.search(r"<Width>([\d.]+)in</Width>\s*<Page>", rdl)
+    assert mw and float(mw.group(1)) >= 6.0 - 0.05
 
 
 def test_label_xsd_valid_and_ready():

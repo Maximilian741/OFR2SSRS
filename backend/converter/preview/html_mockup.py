@@ -754,6 +754,24 @@ def detect_report_kind(report):
     signature blocks, logos, or address lists from being misclassified
     as tabular.
     """
+    # 0pre. AUTHORED SHORTHAND REGION DECLARATION, the strongest signal of
+    #     all: Oracle's geometry-free authoring dialect names the region type
+    #     in the element tag itself (<tabular> holding bare
+    #     <field source label/> children -- see the parser's
+    #     simplified_* LayoutGroup kinds). A <tabular> region IS a tabular
+    #     listing by the author's own declaration; without this, its
+    #     0-geometry fields miss every geometry heuristic below and the
+    #     report falls through to 'certificate' -- the per-record card path
+    #     then stacks all fields at one spot, page-breaks per record, and
+    #     drops the label= captions entirely (wild-corpus verified).
+    #     <formlike>/<mailing> shorthands are deliberately NOT routed here:
+    #     no verified instance converts today, and guessing their archetype
+    #     would be invention.
+    for _g in _iter_layout(report):
+        if (getattr(_g, "kind", "") or "") == "simplified_tabular" and any(
+                getattr(f, "kind", "") == "field" for f in (_g.fields or [])):
+            return "tabular_details"
+
     # 0a. POSITIONAL CERTIFICATE / wallet card, checked BEFORE the columnar rule:
     #     an embedded SEAL image + only a TINY columnar frame (<=2 fields, i.e. an
     #     occupation/expiration pair -- not a real data grid) + little prose. The
@@ -1811,8 +1829,40 @@ def _render_tabular_detail_page(report, sample_idx, page_num, total_pages):
         top_rep = find_rep(main)
 
     if top_rep is None:
-        # No repeating frame at all — emit a generic table from query columns
-        body = '<div style="color:#888; font-style:italic;">(no repeating frames)</div>'
+        # No repeating frame at all -> a generic flat table from the main
+        # query's columns, mirroring the RDL's Tablix_Main fallback. This is
+        # the render path for GEOMETRY-LESS tabular reports (Oracle's
+        # simplified-shorthand <tabular> dialect, or a layout-less SQL-only
+        # bundle): the caption comes from the authored item label
+        # (<field label="..."/> stamped onto the item by the parser) and only
+        # falls back to a prettified column name. Before this, the mockup
+        # printed a literal "(no repeating frames)" placeholder while the RDL
+        # rendered a real grid -- the two views disagreed.
+        _mq = _pick_main_query(report)
+        _its = list(getattr(_mq, "items", None) or []) if _mq is not None else []
+        if _its:
+            _caps = [((getattr(it, "label", "") or "").strip()
+                      or (it.name or "").replace("_", " ").title())
+                     for it in _its]
+            _hdr = "".join(
+                '<th style="text-align:left; padding:6px 10px; '
+                'font-size:12px; font-weight:bold; color:' + _TAB_INK + '; '
+                'border-bottom:2px solid #444;">' + _esc(c) + '</th>'
+                for c in _caps)
+            _rows_html = ""
+            for _r in range(3):
+                _cells = "".join(
+                    '<td style="padding:5px 10px; font-size:12px; color:'
+                    + _TAB_INK + '; border-bottom:1px solid #ddd;">'
+                    + _esc(_sample_for_source(it.name, _r)) + '</td>'
+                    for it in _its)
+                _rows_html += '<tr>' + _cells + '</tr>'
+            body = ('<table style="border-collapse:collapse; width:100%; '
+                    'margin-top:10px;"><thead><tr>' + _hdr
+                    + '</tr></thead><tbody>' + _rows_html + '</tbody></table>')
+        else:
+            body = ('<div style="color:#888; font-style:italic;">'
+                    '(no repeating frames)</div>')
         return _render_page(title_top + run_line + body, label="Page " + str(page_num))
 
     # Band from outer frame -- navy/yellow only when the source is actually
@@ -2288,6 +2338,7 @@ def _render_multi_section_page(report, sections, page_label):
             'text-align:center; letter-spacing:0.4px; line-height:1.4;">'
             + _esc(ln) + '</div>'
         )
+    head += _margin_header_sublines(report, title_lines)
     # Selection-criteria echo (Oracle repeating top-left margin, e.g.
     # "Start Date:" / "End Date:" param block). Mirrors the RDL page-header echo
     # so both views show the criteria the run covers. Lazy-import the shared
@@ -2676,6 +2727,53 @@ def _nd_header_label(label_geo, x, y):
     return _resolve_tokens((best or "").strip().rstrip(":"), 0)
 
 
+def _margin_header_sublines(report, title_lines):
+    """Centred header lines for the TOP-band ``<margin>`` static texts the
+    synthesized heads drop. Oracle's margin band often carries subtitle
+    furniture under the title (a company address line, a division name);
+    every archetype that synthesizes its head from ONE title candidate lost
+    the rest — those declared strings never reached ink in the mockup arm
+    (measured: a wild warehouse grid's margin address line at 0 ink).
+    Structural (parser's in_margin tag), token-resolved; page builtins and
+    label-for-field texts (trailing colon — their companion margin field is
+    already stood in for by the run-date band) stay out, and the title's own
+    lines are deduped so nothing prints twice."""
+    seen = {re.sub(r"\s+", " ", (ln or "")).strip().lower()
+            for ln in (title_lines or [])}
+    subs = []
+    try:
+        for sec in (getattr(report, "layout", None) or []):
+            if not (getattr(sec, "kind", "") or "").startswith("section"):
+                continue
+            for g in _iter_group(sec):
+                for f in (getattr(g, "fields", None) or []):
+                    if (not getattr(f, "in_margin", False)
+                            or (getattr(f, "kind", "") or "") != "text"
+                            or not getattr(f, "visible", True)
+                            or float(getattr(f, "y", 0) or 0) >= 1.5):
+                        continue
+                    raw = getattr(f, "text", "") or ""
+                    if "&<" in raw:
+                        continue
+                    txt = " ".join(_resolve_tokens(raw, 0).split())
+                    key = txt.strip().lower()
+                    if not txt or txt.endswith(":") or key in seen:
+                        continue
+                    seen.add(key)
+                    subs.append((float(getattr(f, "y", 0) or 0),
+                                 float(getattr(f, "x", 0) or 0), txt,
+                                 bool(getattr(f, "bold", False))))
+    except Exception:  # noqa: BLE001 -- head furniture never breaks a page
+        return ""
+    html = ""
+    for _y, _x, txt, b in sorted(subs):
+        html += ('<div style="font-family:' + _ACTIVE_TITLE_FONT
+                 + ';font-size:11px;font-weight:' + ('bold' if b else 'normal')
+                 + ';color:#000000;text-align:center;line-height:1.4;">'
+                 + _esc(txt) + '</div>')
+    return html
+
+
 def _is_nested_master_detail_preview(report):
     """True when the main query has a nested <group> chain (>=2 levels) AND a
     detail TABLE band -- the master-detail table shape. Mirrors the RDL
@@ -2802,6 +2900,7 @@ def _render_nested_master_detail_page(report, sample_idx, page_num, total_pages)
         head += ('<div style="font-family:' + _ACTIVE_TITLE_FONT + ';font-size:13px;'
                  'font-weight:bold;color:' + title_color + ';text-align:center;'
                  'letter-spacing:0.4px;line-height:1.4;">' + _esc(ln) + '</div>')
+    head += _margin_header_sublines(report, title_lines)
     head += ('<div style="display:flex;justify-content:space-between;'
              'align-items:baseline;margin:8px 0 10px;font-size:12px;color:#000;">'
              '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
@@ -2984,6 +3083,7 @@ def _render_tabbrkleft_page(report, page_num, total_pages):
         head += ('<div style="font-family:' + _ACTIVE_TITLE_FONT + ';font-size:13px;'
                  'font-weight:bold;color:' + title_color + ';text-align:center;'
                  'letter-spacing:0.4px;line-height:1.4;">' + _esc(ln) + '</div>')
+    head += _margin_header_sublines(report, title_lines)
     head += ('<div style="display:flex;justify-content:space-between;'
              'align-items:baseline;margin:8px 0 6px;font-size:12px;color:#000;">'
              '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
@@ -3168,6 +3268,7 @@ def _render_grouped_tabular_subtotal_page(report, spec, page_num, total_pages):
         head += ('<div style="font-family:' + _ACTIVE_TITLE_FONT + ';font-size:13px;'
                  'font-weight:bold;color:' + title_color + ';text-align:center;'
                  'letter-spacing:0.4px;line-height:1.4;">' + _esc(ln) + '</div>')
+    head += _margin_header_sublines(report, title_lines)
     head += ('<div style="display:flex;justify-content:space-between;'
              'align-items:baseline;margin:8px 0 10px;font-size:12px;color:#000;">'
              '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
@@ -3309,6 +3410,7 @@ def _render_stacked_list_pages(report, sl):
         head += ('<div style="font-family:' + _ACTIVE_TITLE_FONT + ';font-size:13px;'
                  'font-weight:bold;color:' + title_color + ';text-align:center;'
                  'letter-spacing:0.4px;line-height:1.4;">' + _esc(ln) + '</div>')
+    head += _margin_header_sublines(report, title_lines)
     head += ('<div style="display:flex;justify-content:space-between;'
              'align-items:baseline;margin:8px 0 6px;font-size:12px;color:#000;">'
              '<div>Report run on:&nbsp;<span style="font-weight:normal;">'
@@ -4749,55 +4851,129 @@ def _render_matrix_pages(report, spec):
 def _mockup_chart_spec(report):
     """Return a detected chart dict whose category+measure are real dataset
     columns (renderable, mirrors the RDL's <Chart> gate), else None."""
+    specs = _mockup_chart_specs(report)
+    return specs[0] if specs else None
+
+
+def _mockup_chart_specs(report):
+    """Every declared chart the RDL builds, in declaration order (mirrors the
+    generator's gate: the category and at least one value binding resolve to a
+    query column or a declared group summary). Falls back to showing an
+    unbound declaration so a chart is never invisible in the preview."""
     charts = list(getattr(report, "charts", None) or [])
     if not charts:
-        return None
-    cols = set()
+        return []
+    cols, sums = set(), set()
     for q in (report.queries or []):
         for it in (q.items or []):
             if it.name:
                 cols.add(it.name.upper())
+        stack = list(getattr(q, "groups", None) or [])
+        while stack:
+            g = stack.pop()
+            _sm = (g.get("summaries") if isinstance(g, dict)
+                   else getattr(g, "summaries", None)) or []
+            for s in _sm:
+                nm = (s.get("name") if isinstance(s, dict)
+                      else getattr(s, "name", "")) or ""
+                if nm:
+                    sums.add(nm.upper())
+            stack.extend((g.get("children") if isinstance(g, dict)
+                          else getattr(g, "children", None)) or [])
+    out = []
     for c in charts:
         cat = (c.get("category") or "").strip().upper()
-        meas = (c.get("plot_value") or "").strip().upper()
-        if cat and meas and cat in cols and meas in cols:
-            return c
-    return charts[0] if charts else None  # show something even if unbound
+        vals = [v.strip().upper() for v in
+                (c.get("plot_values") or [c.get("plot_value") or ""]) if v]
+        if cat and cat in cols and any(v in cols or v in sums for v in vals):
+            out.append(c)
+    return out or charts[:1]
+
+
+def _chart_svg_family(chart):
+    """The drawing family the DECLARED graphType names: bar / line / pie.
+    Same decomposition the RDL type mapping uses (the Oracle token is
+    FAMILY[_ORIENTATION][_STACKING]), so preview and RDL never disagree
+    about what kind of graph the source declares."""
+    t = re.sub(r"[^A-Z0-9]+", "_", (chart.get("type") or "").upper())
+    if "RING" in t or ("PIE" in t and "BAR" not in t):
+        return "pie"
+    if "LINE" in t and "RADAR" not in t:
+        return "line"
+    return "bar"
 
 
 def _render_chart_svg(chart):
-    """A small SVG bar chart for the preview -- title + sample bars + the
-    '<measure> by <category>' caption -- so the mockup shows the chart the
-    RDL renders (sample bars; real values come at runtime)."""
+    """A small SVG chart for the preview -- the DECLARED title, the declared
+    graph family (bar / line / pie), the declared axis titles and the
+    '<measure> by <category>' caption -- so the mockup shows the same chart
+    the RDL renders (sample values; real ones come at runtime)."""
     title = (chart.get("title") or "Chart").strip() or "Chart"
     cat = _humanize_report_title(chart.get("category") or "Category")
     meas = _humanize_report_title(chart.get("plot_value") or "Value")
+    fam = _chart_svg_family(chart)
     vals = [62, 88, 45, 73, 34, 57, 49]
     maxv = max(vals)
     W, H, pad = 460, 220, 24
-    bw = (W - 2 * pad) // len(vals)
-    bars = []
-    for i, v in enumerate(vals):
-        bh = int((v / maxv) * 150)
-        x = pad + i * bw
-        y = H - 40 - bh
-        bars.append(f'<rect x="{x + 4}" y="{y}" width="{bw - 10}" '
-                    f'height="{bh}" rx="2" fill="#4a6a8a"/>')
-        bars.append(f'<text x="{x + bw // 2}" y="{H - 24}" font-size="9" '
-                    f'text-anchor="middle" fill="#64748b">{chr(65 + i)}</text>')
+    marks = []
+    if fam == "pie":
+        import math
+        cx, cy, rr = W // 2, (H - 20) // 2 + 8, 70
+        total = float(sum(vals))
+        a0 = -math.pi / 2
+        for i, v in enumerate(vals):
+            a1 = a0 + 2 * math.pi * (v / total)
+            x0, y0 = cx + rr * math.cos(a0), cy + rr * math.sin(a0)
+            x1, y1 = cx + rr * math.cos(a1), cy + rr * math.sin(a1)
+            large = 1 if (a1 - a0) > math.pi else 0
+            shade = 30 + (i * 22) % 120
+            marks.append(
+                f'<path d="M{cx:.1f},{cy:.1f} L{x0:.1f},{y0:.1f} '
+                f'A{rr},{rr} 0 {large},1 {x1:.1f},{y1:.1f} Z" '
+                f'fill="rgb({shade + 40},{shade + 70},{shade + 110})" '
+                f'stroke="#fff"/>')
+            a0 = a1
+        axes = ""
+    else:
+        bw = (W - 2 * pad) // len(vals)
+        pts = []
+        for i, v in enumerate(vals):
+            bh = int((v / maxv) * 150)
+            x = pad + i * bw
+            y = H - 40 - bh
+            if fam == "bar":
+                marks.append(f'<rect x="{x + 4}" y="{y}" width="{bw - 10}" '
+                             f'height="{bh}" rx="2" fill="#4a6a8a"/>')
+            else:
+                pts.append(f"{x + bw // 2},{y}")
+            marks.append(
+                f'<text x="{x + bw // 2}" y="{H - 24}" font-size="9" '
+                f'text-anchor="middle" fill="#64748b">{chr(65 + i)}</text>')
+        if fam == "line":
+            marks.append(f'<polyline points="{" ".join(pts)}" fill="none" '
+                         f'stroke="#4a6a8a" stroke-width="2"/>')
+        axes = (f'<line x1="{pad}" y1="{H - 40}" x2="{W - pad}" y2="{H - 40}" '
+                f'stroke="#cbd5e1"/>'
+                f'<line x1="{pad}" y1="20" x2="{pad}" y2="{H - 40}" '
+                f'stroke="#cbd5e1"/>')
     svg = (f'<svg width="{W}" height="{H}" viewBox="0 0 {W} {H}" '
-           f'role="img" style="max-width:100%;">'
-           f'<line x1="{pad}" y1="{H - 40}" x2="{W - pad}" y2="{H - 40}" '
-           f'stroke="#cbd5e1"/>'
-           f'<line x1="{pad}" y1="20" x2="{pad}" y2="{H - 40}" '
-           f'stroke="#cbd5e1"/>' + "".join(bars) + '</svg>')
+           f'role="img" style="max-width:100%;">' + axes
+           + "".join(marks) + '</svg>')
+    # Declared axis titles, printed where the RDL puts them.
+    _va = (chart.get("val_axis_title") or "").strip()
+    _ca = (chart.get("cat_axis_title") or "").strip()
     return (
         '<div style="text-align:center;">'
         '<div style="font-weight:bold;font-size:15px;margin-bottom:2px;">'
         + _esc(title) + '</div>'
         '<div style="color:#64748b;font-size:11px;margin-bottom:8px;">'
-        + _esc(meas) + ' by ' + _esc(cat) + ' (sample bars)</div>'
-        + svg + '</div>')
+        + _esc(meas) + ' by ' + _esc(cat) + ' (sample values)</div>'
+        + (('<div style="color:#475569;font-size:10px;">' + _esc(_va)
+            + '</div>') if _va else '')
+        + svg
+        + (('<div style="color:#475569;font-size:10px;">' + _esc(_ca)
+            + '</div>') if _ca else '')
+        + '</div>')
 
 
 def _uniform_page_widths(html):
@@ -4820,28 +4996,30 @@ def _uniform_page_widths(html):
     return re.sub(r"min-width:\s*[\d.]+in", f"min-width:{uniform}", html)
 
 
-def _maybe_lead_chart(report, html):
-    """If the report has a renderable chart, splice a chart sheet in as the
-    first page of the preview (so mockup <-> RDL agree)."""
-    spec = _mockup_chart_spec(report)
-    if not spec:
-        return html
-    lead = _render_page(_render_chart_svg(spec), label="Chart", first_page=True)
-    # Splice inside the desk wrapper — match its opening tag END, not an
-    # exact style string (adding overflow-x to the wrapper silently broke
-    # the old literal marker and dropped the chart page).
-    i = -1
-    for marker in ('min-height:100%; overflow-x:auto;">',
-                   'min-height:100%;">'):
-        i = html.find(marker)
-        if i >= 0:
-            i += len(marker)
-            break
-    if i < 0:
+def _maybe_trailing_charts(report, html):
+    """Splice ONE preview sheet per declared chart AFTER the body pages.
+
+    Placement follows the RDL, which follows Oracle: a graph is a layout
+    object that prints with its section, and every declared graph in this
+    corpus sits in the main or trailer section — i.e. after the record
+    pages. The preview used to lead with a single chart sheet, so a
+    trailer-section graph appeared BEFORE the data it summarises and any
+    second declared graph was invisible."""
+    specs = _mockup_chart_specs(report)
+    if not specs:
         return html
     divider = ('<div style="border-top:1px dashed #cbd5e1; '
                'max-width:8.25in; margin:0 auto 12px;"></div>')
-    return html[:i] + lead + divider + html[i:]
+    block = "".join(
+        divider + _render_page(_render_chart_svg(s), label="Chart",
+                               first_page=False)
+        for s in specs)
+    # Inject INSIDE the desk-background wrapper: appending after it makes
+    # top-level SIBLING divs, which the preview pane lays out side-by-side.
+    if html.rstrip().endswith("</div>"):
+        _cut = html.rstrip()
+        return _cut[:-len("</div>")] + block + "</div>"
+    return html + block
 
 
 def _mockup_label_spec(report):
@@ -4885,8 +5063,8 @@ def _mockup_label_spec(report):
 
 def _render_label_pages(report):
     """Mailing labels: tile the resolved label cell MULTI-UP across the sheet
-    then down (matching the RDL's newspaper Columns + Oracle's actual print),
-    instead of one label per page."""
+    then down (matching the RDL's row-major grouped Tablix + Oracle's actual
+    acrossDown print order), instead of one label per page."""
     spec = _mockup_label_spec(report)
     if not spec:
         return _render_generic_document_pages(report)
@@ -5495,8 +5673,9 @@ def render_mockup(report, mode="frontend"):
         if _mspec and _mspec.get("dominant") and _mspec.get("row") and _mspec.get("col"):
             _result = _render_matrix_pages(report, _mspec)
         # Mailing-label / multi-up archetype: tile the label cell across the
-        # sheet (matches the RDL's newspaper Columns + Oracle's print), instead
-        # of one label per page through the document path.
+        # sheet (matches the RDL's row-major grouped Tablix + Oracle's
+        # acrossDown print), instead of one label per page through the
+        # document path.
         elif _mockup_label_spec(report):
             _result = _render_label_pages(report)
         elif _is_header_summary_preview(report):
@@ -5535,9 +5714,10 @@ def render_mockup(report, mode="frontend"):
             _result = _render_per_record_document_pages(report)
         else:
             _result = _render_tabular_pages(report)
-        # A detected chart renders as a real <Chart> in the RDL -- show it in
-        # the preview too (leading sheet) so mockup and RDL agree.
-        _result = _maybe_lead_chart(report, _result)
+        # A declared chart renders as a real <Chart> in the RDL -- show every
+        # one in the preview too, AFTER the body pages, so mockup and RDL
+        # agree on both content and order.
+        _result = _maybe_trailing_charts(report, _result)
         # MOCKUP<->RDL parity for the report-end BREAKDOWN/TOTALS block: the
         # RDL renders dropped secondary-dataset repeating frames + summary
         # trailer totals (_emit_secondary_breakdown_tables); the tabular

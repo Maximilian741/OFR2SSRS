@@ -240,13 +240,22 @@ def test_trailer_pairs_declared_literal_label_verbatim():
     assert re.match(r'^="- Total Things\s*"', m.group(1)), m.group(1)
 
 
-def test_trailer_synthesized_without_declared_label():
+def test_trailer_placed_value_without_declared_label_prints_value_alone():
+    # A PLACED summary with no declared caption prints the VALUE alone in
+    # its own declared box -- Oracle puts just the number there, and riding
+    # a fabricated "<Name>: " label in the box forced a wrap past the
+    # declared one-line height that crossed the underline the source
+    # declares at the box's bottom edge (wild engine-render measured:
+    # four report totals each cut by their own declared rule). The
+    # name-derived fallback label survives only for a summary the layout
+    # gives no usable box (see the companion test below).
     rep = parse_oracle_xml(_trailer_xml(with_label=False).encode("utf-8"))
     rdl = generate_rdl(rep)
     m = re.search(r'<Textbox Name="Tb_GrandTotal_0">.*?<Value>([^<]*)</Value>',
                   rdl, re.S)
     assert m
-    assert m.group(1).startswith('="T:')  # name-derived fallback keeps colon
+    v = m.group(1)
+    assert v.startswith("=Count") and '"T:' not in v, v
 
 
 def _trailer_full_xml():
@@ -451,3 +460,173 @@ def test_trailer_prints_in_flow_below_last_item():
     # in flow: within 1in of the last real content bottom, NOT parked below
     # the whole declared 9.6in body
     assert min(tops.values()) <= max(bottoms) + 1.0
+
+
+# ---------------------------------------------------------------------------
+# Wide dot-leader captions + the tablix's TRUE static extent
+# (wild-render measured: a 4.75in caption whose right edge ABUTS its value
+# unpaired under the old 3.0in LEFT-edge distance cap, so a synthesized
+# name-blob label and the declared caption double-painted one line, 16
+# burial pairs on one report; and the first trailer line anchored to the
+# tablix's declared <Height> landed INSIDE its row-heights extent, where
+# the engine never pushes it and grown detail rows paint through it.)
+# ---------------------------------------------------------------------------
+
+def _dot_leader_trailer_xml():
+    """A flat table whose report-trailer declares:
+    * a WIDE dot-leader caption (x=0, w=4.75) abutting its summary value
+      at x=4.75 -- left-edge distance 4.75 > the old 3.0 cap, right-edge
+      gap 0.0;
+    * a second caption whose summary is consumed by the synthesized
+      footer-total row (the caption itself must still print);
+    * a declared trailer gap (0.05in) small enough that anchoring to the
+      tablix's declared <Height> (0.5in) would drop the first line inside
+      the row-heights extent (0.98in)."""
+    return """<?xml version="1.0" encoding="UTF-8"?>
+<report name="TRAILDOT" DTDVersion="9.0.2.0.10">
+  <data>
+    <dataSource name="Q_1">
+      <select><![CDATA[SELECT ITEM, AMT FROM T1]]></select>
+      <group name="G_1">
+        <dataItem name="ITEM" datatype="vchar2" width="30" columnFlags="1"
+         defaultLabel="Item">
+          <dataDescriptor expression="ITEM" order="1" width="30"/>
+        </dataItem>
+        <dataItem name="AMT" oracleDatatype="number" width="22"
+         defaultLabel="Amt">
+          <dataDescriptor expression="AMT" order="2" width="22"/>
+        </dataItem>
+      </group>
+    </dataSource>
+    <summary name="MinAmtPerReport" source="AMT" function="minimum"
+     width="22" reset="report" compute="report" columnFlags="8"/>
+    <summary name="SumAmtPerReport" source="AMT" function="sum"
+     width="22" reset="report" compute="report" columnFlags="8"/>
+  </data>
+  <layout>
+  <section name="main">
+    <body height="9.0">
+      <repeatingFrame name="R_G_1" source="G_1" printDirection="down">
+        <geometryInfo x="0.0" y="0.0" width="7.4" height="0.4"/>
+        <field name="F_ITEM" source="ITEM">
+          <font face="Courier New" size="9"/>
+          <geometryInfo x="0.0" y="0.1" width="2.0" height="0.19"/>
+        </field>
+        <field name="F_AMT" source="AMT">
+          <font face="Courier New" size="9"/>
+          <geometryInfo x="3.0" y="0.1" width="1.0" height="0.19"/>
+        </field>
+      </repeatingFrame>
+      <frame name="M_FTR">
+        <geometryInfo x="0.0" y="0.45" width="7.4" height="1.0"/>
+        <text name="B_W">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.0" y="0.45" width="4.75" height="0.25"/>
+          <textSegment><font face="Courier New" size="9" bold="yes"/>
+            <string><![CDATA[Lowest recorded amount : .....................]]></string>
+          </textSegment>
+        </text>
+        <field name="F_MinAmtPerReport" source="MinAmtPerReport"
+         alignment="start">
+          <font face="Courier New" size="10" bold="yes"/>
+          <geometryInfo x="4.75" y="0.45" width="0.9" height="0.19"/>
+        </field>
+        <text name="B_S">
+          <textSettings spacing="0"/>
+          <geometryInfo x="0.0" y="0.75" width="3.0" height="0.25"/>
+          <textSegment><font face="Courier New" size="9" bold="yes"/>
+            <string><![CDATA[All amounts combined : ......]]></string>
+          </textSegment>
+        </text>
+        <field name="F_SumAmtPerReport" source="SumAmtPerReport"
+         alignment="start">
+          <font face="Courier New" size="10" bold="yes"/>
+          <geometryInfo x="3.0" y="0.75" width="1.0" height="0.19"/>
+        </field>
+      </frame>
+    </body>
+  </section>
+  </layout>
+</report>
+"""
+
+
+def _grand_total_boxes(rdl):
+    """[(name, value, top, left, width, height)] of every trailer box."""
+    out = []
+    for m in re.finditer(
+            r'<Textbox Name="(Tb_GrandTotal_\d+)">(.*?)</Textbox>',
+            rdl, re.S):
+        body = m.group(2)
+        v = re.search(r"<Value>(.*?)</Value>", body, re.S)
+
+        def _f(tag):
+            g = re.search(rf"<{tag}>([-\d.]+)in</{tag}>", body)
+            return float(g.group(1)) if g else 0.0
+        out.append((m.group(1), v.group(1) if v else "",
+                    _f("Top"), _f("Left"), _f("Width"), _f("Height")))
+    return out
+
+
+def test_wide_dot_leader_caption_pairs_and_never_double_paints():
+    rdl = generate_rdl(parse_oracle_xml(
+        _dot_leader_trailer_xml().encode("utf-8")))
+    boxes = _grand_total_boxes(rdl)
+    vals = [b[1] for b in boxes]
+    # the Min line prints ONCE, worded by the DECLARED dot-leader caption
+    minned = [v for v in vals if "Min(Fields!AMT.Value" in v]
+    assert len(minned) == 1, minned
+    assert minned[0].startswith('="Lowest recorded amount : '), minned[0]
+    # and the synthesized name-blob label is nowhere on the page
+    assert not any("Minamtperreport" in v for v in vals), vals
+    # no two trailer boxes may overlap (the double-paint symptom: the
+    # synthesized line at Left 0.100 and the declared caption at Left
+    # 0.000 shared one Top)
+    for i in range(len(boxes)):
+        for j in range(i + 1, len(boxes)):
+            _, _, t1, l1, w1, h1 = boxes[i]
+            _, _, t2, l2, w2, h2 = boxes[j]
+            x_over = min(l1 + w1, l2 + w2) - max(l1, l2)
+            y_over = min(t1 + h1, t2 + h2) - max(t1, t2)
+            assert min(x_over, y_over) <= 1e-6, (boxes[i], boxes[j])
+
+
+def test_caption_of_footer_consumed_summary_still_prints():
+    rdl = generate_rdl(parse_oracle_xml(
+        _dot_leader_trailer_xml().encode("utf-8")))
+    # the Sum value renders in the synthesized footer-total row ...
+    assert re.search(r'<Textbox Name="Foot_AMT">.*?Sum\(Fields!AMT\.Value',
+                     rdl, re.S)
+    vals = [b[1] for b in _grand_total_boxes(rdl)]
+    # ... so the trailer holds no second Sum line ...
+    assert not any("Sum(Fields!AMT.Value" in v for v in vals), vals
+    # ... but its DECLARED caption still prints, exactly once (pairing
+    # used to consume it and silently drop the declared wording)
+    assert vals.count('="All amounts combined : ......"') == 1, vals
+
+
+def test_trailer_clears_the_tablix_row_heights_extent():
+    rdl = generate_rdl(parse_oracle_xml(
+        _dot_leader_trailer_xml().encode("utf-8")))
+    root = ET.fromstring(rdl)
+    ns = root.tag.split("}")[0].strip("{")
+    q = lambda t: f"{{{ns}}}{t}"  # noqa: E731
+    tx = next(root.iter(q("Tablix")))
+
+    def _fin(el, tag):
+        try:
+            return float((el.findtext(q(tag)) or "0").replace("in", ""))
+        except ValueError:
+            return 0.0
+    rows = tx.find(q("TablixBody")).find(q("TablixRows"))
+    true_bottom = _fin(tx, "Top") + sum(_fin(r, "Height")
+                                        for r in rows.findall(q("TablixRow")))
+    decl_bottom = _fin(tx, "Top") + _fin(tx, "Height")
+    # the fixture must keep discriminating: rows extent beyond <Height>
+    assert true_bottom > decl_bottom + 0.05, (true_bottom, decl_bottom)
+    boxes = _grand_total_boxes(rdl)
+    assert boxes, "no grand totals emitted"
+    # the engine sizes the tablix to its ROW HEIGHTS; a line above that
+    # extent is never pushed and the grown rows paint through it
+    assert min(b[2] for b in boxes) >= true_bottom - 1e-6, \
+        (min(b[2] for b in boxes), true_bottom)

@@ -54,13 +54,14 @@ While the spinner runs (it won't run for long), say:
 
 When the tabs light up, you have everything you need open at once.
 
-### Beat 3: the HTML Mockup tab (30 seconds)
+### Beat 3: the Preview tab (30 seconds)
 
 This is the first of four main tabs.
 
-> "This is what the report will look like when SSRS renders it. We
-> generate this mockup from the same parsed structure that produces the
-> RDL, so you can eyeball it side by side with the original Oracle
+> "This is the generated RDL rendered by Microsoft's own ReportViewer
+> engine — real pages, real pagination, not an approximation. An instant
+> HTML mockup stands in for a second while the engine works, then the
+> real render swaps in. You can eyeball it against the original Oracle
 > output before you ever open Report Builder."
 
 If the source is a per-record report (letter, certificate, invoice) you
@@ -151,7 +152,8 @@ the RDL in Report Builder live.
 
 > "Opens clean, no parse errors. Parameters are there with the right
 > types. Datasets are wired. The Tablix is laid out. Now I repoint the
-> data source at our shared DS, refresh fields — no parameter dialog —
+> data source at our shared DS — and I do NOT click Refresh Fields;
+> the field list is emitted complete, so there is nothing to refresh —
 > save, view, export to PDF. That's the loop."
 
 That's the demo. Stop here.
@@ -217,8 +219,8 @@ Mention these in passing:
 * **Verified, not asserted.** The generated RDL is validated against
   Microsoft's own RDL 2008 XSD, and render-verified through Microsoft's
   ReportViewer engine (`tools/renderlab`) — it renders to a real PDF that
-  we measure for page count and blank pages. The test suite is **698
-  passed, 19 skipped**.
+  we measure for page count and blank pages. The test suite is **1,377
+  passed, 0 failed** (20 environment-gated skips).
 * It is **offline by default**. No SaaS, no telemetry, no API keys
   required. Optional Claude assist is opt-in via `.env`.
 * The frontend is **vanilla JS** with no build step. You can clone and

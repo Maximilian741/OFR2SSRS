@@ -206,6 +206,11 @@ def staticize(rdl_xml: str) -> str:
     # =Parameters!X.Value reference to it should render that literal, not the
     # humanised token. Capture these BEFORE the =expr defaults get type-rewritten.
     param_defaults = {}
+    # Parameters whose DECLARED default is =Nothing run as NULL on the real
+    # server; _eval_hidden substitutes None for them so IsNothing() branches
+    # evaluate with server semantics (the type-literal rewrite below is only
+    # for the publish step and would lie to the evaluator).
+    nothing_params = set()
     for rp in root.iter():
         if _local(rp.tag) != "ReportParameter":
             continue
@@ -213,6 +218,8 @@ def staticize(rdl_xml: str) -> str:
         v0 = next((c for c in rp.iter() if _local(c.tag) == "Value"), None)
         if nm and v0 is not None and (v0.text or "") and not (v0.text or "").startswith("="):
             param_defaults[nm] = v0.text
+        elif nm and v0 is not None and (v0.text or "").strip() == "=Nothing":
+            nothing_params.add(nm)
     for rp in root.iter():
         if _local(rp.tag) != "ReportParameter":
             continue
@@ -267,23 +274,44 @@ def staticize(rdl_xml: str) -> str:
         if any(t in _tn for t in _NUM_T) and _fe.get("Name"):
             _numeric_fields.add(_fe.get("Name"))
 
+    class _Unk:
+        """Data-dependent subexpression marker. Comparisons/arithmetic
+        propagate it; coercing it to a BOOLEAN (the value actually
+        deciding visibility) raises, so only expressions whose OUTCOME is
+        parameter-decidable produce a verdict — a Fields! term parked in
+        an untaken IIf branch no longer forces the always-hide fallback."""
+        def __bool__(self):
+            raise ValueError("data-dependent")
+        def _u(self, *_a):
+            return self
+        __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _u
+        __add__ = __radd__ = __sub__ = __rsub__ = _u
+        __mul__ = __rmul__ = __and__ = __or__ = _u
+        __hash__ = object.__hash__
+    _UNK = _Unk()
+
     def _eval_hidden(expr):
-        """Evaluate a PARAMETER-ONLY Hidden expression against the report's
-        staticized parameter defaults, so the layout render shows the same
-        conditional blocks a default-parameter server run would. Returns
-        "true"/"false", or None for data-dependent / unsupported
-        expressions (caller falls back to hidden — the variant-overlap
-        rule)."""
+        """Evaluate a Hidden expression against the report's DECLARED
+        parameter defaults (=Nothing -> None, server NULL semantics), so
+        the layout render shows the same conditional blocks a
+        default-parameter server run would. Fields! terms become Unknown
+        markers that only bail the verdict when the visibility outcome
+        actually depends on them. Returns "true"/"false", or None for
+        data-dependent / unsupported expressions (caller falls back to
+        hidden — the variant-overlap rule)."""
         e = (expr or "").strip()
         if not e.startswith("="):
             return None
         e = e[1:]
-        if any(k in e for k in ("Fields!", "Globals!", "ReportItems!",
-                                "Code.")):
+        if any(k in e for k in ("Globals!", "ReportItems!", "Code.")):
+            return None
+        e = re.sub(r"Fields!\w+\.Value", "U", e)
+        if "Fields!" in e:  # a member form the substitution doesn't model
             return None
         e = re.sub(r"Parameters!(\w+)\.Value",
-                   lambda m: '"%s"' % param_defaults.get(m.group(1), "x")
-                   .replace('"', ""), e)
+                   lambda m: ("None" if m.group(1) in nothing_params
+                              else '"%s"' % param_defaults
+                              .get(m.group(1), "x").replace('"', "")), e)
         # VB string literals -> Python literals FIRST (so operator rewrites
         # never touch text inside quotes)
         e = re.sub(r'"((?:[^"]|"")*)"',
@@ -300,16 +328,99 @@ def staticize(rdl_xml: str) -> str:
         # quotes are data, not identifiers.
         bare = re.sub(r"'(?:[^'\\]|\\.)*'", "''", e)
         idents = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", bare))
-        if idents - {"IIf", "True", "False", "not", "and", "or"}:
+        if idents - {"IIf", "True", "False", "not", "and", "or", "None",
+                     "U", "IsNothing",
+                     "First", "Last", "Sum", "Count", "CountDistinct",
+                     "CountRows", "Min", "Max", "Avg", "RunningValue",
+                     "UCase", "LCase", "Trim", "LTrim", "RTrim"}:
             return None
+        _agg = lambda *a, **k: _UNK  # any aggregate over data is Unknown
+        _s = lambda f: (lambda v: v if isinstance(v, _Unk)
+                        else f(str(v or "")))
+
+        def _iif(c, a, b):
+            if isinstance(c, _Unk):
+                return _UNK
+            return a if c else b
         try:
             r = eval(e, {"__builtins__": {}},  # noqa: S307 - whitelisted tokens only
-                     {"IIf": lambda c, a, b: a if c else b})
+                     {"IIf": _iif, "U": _UNK,
+                      "IsNothing": lambda v: (_UNK if isinstance(v, _Unk)
+                                              else v is None),
+                      "First": _agg, "Last": _agg, "Sum": _agg,
+                      "Count": _agg, "CountDistinct": _agg,
+                      "CountRows": _agg, "Min": _agg, "Max": _agg,
+                      "Avg": _agg, "RunningValue": _agg,
+                      # Deterministic VB string functions the Oracle
+                      # UPPER(TRIM(:param)) trigger dialect compiles to —
+                      # without them a parameter-only Hidden like
+                      # =Not(UCase(Trim(Parameters!P.Value))="YES") bailed
+                      # to always-hidden and blanked the whole declared
+                      # summary block a default-parameter server run shows.
+                      "UCase": _s(str.upper), "LCase": _s(str.lower),
+                      "Trim": _s(str.strip), "LTrim": _s(str.lstrip),
+                      "RTrim": _s(str.rstrip)})
         except Exception:  # noqa: BLE001
             return None
         if isinstance(r, bool):
             return "true" if r else "false"
         return None
+
+    # ACROSS-TILED LABEL GROUPS (rdl.py _build_label_body): the row-major
+    # mailing-label construct groups on =Ceiling(RowNumber(Nothing)/N) x
+    # =(RowNumber(Nothing)-1) Mod N. RowNumber needs the expression host,
+    # and blanking these (the generic GroupExpression fallback below) would
+    # collapse the whole grid to a single tile -- the layout render would
+    # misstate both the tiling and the pagination. Instead, simulate
+    # RowNumber's documented semantics (sequential feed order) in the DATA:
+    # rewrite each tile group to a synthetic integer field -- a simple
+    # =Fields!X.Value group binds natively without the host (engine-
+    # measured) -- and synthesize_data fills O2S_TILE_ROW_N / O2S_TILE_COL_N
+    # with ceil((i+1)/N) / (i Mod N) per feed row (render.py _sample_value).
+    _tile_row_re = re.compile(r"^=Ceiling\(RowNumber\(Nothing\)\s*/\s*(\d+)\)$")
+    _tile_col_re = re.compile(r"^=\(RowNumber\(Nothing\)\s*-\s*1\)\s*Mod\s*(\d+)$")
+    _tile_adds: dict = {}  # dataset name -> field names to add
+    for _tx in root.iter():
+        if _local(_tx.tag) != "Tablix":
+            continue
+        _dsn = next((c.text for c in _tx if _local(c.tag) == "DataSetName"),
+                    None)
+        if not _dsn:
+            continue
+        for _ge in _tx.iter():
+            if _local(_ge.tag) != "GroupExpression":
+                continue
+            _get = (_ge.text or "").strip()
+            _m = _tile_row_re.match(_get)
+            _kind = "ROW"
+            if _m is None:
+                _m = _tile_col_re.match(_get)
+                _kind = "COL"
+            if _m is None:
+                continue
+            _fn = f"O2S_TILE_{_kind}_{int(_m.group(1))}"
+            _ge.text = f"=Fields!{_fn}.Value"
+            _tile_adds.setdefault(_dsn, set()).add(_fn)
+    if _tile_adds:
+        for _ds in root.iter():
+            if _local(_ds.tag) != "DataSet":
+                continue
+            _wanted = _tile_adds.get(_ds.get("Name") or "")
+            if not _wanted:
+                continue
+            _flds = next((c for c in _ds if _local(c.tag) == "Fields"), None)
+            if _flds is None:
+                continue
+            _have = {f.get("Name") for f in _flds}
+            for _fn in sorted(_wanted):
+                if _fn in _have:
+                    continue
+                _f = ET.SubElement(_flds, NS + "Field")
+                _f.set("Name", _fn)
+                ET.SubElement(_f, NS + "DataField").text = _fn
+                ET.SubElement(
+                    _f, "{http://schemas.microsoft.com/SQLServer/reporting/"
+                    "reportdesigner}TypeName").text = "System.Int32"
 
     for el in root.iter():
         txt = el.text or ""
@@ -429,15 +540,20 @@ def staticize(rdl_xml: str) -> str:
                        else rendered)
         elif t == "Hidden":
             # An EXPRESSION Hidden marks a CONDITIONAL item (a format-trigger
-            # variant frame, an optional enclosure line). In PAGE BANDS and
-            # COVER rects, PARAMETER-ONLY conditions evaluate against the
-            # staticized defaults so a fully-conditional cover page renders
-            # like a default-parameter server run instead of BLANK. BODY
-            # items keep the always-hide rule: un-hiding body variant
-            # frames inflated per-record letters past their tuned page
-            # budget (an ARCHIVED known-good grant letter re-rendered with
-            # alternating blank pages and a mid-letter page 1 — harness
-            # drift, caught by rendering the archive first).
+            # variant frame, an optional enclosure line). Conditions whose
+            # OUTCOME is decidable from the report's declared parameter
+            # defaults evaluate to what a default-parameter server run
+            # would show (a fully-conditional cover page, a summary block
+            # gated on P_SUMMARY). A PARAMETER-ONLY condition evaluates
+            # ANYWHERE (A/B-measured: zero page-count drift across the
+            # truth corpus). A condition that mentions Fields! at all only
+            # evaluates inside page bands / cover rects — un-hiding a body
+            # item off its Fields!-in-untaken-branch default exposed a
+            # latent grid overlap the paint gate rejects, and the wake-16
+            # incident (per-record letters inflated past their tuned page
+            # budgets; an ARCHIVED known-good grant letter re-rendered
+            # with alternating blank pages) was this same class. Anything
+            # undecidable keeps the always-hide fallback.
             _cur = parent.get(el)
             _in_band = False
             while _cur is not None:
@@ -448,7 +564,9 @@ def staticize(rdl_xml: str) -> str:
                     _in_band = True
                     break
                 _cur = parent.get(_cur)
-            el.text = (_eval_hidden(txt) if _in_band else None) or "true"
+            el.text = (_eval_hidden(txt)
+                       if (_in_band or "Fields!" not in txt)
+                       else None) or "true"
         elif t in _COLOR:
             el.text = "White" if t == "BackgroundColor" else "Black"
         elif t in ("Hyperlink", "BookmarkLink"):
@@ -472,6 +590,27 @@ def staticize(rdl_xml: str) -> str:
                            "VerticalAlign": "Top"}
             el.text = ((_lits[-1] if _lits else "")
                        or _safe_const.get(t, ""))
+        elif t in ("Y", "X", "Size", "High", "Low", "Open", "Close") and \
+                re.fullmatch(r"=(?:Sum|Count|CountDistinct|Avg|Min|Max|First"
+                             r"|Last)\(Fields!\w+\.Value\)", txt.strip()):
+            # A chart data point's value. A SIMPLE aggregate over one field
+            # binds NATIVELY, without the expression host (measured through
+            # the signed-DLL path: the same chart renders real bars with the
+            # expression kept and an EMPTY plot frame with it blanked) --
+            # blanking these made every chart render as an empty axis box and
+            # the layout render could not tell a working chart from a broken
+            # one. Anything more complex still blanks below.
+            pass
+        elif t == "GroupExpression" and re.fullmatch(
+                r"=Fields!\w+\.Value", txt.strip()):
+            # A SIMPLE field-reference group expression is a native binding
+            # the engine loads WITHOUT compiling an expression host
+            # (measured through the signed-DLL path). Keeping it preserves
+            # the per-row grain of dynamic detail groups (the variant-band
+            # row-scope rebind emits these); blanking it would merge every
+            # row into one group instance and change the layout render's
+            # pagination. Anything more complex still blanks below.
+            pass
         else:
             el.text = ""
     # A non-empty <Code> block makes the engine build the EXPRESSION HOST

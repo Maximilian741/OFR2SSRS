@@ -3,118 +3,205 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Oracle2SSRS &mdash; Drag, drop, deploy.</title>
+<title>Oracle2SSRS &mdash; turn an Oracle report into an SSRS report</title>
 <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v={{ asset_version }}">
-<link href="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/themes/prism-tomorrow.min.css" rel="stylesheet">
-<link rel="preconnect" href="https://fonts.googleapis.com">
-<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<!-- Theme boot. Deliberately NOT deferred and NOT at the end of <body>: it
+     puts the saved light/dark choice on <html> before the first paint, so
+     there is no flash of the wrong theme on load. -->
+<script src="{{ url_for('static', filename='js/theme.js') }}?v={{ asset_version }}"></script>
+<!-- NOTHING ON THIS PAGE IS FETCHED FROM THE INTERNET.
+     The operator this tool is built for works on a locked-down agency
+     workstation that may be fully offline. This head used to pull a Prism
+     stylesheet and three Prism scripts from one public CDN, plus a webfont
+     stylesheet (and its font files) from another. Offline, each of those
+     either fails — killing syntax highlighting outright — or hangs until a
+     proxy times out, which reads as "the app won't load".
+
+       * syntax highlighting  -> static/js/highlight.js + the syntax tokens
+                                 in style.css (both served from here)
+       * Inter / JetBrains Mono -> DROPPED. There was no offline copy to
+                                 vendor and no licence to bundle one, so
+                                 the rule "remove the feature rather than
+                                 ship a network dependency" applies. The
+                                 family names stay first in --font-sans /
+                                 --font-mono, so a machine that already has
+                                 them installed still uses them; every
+                                 other machine falls through to Segoe UI
+                                 and Cascadia Mono, which Windows ships.
+
+     tests/test_offline_assets.py fails the build if a remote URL comes
+     back into any template or any served asset. -->
 </head>
-<body>
+<!-- data-max-upload-bytes: the server's live MAX_CONTENT_LENGTH. The upload
+     pre-flight reads it from here so the FIRST folder drop is already checked
+     against the real cap -- never a number hardcoded in JS. -->
+<body data-max-upload-bytes="{{ max_upload_bytes }}">
+
+<!-- First focusable thing on the page. The sidebar puts ~15 controls
+     between the top of the document and the report views, so without this
+     a keyboard user re-walks the whole settings column on every visit. It
+     is off-screen until focused, then it parks itself over the top bar. -->
+<a class="skip-link" href="#main">Skip to the report views</a>
 
 <header class="topbar">
   <div class="brand">
-    <div class="brand-logo">O2S</div>
+    <div class="brand-logo" aria-hidden="true">O2S</div>
     <div class="brand-text">
-      <div class="brand-name">Oracle2SSRS</div>
-      <div class="brand-tag">Drag, drop, deploy.</div>
+      <h1 class="brand-name">Oracle2SSRS</h1>
+      <div class="brand-tag">Oracle reports &rarr; SSRS reports</div>
     </div>
   </div>
   <div class="topbar-meta">
-    <button id="howto-open" class="topbar-howto" type="button" title="How this tool works">
+    <!-- Colour theme. Three real radios in a fieldset: the group name comes
+         from the legend, arrow keys move between options, and the chosen
+         one is exposed to assistive tech as checked with no ARIA of our
+         own. The choice is saved in localStorage by static/js/theme.js. -->
+    <fieldset class="theme-toggle" id="theme-toggle">
+      <legend class="sr-only">Colour theme</legend>
+      <input class="theme-radio" type="radio" name="o2s-theme" id="theme-system" value="system" checked>
+      <label class="theme-option" for="theme-system"><span class="theme-glyph" aria-hidden="true">&#9686;</span> Auto</label>
+      <input class="theme-radio" type="radio" name="o2s-theme" id="theme-light" value="light">
+      <label class="theme-option" for="theme-light"><span class="theme-glyph" aria-hidden="true">&#9788;</span> Light</label>
+      <input class="theme-radio" type="radio" name="o2s-theme" id="theme-dark" value="dark">
+      <label class="theme-option" for="theme-dark"><span class="theme-glyph" aria-hidden="true">&#9789;</span> Dark</label>
+    </fieldset>
+    <!-- The theme change is its own visual confirmation: the whole page
+         repaints and the chosen segment moves. This line carries the same
+         fact for a screen reader, including which way "Auto" resolved. -->
+    <p class="sr-only" id="theme-state" role="status">Theme: matching this computer.</p>
+    <button id="howto-open" class="topbar-howto" type="button">
       <span aria-hidden="true">&#9432;</span> How it works
     </button>
-    <span class="topbar-pill" id="status-pill">Ready</span>
+    <!-- The pill is a PROJECTION of the status card below (app.js _syncPill),
+         never its own channel. The first paint is written the same way the
+         projection writes it -- glyph, then word -- so the corner and the
+         card cannot disagree even in the instant before app.js runs. -->
+    <span class="topbar-pill has-glyph" id="status-pill" data-state="idle"
+          aria-label="Ready"><span class="pill-glyph" aria-hidden="true">&#9675;</span><span class="pill-word">Ready</span></span>
   </div>
 </header>
 
 <div id="howto-modal" class="howto-modal" hidden>
   <div class="howto-backdrop" id="howto-backdrop"></div>
-  <div class="howto-panel" role="dialog" aria-modal="true" aria-label="How Oracle2SSRS works">
-    <button class="howto-close" id="howto-close" type="button" aria-label="Close">&times;</button>
+  <!-- tabindex="-1" so the open handler can move focus INTO the dialog.
+       aria-labelledby points at the <h2> the body writes; the aria-label
+       is the fallback for the instant before that exists. -->
+  <div class="howto-panel" role="dialog" aria-modal="true" tabindex="-1"
+       id="howto-panel" aria-labelledby="howto-title"
+       aria-label="How Oracle2SSRS works">
+    <button class="howto-close" id="howto-close" type="button"
+            aria-label="Close this window">&times;</button>
     <div id="howto-body"></div>
   </div>
 </div>
 
 <div class="layout">
 
-  <aside class="sidebar">
+  <aside class="sidebar" aria-label="Conversion settings">
 
     <section class="side-section">
-      <div id="drop-zone" class="drop-zone" tabindex="0" role="button" aria-label="Drop or browse Oracle artifacts">
-        <input type="file" id="file-input" multiple webkitdirectory directory hidden>
-        <input type="file" id="file-input-files" multiple hidden>
-        <div class="drop-icon">&#x2913;</div>
-        <div class="drop-title">Drop Oracle artifacts &mdash; folders OK</div>
-        <div class="drop-sub">XML &middot; SQL &middot; DOCX &middot; RDF &middot; PNG/JPG</div>
-        <div class="drop-sub-alt"><a href="#" id="pick-files-link">pick individual files instead</a></div>
+      <!-- A REAL button, not a div wearing role="button": Enter/Space,
+           focus and the announced role then come from the platform and
+           cannot drift. The "pick individual files" control is a SIBLING,
+           never a child -- one interactive element inside another is
+           invalid markup and the inner one is unreachable. -->
+      <button type="button" id="drop-zone" class="drop-zone">
+        <span class="drop-icon" aria-hidden="true">&#x2913;</span>
+        <span class="drop-title">Drop your Oracle report here</span>
+        <span class="drop-sub">One file or a whole folder &mdash; the <b>.xml</b> or <b>.rdf</b>
+          export, plus any .sql, .docx or image files that belong with it</span>
+      </button>
+      <input type="file" id="file-input" multiple webkitdirectory directory hidden>
+      <input type="file" id="file-input-files" multiple hidden>
+      <div class="drop-sub-alt">
+        <button type="button" id="pick-files-link" class="linkish">pick individual files instead</button>
       </div>
     </section>
 
     {% if samples %}
     <section class="side-section" id="samples-section">
-      <div class="side-heading">Try a sample</div>
+      <h2 class="side-heading">Try a sample</h2>
       <div id="samples-list" class="samples-list">
         {% for s in samples %}
-        <button class="sample-chip" data-sample="{{ s }}" type="button"
-          title="Convert {{ s }}">{{ s | replace('.xml','') | replace('_', ' ') | title }}</button>
+        <button class="sample-chip" data-sample="{{ s }}" type="button">{{ s | replace('.xml','') | replace('_', ' ') | title }}</button>
         {% endfor %}
       </div>
     </section>
     {% endif %}
 
+    <!-- Shown ONLY when the converted report declares drill-through links
+         (subreport_links) — the slots feed each DETECTED child its
+         artifacts. Manual sub-report building lives in the Sub-Reports
+         tab ("+ Add a sub-report"), not here. -->
     <section class="side-section" id="subreport-section" hidden>
       <div class="side-heading side-heading-row">
-        <span>Sub-reports</span>
-        <button id="subreport-add-manual" class="btn-tiny" title="Build a sub-report from any artifact">+ Add</button>
+        <h2 class="side-heading-title">Sub-reports</h2>
       </div>
       <div class="muted-note conn-note" id="subreport-hint">
-        Drop the child report&#39;s artifacts (XML, .rdl, or SQL) to generate it.
+        A <b>sub-report</b> is a second report that a row in this one opens.
+        Drop its files here &mdash; its Oracle <code>.xml</code>, an existing
+        <code>.rdl</code>, or its SQL &mdash; and this tool builds it the same
+        way it built the main report.
       </div>
       <div id="subreport-slots" class="subreport-slots"></div>
     </section>
 
     <section class="side-section">
-      <div class="side-heading">Target database backend</div>
+      <!-- The section heading IS the field label. Nesting a real <label>
+           inside the heading keeps BOTH: heading navigation still lands
+           here, and the control is programmatically named (a placeholder
+           is not a label -- it vanishes the moment you type). -->
+      <h2 class="side-heading"><label for="target-db">Which database the report will read</label></h2>
       <select id="target-db" class="conn-input">
         <option value="oracle" selected>Oracle (default)</option>
         <option value="sqlserver">SQL Server</option>
       </select>
       <div class="muted-note conn-note">
-        Oracle preserves original SQL. SQL Server uses translated T-SQL. Change BEFORE converting.
+        Where the finished report will read its data. <b>Oracle</b> keeps the
+        report&rsquo;s SQL exactly as Oracle wrote it. <b>SQL Server</b> rewrites
+        it into T-SQL (Microsoft&rsquo;s version of SQL). Choose this
+        <b>before</b> you convert &mdash; changing it later means converting again.
       </div>
     </section>
 
     <section class="side-section">
-      <div class="side-heading">Report-server data source (recommended)</div>
+      <h2 class="side-heading"><label for="shared-ds-path">Shared data source on your report server (recommended)</label></h2>
       <input id="shared-ds-path" type="text" autocomplete="off" spellcheck="false"
              class="conn-input"
              placeholder="/Data Sources/MyOracle  or  MyOracle">
       <div class="muted-note conn-note">
-        Path (or sibling name) of the SHARED data source on your report
-        server. Baked into every generated RDL &mdash; main report,
-        sub-reports, burst pack &mdash; so uploads bind automatically.
-        No repointing, no refresh dance. Remembered in this browser.
+        A <b>shared data source</b> is the saved database connection that
+        already exists on your report server. Type its full path &mdash; or
+        just its name, if it sits in the same folder as the report. Every
+        file this tool makes points at it: the main report, its sub-reports
+        and the burst pack. An uploaded report then connects on its own, so
+        you never have to point it at the database by hand. This browser
+        remembers what you type.
       </div>
     </section>
 
     <section class="side-section">
-      <div class="side-heading">Report server URL (for drill-through links)</div>
+      <h2 class="side-heading"><label for="report-server-url">Report server address &mdash; for links to sub-reports (optional)</label></h2>
       <input id="report-server-url" type="text" autocomplete="off" spellcheck="false"
              class="conn-input"
              placeholder="http://myserver/ReportServer?/MyFolder">
       <div class="muted-note conn-note">
-        Sub-report drill-throughs are <b>always</b> turned into parameterized
-        <b>URL links</b>, so they fire in the SSRS viewer AND in an exported
-        <b>PDF</b> (a plain drill-through is dropped in PDF/Word/Excel).
-        <b>Optional:</b> leave this blank and the link builds itself from the
-        server at run time (<code>Globals!ReportServerUrl</code> +
-        <code>Globals!ReportFolder</code>, zero-config on SSRS&nbsp;2016+).
-        Fill it in &mdash; your report-server URL up to the FOLDER, e.g.
-        <code>http://host/ReportServer?/MyReports</code> &mdash; for older servers or
-        to point the links at a specific folder. Use the <b>ReportServer</b>
-        URL, not the <code>/Reports</code> portal URL. The child report must be
-        deployed in that folder under its exact name. Remembered in this browser.
+        <b>Most people can leave this blank.</b>
+        When a row in one report opens a second report, this tool always
+        builds that as a <b>web link</b> that carries the row&rsquo;s values
+        with it. A web link keeps working after the report is exported to
+        PDF &mdash; SSRS&rsquo;s own built-in link does not survive an export
+        to PDF, Word or Excel.
+        Left blank, the report works out its own address while it runs
+        (<code>Globals!ReportServerUrl</code> +
+        <code>Globals!ReportFolder</code>). That needs no setup on SSRS&nbsp;2016
+        or newer.
+        Fill it in for older servers, or to send the links to a particular
+        folder. Type your report server address up to the folder, for example
+        <code>http://host/ReportServer?/MyReports</code>. Use the
+        <b>ReportServer</b> address, not the <code>/Reports</code> portal one.
+        The second report has to be on the server, in that folder, under its
+        exact name. This browser remembers what you type.
       </div>
     </section>
 
@@ -123,68 +210,77 @@
          describing one report family's envelope idiom read as noise (user:
          "confusing garbage") on the reports that have no such link. -->
     <section class="side-section side-section-accent" id="cover-link-section" hidden>
-      <div class="side-heading">Cover hyperlink text</div>
+      <h2 class="side-heading"><label for="generate-all-label">Cover hyperlink text</label></h2>
       <input id="generate-all-label" type="text" autocomplete="off" spellcheck="false"
              class="conn-input"
              placeholder="e.g. Standard #10 Envelope">
       <div class="muted-note conn-note">
-        This is the <b>exact words the sub-report hyperlink shows</b> on the cover
-        page (both the &ldquo;generate all&rdquo; link and any
-        &ldquo;[field] is a hyperlink to&hellip;&rdquo; line). Type the
-        human-friendly name here (e.g. <code>Standard #10 Envelope</code>), then
-        Convert/Download &mdash; the link reads exactly that instead of the raw
-        report name. <b>If you leave this blank it falls back to the report
-        name</b> (the tool can&rsquo;t invent the sub-report&rsquo;s description).
-        Remembered in this browser.
+        These are the <b>exact words the link shows</b> on the cover page
+        &mdash; both the &ldquo;generate all&rdquo; link and any
+        &ldquo;[field] is a hyperlink to&hellip;&rdquo; line. Type the name a
+        reader would recognise, for example <code>Standard #10 Envelope</code>,
+        then convert or download again. The link then reads exactly that
+        instead of the raw report name.
+        <b>Leave it blank and the link falls back to the report name.</b>
+        This tool cannot invent a friendly description for you, so if you
+        want one, type it here. This browser remembers what you type.
       </div>
     </section>
 
 
     <section class="side-section" id="report-images-section" hidden>
-      <div class="side-heading">Report images (seals / logos)</div>
+      <h2 class="side-heading">Report images (seals / logos)</h2>
       <div id="image-slot-list"></div>
       <div class="muted-note conn-note">
-        Image placeholders detected in the layout. Images embedded in the
-        Oracle export load automatically; upload a PNG/GIF/JPG to fill or
-        replace one &mdash; it is embedded into the RDL and shown in the
-        mockup immediately.
+        These are the picture slots this tool found in the report&rsquo;s
+        layout. Any picture stored inside the Oracle export loads by itself.
+        To fill or replace a slot, upload a PNG, GIF or JPG: it goes into the
+        <code>.rdl</code> file and appears in the preview straight away.
       </div>
     </section>
 
     <section class="side-section">
-      <div class="side-heading">Batch migration</div>
+      <h2 class="side-heading">Convert many reports at once</h2>
+      <label class="field-label" for="batch-input">Oracle XML files to convert</label>
       <input id="batch-input" type="file" multiple accept=".xml" class="batch-file">
       <label class="batch-check">
         <input id="batch-render" type="checkbox">
-        verify each RDL with the local MS render engine
+        <span>Also print each report with Microsoft&rsquo;s report engine on
+          this computer. Slower, but it proves every report really renders.</span>
       </label>
-      <button id="batch-run" class="btn-tiny" type="button">Convert all + assess</button>
+      <button id="batch-run" class="btn-tiny" type="button">Convert all and score them</button>
       <div id="batch-status" class="muted-note conn-note"></div>
       <div id="batch-results"></div>
       <div class="muted-note conn-note">
-        Select a whole folder of Oracle XML exports: every report is
-        converted, scored, and bundled with a Migration Assessment
-        (effort per report, upload checks, fidelity).
+        Pick a whole folder of Oracle XML exports. Every report is converted
+        and scored, and you get one <b>Migration Assessment</b> covering the
+        set: how much hand-finishing each report needs, whether it will upload
+        cleanly, and how much of the original came across.
       </div>
     </section>
 
     <section class="side-section">
-      <div class="side-heading">Embedded connection (optional)</div>
+      <h2 class="side-heading"><label for="conn-string">Embedded connection (optional)</label></h2>
       <input id="conn-string" type="password" autocomplete="off" spellcheck="false"
              class="conn-input"
              placeholder="Data Source=...;Initial Catalog=...;Integrated Security=true">
       <div class="muted-note conn-note">
-        Embeds a connection INSIDE the RDL instead of referencing a shared
-        data source. Sent only with the next conversion, never stored.
-        Prefer the shared path above &mdash; embedded connections can make
-        SSRS prompt at design time.
+        Puts the connection details <b>inside</b> the report file instead of
+        pointing at the shared data source above. It is sent with the next
+        conversion only, and never saved anywhere.
+        The shared data source above is the better choice: a connection kept
+        inside the file can make Report Builder ask you for connection
+        details when you open it.
       </div>
     </section>
 
     <section class="side-section">
       <div class="side-heading side-heading-row">
-        <span>Recent reports</span>
-        <button id="recent-clear" class="btn-tiny" title="Clear history">Clear</button>
+        <h2 class="side-heading-title">Recent reports</h2>
+        <!-- "Clear" alone does not say what it clears once you have tabbed
+             to it out of context, and title= is not an accessible name a
+             keyboard user can reach. -->
+        <button id="recent-clear" class="btn-tiny" type="button">Clear<span class="sr-only"> the recent reports list</span></button>
       </div>
       <div id="recent-list" class="samples-list">
         <div class="muted-note" id="recent-empty">No conversions yet &mdash; drop a file above.</div>
@@ -192,14 +288,23 @@
     </section>
 
     <section class="side-section" id="summary-section" hidden>
-      <div class="side-heading">Report summary</div>
+      <h2 class="side-heading">Report summary</h2>
       <div class="summary-card">
         <div class="summary-row"><span>Name</span><b id="sum-name">&mdash;</b></div>
-        <div class="summary-row"><span>DTD</span><b id="sum-dtd">&mdash;</b></div>
+        <div class="summary-row"><span>Oracle export version</span><b id="sum-dtd">&mdash;</b></div>
         <div class="summary-row"><span>Parameters</span><b id="sum-params">0</b></div>
         <div class="summary-row"><span>Queries</span><b id="sum-queries">0</b></div>
         <div class="summary-row"><span>Formulas</span><b id="sum-formulas">0</b></div>
-        <div class="summary-row" id="sum-fidelity-row" title="Source &rarr; RDL coverage: the share of source columns and parameters preserved in the generated RDL. 100% = a faithful 1:1 copy with no silently dropped data."><span>Fidelity</span><b id="sum-fidelity">&mdash;</b></div>
+        <div class="summary-row" id="sum-fidelity-row"><span>Fidelity</span><b id="sum-fidelity">&mdash;</b></div>
+        <!-- What "Fidelity" means used to live in a title= tooltip on the row
+             above. A title tooltip needs a mouse hovering: it never opens for
+             a keyboard user, never appears on touch, and cannot be dismissed.
+             The explanation is ordinary on-screen text now, and the per-report
+             detail below it is written by renderSummary(). -->
+        <p class="summary-note" id="sum-fidelity-note">Fidelity is source
+          &rarr; RDL coverage: the share of source columns and parameters kept
+          in the generated RDL. 100% means nothing was silently dropped.</p>
+        <p class="summary-note summary-note-detail" id="sum-fidelity-detail" hidden></p>
         <div class="summary-row warn-row"><span>Warnings</span><b id="sum-warnings">0</b></div>
       </div>
       <div id="preflight-banner" class="preflight-banner" hidden></div>
@@ -208,51 +313,105 @@
       </button>
     </section>
 
-    <div class="side-foot">
+    <!-- role="contentinfo" is load-bearing, not decoration: a <footer> that
+         sits INSIDE <aside> is scoped to that section, so HTML gives it no
+         landmark role at all and the page ends up with no contentinfo for a
+         screen reader to jump to. The explicit role restores it without
+         moving the version pill out of the sidebar. -->
+    <footer class="side-foot" role="contentinfo" aria-label="About this app">
       <span class="version-pill">v0.1</span>
-    </div>
+    </footer>
   </aside>
 
-  <main class="main">
-    <nav class="tabbar" role="tablist">
-      <button class="tab tab-main active" data-tab="mockup" role="tab">
+  <!-- tabindex="-1" so the skip link can actually PARK focus here; without
+       it the browser scrolls to #main but focus stays where it was and the
+       next Tab drops back into the sidebar. -->
+  <main class="main" id="main" tabindex="-1">
+    <!-- The tablist is a CHILD of the nav, not the nav itself: role=tablist
+         on <nav> replaces the navigation landmark. And "Advanced views" is
+         a disclosure button, not a tab, so it lives outside the tablist --
+         inside it, assistive tech counts one tab too many. -->
+    <nav class="tabbar" aria-label="Report views">
+    <div class="tablist" role="tablist" aria-label="Report views">
+      <button class="tab tab-main active" data-tab="mockup" role="tab" type="button" id="tab-btn-mockup" aria-controls="tab-mockup" aria-selected="true" tabindex="0">
         <span class="tab-dot dot-mockup"></span> Preview
         <span class="tab-badge" id="badge-mockup" hidden></span>
       </button>
-      <button class="tab tab-main" data-tab="rdl" role="tab">
+      <button class="tab tab-main" data-tab="rdl" role="tab" type="button" id="tab-btn-rdl" aria-controls="tab-rdl" aria-selected="false" tabindex="-1">
         <span class="tab-dot dot-rdl"></span> RDL XML
         <span class="tab-badge" id="badge-rdl" hidden></span>
       </button>
-      <button class="tab tab-main" data-tab="burst" role="tab">
+      <!-- Bursting + Sub-Reports start in the Advanced group; each
+           conversion promotes them to MAIN tabs only when the report's
+           own structure carries the signal (bursting.is_bursting /
+           subreport_links) — see renderBurstingTab / renderSubreports. -->
+      <button class="tab tab-adv" data-tab="burst" role="tab" type="button" id="tab-btn-burst" aria-controls="tab-burst" aria-selected="false" tabindex="-1">
         <span class="tab-dot dot-burst"></span> Bursting
         <span class="tab-badge" id="badge-burst" hidden></span>
       </button>
-      <button class="tab tab-main" data-tab="subreports" role="tab" id="tabbtn-subreports" hidden>
+      <button class="tab tab-adv" data-tab="subreports" role="tab" type="button" id="tabbtn-subreports" aria-controls="tab-subreports" aria-selected="false" tabindex="-1" hidden>
         <span class="tab-dot dot-subreports"></span> Sub-Reports
         <span class="tab-badge" id="badge-subreports" hidden></span>
       </button>
-      <button class="tab tab-adv" data-tab="side" role="tab">
+      <button class="tab tab-adv" data-tab="side" role="tab" type="button" id="tab-btn-side" aria-controls="tab-side" aria-selected="false" tabindex="-1">
         <span class="tab-dot dot-side"></span> Side-by-Side
         <span class="tab-badge" id="badge-side" hidden></span>
       </button>
-      <button class="tab tab-adv" data-tab="live" role="tab">
+      <button class="tab tab-adv" data-tab="live" role="tab" type="button" id="tab-btn-live" aria-controls="tab-live" aria-selected="false" tabindex="-1">
         <span class="tab-dot dot-live"></span> Live Data
         <span class="tab-badge" id="badge-live" hidden></span>
       </button>
-      <button class="tab tab-adv" data-tab="validate" role="tab">
+      <button class="tab tab-adv" data-tab="validate" role="tab" type="button" id="tab-btn-validate" aria-controls="tab-validate" aria-selected="false" tabindex="-1">
         <span class="tab-dot dot-validate"></span> Validation
         <span class="tab-badge" id="badge-validate" hidden></span>
       </button>
-      <button class="tab tab-adv" data-tab="deploy" role="tab">
+      <button class="tab tab-adv" data-tab="deploy" role="tab" type="button" id="tab-btn-deploy" aria-controls="tab-deploy" aria-selected="false" tabindex="-1">
         <span class="tab-dot dot-deploy"></span> Deploy Checklist
         <span class="tab-badge" id="badge-deploy" hidden></span>
       </button>
-      <button class="tab tab-adv" data-tab="extras" role="tab">
+      <button class="tab tab-adv" data-tab="extras" role="tab" type="button" id="tab-btn-extras" aria-controls="tab-extras" aria-selected="false" tabindex="-1">
         <span class="tab-dot dot-extras"></span> Extras
         <span class="tab-badge" id="badge-extras" hidden></span>
       </button>
-      <button id="advanced-toggle" class="advanced-toggle" title="Show advanced views">Advanced views</button>
+    </div>
+    <button id="advanced-toggle" class="advanced-toggle" type="button"
+            aria-expanded="false">Advanced views</button>
     </nav>
+
+    <!-- ===================== STATUS =====================
+         The operator of this tool is deaf. Nothing here may depend on a
+         sound, and nothing that matters may be a message that disappears:
+         a toast is gone in three seconds, and the person who looked away
+         while a 40 MB folder uploaded has no way to find out what happened.
+
+         So this strip is the app's ONE status surface, and it is ordinary
+         on-screen text that stays put:
+
+           #activity-now    role=status  (polite)  — what is happening now,
+                            and how the last thing finished.
+           #activity-alert  role=alert   (assertive) — failures: what
+                            happened, why, and the next action. It stays
+                            until it is dismissed or superseded.
+           #activity-log    the durable record — the last few operations
+                            with the file name, the result, and the time.
+                            NOT a live region: re-announcing history is
+                            noise, and it is here to be READ.
+
+         Both live regions are permanent, never toggled with `hidden`, and
+         carry no box of their own: a live region has to be in the
+         accessibility tree BEFORE its content changes or the change is
+         announced to nobody, and an element that is display:none is not in
+         that tree. All the styling lives on the card JS puts inside, so an
+         empty region is invisible without ever leaving the document. -->
+    <section class="activity" id="activity" aria-labelledby="activity-title">
+      <h2 class="activity-title" id="activity-title">Status</h2>
+      <div class="activity-live" id="activity-now" role="status" aria-live="polite"></div>
+      <div class="activity-live" id="activity-alert" role="alert" aria-live="assertive"></div>
+      <div class="activity-history" id="activity-history" hidden>
+        <h3 class="activity-history-title" id="activity-history-title">Earlier</h3>
+        <ol class="activity-log" id="activity-log" aria-labelledby="activity-history-title"></ol>
+      </div>
+    </section>
 
     <section class="tab-panels">
 
@@ -260,7 +419,7 @@
       <section id="ingest-summary" class="ingest-summary" hidden>
         <div class="ingest-head">
           <span class="ingest-head-dot"></span>
-          <span class="ingest-head-title">Ingest Summary</span>
+          <h2 class="ingest-head-title">What was in the files you dropped</h2>
           <span class="ingest-head-totals" id="ingest-totals"></span>
         </div>
         <div class="ingest-body" id="ingest-body"></div>
@@ -273,26 +432,45 @@
       <!-- Empty / loading hero -->
       <div id="empty-state" class="empty-state">
         <div class="empty-glyph">&#x21BB;</div>
-        <h2>Convert an Oracle Report to SSRS</h2>
-        <p class="empty-lede">Drop an XML/RDF (or a folder of related artifacts) into the sidebar &mdash; get an SSRS-ready <code>.rdl</code> plus a preview of how it will render — mockup or real rendered pages.</p>
-        <p class="empty-sub">Main views: <b>Preview</b>, <b>RDL XML</b>, <b>Bursting</b>, <b>Sub-Reports</b>. Toggle <i>Advanced views</i> for validation, side-by-side diff, live data, and deploy checklist.</p>
+        <h2>Turn an Oracle report into an SSRS report</h2>
+        <p class="empty-lede">Drop the Oracle export &mdash; one
+          <code>.xml</code> or <code>.rdf</code> file, or the whole folder
+          that came with it &mdash; into the panel on the left. You get back
+          an <code>.rdl</code> file you can upload to <b>SSRS</b> (SQL Server
+          Reporting Services, Microsoft&rsquo;s reporting server), plus a
+          preview of the pages it will print.</p>
+        <p class="empty-sub">Start in <b>Preview</b> and <b>RDL XML</b>. Open
+          <i>Advanced views</i> for the checks, an Oracle-beside-SSRS
+          comparison, a test run of the report&rsquo;s SQL, and the steps for
+          going live.</p>
+        <p class="empty-sub">New to this tool? Open <b>How it works</b> at the
+          top of the page. It explains every view and offers a short guided
+          tour.</p>
       </div>
 
       <!-- Tab: Preview — ONE place to look at the report, three ways.
            Frontend/Backend are the fast in-browser mockups; Live rendered
            pages runs the generated .rdl through Microsoft's own report
            engine, so it is not an approximation -- it IS what SSRS prints. -->
-      <div id="tab-mockup" class="tab-panel" hidden>
+      <div id="tab-mockup" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-mockup" tabindex="0" hidden>
+        <!-- Every other view names itself with an h2; this one did not, so
+             heading navigation -- the way a screen-reader user skims a
+             page -- skipped the ONE view the operator lives in. It is a
+             real, visible heading, like the others, and it says what the
+             view is FOR rather than repeating the tab's one word. -->
+        <h2 class="view-title" id="mockup-view-title">Preview &mdash; the pages this report will print</h2>
         <div class="mockup-mode-toggle" role="radiogroup" aria-label="Preview mode">
+          <!-- Roving tabindex: a radio group is ONE tab stop, and the
+               arrow keys move within it (wired in app.js). -->
           <button id="mockup-mode-frontend" class="mockup-mode-btn" data-mode="frontend"
-                  role="radio" aria-checked="true" type="button">
+                  role="radio" aria-checked="true" tabindex="0" type="button">
             <span class="mockup-mode-icon" aria-hidden="true">&#x1F441;</span>
-            <span>Frontend (rendered with sample data)</span>
+            <span>Frontend &mdash; the printed pages, filled with sample data</span>
           </button>
           <button id="mockup-mode-backend" class="mockup-mode-btn" data-mode="backend"
-                  role="radio" aria-checked="false" type="button">
+                  role="radio" aria-checked="false" tabindex="-1" type="button">
             <span class="mockup-mode-icon" aria-hidden="true">&#x1F527;</span>
-            <span>Backend (Report Builder skeleton)</span>
+            <span>Backend &mdash; the empty layout, showing labels and data fields</span>
           </button>
         </div>
         <div class="panel-card mockup-card">
@@ -312,44 +490,51 @@
         </div>
         <div id="mockup-cta" class="mockup-cta-bar" hidden>
           <div class="cta-text">
-            <b>Looks good?</b>
-            Click here to download the SSRS-ready <code>.rdl</code> file. Drop it in Report Builder.
+            <b>Looks right?</b>
+            Download the <code>.rdl</code> file, then upload it to your report
+            server. The <b>Deploy Checklist</b> view has the full steps.
           </div>
           <button id="cta-download-rdl" class="cta-btn">Download .rdl</button>
         </div>
       </div>
 
       <!-- Tab: RDL XML -->
-      <div id="tab-rdl" class="tab-panel" hidden>
+      <div id="tab-rdl" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-rdl" tabindex="0" hidden>
         <div class="panel-card">
           <div class="panel-toolbar">
-            <div class="panel-title">Generated RDL</div>
+            <h2 class="panel-title">Generated RDL</h2>
             <button id="copy-rdl" class="btn btn-ghost">Copy</button>
           </div>
+          <p class="panel-intro">This is the report file this tool wrote for
+            you &mdash; an <b>RDL</b> (Report Definition Language) file, the
+            format SSRS reads. It is the thing you download and upload to the
+            server. You do not have to read it; it is here so you can check
+            anything you want to check. A very long file shows only its
+            beginning here, but every download contains the whole file.</p>
           <pre class="code-block"><code id="rdl-code" class="language-xml"></code></pre>
         </div>
       </div>
 
       <!-- Tab: Bursting / Email Distribution -->
-      <div id="tab-burst" class="tab-panel" hidden>
+      <div id="tab-burst" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-burst" tabindex="0" hidden>
 
         <!-- Plug-and-play Distribution Settings form -->
         <section id="burst-form-panel" class="panel-card burst-form-panel" hidden>
           <div class="panel-toolbar burst-form-head">
-            <div class="panel-title">Distribution Settings</div>
-            <div class="burst-form-hint muted-note">Edit, then Update Preview or Download Burst Pack.</div>
+            <h2 class="panel-title">Distribution Settings</h2>
+            <div class="burst-form-hint muted-note">Change anything here, then click Update Preview or Download Burst Pack.</div>
           </div>
           <div class="burst-form-grid">
             <label class="burst-field">
-              <span>SMTP Host</span>
+              <span>Email server (SMTP host)</span>
               <input id="bf-smtp-host" type="text" value="smtp.office365.com" autocomplete="off" spellcheck="false">
             </label>
             <label class="burst-field">
-              <span>SMTP Port</span>
+              <span>Port</span>
               <input id="bf-smtp-port" type="number" min="1" max="65535" value="587">
             </label>
             <label class="burst-field">
-              <span>Auth Mode</span>
+              <span>How the email server signs you in</span>
               <select id="bf-auth-mode">
                 <option value="Office365" selected>Office365</option>
                 <option value="Exchange">Exchange</option>
@@ -357,15 +542,15 @@
               </select>
             </label>
             <label class="burst-field">
-              <span>Sender Email</span>
+              <span>Sent from (email address)</span>
               <input id="bf-sender" type="email" value="[email protected]" autocomplete="off" spellcheck="false">
             </label>
             <label class="burst-field burst-field-wide">
-              <span>Subject Template <span class="burst-field-hint">use <code>{BurstKey}</code> and <code>{ReportName}</code></span></span>
+              <span>Subject line <span class="burst-field-hint">write <code>{BurstKey}</code> or <code>{ReportName}</code> where you want those filled in</span></span>
               <input id="bf-subject" type="text" value="{ReportName} - {BurstKey}" autocomplete="off" spellcheck="false">
             </label>
             <label class="burst-field burst-field-wide">
-              <span>Body Template <span class="burst-field-hint">placeholders <code>{BurstKey}</code>, <code>{ReportName}</code></span></span>
+              <span>Message <span class="burst-field-hint">the same fill-ins work here: <code>{BurstKey}</code>, <code>{ReportName}</code></span></span>
               <textarea id="bf-body" rows="3" spellcheck="false">Hello,
 
 Your {ReportName} report for {BurstKey} is attached.
@@ -373,7 +558,7 @@ Your {ReportName} report for {BurstKey} is attached.
 - Reports</textarea>
             </label>
             <label class="burst-field burst-field-wide">
-              <span>Email-Source SQL <span class="burst-field-hint">auto-substituted from the parsed report</span></span>
+              <span>SQL that lists the recipients <span class="burst-field-hint">started for you from the report this tool just read</span></span>
               <textarea id="bf-sql" class="burst-field-code" rows="8" spellcheck="false"></textarea>
             </label>
           </div>
@@ -388,38 +573,51 @@ Your {ReportName} report for {BurstKey} is attached.
       </div>
 
       <!-- Tab: Sub-Reports (drill-through child reports) -->
-      <div id="tab-subreports" class="tab-panel" hidden>
+      <div id="tab-subreports" class="tab-panel" role="tabpanel" aria-labelledby="tabbtn-subreports" tabindex="0" hidden>
         <div class="panel-card">
           <div class="panel-toolbar">
             <h2 class="panel-title">Sub-Reports</h2>
             <span id="subreports-status" class="muted-note panel-toolbar-right"></span>
           </div>
           <p class="subreports-intro">
-            Build a deployable child report from <b>any</b> artifact &mdash; the child’s Oracle XML, an existing <code>.rdl</code>, or its SQL (<code>.sql</code>/<code>.docx</code>/<code>.txt</code>). Drop artifacts in a card (or the sidebar <b>Sub-reports</b> box) and click <b>Build &amp; preview</b> to generate a full RDL plus a live mockup, just like the main report.
+            A <b>sub-report</b> is a second report that a row in the main
+            report opens &mdash; the envelope for one permit, say, or the
+            detail behind one line. Build one from whatever you have: its
+            Oracle XML, an existing <code>.rdl</code>, or just its SQL
+            (<code>.sql</code>, <code>.docx</code> or <code>.txt</code>).
+            Drop the files onto a card below, or into the <b>Sub-reports</b>
+            box in the panel on the left, then click <b>Build &amp;
+            preview</b>. You get a full report file and a preview, the same
+            way you do for the main report.
           </p>
           <div id="subreports-host" class="subreports-host"></div>
         </div>
       </div>
 
       <!-- Tab: Side-by-Side -->
-      <div id="tab-side" class="tab-panel" hidden>
+      <div id="tab-side" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-side" tabindex="0" hidden>
         <div class="panel-card">
           <div class="panel-toolbar">
-            <div class="panel-title">Oracle XML &rarr; RDL XML</div>
+            <h2 class="panel-title">Oracle XML &rarr; RDL XML</h2>
             <label class="switch">
               <input type="checkbox" id="sync-scroll" checked>
-              <span>Sync scroll</span>
+              <span>Scroll both sides together</span>
             </label>
           </div>
+          <p class="panel-intro">The Oracle file you dropped in is on the
+            left; the SSRS file this tool wrote is on the right. Search both
+            sides for a column or query name when you need to answer
+            &ldquo;where did this end up?&rdquo; &mdash; for yourself, or for
+            whoever asks how a number got onto the page.</p>
           <div class="side-by-side">
             <div class="sxs-col">
-              <div class="sxs-head">Oracle XML (source)</div>
+              <h3 class="sxs-head">Oracle XML &mdash; what you dropped in</h3>
               <div class="sxs-scroll" id="sxs-left-scroll">
                 <pre class="code-block"><code id="oracle-code" class="language-xml"></code></pre>
               </div>
             </div>
             <div class="sxs-col">
-              <div class="sxs-head">RDL XML (target)</div>
+              <h3 class="sxs-head">RDL XML &mdash; what this tool wrote</h3>
               <div class="sxs-scroll" id="sxs-right-scroll">
                 <pre class="code-block"><code id="rdl-code-2" class="language-xml"></code></pre>
               </div>
@@ -430,37 +628,56 @@ Your {ReportName} report for {BurstKey} is attached.
 
 
       <!-- Tab: Live Data -->
-      <div id="tab-live" class="tab-panel" hidden>
+      <div id="tab-live" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-live" tabindex="0" hidden>
+        <h2 class="sr-only">Live data</h2>
         <div id="live-host" class="live-host"></div>
       </div>
 
       <!-- Tab: Validation -->
-      <div id="tab-validate" class="tab-panel" hidden>
+      <div id="tab-validate" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-validate" tabindex="0" hidden>
         <div class="panel-card">
           <div class="panel-toolbar">
-            <div class="panel-title">T-SQL Validation</div>
+            <h2 class="panel-title">Validation</h2>
             <div class="validation-summary" id="validation-summary"></div>
           </div>
+          <p class="panel-intro">Everything this tool checked before you
+            deploy. Each finding says what will happen when the report runs,
+            and what to do about it. Four words are used, most urgent first:
+            <b>BLOCKER</b> &mdash; the file will not upload or open cleanly;
+            fix this first.
+            <b>RED</b> &mdash; it uploads, but something is likely to go wrong
+            once the report runs.
+            <b>AMBER</b> &mdash; worth reading; the report should still run.
+            <b>READY</b> &mdash; nothing is standing in your way.</p>
           <div id="validation-host" class="validation-host"></div>
         </div>
       </div>
 
       <!-- Tab: Deploy Checklist -->
-      <div id="tab-deploy" class="tab-panel" hidden>
+      <div id="tab-deploy" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-deploy" tabindex="0" hidden>
         <div class="panel-card">
           <div class="panel-toolbar">
-            <div class="panel-title">Deployment Checklist</div>
+            <h2 class="panel-title">Deploy Checklist</h2>
           </div>
+          <p class="panel-intro">The steps for putting this report on your
+            server, in order. Steps marked <b>Done for you</b> are already
+            handled inside the file you download &mdash; they are listed so
+            you can see what was done. Steps marked <b>You do this</b>,
+            <b>Needs finishing</b> or <b>Take care</b> need a person.</p>
           <ol id="deploy-host" class="deploy-host"></ol>
         </div>
       </div>
 
       <!-- Tab: Extras (audit trail, AI prompts, bursting / DDS) -->
-      <div id="tab-extras" class="tab-panel" hidden>
+      <div id="tab-extras" class="tab-panel" role="tabpanel" aria-labelledby="tab-btn-extras" tabindex="0" hidden>
         <div class="panel-card">
           <div class="panel-toolbar">
-            <div class="panel-title">Extras</div>
+            <h2 class="panel-title">Extras</h2>
           </div>
+          <p class="panel-intro">How much of the original report came across,
+            a record of the decisions this tool made while converting, and
+            ready-made questions you can paste into an AI tool if you want a
+            second opinion on a query or a formula.</p>
           <div id="extras-host" class="extras-host"></div>
         </div>
       </div>
@@ -474,12 +691,17 @@ Your {ReportName} report for {BurstKey} is attached.
 
 <div id="toast" class="toast" hidden></div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/prism.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-markup.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/prism/1.29.0/components/prism-sql.min.js"></script>
+<!-- Syntax highlighting, served from this machine. Loads before app.js for
+     the same reason the three CDN Prism tags did: highlightPanel() calls
+     into it on the first tab render. See static/js/highlight.js. -->
+<script src="{{ url_for('static', filename='js/highlight.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='js/app.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='js/demo_mode.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='js/ai_apply.js') }}?v={{ asset_version }}"></script>
 <script src="{{ url_for('static', filename='js/ai_auto.js') }}?v={{ asset_version }}"></script>
+<!-- Wide content (RDL XML, generated SQL, tables, rendered pages) scrolls in
+     its own box at 320px and at 200% zoom; this makes that box reachable by
+     keyboard. See the REFLOW LAYER in style.css. -->
+<script src="{{ url_for('static', filename='js/scroll_regions.js') }}?v={{ asset_version }}"></script>
 </body>
 </html>

@@ -1128,14 +1128,51 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
                  "Var", "VarP", "RunningValue", "Aggregate")
     agg_alt = "|".join(AGG_FUNCS)
 
+    _agg_open_re = re.compile(r"(?:" + agg_alt + r")\s*\(")
+
     def _is_scoped(expr: str, field_name: str) -> bool:
-        # Strict match: <Agg>(... Fields!<X>.Value [...optional...] , "<DS>" )
-        pat = (
-            r"(?:" + agg_alt + r")\s*\(" +
-            r"[^()]*?Fields!" + re.escape(field_name) + r"\.Value" +
-            r"[^()]*?,\s*\"[^\"]+\"\s*\)"
-        )
-        return bool(re.search(pat, expr))
+        # True when EVERY occurrence of Fields!<X>.Value sits inside an
+        # aggregate call whose LAST top-level argument is a "<scope>"
+        # string literal. Balanced-paren scan, not a regex over the
+        # argument text: the operand may itself be parenthesized
+        # arithmetic — Sum((((F!A.Value + F!B.Value) + ...)), "Q_1") is a
+        # correctly scoped expression the previous [^()]* pattern could
+        # never match, flagging valid grand totals as false BLOCKERs
+        # (wild-corpus verified). String literals are skipped so parens
+        # or commas inside them never skew the depth.
+        target = "Fields!" + field_name + ".Value"
+        n = len(expr)
+        covered = []
+        for m in _agg_open_re.finditer(expr):
+            start = m.end()           # position just past the '('
+            depth, i = 1, start
+            last_top_comma = -1
+            while i < n and depth:
+                c = expr[i]
+                if c == '"':
+                    j = expr.find('"', i + 1)
+                    i = (j if j >= 0 else n) + 1
+                    continue
+                if c == "(":
+                    depth += 1
+                elif c == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                elif c == "," and depth == 1:
+                    last_top_comma = i
+                i += 1
+            if depth:                  # unbalanced — not a judgeable call
+                continue
+            if last_top_comma < 0:
+                continue               # single-argument call: no scope
+            tail = expr[last_top_comma + 1:i].strip()
+            if re.fullmatch(r"\"[^\"]+\"", tail):
+                covered.append((start, i))
+        for r in re.finditer(re.escape(target), expr):
+            if not any(a <= r.start() and r.end() <= b for a, b in covered):
+                return False
+        return True
 
     # Pre-compute "is this element inside a Tablix?" by walking down
     # from each Tablix and collecting id()'s of descendants.

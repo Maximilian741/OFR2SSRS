@@ -16,6 +16,14 @@ from typing import Any, Dict, Iterable, List
 
 RD = "{http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition}"
 
+# The needs-attention bar for the fidelity HEADLINE the UI presents (the
+# worst of the binding score and the display-coverage axis). Below this the
+# fidelity card renders the conversion as partial — and the preflight
+# surface must disclose the same fact (one story across surfaces), so
+# convert() emits an informational preflight finding against this SAME
+# constant. 1.0 == only a full-coverage report is presented finding-free.
+ATTENTION_THRESHOLD = 1.0
+
 
 def _safe_up(s: str) -> str:
     # MUST mirror the generator's _safe() rule exactly (incl. the leading-
@@ -172,8 +180,9 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
             f"not rendered as an aggregate -- add the total row(s) in Report "
             f"Builder: {missing_tot[:8]}")
 
-    # 6) Charts / graphs -> not auto-built (SSRS Chart is a different model).
-    # Surface every one so a chart is never silently lost.
+    # 6) Charts / graphs -> translated to real SSRS Charts from the declared
+    # bindings. Surface every one so a chart is never silently lost, and name
+    # the DECLARED graph type so the reader can check it against the source.
     charts = list(getattr(parsed, "charts", None) or [])
     cats["charts"] = {"count": len(charts),
                       "titles": [c.get("title") or "(untitled)" for c in charts]}
@@ -182,13 +191,19 @@ def build_fidelity_report(parsed, rdl_xml: str) -> Dict[str, Any]:
         _desc = []
         for c in charts:
             t = c.get("title") or "(untitled)"
-            pv = c.get("plot_value") or ""
-            _desc.append(f"{t}" + (f" [plots {pv}]" if pv else ""))
+            pv = ", ".join(c.get("plot_values")
+                           or ([c.get("plot_value")] if c.get("plot_value")
+                               else []))
+            ty = (c.get("type") or "").strip()
+            _desc.append(f"{t}" + (f" [plots {pv}]" if pv else "")
+                         + (f" [declared {ty}]"
+                            if ty and ty.lower() not in ("chart", "graph")
+                            else ""))
         if _built >= len(charts):
             needs.append(
-                f"{len(charts)} chart/graph(s) auto-built as basic SSRS "
-                f"Column Chart(s) -- verify chart type/styling in Report "
-                f"Builder: {_desc[:6]}")
+                f"{len(charts)} chart/graph(s) translated to SSRS Chart(s) "
+                f"from the declared bindings -- verify against the source "
+                f"graph in Report Builder: {_desc[:6]}")
         else:
             needs.append(
                 f"{len(charts) - _built} of {len(charts)} chart/graph(s) "

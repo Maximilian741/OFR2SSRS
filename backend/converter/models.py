@@ -65,6 +65,18 @@ class DataItem:
     label: str = ""
     scale: Optional[int] = None     # Oracle NUMBER scale (digits right of '.')
     precision: Optional[int] = None  # Oracle NUMBER precision (total digits)
+    # Oracle OBJECT-column (ADT) attribute breakout: <dataItemPrivate
+    # parentColumn="..."> names the object-typed sibling column this item is
+    # an attribute of (its ``expression`` is then the attribute name). Empty
+    # for ordinary columns. Lets the generator project the attribute as real
+    # SQL ( parent.ATTR ) instead of a valueless stub.
+    parent_column: str = ""
+    # Did the SOURCE actually declare ``datatype``? Oracle omits the attribute
+    # freely, and the parser then falls back to the character default -- which
+    # is indistinguishable from a column the source declares character. Any
+    # rule that wants to read a type OUT of the declarations (rather than out
+    # of a default) needs to know which one it is looking at.
+    datatype_declared: bool = True
 
     @property
     def ssrs_datatype(self) -> str:
@@ -436,6 +448,11 @@ class LayoutGroup:
     # FORM/invoice shape (a vendor block + line-item table per record), as
     # opposed to a tabular list (many records stacked per page). 0 = unset.
     max_records_per_page: int = 0
+    # repeatingFrame minWidowRecords: the fewest instances Oracle will leave at
+    # the BOTTOM of a page. With >= 1 declared, a record that does not fit the
+    # room left moves WHOLE to the next page -- Oracle never prints the top
+    # slice of a record at a page bottom and the rest overleaf. 0 = unset.
+    min_widow_records: int = 0
     # Section groups only: the declared <body width= height=> of the section
     # (the printable sheet MINUS the margin chrome). A paper-like body height
     # (>= 8in) is the author saying "this section prints on a normal sheet" --
@@ -450,6 +467,14 @@ class LayoutGroup:
     # prints at location + its own declared x/y (truth-measured on the
     # Oracle-rendered PDFs to 0.0003in). () when the export declares none.
     body_location: tuple = ()
+    # True when the frame itself was authored inside a section's <margin>
+    # band (the LayoutGroup twin of LayoutField.in_margin). Oracle margin
+    # objects are PAGE CHROME printed once per page in paper coordinates —
+    # a margin-resident frame tree (frames, even repeating frames, holding
+    # the running master header) belongs to the RDL page bands ONLY. The
+    # body/record emitters use this tag to keep such a subtree out of the
+    # body flow, where a second copy printed offset over the page-band one.
+    in_margin: bool = False
 
 
 # ---------------------------------------------------------------------------

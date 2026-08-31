@@ -168,6 +168,16 @@ class _Parser:
         if self._eat_kw("LIKE"):
             pat = self._add()
             return f"({left} Like {self._like_pattern(pat)})"
+        # Oracle's POSTFIX negation: ``expr NOT LIKE pattern``. (The prefix
+        # ``NOT expr`` form is handled by _not(); without this branch the
+        # dangling NOT was a trailing token and the whole trigger declined,
+        # so a success-variant frame gated on "no error text anywhere" lost
+        # its condition entirely.)
+        if self._eat_kw("NOT"):
+            if self._eat_kw("LIKE"):
+                pat = self._add()
+                return f"(Not ({left} Like {self._like_pattern(pat)}))"
+            raise ValueError("only LIKE may follow a postfix NOT")
         op = self._eat_op("=", "<>", "!=", ">", "<", ">=", "<=")
         if op:
             vb = {"!=": "<>"}.get(op, op)

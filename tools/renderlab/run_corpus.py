@@ -45,21 +45,22 @@ def _collect(args: list[str]) -> list[Path]:
     return out
 
 
-def _measure_pdf(pdf_path: str) -> dict:
-    from pypdf import PdfReader
-    r = PdfReader(pdf_path)
-    n = len(r.pages)
-    blank = []
-    for i, page in enumerate(r.pages):
-        txt = (page.extract_text() or "").strip()
-        # Strip page-chrome-ish lines; a page with <8 residual chars is blank.
-        residual = "".join(
-            ln for ln in txt.splitlines()
-            if not ln.strip().lower().startswith(("page ", "report run on"))
-        ).strip()
-        if len(residual) < 8:
-            blank.append(i + 1)
-    return {"pages": n, "blank": blank}
+def _measure_pdf(pdf_path: str, rdl_xml: str = None, mode: str = None) -> dict:
+    """Shared strict blank measure (blank_measure.measure_pdf).
+
+    Page furniture is derived from the ARTIFACT — the wording the RDL declares
+    in its PageHeader/PageFooter, in whatever language, the strip that band
+    RESERVES on the sheet, and the lines the document repeats on every page —
+    and a page is blank when NO mark of content ink is left. This used to
+    strip two hardcoded English literals and call a page with under 8
+    residual characters blank; a judge proved the literals blind (a blank
+    sheet behind an intact PageHeader read as inked) and two more proved the
+    count blind (a sheet printing a short value read blank, and the same
+    sheet got opposite verdicts in different scripts)."""
+    from blank_measure import measure_pdf
+    m = measure_pdf(pdf_path, rdl_xml=rdl_xml, mode=mode)
+    return {"pages": m["pages"], "blank": m["blank"],
+            "placeholder_only": m["placeholder_only"]}
 
 
 def main() -> int:
@@ -111,7 +112,7 @@ def main() -> int:
             print(f"{name:28} {verdict:8} {'FAIL':7} {'-':>5} {'-':>6}  {reason[:90]}")
             failures += 1
             continue
-        m = _measure_pdf(res["pdf"])
+        m = _measure_pdf(res["pdf"], rdl, res.get("mode"))
         blank_s = ",".join(map(str, m["blank"])) or "-"
         note = f"{warns} warn(s)" if warns else ""
         if m["blank"]:

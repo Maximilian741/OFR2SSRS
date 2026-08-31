@@ -42,6 +42,10 @@ def test_substr_instr_upper():
     e = vb("BEGIN RETURN(UPPER(SUBSTR(:Name, 1, 3))); END;")
     assert e and "UCase(" in e and "Mid(Fields!Name.Value, 1, 3)" in e
 
+def test_postfix_not_like_negates_vb_like():
+    e = vb("BEGIN IF UPPER(:Nm) NOT LIKE '%X%' THEN RETURN(1); ELSE RETURN(0); END IF; END;")
+    assert e and "Not (" in e and 'Like "*X*"' in e and "UCase(" in e
+
 def test_external_package_fn_falls_back():
     r = T("BEGIN RETURN(Pkg_App_Util.F_System_Parm_Char('X')); END;")
     assert r["ok"] is False  # genuinely uncomputable external -> placeholder

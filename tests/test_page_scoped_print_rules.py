@@ -202,3 +202,83 @@ def test_page_gated_object_declared_low_in_the_body_uses_the_footer():
     tb = _marker_boxes(root, ftr)[0]
     # anchored to the footer's CEILING — the row just under the body
     assert abs(_geom(tb, "Top")) < 0.002
+
+
+# ---------------------------------------------------------------------------
+# The gate has to survive every OTHER pass that copies declared text around.
+# A page-gated object sits in the title band by construction (a continuation
+# marker is declared beside the group caption at the top of the frame), and
+# the synthesized page title is built by CONCATENATING the declared texts it
+# finds there.  A copy that lands inside that concatenation carries no gate,
+# so the marker printed on page one -- the one page its declaration excludes
+# -- and twice on every other page.  The body-copy strip cannot reach it: it
+# matches a whole <Value> inside <Body>, and this copy is one atom of an
+# expression in a page band.
+#
+# MEASURED before the fix, on the fixture below: rdl.count(marker) == 2, one
+# gated box (PgPrint_*) plus '="(marker)" & vbCrLf & "<caption>"' in
+# Tb_PageTitle.  After: exactly one, gated.
+# ---------------------------------------------------------------------------
+
+def _xml_titleband(print_rule: str = 'printObjectOnPage="allButFirstPage" '):
+    """The same grouped listing with NO declared <margin> title, plus a plain
+    caption text in the marker's own band. With no declared page title the
+    synthesizer builds one out of the band texts it finds -- which is the
+    shape that duplicated the marker."""
+    return (_xml(print_rule)
+            .replace(b'<margin><text name="B_TTL">'
+                     b'<geometryInfo x="2.5" y="0.2" width="3.0" '
+                     b'height="0.25"/>'
+                     b'<textSegment><font face="Arial" size="12" bold="yes"/>'
+                     b'<string><![CDATA[Synthetic Title]]></string>'
+                     b'</textSegment></text></margin>', b'')
+            .replace(b'<repeatingFrame name="R_ROW"',
+                     b'<text name="B_CAP"><textSettings spacing="single"/>'
+                     b'<geometryInfo x="0.01" y="0.30" width="1.20" '
+                     b'height="0.17"/>'
+                     b'<textSegment><font face="Arial" size="9"/>'
+                     b'<string><![CDATA[Alpha Head]]></string>'
+                     b'</textSegment></text>'
+                     b'<repeatingFrame name="R_ROW"'))
+
+
+def test_page_gated_text_never_joins_the_synthesized_page_title():
+    """The marker must exist exactly once, and that once must be the GATED
+    copy — a title-line copy prints on the excluded page."""
+    for rule in ('printObjectOnPage="allButFirstPage" ',
+                 'printObjectOnPage="allButLastPage" '):
+        rdl = convert(_xml_titleband(rule))["rdl_xml"]
+        assert rdl.count(_MARKER) == 1, (
+            f"{rule}: the declared marker must be emitted exactly once, "
+            f"got {rdl.count(_MARKER)}")
+        root = ET.fromstring(rdl)
+        gated = []
+        for region in ("PageHeader", "PageFooter", "Body"):
+            el = root.find(".//" + _NS + region)
+            if el is not None:
+                gated.extend(_marker_boxes(root, el))
+        assert len(gated) == 1, gated
+        hidden = gated[0].find(".//" + _NS + "Hidden")
+        assert hidden is not None and (hidden.text or "").startswith(
+            "=Globals!PageNumber"), (
+            "the single surviving copy is the page-number-gated one",
+            None if hidden is None else hidden.text)
+
+
+def test_an_undeclared_text_in_the_same_band_still_becomes_a_title_line():
+    """PROVE-THE-GATE: the exclusion is keyed on the DECLARED print rule, not
+    on where the text sits or what it says. Drop the declaration and the very
+    same text is ordinary title-band content again."""
+    rdl = convert(_xml_titleband(""))["rdl_xml"]
+    assert rdl.count(_MARKER) == 1
+    assert "PgPrint_" not in rdl
+    root = ET.fromstring(rdl)
+    hdr = root.find(".//" + _NS + "PageHeader")
+    assert hdr is not None, "the caption still synthesizes a page title"
+    title = [tb for tb in hdr.iter(_NS + "Textbox")
+             if (tb.get("Name") or "") == "Tb_PageTitle"]
+    assert title, "the title box is still built"
+    joined = "".join(v.text or "" for v in title[0].iter(_NS + "Value"))
+    assert _MARKER in joined, (
+        "with no page-scoped declaration the text is title-band content",
+        joined)

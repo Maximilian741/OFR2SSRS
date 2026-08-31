@@ -17,27 +17,32 @@
     const s = document.createElement("style");
     s.id = "o2s-ai-auto-style";
     s.textContent = `
+      /* Tokens only. A hardcoded gradient here painted white text at
+         3:1 and ignored the theme entirely; this is the same accent
+         callout the rest of the app uses, so it reads correctly in
+         light and dark without a second palette. */
       .o2s-ai-auto-bar {
         display: flex; align-items: center; gap: 12px;
         margin: 0 0 14px 0; padding: 10px 14px;
-        background: linear-gradient(135deg, #5b8cff, #7d6bff);
-        color: #fff; border-radius: 10px;
+        background: var(--accent-wash); color: var(--ink);
+        border: 1px solid var(--accent-line); border-radius: 10px;
         font-size: 13px;
       }
-      .o2s-ai-auto-bar .o2s-ai-status { flex: 1; opacity: 0.95; }
+      .o2s-ai-auto-bar .o2s-ai-status { flex: 1; color: var(--ink-2); }
       .o2s-ai-auto-bar button {
-        background: rgba(0,0,0,0.25); color: #fff; border: 1px solid rgba(255,255,255,0.25);
+        background: var(--surface-0); color: var(--ink);
+        border: 1px solid var(--field-border);
         padding: 7px 14px; border-radius: 6px; cursor: pointer; font-weight: 600;
-        font-size: 12px; font-family: inherit;
+        font-size: 12px; font-family: inherit; min-height: 26px;
       }
-      .o2s-ai-auto-bar button:hover { background: rgba(0,0,0,0.4); }
+      .o2s-ai-auto-bar button:hover { background: var(--surface-1); }
       .o2s-ai-auto-bar button:disabled { opacity: 0.55; cursor: not-allowed; }
       .o2s-ai-auto-progress {
-        margin-top: 6px; font-size: 11px; opacity: 0.9;
-        font-family: Consolas, monospace;
+        margin-top: 6px; font-size: 11px; color: var(--ink-2);
+        font-family: var(--font-mono);
       }
       .o2s-ai-not-configured {
-        background: linear-gradient(135deg, #b0b0b0, #888);
+        background: var(--surface-1); border-color: var(--line-strong);
       }
     `;
     document.head.appendChild(s);
@@ -71,14 +76,15 @@
       status.innerHTML = '<b>Auto-fix with AI</b> &mdash; click to run Claude (' + model + ') ' +
                         'on every prompt below and apply each valid result automatically.';
     } else {
-      status.innerHTML = '<b>Auto-AI not configured.</b> Set <code style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:3px;">ANTHROPIC_API_KEY</code> ' +
-                        'in your <code style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:3px;">.env</code> ' +
-                        'and restart Flask. (See <code style="background:rgba(0,0,0,0.25);padding:1px 5px;border-radius:3px;">.env.example</code>.)';
+      status.innerHTML = '<b>Auto-AI not configured.</b> Set <code style="background:var(--surface-0);border:1px solid var(--line);padding:1px 5px;border-radius:3px;">ANTHROPIC_API_KEY</code> ' +
+                        'in your <code style="background:var(--surface-0);border:1px solid var(--line);padding:1px 5px;border-radius:3px;">.env</code> ' +
+                        'and restart Flask. (See <code style="background:var(--surface-0);border:1px solid var(--line);padding:1px 5px;border-radius:3px;">.env.example</code>.)';
     }
     bar.appendChild(status);
 
     if (configured) {
       const btn = document.createElement("button");
+      btn.type = "button";   // never a submit; it lives inside no form today
       btn.textContent = "Fix all with AI";
       btn.addEventListener("click", () => runAutoFix(btn, bar));
       bar.appendChild(btn);
@@ -113,7 +119,7 @@
       if (firstFail) {
         const errLine = document.createElement("div");
         errLine.className = "o2s-ai-auto-progress";
-        errLine.style.cssText = "color: #ffe4e4; font-weight: 600;";
+        errLine.style.cssText = "color: var(--bad); font-weight: 600;";
         errLine.textContent = `First failure: ${firstFail.error.slice(0, 200)}`;
         bar.appendChild(errLine);
       }
@@ -132,11 +138,11 @@
             tag.style.cssText = "margin-left:8px;font-size:10px;padding:2px 7px;border-radius:999px;";
             if (r.applied) {
               tag.textContent = "Auto-applied ✓";
-              tag.style.background = "#2bb673"; tag.style.color = "#fff";
+              tag.style.background = "var(--good)"; tag.style.color = "var(--on-solid)";
             } else {
               tag.textContent = "AI failed";
               tag.title = r.error || "";
-              tag.style.background = "#e04b4b"; tag.style.color = "#fff";
+              tag.style.background = "var(--bad)"; tag.style.color = "var(--on-solid)";
             }
             // Avoid duplicate tags
             if (!summary.querySelector(".o2s-ai-applied-tag")) {

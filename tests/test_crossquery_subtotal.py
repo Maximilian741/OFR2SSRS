@@ -54,6 +54,33 @@ def test_no_subtotal_tablix_without_group_summary():
     assert 'Name="Subtot_' not in rdl
 
 
+def test_crossquery_subtotal_tablix_publishes_and_reaches_the_page():
+    """LAYOUT-mode engine gate (no expression host needed): the emitted
+    Subtot tablix must PUBLISH — the engine validates the member shape at
+    publish, the step that rejected the grouped-subtotal member run on the
+    wild banking report while every static rail said READY — and its key
+    column + subtotal label must land on a page.  Value correctness stays
+    with the expression-mode test below."""
+    try:
+        from render import render_rdl as _rr, lib_ready as _lr  # noqa: E402
+    except Exception:  # noqa: BLE001
+        pytest.skip("renderlab not importable")
+    if not _lr() or sys.platform != "win32":
+        pytest.skip("renderlab DLLs not fetched / non-Windows")
+    rdl = convert(_MD)["rdl_xml"]
+    assert 'Name="Subtot_' in rdl
+    d = Path(tempfile.mkdtemp())
+    (d / "r.rdl").write_text(rdl, encoding="utf-8")
+    res = _rr(d / "r.rdl", d / "r.pdf", rows=3)
+    assert res["ok"], res.get("log", "")[-500:]
+    from pypdf import PdfReader
+    txt = "\n".join((p.extract_text() or "")
+                    for p in PdfReader(res["pdf"]).pages)
+    # the subtotal tablix header row: the group-key column + the
+    # summary-derived label (CS_dsub -> "Dsub") both reach the page
+    assert "Group" in txt and "Dsub" in txt, txt[:300]
+
+
 try:
     from render import render_rdl, lib_ready, expression_host_available  # noqa: E402
     # This test asserts a COMPUTED subtotal value appears in the PDF, which
