@@ -36,6 +36,7 @@ from converter.bundle_export import build_bundle_zip  # noqa: E402
 from converter.rdl_postprocess import (inject_connection_string,  # noqa: E402
                                        set_datasource_reference,
                                        relax_generate_all_drillthroughs,
+                                       deploy_transforms,
                                        set_drillthrough_hyperlinks,
                                        align_drillthrough_sort_default,
                                        set_generate_all_link_text)
@@ -266,14 +267,11 @@ def _apply_deploy_datasource(rdl_xml: str, req) -> str:
     #    work in an exported PDF (a Drillthrough is dropped in static export).
     #    An explicit server URL is used verbatim; otherwise the hyperlink falls
     #    back to SSRS server globals (zero-config on SSRS 2016+).
-    rdl_xml = relax_generate_all_drillthroughs(rdl_xml)
-    rdl_xml = set_drillthrough_hyperlinks(rdl_xml, rsu)
-    # Give the cover "generate all" link a friendly display label (e.g. "JV
-    # Standard 12 x 9 Envelope") so the end user knows what they're generating.
-    rdl_xml = set_generate_all_link_text(rdl_xml, gen_all_label)
-    # Default the master's sort selector to SITE so its records line up 1:1 with
-    # the sub-report's site-ordered bulk list -- no manual parameter setting.
-    rdl_xml = align_drillthrough_sort_default(rdl_xml)
+    #    (relax generate-all -> URL hyperlinks -> friendly generate-all label
+    #    -> master sort default.) ONE shared function with the publish gate:
+    #    the gate audits deploy_transforms()' output, so what it certifies is
+    #    the file this route serves, transform for transform.
+    rdl_xml = deploy_transforms(rdl_xml, rsu, gen_all_label)
 
     # 2. Data source binding.
     if cs:

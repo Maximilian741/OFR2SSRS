@@ -71,19 +71,29 @@ unavailable.
 git clone https://github.com/Maximilian741/OFR2SSRS.git
 cd OFR2SSRS
 
-# Windows
-run.bat
+# 1. ONE-TIME: install the Python dependencies (the launcher never does this)
+python -m pip install -r requirements.txt
 
-# macOS / Linux / WSL
-./run.sh
+# 2. Start the app
+run.bat          # Windows
+./run.sh         # macOS / Linux / WSL / Git Bash
 ```
 
-The launcher installs dependencies (`pip install -r requirements.txt`) and
-starts the app. Then open <http://127.0.0.1:5057> and drop an Oracle Reports
-artifact on the page. Override the listen port with `PORT=8080 ./run.sh`.
-Requires Python 3.9+.
+The launcher only **starts** the app — it deliberately never installs
+anything (on locked-down machines an implicit `pip install` triggers install
+activity the user may be unable to act on). If step 1 was skipped, the
+launcher stops and prints the exact command instead of a Python traceback:
 
-To install dependencies manually (for example into a virtualenv):
+```text
+ModuleNotFoundError: No module named 'flask'   <- what you see without step 1
+python -m pip install -r requirements.txt      <- the one-time fix
+```
+
+Then open <http://127.0.0.1:5057> and drop an Oracle Reports artifact on the
+page. Override the listen port with `PORT=8080 ./run.sh`. Requires
+Python 3.9+.
+
+To install into a virtualenv instead:
 
 ```bash
 python -m venv .venv

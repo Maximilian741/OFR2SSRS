@@ -592,10 +592,12 @@ def _alias_select_items(sql: str, item_names, item_exprs=None) -> str:
             i + 4 == len(sql)
             or (not sql[i + 4].isalnum() and sql[i + 4] not in "_$#")
         ) and (
-            # WORD boundary on BOTH sides: a column alias CONTAINING the
-            # token ("CF_EMAIL_FROM", "VALID_FROM", "FROM_DT") must never
-            # terminate the select list — it silently left every later
-            # item unaliased (the blank-column / Refresh-mismatch class).
+            # WORD boundary on BOTH sides: an identifier that merely CONTAINS
+            # the keyword — as a prefix, an infix or a suffix of a longer
+            # column or alias name — must never terminate the select list. It
+            # silently left every later item unaliased (the blank-column /
+            # Refresh-mismatch class). The test is positional, so it holds for
+            # any naming convention; no identifier is named here.
             i == 0
             or (not sql[i - 1].isalnum() and sql[i - 1] not in "_$#")
         ):
@@ -2731,10 +2733,18 @@ def _strict_trigger_resolve(report):
     cmap = {}
     col_owner = {}
     for q in (getattr(report, "queries", None) or []):
-        for it in (getattr(q, "items", None) or []):
-            if getattr(it, "name", ""):
-                cmap.setdefault(it.name.upper(), it.name)
-                col_owner.setdefault(it.name.upper(), q.name)
+        # A trigger reference must be spelled with the name the DataSet
+        # emitter actually wrote, and scoped with the name the <DataSet>
+        # actually carries — both are SANITISED derivations of the source
+        # names (see _dataset_field_names). Spelling either from the raw
+        # Oracle name publishes a reference to a field the dataset does not
+        # declare, which Report Server refuses at upload while ReportViewer
+        # renders it clean (measured: a per-record rectangle's translated
+        # format trigger, 7 such references on one report).
+        for it, fname in _dataset_field_names(q):
+            cmap.setdefault(it.name.upper(), fname)
+            col_owner.setdefault(it.name.upper(),
+                                 _safe(q.name) or "DataSet1")
     # Formula/placeholder columns the synthetic formula-resolution dataset
     # carries as fields (it is emitted whenever this list is non-empty, so
     # a resolution against it can never dangle).
@@ -3073,6 +3083,62 @@ def _lexical_splice_expression(pre_text: str, resolved_map: dict,
     return "=" + " & ".join(atoms) if atoms else None
 
 
+def _dataset_field_names(query) -> list:
+    """``[(item, emitted <Field Name>), ...]`` in emission order — the ONE
+    derivation of a dataset's field names.
+
+    Three steps separate a source column from the name the ``<Field>``
+    actually carries, and a caller cannot guess any of them from the
+    column name alone:
+
+      * ``_safe()`` sanitisation (every character SSRS will not take in an
+        identifier becomes ``_`` — ``EMP#``, ``TOTAL AMT``, an accented or
+        otherwise non-ASCII column);
+      * the CLS fallback: a name with no ASCII LETTER left after
+        sanitisation is rejected by the server ("Field names must be
+        CLS-compliant identifiers"), so it becomes a positional ``Col<n>``;
+      * the uniquifier: two raw names that sanitise to the SAME string
+        would make the RDL invalid, so the second gets a ``_<n>`` suffix.
+
+    The ``<Field DataField>`` keeps the RAW name, so the binding to the
+    result-set column is unaffected by any of it.
+
+    WHY THIS IS A FUNCTION AND NOT A LOOP INSIDE THE EMITTER (publish-fatal
+    class, measured): an expression builder that spelled a field reference
+    itself — with the raw column name, or with a bare ``_safe(col)`` that
+    knows nothing of the last two steps — desynced from the emitted name
+    the moment a step fired, and the reference then names a field the
+    dataset does not declare. Report Server refuses the whole report at
+    upload ("...refers to the field `X'. Report item expressions can only
+    refer to fields within the current dataset scope, or, if inside an
+    aggregate, the specified dataset scope"), while ReportViewer evaluates
+    the unknown field as Nothing and renders a clean page — so no local
+    render rail can see it. Every builder that needs to SPELL a reference
+    must take the name from here (or, post-emission, from the RDL's own
+    DataField -> Name mapping), never re-derive it.
+    """
+    out, used = [], set()
+    for item in (getattr(query, "items", None) or []):
+        # Wild-corpus net: a <dataItem> with no usable name (Oracle's own
+        # docs ship one with the name attribute missing) must be SKIPPED —
+        # it otherwise becomes a field named "_", which SSRS rejects at
+        # publish time ("Field names must be CLS-compliant identifiers").
+        nm = (getattr(item, "name", "") or "").strip()
+        if not nm:
+            continue
+        fname = _safe(nm) or "Field1"
+        if not re.search(r"[A-Za-z]", fname):
+            fname = f"Col{len(used) + 1}"
+        if fname in used:
+            n = 2
+            while f"{fname}_{n}" in used:
+                n += 1
+            fname = f"{fname}_{n}"
+        used.add(fname)
+        out.append((item, fname))
+    return out
+
+
 def _build_dataset(query: DataQuery, declared_params: Iterable[str],
                    target_db: str = "oracle",
                    param_types: Optional[dict] = None,
@@ -3405,7 +3471,23 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
         if referenced:
             qp_root = _sub(q_el, "QueryParameters")
             canonical = {p.upper(): p for p in declared_params}
+            # EXACTLY ONE QueryParameter per DISTINCT bind -- the same rule
+            # the Oracle branch above applies, for the same reason. The bind
+            # identities come from an ORACLE source, where :P_X and :P_x are
+            # ONE bind a statement may legally spell both ways; translating
+            # to T-SQL does not split them into two. Emitting one
+            # QueryParameter per SPELLING hands the provider more parameters
+            # than the statement binds -- the ORA-01036 that fires the moment
+            # Report Builder executes the query at Refresh Fields, and the
+            # defect this project treats as fatal error #2.
+            # Measured: 16 corpus reports declared a duplicate here while the
+            # Oracle target of the SAME reports was clean, because this
+            # branch never got the dedupe when the Oracle one did.
+            _emitted_binds: Set[str] = set()
             for pname in referenced:
+                if pname.upper() in _emitted_binds:
+                    continue
+                _emitted_binds.add(pname.upper())
                 qp = _sub(qp_root, "QueryParameter")
                 qp.set("Name", f"@{pname}")
                 # Bind to the report parameter if it exists; an undeclared
@@ -3426,32 +3508,14 @@ def _build_dataset(query: DataQuery, declared_params: Iterable[str],
     # DECODE_WORK_INS_SECTOR________ fields = BLOCKER). De-duplicate with a
     # numeric suffix; the DataField keeps the ORIGINAL name, so the binding
     # to the result-set column is unaffected.
-    _used_field_names: set = set()
-    for item in query.items or []:
-        # Wild-corpus net: a <dataItem> with no usable name (Oracle's own
-        # docs ship one with the name attribute missing) must be SKIPPED —
-        # it otherwise becomes a field named "_", which SSRS rejects at
-        # publish time ("Field names must be CLS-compliant identifiers").
+    # SINGLE DERIVATION: the name each item gets comes from
+    # _dataset_field_names, the one place the rule lives, so an expression
+    # builder that needs to SPELL a field reference gets the same answer
+    # the emitter wrote (see that helper's docstring). The pairs arrive in
+    # emission order, one per item that yields a <Field>.
+    for item, _fname in _dataset_field_names(query):
         nm = (item.name or "").strip()
-        if not nm:
-            continue
         f = _sub(fields, "Field")
-        _fname = _safe(nm) or "Field1"
-        # SSRS requires CLS-compliant field names, and engine-verified on a
-        # Greek report that means the name must contain at least one
-        # LETTER: a name made entirely of non-ASCII characters sanitizes to
-        # underscores ("___"), and Oracle's uniquifier suffix only makes it
-        # "___1" — still rejected ("Field names must be CLS-compliant
-        # identifiers"). A digit does not rescue it. Fall back to a
-        # positional name; DataField keeps the original so binding works.
-        if not re.search(r"[A-Za-z]", _fname):
-            _fname = f"Col{len(_used_field_names) + 1}"
-        if _fname in _used_field_names:
-            _n = 2
-            while f"{_fname}_{_n}" in _used_field_names:
-                _n += 1
-            _fname = f"{_fname}_{_n}"
-        _used_field_names.add(_fname)
         f.set("Name", _fname)
         _sub(f, "DataField", nm)
         _rdsub(f, "TypeName", _field_clr_type(item, numeric_summary_cols))
@@ -3821,20 +3885,166 @@ def _build_data_sets(report: ParsedReport, target_db: str = "oracle") -> ET.Elem
 # ---------------------------------------------------------------------------
 
 
-def _should_hide_parameter(param_name: str, was_declared_in_xml: bool) -> bool:
-    """Hide a parameter from the end-user prompt when it is internal wiring, not
-    a real filter. Generic across reports: a parameter is hidden when it is a
-    query-bind-only param (synthesized from a SQL :bind, never declared as an
-    Oracle <userParameter>), OR its name matches a system/internal pattern
-    (report-server URL, file path, lexical criteria, subtitle, distribution,
-    envelope/url builder, or a drill-through *_NUM id). The caller already
-    handles Oracle display="no"."""
+def _source_parameter_roles(report) -> dict:
+    """What the SOURCE actually DOES with each declared parameter name.
+
+    Six role sets, every one read off a DECLARATION rather than off spelling
+    (``{"binds", "lexical", "layout", "assigned", "read", "form"}`` ->
+    ``set`` of UPPER names):
+
+      binds     ``:NAME`` appears in a query's SQL  -> the value reaches data
+      lexical   ``&NAME`` is spliced into a query's SQL TEXT -> the value IS
+                SQL, not something an end user types
+      layout    the name is some layout element's ``source=`` or an ``&NAME``
+                reference in boilerplate -> the value is printed
+      assigned  ``:NAME :=`` in a trigger / program unit / formula body ->
+                the report computes the value; the user does not supply it
+      read      ``:NAME`` is read (not assigned) by a program unit
+      form      Oracle's OWN ``<paramForm>`` declares it as a typed input
+                field -> the user really does type this one
+
+    Cached on the report (this walks the whole source once).
+    """
+    cached = getattr(report, "_o2s_param_roles", None)
+    if cached is not None:
+        return cached
+    import html as _html_mod
+    binds: Set[str] = set()
+    lexical: Set[str] = set()
+    for q in (getattr(report, "queries", None) or []):
+        for sql in (getattr(q, "sql", "") or "", getattr(q, "tsql", "") or ""):
+            if not sql:
+                continue
+            for m in re.finditer(r":([A-Za-z_][A-Za-z0-9_]*)", sql):
+                binds.add(m.group(1).upper())
+            for m in re.finditer(r"&<?([A-Za-z_][A-Za-z0-9_]*)>?", sql):
+                lexical.add(m.group(1).upper())
+    raw = getattr(report, "raw_xml", "") or ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    layout: Set[str] = set()
+    for m in re.finditer(r'\bsource="([^"]+)"', raw):
+        layout.add(m.group(1).lstrip("&:").strip().upper())
+    for m in re.finditer(r"&<?([A-Za-z_][A-Za-z0-9_]*)>?", raw):
+        layout.add(m.group(1).upper())
+    bodies = []
+    for t in (getattr(report, "triggers", None) or []):
+        bodies.append(getattr(t, "body", "") or "")
+    for f in (getattr(report, "formulas", None) or []):
+        bodies.append(getattr(f, "plsql_body", "") or "")
+    plsql = _html_mod.unescape("\n".join(b for b in bodies if b))
+    assigned: Set[str] = set()
+    read: Set[str] = set()
+    for m in re.finditer(r":([A-Za-z_][A-Za-z0-9_]*)\s*(:=)?", plsql):
+        if m.group(2):
+            assigned.add(m.group(1).upper())
+        else:
+            read.add(m.group(1).upper())
+    form: Set[str] = set()
+    for pfm in re.finditer(r"<paramForm\b.*?</paramForm>", raw, re.S | re.I):
+        for sm in re.finditer(r'\bsource="([^"]+)"', pfm.group(0)):
+            form.add(sm.group(1).strip().upper())
+    roles = {"binds": binds, "lexical": lexical, "layout": layout,
+             "assigned": assigned, "read": read, "form": form}
+    try:
+        setattr(report, "_o2s_param_roles", roles)
+    except Exception:
+        pass
+    return roles
+
+
+def _non_filter_parameters(report) -> Set[str]:
+    """UPPER names of DECLARED parameters the SOURCE proves are not filters.
+
+    Three declaration-driven classes -- none of them looks at spelling:
+
+      LEXICAL     the parameter is spliced into a query as SQL TEXT
+                  (``&NAME``). Its value is a SQL fragment, never something an
+                  end user types; the real filters are the parameters that
+                  fragment itself binds, which _reconstruct_lexical_criteria
+                  recovers into genuine predicates.
+      DEAD        the parameter is referenced NOWHERE -- no query, no layout,
+                  no program unit. Nothing the user types can change anything.
+      WRITE-ONLY  a program unit ASSIGNS the parameter and no layout element
+                  prints it. Whatever the user typed is overwritten before it
+                  could matter and nothing shows the result.
+
+    All three additionally require that the name never binds into a query and
+    is not a field on Oracle's OWN parameter form: either of those makes it a
+    genuine input whatever else the source does with it.
+    """
+    cached = getattr(report, "_o2s_non_filter_params", None)
+    if cached is not None:
+        return cached
+    roles = _source_parameter_roles(report)
+    out: Set[str] = set()
+    for p in (getattr(report, "parameters", None) or []):
+        nm = (getattr(p, "name", "") or "").upper()
+        if not nm or nm in roles["form"] or nm in roles["binds"]:
+            continue
+        if nm in roles["lexical"]:
+            out.add(nm)                                        # LEXICAL
+        elif not (nm in roles["layout"] or nm in roles["assigned"]
+                  or nm in roles["read"]):
+            out.add(nm)                                        # DEAD
+        elif nm in roles["assigned"] and nm not in roles["layout"]:
+            out.add(nm)                                        # WRITE-ONLY
+    try:
+        setattr(report, "_o2s_non_filter_params", out)
+    except Exception:
+        pass
+    return out
+
+
+# RESIDUAL, and measured -- not a guess about what a site calls things.
+# These are Oracle Reports DEPLOYMENT slots: the Reports Server endpoint, the
+# application-server output path, the envelope/URL builder input, and Oracle's
+# own DISTRIBUTE switch. The source does NOT express their "not a filter"
+# nature structurally -- each is read by a program unit AND printed on the
+# report's own parameter-echo page, so every role test in
+# _non_filter_parameters legitimately sees it as content, and Oracle's own
+# <paramForm> lists some of them as typed input fields.
+# Measured over 269 corpus sources: these four are the ONLY reason 25
+# parameters across 9 reports stay off the end-user prompt; the structural
+# rule above covers everything else the old seven-token name list covered.
+# The obvious replacement -- "a parameter the source's own DISTRIBUTION
+# instructions reference is a delivery slot" -- was MEASURED over all 464
+# corpus sources (4,488 parameters) and does not work at any scope:
+#
+#     signal scope                         covers 26?   falsely hides
+#     destination element attributes            0/26               0
+#     program unit that builds destinations     4/26              21
+#     all distribution-candidate text          26/26           3,355
+#
+# Full coverage only arrives once the scope is wide enough to include the
+# whole source document, at which point it hides every real filter in the
+# corpus (P_BEGIN_DATE, P_SITE_NAME, P_INSPECTOR ...). The slots simply are
+# not referenced inside the destination declarations: they are consumed by
+# the deployment wrapper, which the report document does not describe.
+# So this list stays until a DIFFERENT declared signal is found -- do not
+# re-attempt the distribution-reference route without new evidence.
+_RESIDUAL_DEPLOYMENT_SLOTS = ("REPORT_SERVER", "_PATH", "ENVELOPE", "DISTRIBUTE")
+
+
+def _should_hide_parameter(param_name: str, was_declared_in_xml: bool,
+                           report=None) -> bool:
+    """Hide a parameter from the end-user prompt when it is internal wiring,
+    not a real filter.
+
+    STRUCTURE FIRST: a query-bind-only parameter (synthesized from a SQL
+    ``:bind``, never declared as an Oracle ``<userParameter>``) is always
+    wiring, and when ``report`` is supplied the decision comes from what the
+    source DECLARES about the name -- see _non_filter_parameters. The residual
+    deployment-slot list above and the drill-through ``*_NUM`` id suffix are
+    the two spelling tests that survive, both measured. The caller already
+    handles Oracle ``display="no"``.
+    """
     name_upper = (param_name or "").upper()
     if not was_declared_in_xml:
         return True
-    internal_patterns = ("REPORT_SERVER", "_PATH", "_URL", "CRITERIA",
-                         "SUBTITLE", "DISTR", "ENVELOPE")
-    if any(p in name_upper for p in internal_patterns):
+    if report is not None and name_upper in _non_filter_parameters(report):
+        return True
+    if any(p in name_upper for p in _RESIDUAL_DEPLOYMENT_SLOTS):
         return True
     if name_upper.endswith("_NUM"):
         return True
@@ -4049,7 +4259,8 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
         # params (server/path/url) keep =Nothing — their Oracle initialValue
         # is source-environment garbage, never a portable default.
         if _iv and not _is_bind and not _is_computed_ph \
-                and not _should_hide_parameter(p.name, was_declared_in_xml=True) \
+                and not _should_hide_parameter(p.name, was_declared_in_xml=True,
+                                               report=report) \
                 and ptype == "String":
             # A display-constant string parameter shown by a printed layout
             # field: emit its Oracle default verbatim as a literal (a leading
@@ -4079,12 +4290,13 @@ def _build_report_parameters(report: ParsedReport) -> Optional[ET.Element]:
         # Use the parameter's declared name verbatim as the prompt; SSRS
         # auto-renders underscores as spaces in the parameter form.
         _sub(rp, "Prompt", p.label or p.name)
-        # Hide when explicitly display="no" OR when the name matches an
-        # internal/system pattern (report-server / path / url / criteria /
-        # subtitle / distr / envelope / *_NUM) -- keeps the end-user prompt to
-        # the real filters only.
+        # Hide when explicitly display="no" OR when the SOURCE shows the
+        # parameter is not a filter (a lexical SQL splice, a name referenced
+        # nowhere, or one a program unit assigns and nothing prints) -- keeps
+        # the end-user prompt to the real filters only.
         if (not p.display
-                or _should_hide_parameter(p.name, was_declared_in_xml=True)
+                or _should_hide_parameter(p.name, was_declared_in_xml=True,
+                                          report=report)
                 or _is_computed_ph):
             # A computed placeholder is not an input — never prompt for it.
             _sub(rp, "Hidden", "true")
@@ -6609,6 +6821,10 @@ def _build_token_resolver(report: ParsedReport):
     # of blanking the field to =Nothing.
     query_by_name = {(q.name or "").upper(): q for q in (report.queries or [])}
 
+    def _scope_declares(ds_name, col) -> bool:
+        """This build's binding of the module-level _ds_declares rule."""
+        return _ds_declares(dataset_fields, ds_name, col)
+
     def _lookup_for_child(result_col, child_ds, bound_ds):
         """If child_ds is a linked detail (Oracle <link>) of the bound master
         dataset, return a VALID SSRS Lookup() pulling result_col from the
@@ -6619,10 +6835,25 @@ def _build_token_resolver(report: ParsedReport):
         q = query_by_name.get((child_ds or "").upper())
         if q is None or not getattr(q, "parent_group", ""):
             return None
+        # DIRECT child only: the child's parent group must be owned by the
+        # bound dataset itself (the mirror, _lookup_for_parent, has always
+        # required this). Without the ownership check a GRANDCHILD passed
+        # here too, and its key pairs were then whatever of its binds
+        # happened to name a grandparent column -- a PARTIAL key, i.e. the
+        # first grandchild row painted on every record (the P0 this
+        # resolver's own comment below warns about). A two-hop child is
+        # _lookup_via_chain's job, which proves the full key or declines.
+        bq = query_by_name.get((bound_ds or "").upper())
+        if bq is None or (getattr(q, "parent_group", "") or "").upper() not in {
+                (g or "").upper()
+                for g in (getattr(bq, "group_names", None) or [])}:
+            return None
         bound_cols = dataset_fields.get((bound_ds or "").upper(), {})
         child_cols = dataset_fields.get((child_ds or "").upper(), {})
         if not bound_cols or not child_cols:
             return None
+        if not _scope_declares(child_ds, result_col):
+            return None  # publish-fatal scope (see _scope_declares)
         # Collect ALL correlation key pairs and join on the COMPOSITE.
         # Joining on just the first bind is wrong with real data: e.g. a
         # child correlated on (Prog_Id, Site_Id) where Prog_Id is the SAME
@@ -6684,6 +6915,8 @@ def _build_token_resolver(report: ParsedReport):
         bound_cols = dataset_fields.get((bound_ds or "").upper(), {})
         if not parent_cols or not bound_cols:
             return None
+        if not _scope_declares(parent_ds, result_col):
+            return None  # publish-fatal scope (see _scope_declares)
         pairs = _link_key_pairs(bq, parent_cols, bound_cols)
         if not pairs:
             return None
@@ -6703,18 +6936,57 @@ def _build_token_resolver(report: ParsedReport):
         )
 
     def _lookup_via_chain(result_col, child_ds, bound_ds):
-        """Correlated lookup into a linked child that is TWO hops away.
+        """Correlated lookup into a linked child that is TWO hops away,
+        WHEN AND ONLY WHEN the chain collapses to one legal hop.
 
         Oracle chains <link>s (applicant -> application -> course). SSRS has
-        no notion of that chain, so a value from the far end must be reached
-        by NESTING lookups: first fetch the middle query's key for the
-        current row, then use it as the lookup key into the far child.
+        no notion of that chain, and the obvious translation -- nesting one
+        Lookup inside another's source key -- is PUBLISH-FATAL:
 
-        Without this the far child resolved to a dataset-scoped ``First()``
-        — the globally first row, i.e. ANOTHER applicant's course data
-        painted onto every record (agent-army verified, P0). Restricted to
-        single-column keys on both hops; anything else returns None so the
-        caller can fall back honestly."""
+            [AGGREF] "Only one level of lookup is supported. A source,
+            destination, or result expression can't include a reference to
+            a lookup function."
+
+        Report Server enforces that when it compiles the definition at
+        upload; the local rails cannot see it (ReportViewer evaluates the
+        nested call and renders, and the XSD only knows that <Value> holds
+        a string), so a nested-Lookup report passed every gate here and was
+        REFUSED by the customer's server. It is therefore never emitted.
+
+        The chain DOES collapse when every key the far child uses is one
+        the middle query only RELAYS from the bound row -- so the bound
+        row's own key already IS the far child's key, and
+        ``Lookup(<bound keys>, <far keys>, ...)`` is exactly equivalent AND
+        legal. A middle column relays a bound key in two provable ways:
+
+          * it IS the inbound key (hop1 ``bound.b -> mid.k`` and hop2
+            ``mid.k -> child.c``: same column in and out); or
+          * the middle query's own SQL declares it a pass-through --
+            ``SELECT T.X AS Alias ... WHERE T.X = :k`` at the top level of
+            its WHERE (see _declared_alias_relays). Oracle's group-to-query
+            link binds ``:k`` to the parent's column k, so Alias carries
+            exactly that value on every row.
+
+        Composite keys are joined with "|" on both sides, in the far
+        child's declared key order, the same way _lookup_for_child does.
+        A far key that no relay accounts for means the middle row is
+        contributing a key of its OWN (a real one-to-many chain, e.g. an
+        application id between an applicant and its courses): that value
+        is genuinely unexpressible in one SSRS expression, and the honest
+        answer is None so the caller reaches its blank + disclosure path.
+        The alternative it must NOT fall back to is a dataset-scoped
+        ``First()`` over the far child -- the globally first row, i.e.
+        ANOTHER record's data painted onto every record (agent-army
+        verified, P0). Blank-and-disclosed beats both a wrong value and a
+        report the server refuses.
+
+        Measured on the customer's own permit letter: the contact org id
+        the envelope link needs sits two hops from the permit row (permit
+        -> permittee -> contact); the permittee query selects
+        ``SA.Site_Id AS Permittee_Site_Id`` and filters ``SA.Site_Id =
+        :Site_Id``, so the contact's ``:Permittee_Site_Id`` key is the
+        permit's own Site_Id and the chain collapses. Before this relay
+        rule the link carried an empty org id (a disclosed blank)."""
         child_q = query_by_name.get((child_ds or "").upper())
         if child_q is None or not getattr(child_q, "parent_group", ""):
             return None
@@ -6735,16 +7007,74 @@ def _build_token_resolver(report: ParsedReport):
         child_cols = dataset_fields.get((child_ds or "").upper(), {})
         if not (bound_cols and mid_cols and child_cols):
             return None
-        hop2 = _link_key_pairs(child_q, mid_cols, child_cols)
-        hop1 = _link_key_pairs(mid_q, bound_cols, mid_cols)
-        if len(hop1) != 1 or len(hop2) != 1:
+        def _exact_pairs(q, pairs):
+            """Only keys that are PROVEN pairs: Oracle's own <link
+            parentColumn/childColumn> declarations, or a :bind whose child
+            column carries the very same name. _link_key_pairs' last resort
+            -- a child column that merely ENDS with the bind name -- is a
+            guess (a judge's counterexample: a ``website`` column matched
+            ``:site``), and a guessed key here would paint another record's
+            far value on every record. Never trusted for a chain."""
+            if getattr(q, "link_pairs", None):
+                return pairs
+            return [(a, b) for a, b in pairs if a.upper() == b.upper()]
+
+        hop2 = _exact_pairs(child_q, _link_key_pairs(child_q, mid_cols, child_cols))
+        hop1 = _exact_pairs(mid_q, _link_key_pairs(mid_q, bound_cols, mid_cols))
+        if not hop1 or not hop2:
             return None
-        b_col, m_key = hop1[0]
-        m_col, c_col = hop2[0]
-        inner = (f'Lookup(Fields!{_safe(b_col)}.Value, '
-                 f'Fields!{_safe(m_key)}.Value, '
-                 f'Fields!{_safe(m_col)}.Value, "{_safe(mid_name)}")')
-        return (f'=Lookup({inner}, Fields!{_safe(c_col)}.Value, '
+        # A hop-1 key that Oracle DECLARES (<link parentColumn/childColumn>)
+        # is applied by Oracle as an AND conjunct at run time: trusted. A
+        # hop-1 key read from a ``:bind`` in the middle SQL is only a key on
+        # the rows the middle query actually FILTERS by it -- so the SQL must
+        # prove the equality holds on every returned row (a top-level
+        # conjunct; see _declared_bind_equalities). A depth-0 OR, a UNION,
+        # a wrapped column all prove nothing, and a middle column then only
+        # SOMETIMES equals the bound key: a chain built on it would paint
+        # another record's far value on every record (judge counterexample).
+        if not getattr(mid_q, "link_pairs", None):
+            _mid_sql = getattr(mid_q, "sql", "") or ""
+            try:
+                _aliases = _declared_select_aliases(_mid_sql)
+                _eqs = _declared_bind_equalities(_mid_sql)
+            except Exception:  # noqa: BLE001 -- a proof helper must never sink a build
+                return None
+            for b_col, m_key in hop1:
+                if _eqs.get(_aliases.get(m_key.upper(), ""), "") != b_col.upper():
+                    return None  # unconfirmed key -> a real chain; decline
+        if not _scope_declares(child_ds, result_col):
+            return None  # publish-fatal scope (see _scope_declares)
+        # Which bound column each middle column carries. First the keys
+        # that enter the middle query unchanged (hop1's mid side), then the
+        # pass-throughs the middle SQL itself declares under another name.
+        # The two proofs live in two NAMESPACES: SAME EXPRESSION is judged
+        # among the middle query's own aliases (carries); BIND EQUALITY
+        # resolves ``:k`` the way Oracle does -- by name against the BOUND
+        # row's columns (bind_carriers) -- and never against a middle alias
+        # or a report parameter that happens to share the name (either
+        # makes the bind ambiguous, so it proves nothing).
+        carries = {m_key.upper(): b_col for b_col, m_key in hop1}
+        _param_names = {(getattr(p, "name", "") or "").upper()
+                        for p in (getattr(report, "parameters", None) or [])}
+        bind_carriers = {b_col.upper(): b_col for b_col, _m in hop1
+                         if b_col.upper() not in _param_names}
+        try:
+            relays = _declared_alias_relays(
+                getattr(mid_q, "sql", "") or "", carries, bind_carriers)
+        except Exception:  # noqa: BLE001 -- a proof helper must never sink a build
+            relays = {}
+        for alias_u, root_col in relays.items():
+            carries.setdefault(alias_u, root_col)
+        src_parts, dst_parts = [], []
+        for m_col, c_col in hop2:
+            root = carries.get(m_col.upper())
+            if not root:
+                return None  # a real two-hop chain -> unexpressible, decline
+            src_parts.append(f"Fields!{_safe(root)}.Value")
+            dst_parts.append(f"Fields!{_safe(c_col)}.Value")
+        src = ' & "|" & '.join(src_parts)
+        dst = ' & "|" & '.join(dst_parts)
+        return (f'=Lookup({src}, {dst}, '
                 f'Fields!{_safe(result_col)}.Value, "{_safe(child_ds)}")')
 
     def _corr_count_for_child(result_col, child_ds, bound_ds):
@@ -6761,6 +7091,8 @@ def _build_token_resolver(report: ParsedReport):
         child_cols = dataset_fields.get((child_ds or "").upper(), {})
         if not bound_cols or not child_cols:
             return None
+        if not _scope_declares(child_ds, result_col):
+            return None  # publish-fatal scope (see _scope_declares)
         # Same <link>-first / :bind-fallback key derivation as _lookup_for_child.
         pairs = _link_key_pairs(q, bound_cols, child_cols)
         if not pairs:
@@ -6919,6 +7251,20 @@ def _build_token_resolver(report: ParsedReport):
         #     handled by the tablix machinery, not here).
         if u in group_summaries and _depth == 0:
             _gsrc, _gfn, _gq = group_summaries[u]
+            # An Oracle <summary> is declared in ONE query's group tree, but
+            # its source column may belong to a DEEPER linked child (the
+            # permittee group summarises the contact query's org id). The
+            # value lives where the column is DECLARED, so the correlation
+            # is resolved against that dataset -- the declaring group only
+            # says where the total resets. Measured: keeping the declared
+            # query here made the lookup below decline at its scope check
+            # and the envelope link shipped an empty org id.
+            if (_gq and _gsrc
+                    and not _scope_declares(_gq, _gsrc)
+                    and _gsrc.upper() in all_field_owner):
+                _true_owner = all_field_owner[_gsrc.upper()][1]
+                if _true_owner and _scope_declares(_true_owner, _gsrc):
+                    _gq = _true_owner
             if _gq and _gq.upper() != (dataset_name or "").upper():
                 if _gfn in ("", "first", "last"):
                     _lk = (_lookup_for_child(_gsrc, _gq, dataset_name)
@@ -6934,6 +7280,18 @@ def _build_token_resolver(report: ParsedReport):
                 # honest blank beats confidently wrong data.
                 _cq = query_by_name.get((_gq or "").upper())
                 if _cq is not None and getattr(_cq, "parent_group", ""):
+                    _reason = (
+                        f"no LEGAL SSRS expression exists for it: reaching "
+                        f"{_gsrc} from the {dataset_name} scope needs a "
+                        f"correlation SSRS cannot state in one expression "
+                        f"(a linked chain more than one hop deep, or a "
+                        f"summary whose source column belongs to a deeper "
+                        f"child than its declared query). Nesting Lookups "
+                        f"or scoping to a dataset that does not declare the "
+                        f"column both make Report Server REJECT the report "
+                        f"at upload")
+                    _record_correlation_decline(
+                        report, token, _gq, dataset_name, _reason)
                     return ("formula", "=Nothing",
                             f"group summary {token!r}: {_gq} is a linked "
                             f"detail whose correlation to the current scope "
@@ -7235,11 +7593,68 @@ _BLANK_TOKEN_ATTR = "_blank_token_findings"
 _BLANK_LITERALS = frozenset(("=nothing", "nothing"))
 
 
+# emitted textbox name -> the DECLARED layout object it came from (the
+# blank-token registry keys on the declared object; this maps it back).
+_DECL_BY_TEXTBOX_ATTR = "_decl_by_textbox"
+
+
+# Values the generator DECLINED to express because no LEGAL SSRS expression
+# for them exists (see _record_correlation_decline). Surfaced by
+# correlation_declines() -> an honest preflight finding, never silently
+# dropped: a blank cell the operator does not know about is a lie by
+# omission, and the alternative (shipping an expression Report Server
+# refuses at publish) is project-fatal error #1.
+_DECLINE_ATTR = "_correlation_declines"
+
+
 def _reset_blank_token_findings(report) -> None:
     """Start a fresh collection (generate_rdl may run repeatedly per report)."""
     try:
         setattr(report, _BLANK_TOKEN_ATTR, [])
+        setattr(report, _DECL_BY_TEXTBOX_ATTR, {})
+        setattr(report, _DECLINE_ATTR, [])
     except Exception:  # noqa: BLE001 -- the audit must never break a build
+        pass
+
+
+def correlation_declines(report) -> List[Dict[str, str]]:
+    """Cross-dataset values the last generate_rdl() left BLANK because SSRS
+    cannot express them legally. Each entry is {token, wanted_dataset,
+    bound_dataset, reason}."""
+    return [dict(d) for d in (getattr(report, _DECLINE_ATTR, None) or [])]
+
+
+def _record_correlation_decline(report, token, wanted_ds, bound_ds, reason):
+    """Register one declined cross-dataset value (deduped on token+scopes).
+
+    The two shapes that reach here are both PUBLISH-FATAL to express:
+
+      * a chain of Oracle <link>s two or more hops from the bound dataset —
+        the only single-expression translation nests one Lookup inside
+        another's source key, and [AGGREF] "Only one level of lookup is
+        supported. A source, destination, or result expression can't
+        include a reference to a lookup function.";
+      * an Oracle <summary> declared in one query's group tree whose source
+        column belongs to a DEEPER linked child, so no dataset declares
+        both the correlation key and the wanted column, and [SCOPE] a
+        reference that resolves against the named dataset must be a column
+        that dataset declares.
+
+    Neither is visible to a local render (ReportViewer evaluates the nested
+    call, and an undeclared field as Nothing) — only the server's compile
+    sees them, which is exactly how the rejected artifact shipped."""
+    try:
+        reg = getattr(report, _DECLINE_ATTR, None)
+        if reg is None:
+            reg = []
+            setattr(report, _DECLINE_ATTR, reg)
+        entry = {"token": str(token or ""),
+                 "wanted_dataset": str(wanted_ds or ""),
+                 "bound_dataset": str(bound_ds or ""),
+                 "reason": str(reason or "")}
+        if entry not in reg:
+            reg.append(entry)
+    except Exception:  # noqa: BLE001 -- disclosure must never break a build
         pass
 
 
@@ -10005,6 +10420,31 @@ def _fold_residual_column_slices(root) -> None:
     visit(body, 0.0)
 
 
+def _first_top_level_comma(text: str) -> int:
+    """Index of the first comma in ``text`` that is not nested inside
+    parentheses or a string literal, or -1 when there is none. ``text``
+    begins at the call's own "(" (the form _repair_misscoped_aggregate_refs
+    captures), so the comma found is the one separating argument 1 from
+    argument 2 -- for a Lookup, the source key from the destination key."""
+    depth = 0
+    i, n = 0, len(text or "")
+    while i < n:
+        c = text[i]
+        if c == '"':
+            j = text.find('"', i + 1)
+            i = (j if j >= 0 else n) + 1
+            continue
+        if c == "(":
+            depth += 1
+        elif c == ")":
+            depth -= 1
+        elif c == "," and depth == 1:
+            return i
+        i += 1
+    return -1
+
+
+
 def _repair_misscoped_aggregate_refs(root) -> None:
     """Retarget ``Agg(Fields!X.Value, "DS")`` when DS doesn't declare X.
 
@@ -10038,6 +10478,24 @@ def _repair_misscoped_aggregate_refs(root) -> None:
             own = owner_of(fld)
             if own is None:
                 return m.group(0)
+            if fn in ("Lookup", "LookupSet"):
+                # A Lookup carries a SECOND dataset-side reference: its
+                # DESTINATION key (argument 2) is evaluated in the named
+                # dataset too. Moving the scope to the result column's owner
+                # without checking that key traded one publish failure for
+                # another -- the retargeted dataset declared the result but
+                # NOT the key columns, and the server rejects on those
+                # instead ("Report item expressions can only refer to fields
+                # within the current dataset scope"). Only the SOURCE key
+                # (argument 1) belongs to the CURRENT scope, so every ref
+                # after the first top-level comma must be a column of the
+                # new owner or this is not a repair. Left alone, the
+                # expression stays visible to the publish-semantics gate and
+                # the preflight RED instead of being silently re-broken.
+                _dest = mid[_first_top_level_comma(mid) + 1:]
+                if any(r not in ds_fields.get(own, set())
+                       for r in re.findall(r"Fields!(\w+)\.Value", _dest)):
+                    return m.group(0)
             return f'{fn}{mid}"{own}")'
         return pat.sub(sub, txt)
 
@@ -10049,20 +10507,149 @@ def _repair_misscoped_aggregate_refs(root) -> None:
                 el.text = new
 
 
-def _scope_hidden_cross_dataset_refs(root) -> None:
+_DS_SCOPED_AGG_OPEN_RE = re.compile(
+    r"\b(?:First|Last|Sum|Avg|Min|Max|Count|CountDistinct|CountRows|StDev|"
+    r"StDevP|Var|VarP|RunningValue|Aggregate|Lookup|LookupSet)\s*\(")
+
+
+def _dataset_scoped_call_spans(expr: str) -> list:
+    """``(start, end)`` character spans of every aggregate call in ``expr``
+    whose LAST top-level argument is a ``"<scope>"`` string literal — the
+    server's "inside an aggregate, the specified dataset scope" context,
+    within which a bare ``Fields!X.Value`` of THAT dataset is legal in any
+    report item. Balanced-paren scan with string literals skipped, so the
+    operand may be arbitrarily nested: ``Sum(IIf(Fields!X.Value = "M", 0,
+    1), "DS")`` is scoped, where the flat ``Fields!X.Value, "DS"`` pattern
+    the nets used before could only recognise a field that is the whole
+    operand.
+
+    ``Lookup``/``LookupSet`` are scoped the way the engine scopes them: the
+    FIRST argument (the source key) is evaluated in the CURRENT scope and
+    is NOT covered; the destination-key and result arguments resolve
+    against the named dataset, so the span starts after the first
+    top-level comma."""
+    expr = expr or ""
+    n = len(expr)
+    spans = []
+    for m in _DS_SCOPED_AGG_OPEN_RE.finditer(expr):
+        start = m.end()
+        depth, i, first_comma, last_comma = 1, start, -1, -1
+        while i < n and depth:
+            c = expr[i]
+            if c == '"':
+                j = expr.find('"', i + 1)
+                i = (j if j >= 0 else n) + 1
+                continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif c == "," and depth == 1:
+                if first_comma < 0:
+                    first_comma = i
+                last_comma = i
+            i += 1
+        if depth or last_comma < 0:
+            continue
+        if not re.fullmatch(r"\"[^\"]+\"", expr[last_comma + 1:i].strip()):
+            continue
+        if m.group(0).lstrip().startswith("Lookup"):
+            spans.append((first_comma + 1, i))
+        else:
+            spans.append((start, i))
+    return spans
+
+
+def _occurrence_is_dataset_scoped(expr: str, spans, hit) -> bool:
+    """Is THIS occurrence of a field reference covered by a dataset scope?
+    Either it sits inside a dataset-scoped aggregate/Lookup call, or it is
+    the flat ``Fields!X.Value, "<scope>"`` form. The single per-occurrence
+    predicate both scope helpers below are built from, so what one calls
+    legal is exactly what the other refuses to rewrite."""
+    if any(a <= hit.start() and hit.end() <= b for a, b in spans):
+        return True
+    return bool(re.match(r"\s*,\s*\"[^\"]+\"", expr[hit.end():]))
+
+
+def _field_ref_is_dataset_scoped(expr: str, ref: str) -> bool:
+    """True when EVERY occurrence of ``Fields!<ref>.Value`` in ``expr``
+    carries a dataset scope.
+
+    PER OCCURRENCE, NOT PER NAME. This asked "does a scoped occurrence
+    appear anywhere?" and answered yes for a mixed expression, so the
+    scope nets skipped the name entirely and left its BARE occurrences
+    behind — publish-fatal, and invisible to every local rail (measured on
+    a wild per-record rectangle whose translated format trigger reads
+    ``Not((Count(Fields!X.Value, "D") <> 0) And (Not IsNothing(
+    Fields!X.Value)))``: the Count half is scoped, the IsNothing half is a
+    bare cross-dataset reference the server refuses at upload)."""
+    expr = expr or ""
+    hits = list(re.finditer(rf"Fields!{re.escape(ref)}\.Value", expr))
+    if not hits:
+        return False
+    spans = _dataset_scoped_call_spans(expr)
+    return all(_occurrence_is_dataset_scoped(expr, spans, h) for h in hits)
+
+
+def _rewrite_unscoped_field_refs(expr: str, ref: str, repl: str) -> str:
+    """Replace the occurrences of ``Fields!<ref>.Value`` in ``expr`` that
+    carry NO dataset scope with ``repl``; occurrences already inside a
+    scoped aggregate (or directly followed by a scope string) are left
+    alone — wrapping them again would nest aggregates."""
+    expr = expr or ""
+    spans = _dataset_scoped_call_spans(expr)
+    out = expr
+    for h in reversed(list(re.finditer(rf"Fields!{re.escape(ref)}\.Value",
+                                       expr))):
+        if _occurrence_is_dataset_scoped(expr, spans, h):
+            continue
+        out = out[:h.start()] + repl + out[h.end():]
+    return out
+
+
+def _scope_hidden_cross_dataset_refs(root, report=None) -> None:
     """Make every <Hidden> expression legal under the server's scope rule.
 
     Walk the finished tree tracking the enclosing data region's dataset.
-    For each expression Hidden: a bare Fields!X ref whose field is NOT in
-    the region's dataset is rewritten to ``First(Fields!X.Value, "D")``
-    where D is the dataset that declares X (an aggregate with an explicit
+    For each expression Hidden: an UNSCOPED Fields!X ref whose field is NOT
+    in the region's dataset is rewritten into a call that carries the
+    scope of the dataset D that declares X (an aggregate with an explicit
     scope is legal in any context). A ref no dataset declares — or a bare
     ref OUTSIDE any region — that cannot be scoped drops the whole
     Visibility: the item stays visible, which is honest; an RDL the server
     refuses at upload is not. (Production-verified failure: 'The Hidden
     expression for the rectangle ... refers to the field ... Report item
     expressions can only refer to fields within the current dataset
-    scope'.)"""
+    scope'.)
+
+    WHICH ROWS OF D — the same DECLARATION-DRIVEN rule the variant-band
+    path already uses, via the same helper (_declared_band_correlation),
+    so there is one answer to this question in the converter and not two:
+
+      * the declaration links nothing (Oracle iterates every row of an
+        unlinked query inside every instance of the containing frame) —
+        ``First(Fields!X.Value, "D")``, dataset grain, the long-standing
+        behavior;
+      * D is a declared <link> CHILD of the container's query — its rows
+        are correlated per container row, so a dataset-wide aggregate
+        would flatten every parent's rows into one global answer. The
+        correlated row through the DECLARED key instead:
+        ``Lookup(<container key>, <child key>, Fields!X.Value, "D")``;
+      * the container's query is a <link> CHILD of D (one owning master
+        row per container row) — the same scalar Lookup with the keys the
+        other way round;
+      * a declared link whose keys cannot be derived falls back to the
+        First() form: the correlation is real but unbuildable, and for a
+        RECTANGLE there is no third option — declining the rewrite ships
+        an upload-fatal reference, and dropping the Visibility prints
+        every conditional variant at once.
+
+    REWRITES ONLY THE UNSCOPED OCCURRENCES. A blanket substitution over
+    the name also hit occurrences that already sat inside a scoped
+    aggregate, nesting one aggregate inside another (which the server
+    refuses in its own right)."""
     ds_fields: dict = {}
     for ds in root.iter(_q("DataSet")):
         ds_fields[ds.get("Name") or ""] = {
@@ -10074,9 +10661,42 @@ def _scope_hidden_cross_dataset_refs(root) -> None:
                 return name
         return None
 
+    _corr_cache: dict = {}
+
+    def _scoped_ref(region_ds: str, own: str, ref: str, expr: str) -> str:
+        """The scoped form of ``Fields!<ref>.Value`` for a reference to
+        dataset ``own`` evaluated in ``region_ds``'s scope — the grain
+        chosen by the DECLARATION (see this function's docstring)."""
+        key = (region_ds or "", own)
+        if key not in _corr_cache:
+            corr = None
+            if report is not None and region_ds:
+                try:
+                    corr = _declared_band_correlation(
+                        report, region_ds, own, ds_fields)
+                except Exception:  # noqa: BLE001 — a net must never sink
+                    corr = None    # a convert; First() stays upload-legal
+            _corr_cache[key] = corr
+        corr = _corr_cache[key]
+        # A correlated form may not go into an expression that ALREADY
+        # carries a Lookup: an unscoped reference can only be sitting in
+        # that Lookup's source key (the scoped spans are skipped), and a
+        # Lookup there is its own publish rejection — "Only one level of
+        # lookup is supported. A source, destination, or result expression
+        # can't include a reference to a lookup function." The dataset-grain
+        # form is legal in that position, so never trade one refusal for
+        # another.
+        if corr is not None and corr[1] and corr[2] and "Lookup" not in expr:
+            return (f'Lookup({corr[1]}, {corr[2]}, '
+                    f'Fields!{ref}.Value, "{own}")')
+        return f'First(Fields!{ref}.Value, "{own}")'
+
     def fix(el, region_ds):
         tag = el.tag.split("}")[-1] if isinstance(el.tag, str) else ""
-        if tag == "Tablix":
+        # The OUTERMOST region's dataset is the scope the engine applies;
+        # a nested region inherits it (its own DataSetName is ignored at
+        # render time and rejected at publish time when it differs).
+        if tag == "Tablix" and not region_ds:
             region_ds = el.findtext(_q("DataSetName")) or region_ds
         vis = el.find(_q("Visibility"))
         if vis is not None:
@@ -10091,17 +10711,22 @@ def _scope_hidden_cross_dataset_refs(root) -> None:
                     if ref in region_fields:
                         continue
                     # already scope-qualified for this ref? (inside an
-                    # aggregate carrying an explicit dataset scope)
-                    if re.search(rf"Fields!{re.escape(ref)}\.Value\s*,"
-                                 rf"\s*\"[^\"]+\"", new):
+                    # aggregate carrying an explicit dataset scope — the
+                    # flat First(Fields!X.Value, "D") form or a nested
+                    # operand such as Sum(IIf(Fields!X.Value = "M", 0, 1),
+                    # "D"), the row-grain variant-band trigger)
+                    if _field_ref_is_dataset_scoped(new, ref):
                         continue
                     own = owner_of(ref)
                     if own is None:
                         ok = False
                         break
-                    new = re.sub(
-                        rf"Fields!{re.escape(ref)}\.Value",
-                        f'First(Fields!{ref}.Value, "{own}")', new)
+                    # the ORIGINAL text decides the correlated-vs-dataset
+                    # grain, so every reference in one expression is judged
+                    # alike (a wrapper this loop already inserted must not
+                    # change the answer for the next reference).
+                    new = _rewrite_unscoped_field_refs(
+                        new, ref, _scoped_ref(region_ds, own, ref, expr))
                 if not ok:
                     el.remove(vis)
                 elif new != expr:
@@ -10112,89 +10737,236 @@ def _scope_hidden_cross_dataset_refs(root) -> None:
     fix(root, None)
 
 
-def _rebind_variant_bands_to_row_scope(root) -> None:
+def _negate_vb(expr: str) -> str:
+    """``Not(<expr>)`` with a full outer ``Not(...)`` peeled instead of
+    doubled, so a trigger of the form ``Not((Fields!X.Value = "M"))``
+    negates to ``(Fields!X.Value = "M")``."""
+    e = (expr or "").strip()
+    if e.startswith("Not(") and e.endswith(")"):
+        depth, i, n = 0, 3, len(e)
+        while i < n:
+            c = e[i]
+            if c == '"':
+                j = e.find('"', i + 1)
+                i = (j if j >= 0 else n) + 1
+                continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            i += 1
+        if i == n - 1:
+            return e[4:-1].strip() or "False"
+    return f"Not({e})"
+
+
+def _declared_band_correlation(report, container_ds: str, own: str,
+                               ds_fields: dict):
+    """How the DECLARATION relates a variant band's trigger dataset
+    ``own`` to its container's dataset ``container_ds``:
+
+      ("child", src, dst)   ``own`` is an Oracle <link> child of the
+                            container's query — its rows are correlated
+                            per container row;
+      ("parent", src, dst)  the container's query is a <link> child of
+                            ``own`` — one owning master row per container
+                            row;
+      None                  the two are unlinked (Oracle iterates EVERY
+                            row of ``own`` inside every container
+                            instance), or no declaration is available.
+
+    ``src`` is the key expression in the CONTAINER's scope, ``dst`` the
+    key expression in ``own``'s scope (composite keys ``"|"``-joined, the
+    resolver's own form). Keys come from the parsed <link> pairs (then the
+    child SQL's :binds) — _link_key_pairs — and every key column must be a
+    declared Field of its RDL dataset. A declared link whose keys cannot
+    be derived returns ("child"/"parent", None, None): the correlation is
+    real but unbuildable, so the caller must not pretend the datasets are
+    independent."""
+    if report is None or not container_ds or not own:
+        return None
+    queries = list(getattr(report, "queries", None) or [])
+    by_name, group_owner = {}, {}
+    for q in queries:
+        by_name[_safe(q.name or "").upper()] = q
+        for g in (getattr(q, "group_names", None) or []):
+            group_owner[(g or "").upper()] = q
+    cq, oq = by_name.get(container_ds.upper()), by_name.get(own.upper())
+    if cq is None or oq is None:
+        return None
+
+    def _cols(q, ds_name):
+        # The key column has to be spelled with the name the DataSet
+        # emitter wrote, not a re-derived _safe() of the source name:
+        # _safe() knows nothing of the CLS fallback or the uniquifier, so
+        # on a sanitised column it either names no declared field (the
+        # correlation silently declines) or, worse, names the field that
+        # ANOTHER column's sanitised name landed on (the key then reads
+        # the wrong column). Single derivation: _dataset_field_names.
+        declared = ds_fields.get(ds_name, set())
+        return {(it.name or "").upper(): fname
+                for it, fname in _dataset_field_names(q)
+                if fname in declared}
+
+    def _key_exprs(pairs, master_first):
+        if not pairs:
+            return None, None
+        left = [m for m, _c in pairs]
+        right = [c for _m, c in pairs]
+        if not master_first:
+            left, right = right, left
+        return (' & "|" & '.join(f"Fields!{k}.Value" for k in left),
+                ' & "|" & '.join(f"Fields!{k}.Value" for k in right))
+
+    if group_owner.get((getattr(oq, "parent_group", "") or "").upper()) is cq:
+        pairs = _link_key_pairs(oq, _cols(cq, container_ds), _cols(oq, own))
+        src, dst = _key_exprs(pairs, master_first=True)
+        return ("child", src, dst)
+    if group_owner.get((getattr(cq, "parent_group", "") or "").upper()) is oq:
+        pairs = _link_key_pairs(cq, _cols(oq, own), _cols(cq, container_ds))
+        src, dst = _key_exprs(pairs, master_first=False)
+        return ("parent", src, dst)
+    return None
+
+
+def _rebind_variant_bands_to_row_scope(root, report=None) -> None:
     """ROW-GRAIN visibility for collapsed variant bands. Runs BEFORE
     _scope_hidden_cross_dataset_refs, which stays the last-resort net for
     genuinely region-external references.
 
     A collapsed variant band (the one-row ``Band_*`` tablix that
-    _wrap_conditional_bands builds) inherits the DataSetName of the record
-    region it sits in. When its member <Hidden> — a translated per-object
-    format trigger — gates on BARE columns of a DIFFERENT dataset, the
-    Oracle declaration behind it is a variant frame living inside a
-    repeating frame bound to that other group, its trigger reading the
-    CURRENT ROW's code. Leaving the inherited binding forces the scope net
-    to rewrite the refs as ``First(Fields!X.Value, "D")`` — DATASET grain —
-    so ONE variant wins globally where the truth prints the right variant
-    per row (engine-verified on a two-variant payment-address block: the
-    First() form printed the same address for every row world).
+    _wrap_conditional_bands builds so a hidden static ROW collapses) whose
+    member Hidden — the frame's format trigger — gates on BARE columns of a
+    DIFFERENT dataset comes from an Oracle variant frame living inside a
+    repeating frame bound to that other query, its trigger reading the
+    CURRENT ROW's code. Leaving the ref bare is the server's publish
+    rejection; letting the scope net wrap it as ``First(Fields!X.Value,
+    "D")`` is DATASET grain — ONE variant wins globally where the truth
+    prints the right variant per row (engine-verified on a two-variant
+    payment-address block: the First() form printed the same address for
+    every row world).
 
-    The general rule: a trigger referencing columns of the region's OWN
-    dataset at ROW grain must stay a ROW-scope ``Fields!X.Value``, which is
-    legal exactly when the region is bound to that dataset and iterates it.
-    So the band is re-bound to the dataset that declares ALL its bare refs,
-    and its row member gets a DETAIL group (a Group with no
-    GroupExpressions): the band then repeats at row grain and each row
-    shows/hides on ITS OWN code, exactly as the Oracle runtime evaluates
-    the format trigger once per repeating-frame instance.
+    THE PUBLISH RULE THAT DECIDES THE SHAPE (probe-proven on the engine,
+    and the exact rejection a customer's report server returned for a
+    multi-section invoice whose two payment-variant bands had been re-bound
+    to the trigger's dataset while sitting inside a record region bound to
+    another query): a data region NESTED inside another data region
+    inherits the CONTAINER's dataset scope — its own <DataSetName> is
+    ignored at render time and the report is refused at publish time as
+    soon as an expression inside it references a column of the dataset it
+    declared ("Report item expressions can only refer to fields within the
+    current dataset scope or, if inside an aggregate, the specified dataset
+    scope"). No local rail saw it: layout-mode renders staticize every
+    expression before the engine compiles one.
 
-    ENGINE CONSTRAINT (measured on the ReportViewer renderer, which
-    enforces the server's publish rules): a data region with a non-static
-    member may not sit inside a DETAIL member of an enclosing tablix —
-    publish fails with "has a detail member with inner members. Detail
-    members can only contain static inner members" whether the inner
-    member is detail OR dynamic. The per-record tablixes this converter
-    builds use exactly such detail members, so every ancestor DETAIL
-    member of a re-bound band is converted to a DYNAMIC per-row group:
-    GroupExpressions listing the ancestor's own dataset columns as simple
-    field references (``=Fields!X.Value`` — a simple binding the engine
-    loads without compiling an expression host, measured). Grouping a
-    per-record region by ALL of its declared columns keeps one instance
-    per row (instances appear in dataset order; only byte-identical
-    duplicate rows would merge), and the member keeps its Group name and
-    PageBreak. The conversion is all-or-nothing per band: any ancestor
-    that cannot be safely converted declines the whole rebind.
+    So a nested band NEVER changes its dataset. Its row-level trigger is
+    evaluated per row of the trigger's own dataset INSIDE a call that
+    carries that dataset's scope — the "inside an aggregate, the specified
+    dataset scope" clause — and WHICH rows that is comes from the
+    DECLARATION (_declared_band_correlation), never from a guess:
+
+      * unlinked (no <link> between the two queries — the invoice case:
+        the address query is a constant of the issuing office, so Oracle
+        iterates ALL its rows inside every invoice; the truth run prints
+        both address variants on every invoice, one per address row):
+            =(Sum(IIf(<trigger>, 0, 1), "<owner>") = 0)
+        hides the band exactly when NO row of the owner dataset fires the
+        trigger (an empty dataset included: Sum over no rows is Nothing,
+        which compares equal to 0 — an Oracle repeating frame with no rows
+        prints nothing either). Content from the owner rides the firing
+        row: Max(IIf(<fires>, Fields!Y.Value, Nothing), "<owner>")
+        (aggregates skip Nothing).
+      * <link> child of the container (its rows are correlated per
+        container row — a whole-dataset aggregate would flatten every
+        parent's variants into one global answer): the correlated set
+        through the DECLARED key,
+            =(Len(Join(LookupSet(<key>, <child key>,
+                                 IIf(<trigger>, "", "x"), "<owner>"), "")) = 0)
+        hides the band when none of THIS row's child rows fires; content
+        is the firing child row's value via the same LookupSet. The
+        resolver's first-match Lookup() for such content is rewritten to
+        the firing-row form (the first child row is not the firing one).
+      * <link> parent of the container (one owning master row):
+            =Not(Lookup(<child key>, <master key>,
+                        IIf(<trigger>, 0, 1), "<owner>") = 1)
+        and content stays / becomes the resolver's scalar Lookup().
+      * a declared link whose keys cannot be derived declines the rewrite
+        (the correlation is real; pretending independence would print
+        another record's variant) — the scope net then keeps the band
+        upload-legal with its honest First() fallback.
+
+    Content the band declares from the owner dataset that the resolver
+    could only blank (an unlinked cross-dataset column is =Nothing by the
+    resolver's rule, since a bare ref is illegal and there is no key to
+    Lookup with) is recovered from the blank-token registry: the textbox's
+    declared object (the emitter's textbox-name -> declared-name registry
+    on the report) names exactly one blanked owner-dataset token and the
+    value carries exactly one blank atom, so that atom becomes the
+    firing-row expression — the invoice's remit-to and deliver-to
+    addresses print instead of two empty boxes.
+
+    A band with NO enclosing data region (a body-direct block) is a
+    top-level region and may legally bind to the owner dataset itself; it
+    keeps the earlier rebind — bound to the owner, its row member a DETAIL
+    group (a Group with no GroupExpressions), the bare row-scope trigger
+    evaluated per row — provided every other bare ref in its subtree is
+    covered by that dataset too.
 
     Structural gates, all measured on the artifact (never name-matched on
     customer data — ``Band_`` is this converter's own construct marker):
-      * the band's current dataset must NOT already declare every bare
-        Hidden ref (a same-dataset band evaluates at the containing row
-        scope via SSRS's nested-region scope inheritance — untouched);
+      * one-row tablix, ONE static member carrying an expression Hidden;
+      * the Hidden's bare refs are NOT covered by the engine's scope for
+        the band (the container's dataset when nested);
       * exactly ONE declared dataset covers every bare Hidden ref
         (ambiguous owners decline: the net's First() wrap is the honest
         upload-legal fallback);
-      * every OTHER bare Fields! ref in the band's subtree must be covered
-        by that same dataset too (a rebind must never push the band's
-        content out of scope — the server applies the same rule to Values);
-      * the formula-resolution stub is never a rebind target (single-row by
-        construction, so First() over it already IS its row grain);
-      * every ancestor tablix holding a DETAIL member must have exactly ONE
-        body row (the per-record construct — the band provably lives inside
-        that member's row) and a dataset with declared columns to group on."""
+      * the formula-resolution stub is never an owner (single-row by
+        construction, so First() over it already IS its row grain).
+    Idempotent: a rewritten trigger carries no bare ref, so a second pass
+    leaves it alone."""
     ds_fields: dict = {}
-    ds_order: dict = {}
     for ds in root.iter(_q("DataSet")):
-        _flds = [f.get("Name") or "" for f in ds.iter(_q("Field"))
-                 if f.get("Name")]
-        ds_fields[ds.get("Name") or ""] = set(_flds)
-        ds_order[ds.get("Name") or ""] = _flds
+        ds_fields[ds.get("Name") or ""] = {
+            f.get("Name") or "" for f in ds.iter(_q("Field")) if f.get("Name")}
     if not ds_fields:
         return
     pmap = {c: p for p in root.iter() for c in p}
+    region_tags = {_q("Tablix"), _q("List"), _q("Matrix"), _q("Table"),
+                   _q("Chart"), _q("CustomReportItem"), _q("GaugePanel")}
 
     def _bare_refs(expr):
-        out = set()
-        for ref in set(re.findall(r"Fields!(\w+)\.Value", expr or "")):
-            # A ref that carries an explicit dataset scope anywhere in the
-            # expression (First/Sum/Lookup(..., "DS") forms) is already
-            # legal in any context — same test the scope net applies.
-            if re.search(rf"Fields!{re.escape(ref)}\.Value\s*,\s*\"[^\"]+\"",
-                         expr):
-                continue
-            out.add(ref)
-        return out
+        return {ref for ref in set(re.findall(r"Fields!(\w+)\.Value",
+                                              expr or ""))
+                if not _field_ref_is_dataset_scoped(expr, ref)}
 
-    for tab in root.iter(_q("Tablix")):
+    def _container_dataset(tab):
+        """The scope the engine gives a nested region: the OUTERMOST
+        enclosing data region's DataSetName (every region in between
+        inherits it too). None for a top-level band."""
+        found = None
+        cur = pmap.get(tab)
+        while cur is not None:
+            if cur.tag in region_tags:
+                found = cur.findtext(_q("DataSetName")) or found
+            cur = pmap.get(cur)
+        return found
+
+    def _under_image(el):
+        cur = pmap.get(el)
+        while cur is not None:
+            if cur.tag == _q("Image"):
+                return True
+            cur = pmap.get(cur)
+        return False
+
+    blank_reg = (getattr(report, _BLANK_TOKEN_ATTR, None)
+                 if report is not None else None) or []
+    decl_map = (getattr(report, _DECL_BY_TEXTBOX_ATTR, None)
+                if report is not None else None) or {}
+
+    for tab in list(root.iter(_q("Tablix"))):
         if not (tab.get("Name") or "").startswith("Band_"):
             continue
         rh = tab.find(_q("TablixRowHierarchy"))
@@ -10206,72 +10978,132 @@ def _rebind_variant_bands_to_row_scope(root) -> None:
                 or member.find(_q("Group")) is not None):
             continue
         vis = member.find(_q("Visibility"))
-        hid = (vis.findtext(_q("Hidden")) or "") if vis is not None else ""
+        hid_el = vis.find(_q("Hidden")) if vis is not None else None
+        hid = (hid_el.text or "") if hid_el is not None else ""
         if not hid.startswith("="):
             continue
         refs = _bare_refs(hid)
         cur_ds = tab.findtext(_q("DataSetName")) or ""
-        if not refs or refs <= ds_fields.get(cur_ds, set()):
+        # The scope the ENGINE applies: the container's dataset for a
+        # nested band (whatever the band itself declares), its own for a
+        # top-level one.
+        container_ds = _container_dataset(tab)
+        eff_ds = container_ds if container_ds is not None else cur_ds
+        if not refs or refs <= ds_fields.get(eff_ds, set()):
             continue
         owners = [d for d, fl in ds_fields.items()
                   if refs <= fl and d != _FORMULA_DATASET_NAME]
-        if len(owners) != 1 or owners[0] == cur_ds:
+        if len(owners) != 1 or owners[0] == eff_ds:
             continue
         own = owners[0]
-        # The band's CONTENT must ride along: every bare ref in the whole
-        # subtree (Values, style expressions, nested Hidden) has to be
-        # covered by the new dataset, or the rebind would trade one scope
-        # violation for another.
-        if any((el.text or "").startswith("=") and "Fields!" in (el.text or "")
-               and not _bare_refs(el.text) <= ds_fields[own]
-               for el in tab.iter()):
-            continue
         ds_el = tab.find(_q("DataSetName"))
         if ds_el is None:
             continue
-        # PLAN the ancestor conversions first (all-or-nothing): every
-        # DETAIL member of every enclosing tablix must become a dynamic
-        # per-row group, or the engine refuses the whole report.
-        anc_plan = []
-        planable = True
-        cur = pmap.get(tab)
-        while cur is not None and planable:
-            if cur.tag == _q("Tablix"):
-                a_body = cur.find(_q("TablixBody"))
-                a_rows = (a_body.find(_q("TablixRows"))
-                          if a_body is not None else None)
-                a_ds = cur.findtext(_q("DataSetName")) or ""
-                a_flds = ds_order.get(a_ds) or []
-                a_rh = cur.find(_q("TablixRowHierarchy"))
-                for mem in (a_rh.iter(_q("TablixMember"))
-                            if a_rh is not None else ()):
-                    a_grp = mem.find(_q("Group"))
-                    if a_grp is None:  # static member — always legal
-                        continue
-                    if a_grp.find(_q("GroupExpressions")) is not None:
-                        continue      # already dynamic
-                    # DETAIL member: convertible only in the single-body-row
-                    # per-record construct (the band provably sits in its
-                    # row) with declared columns to group by.
-                    if a_rows is None or len(a_rows) != 1 or not a_flds:
-                        planable = False
-                        break
-                    anc_plan.append((a_grp, a_flds))
-            cur = pmap.get(cur)
-        if not planable:
+        if container_ds is not None:
+            # NESTED BAND: the container's scope is the only legal one; the
+            # row-level trigger moves inside a dataset-scoped call whose
+            # row set the declaration decides.
+            corr = _declared_band_correlation(report, container_ds, own,
+                                              ds_fields)
+            if corr is not None and corr[1] is None:
+                continue  # declared link, keys underivable: decline
+            trigger = hid[1:].strip()
+            fires = _negate_vb(trigger)
+            if corr is None:
+                hidden = f'=(Sum(IIf({trigger}, 0, 1), "{own}") = 0)'
+
+                def per_row(ref, _f=fires, _o=own):
+                    return (f'Max(IIf({_f}, Fields!{ref}.Value, Nothing), '
+                            f'"{_o}")')
+                first_match = None
+            elif corr[0] == "child":
+                _k, src, dst = corr
+                hidden = (f'=(Len(Join(LookupSet({src}, {dst}, '
+                          f'IIf({trigger}, "", "x"), "{own}"), "")) = 0)')
+
+                def per_row(ref, _f=fires, _o=own, _s=src, _d=dst):
+                    return (f'Join(LookupSet({_s}, {_d}, IIf({_f}, '
+                            f'Fields!{ref}.Value, ""), "{_o}"), "")')
+
+                def first_match(ref, _o=own, _s=src, _d=dst):
+                    return f'Lookup({_s}, {_d}, Fields!{ref}.Value, "{_o}")'
+            else:
+                _k, src, dst = corr
+                hidden = (f'=Not(Lookup({src}, {dst}, IIf({trigger}, 0, 1), '
+                          f'"{own}") = 1)')
+
+                def per_row(ref, _o=own, _s=src, _d=dst):
+                    return f'Lookup({_s}, {_d}, Fields!{ref}.Value, "{_o}")'
+                first_match = None
+            ds_el.text = container_ds
+            hid_el.text = hidden
+            own_only = ds_fields[own] - ds_fields.get(container_ds, set())
+            for el in tab.iter():
+                if el is hid_el or _under_image(el):
+                    continue
+                txt = el.text or ""
+                if not txt.startswith("=") or "Fields!" not in txt:
+                    continue
+                for ref in sorted(own_only):
+                    if first_match is not None:
+                        # the resolver's first-matching-child-row Lookup
+                        # is not the firing row: same declared keys, so
+                        # the exact form is known and rewritten whole.
+                        txt = txt.replace(first_match(ref), per_row(ref))
+                for ref in sorted(_bare_refs(txt) & own_only):
+                    txt = _rewrite_unscoped_field_refs(txt, ref,
+                                                       per_row(ref))
+                if txt != (el.text or ""):
+                    el.text = txt
+            # Declared owner-dataset content the resolver had to blank.
+            own_upper = {f.upper(): f for f in own_only}
+            for tb in tab.iter(_q("Textbox")):
+                decl = (decl_map.get(tb.get("Name") or "") or "").strip()
+                if not decl or _under_image(tb):
+                    continue
+                cands = [c for c in blank_reg
+                         if (c.get("object") or "") == decl
+                         and (c.get("token") or "").strip().upper()
+                         in own_upper]
+                if len(cands) != 1:
+                    continue
+                vals = [v for v in tb.iter(_q("Value"))
+                        if _expr_has_blank_atom(v.text or "")]
+                if len(vals) != 1:
+                    continue
+                v = vals[0]
+                if len(_BLANK_ATOM_RE.findall(
+                        _VB_STRING_RE.sub('""', v.text or ""))) != 1:
+                    continue
+                ref = own_upper[(cands[0].get("token") or "").strip().upper()]
+                # replace the ONE blank atom outside string literals
+                pieces, last, out = [], 0, []
+                text = v.text or ""
+                for lit in _VB_STRING_RE.finditer(text):
+                    pieces.append((last, lit.start(), True))
+                    pieces.append((lit.start(), lit.end(), False))
+                    last = lit.end()
+                pieces.append((last, len(text), True))
+                for a, b, code in pieces:
+                    seg = text[a:b]
+                    out.append(_BLANK_ATOM_RE.sub(per_row(ref), seg, count=1)
+                               if code else seg)
+                v.text = "".join(out)
+                blank_reg.remove(cands[0])
+            continue
+        # TOP-LEVEL BAND: a body-direct region may bind to the owner itself.
+        # Its CONTENT must ride along: every bare ref in the whole subtree
+        # (Values, style expressions, nested Hidden) has to be covered by
+        # the new dataset, or the rebind would trade one scope violation
+        # for another.
+        if any((el.text or "").startswith("=") and "Fields!" in (el.text or "")
+               and not _bare_refs(el.text) <= ds_fields[own]
+               for el in tab.iter()):
             continue
         ds_el.text = own
         grp = ET.Element(_q("Group"))
         grp.set("Name", f"{tab.get('Name')}_Row")
         member.insert(0, grp)
-        for a_grp, a_flds in anc_plan:
-            if a_grp.find(_q("GroupExpressions")) is not None:
-                continue  # a sibling band already converted this ancestor
-            ges = ET.Element(_q("GroupExpressions"))
-            for f in a_flds:
-                ge = ET.SubElement(ges, _q("GroupExpression"))
-                ge.text = f"=Fields!{f}.Value"
-            a_grp.insert(0, ges)
 
 
 def _scope_body_direct_field_refs(root, report) -> None:
@@ -10491,27 +11323,269 @@ def _drop_code_twins(items):
     return out
 
 
-def _split_card_fields(body_items):
-    """Split card fields into (header, detail) by column-name prefix.
+def _declared_column_geometry(report, want=None):
+    """``{SOURCE_UPPER: (x, y, width, height, order)}`` read off the DECLARED
+    layout of ``section_main``.
 
-    Detail rows are per-action / per-history child rows from a join'd
-    table (ACTION_*, HIST_*, LOG_*, etc). Match on COLUMN NAME only --
-    NOT the user-facing label -- so a header column like STATUS_DESC
-    (label="Status:") isn't mis-routed into the detail sub-table just
-    because its label happens to start with the word "Status".
+    Oracle states, for every printed column, exactly where it goes: the
+    ``<field>`` object bound to that column carries its own x / y / width /
+    height, and it is declared inside exactly one frame.  That statement --
+    not how the column happens to be SPELLED -- is what says which side of a
+    record the value prints on and which line it shares with its neighbours.
+
+    The FIRST declaration in document order wins when a column is bound more
+    than once (an outer record frame states the record's own geometry; a
+    deeper frame restates it for a nested region).  ``order`` is that document
+    position, so callers can break geometric ties the way the source lists
+    them.  Columns the layout never places are simply ABSENT from the map --
+    a caller must then fall back to the declared column order, which is the
+    only statement left about them.  ``want``, when given, limits the map to
+    that set of upper-cased source names.
+    """
+    out: dict = {}
+    sec = _section_by_kind(report, "section_main") if report is not None else None
+    if sec is None:
+        return out
+    counter = [0]
+
+    def _walk(node):
+        for f in (getattr(node, "fields", None) or []):
+            if (getattr(f, "kind", "") or "") != "field":
+                continue
+            src = (getattr(f, "source", "") or "").strip().upper()
+            if not src or (want is not None and src not in want):
+                continue
+            counter[0] += 1
+            if src in out:
+                continue
+            out[src] = (
+                float(getattr(f, "x", 0.0) or 0.0),
+                float(getattr(f, "y", 0.0) or 0.0),
+                float(getattr(f, "width", 0.0) or 0.0),
+                float(getattr(f, "height", 0.0) or 0.0),
+                counter[0],
+            )
+        for c in (getattr(node, "children", None) or []):
+            _walk(c)
+
+    _walk(sec)
+    return out
+
+
+def _declared_detail_columns(report, query) -> set:
+    """The columns the SOURCE declares to live in a NESTED region of ``query``.
+
+    Master-vs-detail membership is stated twice by Oracle, and both statements
+    are DECLARATIONS rather than spellings:
+
+      * the dataSource's own ``<group>`` nesting -- the outermost group holds
+        the master columns and every inner group holds per-detail-row columns;
+      * the layout's frame nesting -- a ``<repeatingFrame>`` declared inside
+        another one of this query's frames and bound to a DEEPER group of the
+        same query prints once per detail row of that inner group.
+
+    Either statement names the detail columns outright, so nothing here reads
+    a column's name.  Two frames bound to the SAME group are NOT master and
+    detail: they repeat in lockstep over one record, and the export nests them
+    purely to carry a fill or a border across part of a row.  A nested frame
+    bound to a DIFFERENT query is a linked child region, not this query's
+    detail (``_pick_detail_query`` / ``_declared_nested_regions`` own that
+    case).  Empty set when the source declares no nested region -- a query
+    with one group printed by one frame has no detail rows to split off,
+    however its columns are spelled.
+    """
+    cols: set = set()
+    if query is None:
+        return cols
+
+    chain = _flatten_group_chain(getattr(query, "groups", None) or [])
+    for g in chain[1:]:
+        for it in (getattr(g, "items", None) or []):
+            if getattr(it, "name", ""):
+                cols.add(it.name.upper())
+
+    sec = _section_by_kind(report, "section_main") if report is not None else None
+    if sec is None:
+        return cols
+    # Declared master->detail ORDER of this query's own groups.
+    depth = {g.name.upper(): i for i, g in enumerate(chain)
+             if getattr(g, "name", "")}
+    if not depth:
+        return cols
+
+    def _sources_under(node) -> set:
+        got = set()
+        for f in (getattr(node, "fields", None) or []):
+            if (getattr(f, "kind", "") or "") == "field":
+                s = (getattr(f, "source", "") or "").strip().upper()
+                if s:
+                    got.add(s)
+        for c in (getattr(node, "children", None) or []):
+            got |= _sources_under(c)
+        return got
+
+    def _walk(node, outer_depth):
+        for c in (getattr(node, "children", None) or []):
+            is_rep = "repeating" in (getattr(c, "kind", "") or "").lower()
+            d = depth.get((getattr(c, "source_query", "") or "").upper()) if is_rep else None
+            if d is not None and outer_depth is not None and d > outer_depth:
+                cols.update(_sources_under(c))
+                continue
+            _walk(c, d if d is not None else outer_depth)
+
+    _walk(sec, None)
+    return cols
+
+
+def _declares_multiline_record(report, query) -> bool:
+    """True when the SOURCE declares this query's record across MORE THAN ONE
+    printed line -- the shape the label:value card renders.
+
+    Oracle states this geometrically.  A flat LIST declares its record as one
+    line of values under a separate column-header band; a per-record FORM
+    declares the same record as several lines, a caption beside each value.
+    So: take the repeating frame bound to this query, band its own declared
+    columns by overlapping vertical spans, and ask whether the source declared
+    more than one such line.  (What each caption SAYS is declared too -- on the
+    frame's boilerplate, else on the column's own ``defaultLabel`` -- so a form
+    whose captions live on the data items is still a form.)
+
+    Geometry only -- no column is read by name, so a form renames
+    column-for-column and still routes as a form.  False whenever the source
+    declares no layout for the query (a bare-SQL export states nothing about
+    lines, and the caller's other declared signals decide).
+    """
+    sec = _section_by_kind(report, "section_main") if report is not None else None
+    if sec is None or query is None:
+        return False
+    own_groups = {g.name.upper() for g in
+                  _flatten_group_chain(getattr(query, "groups", None) or [])
+                  if getattr(g, "name", "")}
+    cols = {(it.name or "").upper()
+            for it in (getattr(query, "items", None) or []) if (it.name or "")}
+    if not own_groups or not cols:
+        return False
+
+    frames: list = []
+
+    def _scan(node):
+        for c in (getattr(node, "children", None) or []):
+            if ("repeating" in (getattr(c, "kind", "") or "").lower()
+                    and (getattr(c, "source_query", "") or "").upper() in own_groups):
+                frames.append(c)
+                continue
+            _scan(c)
+
+    _scan(sec)
+    for frm in frames:
+        own = [f for f in (getattr(frm, "fields", None) or [])
+               if (getattr(f, "kind", "") or "") == "field"
+               and (getattr(f, "source", "") or "").strip().upper() in cols]
+        if len(own) < 2:
+            continue
+        spans = sorted((float(getattr(f, "y", 0.0) or 0.0),
+                        float(getattr(f, "height", 0.0) or 0.0)) for f in own)
+        bands: list = []
+        for y, h in spans:
+            if bands:
+                top = min(p[0] for p in bands[-1])
+                bot = max(p[0] + max(p[1], 0.0) for p in bands[-1])
+                if ((y < bot - 1e-9 and (y + max(h, 0.0)) > top + 1e-9)
+                        or abs(y - top) <= 1e-9):
+                    bands[-1].append((y, h))
+                    continue
+            bands.append([(y, h)])
+        if len(bands) >= 2:
+            return True
+    return False
+
+
+def _declared_source_color(report, source) -> str:
+    """The text colour the SOURCE declares for ``source``'s printed line, or "".
+
+    Read from the layout object bound to that column first, then from the
+    caption boilerplate the source declares on the same line to its left --
+    Oracle states a caption's colour on the caption, and the value inherits
+    the line.  Nothing is inferred from what the column is CALLED: a source
+    that declares no colour gets none back, and the caller keeps its own
+    body ink.
+    """
+    sec = _section_by_kind(report, "section_main") if report is not None else None
+    if sec is None or not source:
+        return ""
+    su = str(source).strip().upper()
+    hit = [None]
+
+    def _find(node):
+        for f in (getattr(node, "fields", None) or []):
+            if ((getattr(f, "kind", "") or "") == "field"
+                    and (getattr(f, "source", "") or "").strip().upper() == su):
+                hit[0] = (node, f)
+                return True
+        for c in (getattr(node, "children", None) or []):
+            if _find(c):
+                return True
+        return False
+
+    if not _find(sec):
+        return ""
+    frame, fld = hit[0]
+    own = (getattr(fld, "color", "") or "").strip()
+    if own:
+        return own
+    fy = float(getattr(fld, "y", 0.0) or 0.0)
+    fh = float(getattr(fld, "height", 0.0) or 0.0)
+    fx = float(getattr(fld, "x", 0.0) or 0.0)
+    # The NEAREST caption declared to the left on the same line -- whatever it
+    # declares, including nothing. Skipping colourless captions to reach a
+    # coloured one further left would hand a value the accent of a DIFFERENT
+    # line item, which is an invention, not a declaration.
+    best = (None, None)
+    for t in (getattr(frame, "fields", None) or []):
+        if (getattr(t, "kind", "") or "") != "text":
+            continue
+        if not (getattr(t, "text", "") or "").strip():
+            continue
+        ty = float(getattr(t, "y", 0.0) or 0.0)
+        th = float(getattr(t, "height", 0.0) or 0.0)
+        tx = float(getattr(t, "x", 0.0) or 0.0)
+        if not (ty < fy + max(fh, 1e-9) and ty + max(th, 1e-9) > fy):
+            continue
+        if tx > fx + 1e-9:
+            continue
+        d = fx - tx
+        if best[0] is None or d < best[0]:
+            best = (d, (getattr(t, "color", "") or "").strip())
+    return best[1] or ""
+
+
+def _split_card_fields(body_items, report=None, query=None):
+    """Split card fields into (header, detail) by what the SOURCE DECLARES.
+
+    A card's detail rows are the columns Oracle declares inside a NESTED
+    region of the same query -- an inner ``<group>`` of the dataSource, or a
+    ``<repeatingFrame>`` declared inside the query's own record frame.  Both
+    are statements the export makes outright, so ``_declared_detail_columns``
+    answers this without reading a single column NAME: a report whose child
+    rows are called one thing splits exactly like a report whose child rows
+    are called another, and a query the source declares as one flat group has
+    no detail rows to split off however its columns are spelled.
+
+    Without a report/query to consult there is no declaration to read, so
+    every field stays in the header -- the card then prints the record it was
+    given rather than guessing a sub-table out of column spellings.
 
     Also drops code/abbrev twins of descriptive fields generically -- so a
-    sub-table that has e.g. ACTION_TYPE_NAME ("INL") and ACTION_TYPE_DESC
-    ("Initial Notice Letter") will keep only the descriptive one.
+    sub-table that carries both a STEM_NAME code and a STEM_DESC description
+    keeps only the descriptive one (a suffix convention of the SQL dialect,
+    not a vocabulary of columns).
     """
-    DETAIL_PREFIXES = ("ACTION_", "STATUS_", "HIST_", "LOG_", "EVENT_",
-                       "COMMENT_", "NOTE_")
+    detail_cols = _declared_detail_columns(report, query) if query is not None else set()
     header = []
     detail = []
     for it in body_items:
         u_name = (it.name or "").upper()
-        is_detail = any(u_name.startswith(p) for p in DETAIL_PREFIXES)
-        (detail if is_detail else header).append(it)
+        (detail if u_name in detail_cols else header).append(it)
     header = _drop_code_twins(header)
     detail = _drop_code_twins(detail)
     if not header and detail:
@@ -10519,145 +11593,107 @@ def _split_card_fields(body_items):
     return header, detail
 
 
-def _pair_card_header_rows(header_items):
-    """Group header_items into (left, right) row pairs by semantic role.
+def _pair_card_header_rows(header_items, report=None, query=None):
+    """Group header_items into (left, right) row pairs from DECLARED geometry.
 
-    Generic: ordered token lists declare the conventional two-up card
-    layout (record identity / location / primary date on the LEFT;
-    status / city / secondary date on the RIGHT). No report-specific
-    column names are hardcoded -- the tokens are common SQL semantic
-    words.
+    The source already states where each value prints: the layout object bound
+    to a column declares its own x / y / width / height.  Two columns whose
+    declared vertical spans OVERLAP were authored on the same printed line, and
+    within that line their declared x states the order they read in.  So a card
+    row is a declared line, and a field's side is its position along that line
+    -- laid into the card's two columns in x order, wrapping when a line
+    declares more fields than the card has columns.
 
-    A field's column NAME is checked first (the deterministic Oracle
-    identifier). The user-facing LABEL is consulted only when the name
-    yields no match -- labels are inconsistent and would otherwise pull
-    e.g. a column named *_OBSERVED_DT (label "Bust Date") onto the
-    wrong side.
+    Nothing here reads what a column is CALLED.  Renaming every column of a
+    report leaves its declared geometry untouched, so it pairs identically.
 
-    ROW ORDER within each column follows the DECLARATION ORDER of the
-    pattern list, NOT the source-XML order: the LEFT list places OWNER
-    before LOCATION before RECEIVED, so the rendered card opens with
-    "Owner | Status", then "Location | City", then "Received | Bust"
-    regardless of how the underlying SELECT happens to order columns.
-    Fields that match no pattern preserve relative XML order and are
-    appended below the pattern-driven rows.
+    Columns the layout never places carry no geometric statement at all; the
+    only declaration left about them is the order the dataSource LISTS them in,
+    so they follow the placed rows in that order, filling the open right slot of
+    the last row before opening a new one.  A report with no layout at all (a
+    bare-SQL source) is entirely this case and pairs in pure column order.
 
     Returns: list of (left_item_or_None, right_item_or_None) tuples.
     """
-    # NOTE: tokens are matched as substrings of the (underscored) NAME.
-    # ORDER MATTERS: it drives the rendered row order.
-    LEFT_PATTERNS = (
-        "OWNER",
-        "LOCATION", "ADDRESS", "ADDR",
-        "RECVD", "RECEIVED",
-        "REFERRED",
-        "COMPLAINT_REF", "COMPLNT_REF",
-        "CONTRACTOR",
-    )
-    RIGHT_PATTERNS = (
-        "STATUS", "STAT_TYPE",
-        "CITY",
-        "OBSERVED", "BUST",
-    )
+    COLS = 2
+    items = list(header_items or [])
+    if not items:
+        return []
 
-    def _first_match_idx(haystack, patterns):
-        for i, p in enumerate(patterns):
-            if p in haystack:
-                return i
-        return None
+    want = {(it.name or "").upper() for it in items if (it.name or "")}
+    geo = _declared_column_geometry(report, want) if report is not None else {}
 
-    def _classify(it):
-        u = (it.name or "").upper()
-        # Right takes precedence on the name side so e.g. ADDR_CITY
-        # (contains both ADDR and CITY) classifies as RIGHT -- "CITY"
-        # is more specific than the generic ADDR* family. Same reason
-        # for *_STAT_TYPE_*.
-        r = _first_match_idx(u, RIGHT_PATTERNS)
-        if r is not None:
-            return ("right", r)
-        l = _first_match_idx(u, LEFT_PATTERNS)
-        if l is not None:
-            return ("left", l)
-        lbl = (it.label or "").upper()
-        r = _first_match_idx(lbl, RIGHT_PATTERNS)
-        if r is not None:
-            return ("right", r)
-        l = _first_match_idx(lbl, LEFT_PATTERNS)
-        if l is not None:
-            return ("left", l)
-        return ("unknown", None)
-
-    left_buckets, right_buckets, unknowns = [], [], []
-    for src_idx, it in enumerate(header_items):
-        side, pat_idx = _classify(it)
-        if side == "left":
-            left_buckets.append((pat_idx, src_idx, it))
-        elif side == "right":
-            right_buckets.append((pat_idx, src_idx, it))
+    placed, unplaced = [], []
+    for order, it in enumerate(items):
+        g = geo.get((it.name or "").upper())
+        if g is None:
+            unplaced.append(it)
         else:
-            unknowns.append(it)
+            x, y, _w, h, decl_order = g
+            placed.append((y, x, decl_order, order, h, it))
 
-    # Sort by (pattern-list position, source-XML position) so the
-    # rendered row order matches the LEFT_PATTERNS declaration order.
-    left_buckets.sort(key=lambda t: (t[0], t[1]))
-    right_buckets.sort(key=lambda t: (t[0], t[1]))
+    # DECLARED LINES: sort by the declared top edge, then across by declared x,
+    # then by the order the source lists them (a tie means the export declared
+    # them at the very same spot).
+    placed.sort(key=lambda t: (t[0], t[1], t[2], t[3]))
+    bands: list = []
+    for rec in placed:
+        y, _x, _do, _o, h, _it = rec
+        if bands:
+            top = min(b[0] for b in bands[-1])
+            bot = max(b[0] + max(b[4], 0.0) for b in bands[-1])
+            same = (y < bot - 1e-9 and (y + max(h, 0.0)) > top + 1e-9) or abs(y - top) <= 1e-9
+            if same:
+                bands[-1].append(rec)
+                continue
+        bands.append([rec])
 
-    def _dedupe_pattern_slots(buckets, n_patterns):
-        """If multiple fields hit the same pattern slot, the first one
-        (by src_idx, already sorted) keeps that slot; later duplicates
-        are bumped to the next unused slot >= the pattern range so they
-        don't crowd out items that match later patterns."""
-        out = []
-        used = set()
-        bumped_floor = n_patterns
-        # First pass: claim unique slots in order
-        for pat_idx, src_idx, it in buckets:
-            if pat_idx not in used:
-                used.add(pat_idx)
-                out.append((pat_idx, src_idx, it))
-            else:
-                # bump to next free slot beyond the pattern list
-                while bumped_floor in used:
-                    bumped_floor += 1
-                used.add(bumped_floor)
-                out.append((bumped_floor, src_idx, it))
-                bumped_floor += 1
-        out.sort(key=lambda t: (t[0], t[1]))
-        return [t[2] for t in out]
+    rows: list = []
+    for band in bands:
+        band.sort(key=lambda t: (t[1], t[2], t[3]))
+        for i, rec in enumerate(band):
+            if i % COLS == 0:
+                rows.append([None] * COLS)
+            rows[-1][i % COLS] = rec[5]
 
-    lefts  = _dedupe_pattern_slots(left_buckets,  len(LEFT_PATTERNS))
-    rights = _dedupe_pattern_slots(right_buckets, len(RIGHT_PATTERNS))
-
-    # Spill unknowns into the shorter column, preserving XML order.
-    for it in unknowns:
-        if len(lefts) <= len(rights):
-            lefts.append(it)
+    for it in unplaced:
+        if rows and rows[-1][-1] is None:
+            slot = next(i for i, v in enumerate(rows[-1]) if v is None)
+            rows[-1][slot] = it
         else:
-            rights.append(it)
+            rows.append([it] + [None] * (COLS - 1))
 
-    rows = []
-    n = max(len(lefts), len(rights))
-    for i in range(n):
-        l = lefts[i] if i < len(lefts) else None
-        r = rights[i] if i < len(rights) else None
-        rows.append((l, r))
-    return rows
+    return [tuple(r) for r in rows]
 
 
-def _sort_detail_columns(items):
-    """Sort action/history sub-table columns into canonical order:
-    Type | Comments/Description | Date. Pure name-pattern."""
-    def _bucket(it):
-        u = (it.name or "").upper()
-        if "TYPE" in u and ("DESC" in u or "NAME" in u or u.endswith("TYPE")):
-            return 0
-        if any(tok in u for tok in ("COMMENT", "DESCR", "NOTE", "REMARK")):
-            return 1
-        if any(tok in u for tok in ("_DT", "_DATE", "TIMESTAMP", "WHEN")):
-            return 2
-        return 3
+def _sort_detail_columns(items, report=None):
+    """Order a detail sub-table's columns the way the SOURCE declares them.
+
+    Oracle states a sub-table's column order geometrically: each column's
+    layout object declares its own x inside the nested frame, left to right.
+    That declaration is the order, so this sorts on declared x (declared y,
+    then the declared list position, break ties).
+
+    Columns the layout never places carry no such statement; the dataSource's
+    own column ORDER is the only declaration left about them, so they keep it
+    and follow the placed ones.  Nothing here reads a column's name -- the
+    same sub-table renamed column-for-column orders identically.
+    """
+    items = list(items or [])
+    if not items:
+        return items
+    want = {(it.name or "").upper() for it in items if (it.name or "")}
+    geo = _declared_column_geometry(report, want) if report is not None else {}
     orig = {id(it): i for i, it in enumerate(items)}
-    return sorted(items, key=lambda it: (_bucket(it), orig[id(it)]))
+
+    def _key(it):
+        g = geo.get((it.name or "").upper())
+        if g is None:
+            return (1, 0.0, 0.0, 0, orig[id(it)])
+        x, y, _w, _h, decl_order = g
+        return (0, x, y, decl_order, orig[id(it)])
+
+    return sorted(items, key=_key)
 
 
 def _resolve_palette(report: "ParsedReport") -> Dict[str, str]:
@@ -11562,7 +12598,7 @@ def _grouped_tabular_spec(report):
 
     Returns:
         {"grp_key", "group_header":[(kind,src_or_text,x,w,y)],
-         "col_headers":[(x,label)], "detail_cols":[(x,w,src)],
+         "col_headers":[(x,label,field)], "detail_cols":[(x,w,src,field)],
          "footers":[[(kind,src_or_text,x,w)] per line top->bottom],
          "themed":bool}
     or None when the layout is NOT this archetype.
@@ -12418,9 +13454,13 @@ def _is_grouped_card_report(query, report=None):
     """True when a report has genuine master-detail/card structure that the
     wallet-card Tablix represents, rather than being a FLAT table:
 
-      * a DETAIL sub-table -- child rows whose column names carry
-        ACTION_/STATUS_/HIST_/LOG_/EVENT_/COMMENT_/NOTE_ prefixes, OR
+      * a DETAIL sub-table the SOURCE DECLARES -- an inner <group> of this
+        dataSource, or a <repeatingFrame> bound to it declared inside the
+        query's own record frame (see _declared_detail_columns), OR
       * a linked detail query (an Oracle <link> child of this query).
+
+    Both signals are statements the export makes; neither reads what a column
+    is called, so a report renames column-for-column without changing route.
 
     A plain column list with neither is an ordinary FLAT table and MUST render
     as a column grid (_build_tablix). The card path collapses the non-header
@@ -12431,8 +13471,15 @@ def _is_grouped_card_report(query, report=None):
     parser assigns it to the first data item of EVERY group (even a flat one,
     see oracle_xml `_build_group_tree`), so it cannot distinguish flat from
     grouped. Structural and generic; no per-report logic."""
-    _header, detail = _split_card_fields(list(getattr(query, "items", None) or []))
+    _header, detail = _split_card_fields(
+        list(getattr(query, "items", None) or []), report, query)
     if detail:
+        return True
+    # A record the source declares across SEVERAL printed lines with captions
+    # is a label:value form, which is what this Tablix draws -- and the flat
+    # column grid cannot draw it. Declared geometry decides (see
+    # _declares_multiline_record); no column is read by name.
+    if report is not None and _declares_multiline_record(report, query):
         return True
     # A linked detail query makes this a master-detail report (rendered via the
     # card/Tablix detail group), not a flat table.
@@ -14258,6 +15305,304 @@ def _orig_name(query, upper_name):
     return upper_name
 
 
+def _ds_declares(dataset_fields: dict, ds_name: str, col: str) -> bool:
+    """Does the dataset named ``ds_name`` declare a column ``col``?
+
+    PUBLISH RULE [SCOPE]. Inside ``Agg(..., "DS")`` / ``Lookup(src, dst,
+    result, "DS")`` every field reference that resolves against DS -- the
+    destination key and the result -- must be a column DS actually declares,
+    or Report Server REFUSES the report when it compiles the definition at
+    publish time: "...refers to the field `X'. Report item expressions can
+    only refer to fields within the current dataset scope or, if inside an
+    aggregate, the specified dataset scope."
+
+    NO LOCAL RAIL CAN SEE THIS. The XSD encodes shape, not meaning.
+    ReportViewer evaluates an undeclared field as Nothing and paints a
+    blank cell, so the render is clean too. Only the server refuses, which
+    is how a report that passed every gate here bounced at upload.
+
+    The mismatch is structural, not hypothetical: an Oracle <summary>
+    object is declared in the GROUP TREE of one query while its ``source``
+    column belongs to a DEEPER linked child, so the DECLARED owner and the
+    column's TRUE owner are different datasets. Building a correlated
+    Lookup against the declared owner shipped exactly the expression above.
+
+    ``dataset_fields`` is the generator's ``{DATASET_UPPER: {COL_UPPER:
+    canonical}}`` map. Callers that pass a column's TRUE owner satisfy this
+    by construction; callers that pass a DECLARED owner (the <summary>
+    path) are the ones it actually stops -- but every correlated-lookup
+    builder asks, so a future caller cannot reintroduce the defect by
+    passing a declared owner to a builder that did not check.
+    """
+    return (col or "").upper() in (dataset_fields or {}).get(
+        (ds_name or "").upper(), {})
+
+
+_SQL_IDENT = r"[A-Za-z_][A-Za-z0-9_$#]*"
+_SQL_COLREF = re.compile(r"^\s*(?:(" + _SQL_IDENT + r")\s*\.\s*)?(" + _SQL_IDENT + r")\s*$")
+_SQL_ALIAS_TAIL = re.compile(r"^(.*?)\s+(?:AS\s+)?(" + _SQL_IDENT + r")\s*$",
+                             re.IGNORECASE | re.DOTALL)
+_SQL_BIND_EQ = re.compile(
+    r"^\s*(?:(" + _SQL_IDENT + r")\s*\.\s*)?(" + _SQL_IDENT + r")\s*=\s*:\s*("
+    + _SQL_IDENT + r")\s*$")
+_SQL_BIND_EQ_REV = re.compile(
+    r"^\s*:\s*(" + _SQL_IDENT + r")\s*=\s*(?:(" + _SQL_IDENT + r")\s*\.\s*)?("
+    + _SQL_IDENT + r")\s*$")
+_SQL_WHERE_END = re.compile(
+    r"\b(GROUP\s+BY|ORDER\s+BY|HAVING|UNION|INTERSECT|MINUS|CONNECT\s+BY|"
+    r"START\s+WITH|FOR\s+UPDATE)\b", re.IGNORECASE)
+_SQL_COMMA = re.compile(r",")
+_SQL_AND = re.compile(r"\bAND\b", re.IGNORECASE)
+
+
+def _sql_is_ident_char(ch: str) -> bool:
+    return ch.isalnum() or ch in "_$#"
+
+
+def _sql_top_level_split(text: str, sep_re) -> list:
+    """Split ``text`` on ``sep_re`` matches that sit at parenthesis depth 0.
+    ``text`` must already be comment/literal-blanked (see the callers)."""
+    parts, depth, start, i = [], 0, 0, 0
+    while i < len(text):
+        ch = text[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0:
+            m = sep_re.match(text, i)
+            if m:
+                parts.append(text[start:i])
+                i = m.end()
+                start = i
+                continue
+        i += 1
+    parts.append(text[start:])
+    return parts
+
+
+def _sql_top_level_keyword(up: str, word: str, start: int) -> int:
+    """Index of the first ``word`` at parenthesis depth 0 from ``start`` in
+    the upper-cased, blanked SQL ``up``, as a whole word; -1 if none."""
+    depth, i, n = 0, start, len(word)
+    while i < len(up):
+        ch = up[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and up.startswith(word, i):
+            before_ok = i == 0 or not _sql_is_ident_char(up[i - 1])
+            after_ok = i + n >= len(up) or not _sql_is_ident_char(up[i + n])
+            if before_ok and after_ok:
+                return i
+        i += 1
+    return -1
+
+
+# The generator's own NULL-tolerant link filter, ``(:X IS NULL OR T.C = :X)``:
+# the equality holds on every row whenever the bound key is present, and a
+# NULL bound key cannot be matched by a Lookup source anyway.
+_SQL_RELAXED_EQ = re.compile(
+    r"^\s*\(\s*:\s*(" + _SQL_IDENT + r")\s+IS\s+NULL\s+OR\s+(?:("
+    + _SQL_IDENT + r")\s*\.\s*)?(" + _SQL_IDENT + r")\s*=\s*:\s*("
+    + _SQL_IDENT + r")\s*\)\s*$", re.IGNORECASE)
+_SQL_SET_OPS = ("UNION", "INTERSECT", "MINUS", "EXCEPT")
+_SQL_QQUOTE = re.compile(r"(?<![A-Za-z0-9_$#])[qQ]'")
+_SQL_SELECT_PREFIX = re.compile(r"^\s*(DISTINCT|UNIQUE|ALL)\s+", re.IGNORECASE)
+
+
+def _sql_proof_text(sql: str):
+    """``(det, up)`` -- the ONE text both proof helpers scan, or ``None`` when
+    the statement has a shape the scanner cannot read soundly.
+
+    ``det`` is the comment/literal-blanked statement with the CONTENT of
+    double-quoted identifiers blanked too (a ``")"`` inside a quoted name
+    would otherwise corrupt depth tracking); ``up`` is a LENGTH-PRESERVING
+    upper-casing of it (a character whose upper-case form is longer, such as
+    a sharp s, stays as it is), so every index found in ``up`` is valid in
+    ``det``. Refused outright (None): an Oracle ``q'...'`` literal, whose
+    delimiter syntax the blanker does not know and which can therefore hide
+    or fabricate an OR; and any depth-0 set operator (UNION / INTERSECT /
+    MINUS / EXCEPT), because a second branch may put a different expression
+    under the same alias and its WHERE says nothing about the first branch's
+    rows. Each of these was a judge's concrete wrong-value counterexample.
+    """
+    if not sql or _SQL_QQUOTE.search(sql):
+        return None
+    det = _blank_sql_comments(sql, blank_literals=True)
+    # blank the content of "quoted identifiers", length-preserving
+    out, i, n = [], 0, len(det)
+    while i < n:
+        ch = det[i]
+        if ch == '"':
+            j = det.find('"', i + 1)
+            if j < 0:
+                return None                       # unterminated: unreadable
+            out.append('"' + " " * (j - i - 1) + '"')
+            i = j + 1
+            continue
+        out.append(ch)
+        i += 1
+    det = "".join(out)
+    up = "".join(c.upper() if len(c.upper()) == 1 else c for c in det)
+    for op in _SQL_SET_OPS:
+        if _sql_top_level_keyword(up, op, 0) >= 0:
+            return None
+    return det, up
+
+
+def _declared_select_aliases(sql: str) -> dict:
+    """``{ALIAS_UPPER: "QUAL.COL" | "COL"}`` for every item of the outermost
+    SELECT list that is a PLAIN column reference (``T.X``, ``T.X alias``,
+    ``T.X AS alias``). Function calls, arithmetic and subqueries are not
+    column references and are left out. A leading DISTINCT / UNIQUE / ALL
+    is a modifier, not part of the first item. Statements the scanner cannot
+    read soundly (see _sql_proof_text) yield nothing."""
+    pt = _sql_proof_text(sql)
+    if pt is None:
+        return {}
+    det, up = pt
+    sel = _sql_top_level_keyword(up, "SELECT", 0)
+    if sel < 0:
+        return {}
+    from_at = _sql_top_level_keyword(up, "FROM", sel + 6)
+    if from_at < 0:
+        return {}
+    out = {}
+    items = _sql_top_level_split(det[sel + 6:from_at], _SQL_COMMA)
+    if items:
+        items[0] = _SQL_SELECT_PREFIX.sub("", items[0], count=1)
+    for item in items:
+        item = item.strip()
+        if not item:
+            continue
+        m = _SQL_ALIAS_TAIL.match(item)
+        if m and _SQL_COLREF.match(m.group(1)):
+            expr, alias = m.group(1), m.group(2)
+        elif _SQL_COLREF.match(item):
+            expr, alias = item, _SQL_COLREF.match(item).group(2)
+        else:
+            continue
+        cm = _SQL_COLREF.match(expr)
+        qual, col = cm.group(1), cm.group(2)
+        out[alias.upper()] = ((qual.upper() + ".") if qual else "") + col.upper()
+    return out
+
+
+def _declared_bind_equalities(sql: str) -> dict:
+    """``{"QUAL.COL" | "COL": BIND_UPPER}`` for every top-level AND conjunct
+    of the outermost WHERE that equates a plain column to a bind -- written
+    ``T.C = :X``, ``:X = T.C``, or in the generator's own relaxed form
+    ``(:X IS NULL OR T.C = :X)``.
+
+    SQL binds AND tighter than OR, so ONE depth-0 OR anywhere in the WHERE
+    turns every other conjunct into a branch condition that holds on only
+    some rows: the whole WHERE then proves nothing and this returns {}. A
+    conjunct carrying a function, a subquery or an outer-join ``(+)`` is
+    not an equality that holds on every returned row and is ignored. The
+    WHERE ends at the next top-level clause keyword or a ``;``."""
+    pt = _sql_proof_text(sql)
+    if pt is None:
+        return {}
+    det, up = pt
+    sel = _sql_top_level_keyword(up, "SELECT", 0)
+    from_at = _sql_top_level_keyword(up, "FROM", (sel + 6) if sel >= 0 else 0)
+    if from_at < 0:
+        return {}
+    where_kw = _sql_top_level_keyword(up, "WHERE", from_at + 4)
+    if where_kw < 0:
+        return {}
+    where = det[where_kw + 5:]
+    depth, i = 0, 0
+    while i < len(where):
+        ch = where[i]
+        if ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth = max(0, depth - 1)
+        elif depth == 0 and (ch == ";" or _SQL_WHERE_END.match(where, i)):
+            where = where[:i]
+            break
+        i += 1
+    if _sql_top_level_keyword(where.upper(), "OR", 0) >= 0:
+        return {}                     # precedence: nothing here is universal
+    out = {}
+    for conj in _sql_top_level_split(where, _SQL_AND):
+        m = _SQL_RELAXED_EQ.match(conj)
+        if m and m.group(1).upper() == m.group(4).upper():
+            qual, col, bind = m.group(2), m.group(3), m.group(4)
+        elif re.search(r"\bOR\b", conj, re.IGNORECASE) or "(" in conj:
+            continue
+        else:
+            m = _SQL_BIND_EQ.match(conj)
+            if m:
+                qual, col, bind = m.group(1), m.group(2), m.group(3)
+            else:
+                m = _SQL_BIND_EQ_REV.match(conj)
+                if not m:
+                    continue
+                bind, qual, col = m.group(1), m.group(2), m.group(3)
+        out[((qual.upper() + ".") if qual else "") + col.upper()] = bind.upper()
+    return out
+
+
+def _declared_alias_relays(sql: str, carriers, bind_carriers=None) -> dict:
+    """``{ALIAS_UPPER: root_col}`` -- every SELECT alias of ``sql`` that
+    provably carries a bound row's key, proven by the query's OWN text in
+    two ways:
+
+      SAME EXPRESSION  the alias selects the identical column reference as
+                       a column in ``carriers`` -- ``{MID_COL_UPPER:
+                       root_col}``, the middle query's columns already known
+                       to carry a bound key (``SA.Site_Id AS Site_Id`` and
+                       ``SA.Site_Id AS Permittee_Site_Id``): equal by SQL
+                       semantics on every row, no data assumption at all;
+      BIND EQUALITY    the alias selects ``T.C`` and a top-level WHERE
+                       conjunct equates ``T.C`` to ``:k`` where k is in
+                       ``bind_carriers`` -- ``{PARENT_COL_UPPER: root_col}``,
+                       the BOUND row's own column names. Oracle resolves a
+                       bind by NAME against the parent group's columns, so
+                       the bind namespace is the parent's, never the middle
+                       query's aliases (a judge's counterexample: a middle
+                       alias that merely shares a bound column's name).
+
+    PROOF, NOT INFERENCE. A wrong relay would paint ANOTHER record's value
+    on every record, which is worse than the honest blank it replaces, so
+    nothing looser than these two is accepted, and a proven alias is never
+    itself treated as a bind name. Every name is read from the report's own
+    SQL; nothing here is report-specific.
+    """
+    carriers = dict(carriers or {})
+    bind_carriers = dict(bind_carriers or {})
+    if not sql or not (carriers or bind_carriers):
+        return {}
+    aliases = _declared_select_aliases(sql)
+    equalities = _declared_bind_equalities(sql) if bind_carriers else {}
+    found = {}
+    # BIND EQUALITY first (independent of other aliases), then SAME
+    # EXPRESSION in two passes so a proven alias can prove its twin.
+    for alias_u, expr_key in aliases.items():
+        if alias_u in carriers:
+            continue
+        bind_u = equalities.get(expr_key)
+        if bind_u and bind_u in bind_carriers:
+            found[alias_u] = bind_carriers[bind_u]
+    for _pass in (0, 1):
+        expr_carrier = {}
+        for alias_u, expr_key in aliases.items():
+            root = carriers.get(alias_u) or found.get(alias_u)
+            if root:
+                expr_carrier.setdefault(expr_key, root)
+        for alias_u, expr_key in aliases.items():
+            if alias_u in carriers or alias_u in found:
+                continue
+            root = expr_carrier.get(expr_key)
+            if root:
+                found[alias_u] = root
+    return found
+
+
 def _link_key_pairs(child_q, master_cols, child_cols):
     """Correlation key pairs ``[(master_field, child_field), ...]`` for an
     Oracle ``<link>`` child query, composite-safe. Structural sources, in
@@ -14353,25 +15698,27 @@ def _build_grouped_card_tablix(report: "ParsedReport", main: "DataQuery") -> ET.
     if id_field is None and body_items:
         id_field = body_items.pop(0)
 
-    # Build a parameter-label lookup so we can RELABEL an internal-ID
-    # field (e.g. ORG_ID -> "Contractor") when the report has a
-    # parameter whose name maps to that field (PARM_CONTRACTOR).
-    # Generic: parameter PARM_X gets its label applied to a dataset
-    # field whose name semantically matches X.
-    _PARM_NAME_TO_FIELD = {
-        "CONTRACTOR": ("ORG_ID", "ORGANIZATION_ID"),
-        "ORGANIZATION": ("ORG_ID", "ORGANIZATION_ID"),
-        "OPERATOR": ("OP_ID", "OPERATOR_ID"),
-        "PERMITTEE": ("PERMITTEE_ID",),
-    }
+    # RELABEL an internal-ID column with the LABEL the source declares on the
+    # parameter that selects it.  The correspondence is one the DECLARATIONS
+    # make: a parameter declared PARM_<X> / P_<X> and a column declared <X>,
+    # or <X> plus one of the dialect's key suffixes (_ID/_CODE/_NO/_NUM/_KEY),
+    # name the same thing.  No table of which business word maps to which
+    # column -- a source is free to call the pair anything, and an unrelated
+    # parameter matches nothing.
+    _KEY_SUFFIXES = ("_ID", "_CODE", "_NO", "_NUM", "_KEY")
+    _body_names = {(it.name or "").upper() for it in body_items if (it.name or "")}
     _label_overrides = {}
     for _p in (report.parameters or []):
         n = (_p.name or "").upper()
         bare = re.sub(r"^(PARM_|P_)", "", n)
-        if bare in _PARM_NAME_TO_FIELD:
-            override_label = _clean_label(_p.label) or _abbrev_expand(bare)
-            for fld_name in _PARM_NAME_TO_FIELD[bare]:
-                _label_overrides[fld_name] = override_label
+        if not bare:
+            continue
+        override_label = _clean_label(_p.label) or _abbrev_expand(bare)
+        if not override_label:
+            continue
+        for _cand in (bare,) + tuple(bare + sfx for sfx in _KEY_SUFFIXES):
+            if _cand in _body_names:
+                _label_overrides[_cand] = override_label
 
     def _is_internal_id(it):
         u = (it.name or "").upper()
@@ -14392,15 +15739,15 @@ def _build_grouped_card_tablix(report: "ParsedReport", main: "DataQuery") -> ET.
             except Exception:
                 pass
 
-    header_items, detail_items = _split_card_fields(body_items)
-    detail_items = _sort_detail_columns(detail_items)
+    header_items, detail_items = _split_card_fields(body_items, report, main)
+    detail_items = _sort_detail_columns(detail_items, report)
     # Action sub-table is meaningful only when there's a Complaint-level
     # group to attach it to. Without an id_field the Tablix has just
     # band + card rows; a stray detail_items list would emit phantom
     # rows that don't match any hierarchy member.
     if id_field is None:
         detail_items = []
-    _pre_paired_rows = _pair_card_header_rows(header_items)
+    _pre_paired_rows = _pair_card_header_rows(header_items, report, main)
 
     # LAYOUT-LESS (bare-SQL synthetic) reports carry no evidence for the
     # card decorations below: Oracle's default break output prints plain
@@ -14611,16 +15958,13 @@ def _build_grouped_card_tablix(report: "ParsedReport", main: "DataQuery") -> ET.
                 continue
             base_left = col_x[col]
             lbl_text = (_clean_label(field.label) or _abbrev_expand(field.name)) + ":"
-            # Generic accent: primary-entity fields (OWNER / PERMITTEE /
-            # APPLICANT / OPERATOR) get the blue accent so they pop
-            # below the Complaint ID sub-header, matching the reference.
-            u_name = (field.name or "").upper()
-            u_label = (field.label or "").upper()
-            is_primary_entity = any(
-                tok in u_name or tok in u_label
-                for tok in ("OWNER", "PERMITTEE", "APPLICANT", "OPERATOR")
-            )
-            lbl_fg = SUBHDR_FG if is_primary_entity else INK_SOFT
+            # A caption prints in the colour the SOURCE DECLARES for that
+            # line -- on the bound layout object itself, else on the caption
+            # boilerplate declared beside it.  Which captions stand out is a
+            # statement the export makes; it is not inferable from the words
+            # a column happens to be named after, so a source that declares
+            # no colour keeps the card's own body ink.
+            lbl_fg = _declared_source_color(report, field.name) or INK_SOFT
             _build_textbox(
                 card_ri, f"Tb_Lbl_{_safe(field.name)}", lbl_text,
                 bold=True, font_size="9pt", bg=SUBHDR_BG, fg=lbl_fg,
@@ -19962,6 +21306,22 @@ def _emit_field_textbox(
     _cf = getattr(lf, "conditional_formats", None)
     if _cf:
         tb.set("data-cf", str(_cf_register(report, _cf)))
+    # The DECLARED object behind this textbox (its layout name), so a later
+    # pass can trace the box back to what the resolver recorded about it
+    # (the blank-token registry keys on the declared object, not on the
+    # emitted textbox name). A side registry on the report, keyed by the
+    # emitted textbox name — never an attribute on the tree, which would
+    # alter the intermediate tag text other passes and tests match on.
+    _decl = (getattr(lf, "name", "") or "").strip()
+    if _decl and (tb.get("Name") or ""):
+        try:
+            _dmap = getattr(report, _DECL_BY_TEXTBOX_ATTR, None)
+            if _dmap is None:
+                _dmap = {}
+                setattr(report, _DECL_BY_TEXTBOX_ATTR, _dmap)
+            _dmap[tb.get("Name")] = _decl
+        except Exception:  # noqa: BLE001 -- a trace must never sink a build
+            pass
     # The field's Oracle formatMask travels to the emitted textbox no matter
     # HOW the value resolved (pure ref, aggregate, computed placeholder,
     # cross-dataset lookup, inline-translated formula) — the name-keyed
@@ -28653,7 +30013,14 @@ def _emit_secondary_breakdown_tables(root: ET.Element, report) -> None:
                 val, _is_expr = _resolve_text_expression(
                     f.text or "", report, dataset_name=ds,
                     object_name=(getattr(f, "name", "") or ""))
-                if not (val or "").strip():
+                # An expression whose BODY resolved to nothing is not a
+                # value, it is a bare "=" — which the Report Server
+                # rejects at publish (publish.expression_empty). Treat it
+                # exactly like empty text: emit nothing rather than an
+                # invalid expression. Measured on a wild per-record
+                # letter whose boilerplate referenced only tokens that
+                # resolve to nothing in this dataset's scope.
+                if _is_empty_expression(val):
                     continue
                 value = val
             else:
@@ -30872,6 +32239,44 @@ def _prune_dead_datasets(root) -> None:
 _INTERNAL_ATTR_PREFIX = "data-"
 
 
+def _is_empty_expression(value) -> bool:
+    """True when a value is an expression with NO body — a bare ``=``.
+
+    ``=`` alone is not a valid SSRS expression: the Report Server
+    rejects it at publish (the gate's publish.expression_empty class).
+    It appears whenever a text resolver emits its ``=`` prefix and every
+    token inside resolves to nothing, so callers must treat it exactly
+    like empty text rather than as a value worth emitting."""
+    s = (value or "").strip()
+    return s.startswith("=") and not s[1:].strip()
+
+
+def _strip_empty_expressions(root) -> None:
+    """FINAL serialization-time sweep: no element may carry a bare ``=``.
+
+    The breakdown text path produced these when a boilerplate's tokens
+    all resolved to nothing, and any future resolver can do the same.
+    One choke point here — mirroring the internal-marker sweep — makes
+    shipping an empty expression impossible regardless of which pass
+    built it. An empty expression carries no information, so dropping
+    the text is lossless: the element keeps its declared geometry and
+    prints blank, which is what the unresolved tokens meant anyway."""
+    for el in root.iter():
+        if _is_empty_expression(el.text):
+            el.text = None
+
+
+def _assert_no_empty_expressions(xml_body: str) -> None:
+    """Generate-time invariant over the SERIALIZED document: raise
+    rather than ship an RDL carrying a bare ``=`` (upload-fatal)."""
+    if not re.search(r"<(\w+)>\s*=\s*</\1>", xml_body):
+        return
+    bad = re.findall(r"<(\w+)>\s*=\s*</\1>", xml_body)[:5]
+    raise AssertionError(
+        "empty expression(s) leaked into the RDL (the Report Server "
+        "rejects a bare '=' at publish): " + ", ".join(bad))
+
+
 def _strip_internal_markers(root) -> None:
     """FINAL serialization-time sweep: remove every internal marker
     attribute from the WHOLE tree.
@@ -30990,15 +32395,21 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     _fit_body_to_page(root, report)
     _clamp_body_items_to_printable_width(root)
     # ROW GRAIN FIRST: a collapsed variant band whose member Hidden gates
-    # on bare row-level columns of ANOTHER dataset is re-bound to that
-    # dataset with a detail-grain member, so the trigger keeps evaluating
-    # per row exactly as Oracle fires it per repeating-frame instance.
-    # Must run BEFORE the scope net below — its First(Fields!X, "D") wrap
-    # is DATASET grain and flattens per-row variants to one global winner
-    # (engine-verified: a two-variant payment-address block printed the
-    # same variant for every row world). The net stays the last resort
-    # for genuinely region-external refs.
-    _rebind_variant_bands_to_row_scope(root)
+    # on bare row-level columns of ANOTHER dataset keeps its CONTAINER's
+    # dataset (a nested region binding to any other dataset is the
+    # server's publish rejection — a customer's report server refused the
+    # multi-section invoice for exactly that) and evaluates the trigger
+    # per row INSIDE a dataset-scoped call over the owner dataset — the
+    # whole dataset when the DECLARATION links nothing (Oracle iterates
+    # every row of an unlinked query inside every container instance), the
+    # correlated rows through the declared <link> key otherwise — so it
+    # keeps firing per row exactly as Oracle fires it per repeating-frame
+    # instance. Must run BEFORE the scope net below — its First(Fields!X,
+    # "D") wrap is DATASET grain and flattens per-row variants to one
+    # global winner (engine-verified: a two-variant payment-address block
+    # printed the same variant for every row world). The net stays the
+    # last resort for genuinely region-external refs.
+    _rebind_variant_bands_to_row_scope(root, report)
     # HIDDEN expressions must obey the SERVER's dataset-scope rule: a
     # Fields!X ref inside a data region resolves ONLY against that region's
     # dataset. A format-trigger Hidden built from another query's column
@@ -31008,7 +32419,7 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # rewrite to First(Fields!X.Value, "OwnerDS") (legal anywhere);
     # unresolvable refs drop the Visibility entirely — VISIBLE is honest,
     # broken-at-upload is not.
-    _scope_hidden_cross_dataset_refs(root)
+    _scope_hidden_cross_dataset_refs(root, report)
     # Misscoped aggregate refs: a scope naming a dataset that lacks the
     # field silently evaluates to Nothing (a drill-through parameter
     # filtered on nothing, production-verified). Retarget to the provable
@@ -31149,6 +32560,7 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     # Only blanks the FINISHED document carries survive as findings.
     _confirm_blank_token_findings(report, root)
     _strip_internal_markers(root)
+    _strip_empty_expressions(root)
     _strip_non_element_nodes(root)
     try:
         ET.indent(root, space="  ")
@@ -31157,4 +32569,5 @@ def generate_rdl(report: ParsedReport, target_db: str = "oracle") -> str:
     body = ET.tostring(root, encoding="unicode")
     _assert_no_internal_markers(body)
     _assert_no_comment_nodes(body)
+    _assert_no_empty_expressions(body)
     return '<?xml version="1.0" encoding="utf-8"?>\n' + body

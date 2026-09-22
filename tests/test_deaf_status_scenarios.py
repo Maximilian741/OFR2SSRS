@@ -378,7 +378,7 @@ def test_the_card_reader_notices_when_an_instruction_is_destroyed(page):
 
 def test_dropping_an_rdf_keeps_the_export_command_on_screen(page):
     """The worst measured case: the one card that says how to fix it."""
-    _drop(page, [{"name": "ASBINSPC.rdf",
+    _drop(page, [{"name": "REPORT.rdf",
                   "mimeType": "application/octet-stream",
                   "buffer": RDF_BYTES}])
     _wait_for_card(page)

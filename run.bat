@@ -9,9 +9,13 @@ REM app's own import error names it, and the ONE optional command is:
 REM     python -m pip install -r requirements.txt
 
 REM Load .env if present (for ANTHROPIC_API_KEY etc.)
+REM (eol=# skips comment lines natively. The previous form used a substring
+REM  expression on a FOR variable, which batch does not support, so any
+REM  machine that HAD a .env died with "The syntax of the command is
+REM  incorrect." before the app ever started.)
 if exist .env (
-    for /f "usebackq tokens=1,* delims==" %%a in (".env") do (
-        if not "%%a"=="" if not "%%a:~0,1%"=="#" set "%%a=%%b"
+    for /f "usebackq eol=# tokens=1,* delims==" %%a in (".env") do (
+        if not "%%a"=="" set "%%a=%%b"
     )
 )
 
@@ -21,5 +25,24 @@ if %errorlevel%==0 (
     set "PY=py -3"
 ) else (
     set "PY=python"
+)
+
+REM READ-ONLY dependency probe (imports only; installs nothing). A fresh
+REM clone that skipped the one-time install otherwise dies on a raw
+REM "ModuleNotFoundError: No module named 'lxml'" traceback from Flask's
+REM import chain -- which is what a first-time user actually hit. Name the
+REM fix instead of the symptom.
+%PY% -c "import flask, lxml, docx, werkzeug" >nul 2>nul
+REM No ^> / ^< in these echo lines: inside a parenthesised block cmd can drop
+REM the caret and turn the arrow into a REDIRECTION, silently creating an
+REM empty file named after the next word (measured: a stray "SSRS" file).
+if errorlevel 1 (
+    echo Oracle to SSRS Converter: a required Python package is not installed.
+    echo This launcher only STARTS the app; it never installs anything.
+    echo Run this ONCE, then start the launcher again:
+    echo.
+    echo     %PY% -m pip install -r requirements.txt
+    echo.
+    exit /b 1
 )
 %PY% backend\app.py

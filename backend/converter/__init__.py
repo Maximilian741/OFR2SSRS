@@ -430,6 +430,62 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
         bursting_info = {"is_bursting": False, "error": f"{type(e).__name__}: {e}"}
 
     preflight = preflight_audit(rdl_xml, target_db=target_db)
+    # PUBLISH-TIME SEMANTICS. The rules Report Server enforces when it
+    # COMPILES the definition at upload, which neither the XSD nor a local
+    # render can see: the XSD encodes shape ("a Tablix MAY carry a
+    # DataSetName"), never meaning ("...but a nested one is ignored, so the
+    # fields inside it must belong to the CONTAINER's dataset"), and
+    # ReportViewer is strictly MORE FORGIVING than the server -- it ignores
+    # a nested region's DataSetName, evaluates an undeclared field as
+    # Nothing, and evaluates a Lookup nested inside another Lookup. All
+    # three are refused at publish.
+    #
+    # The repo's own gate runs this rule engine over every corpus source,
+    # but a gate only protects the repo. The person who uploads the RDL is
+    # running THIS function on a report no gate has ever seen, so the
+    # verdict they read before downloading has to carry the same finding --
+    # a report that bounces at upload is project-fatal error #1, and it
+    # bounced once already because the pre-download verdict said READY.
+    # BLOCKER: the server will refuse the file outright.
+    try:
+        from .validators.publish_semantics import audit_publish_semantics
+        _pv = (audit_publish_semantics(rdl_xml) or {}).get("violations") or []
+        # The file the operator DOWNLOADS is not rdl_xml: every download
+        # route runs the deploy transforms first (each sub-report
+        # drill-through becomes a URL <Hyperlink> that inlines the
+        # drill-through's row expressions -- with or without a server URL).
+        # Audit THAT form too, so a violation that only exists once the
+        # link is a hyperlink reaches this verdict. Measured: a customer's
+        # sub-report read clean here and bounced at the server on exactly
+        # such a hyperlink ("The Hyperlink expression for the text box ...
+        # refers to the field ...").
+        try:
+            from .rdl_postprocess import deploy_transforms
+            _pv_deployed = (audit_publish_semantics(deploy_transforms(rdl_xml))
+                            or {}).get("violations") or []
+        except Exception:  # noqa: BLE001 - the raw audit above still stands
+            _pv_deployed = []
+        _pv_seen = {(str(v.get("rule")), str(v.get("where"))) for v in _pv}
+        _pv = list(_pv) + [v for v in _pv_deployed
+                           if (str(v.get("rule")), str(v.get("where")))
+                           not in _pv_seen]
+        if _pv:
+            preflight = dict(preflight)
+            _iss = list(preflight.get("issues") or [])
+            for _v in _pv[:50]:
+                _iss.append({
+                    "severity": "BLOCKER",
+                    "rule": "rdl." + str(_v.get("rule") or "publish"),
+                    "message": (
+                        f"<{_v.get('where')}> {_v.get('message')} "
+                        f"— Report Server REJECTS this at upload. It is not "
+                        f"visible to a local render: the engine evaluates it "
+                        f"and paints a page."),
+                })
+            preflight["issues"] = _iss
+            preflight["verdict"] = "BLOCKER"
+    except Exception:  # noqa: BLE001 - a validator must never sink convert()
+        pass
     # REAL-GRAMMAR SQL validation. Every other check reasons about the
     # RDL; none of them ever asked whether the SQL we emit is SQL Oracle
     # would accept — and the render harness cannot tell, because it feeds
@@ -654,6 +710,42 @@ def convert(xml_bytes: bytes, target_db: str = "oracle",
                                         0: "READY"}[_worst]
         except Exception:  # noqa: BLE001 -- deep verify must never sink a convert
             pass
+
+    # UNEXPRESSIBLE-CORRELATION HONESTY. Some cross-dataset values have NO
+    # legal SSRS expression (a linked chain more than one hop from the bound
+    # dataset; an Oracle <summary> whose source column belongs to a deeper
+    # child than its declared query). The generator leaves those BLANK
+    # rather than shipping the two expressions that "work" locally and are
+    # REFUSED by Report Server at publish — a nested Lookup ([AGGREF] "Only
+    # one level of lookup is supported") or an aggregate scoped to a dataset
+    # that does not declare the column ([SCOPE]). Neither is visible to any
+    # local rail: ReportViewer renders both. So the decline is DISCLOSED
+    # here — an operator who is not told a cell is blank on purpose has been
+    # misled just as badly as one whose report bounced at upload.
+    try:
+        import re as _re2
+        from .generators.rdl import correlation_declines
+        for _d in (correlation_declines(parsed) or []):
+            if not isinstance(preflight, dict):
+                break
+            preflight.setdefault("issues", []).append({
+                "severity": "AMBER",
+                "rule": "rdl.correlation_declined."
+                        + _re2.sub(r"[^A-Za-z0-9_]", "_",
+                                   _d.get("token", "")),
+                "message": (
+                    f"'{_d.get('token')}' (from {_d.get('wanted_dataset')}, "
+                    f"referenced in the {_d.get('bound_dataset')} scope) is "
+                    f"left BLANK on purpose: {_d.get('reason')}. To print it, "
+                    f"add the correlating key column to "
+                    f"{_d.get('wanted_dataset')}'s query so a single "
+                    f"Lookup() can join it to {_d.get('bound_dataset')}, or "
+                    f"render it in a subreport bound to its own dataset."),
+            })
+            if preflight.get("verdict") in (None, "READY"):
+                preflight["verdict"] = "AMBER"
+    except Exception:  # noqa: BLE001 -- disclosure must never sink a convert
+        pass
 
     # LINKED-DETAIL HONESTY (wild-corpus: 5-link chains and parallel
     # sibling details silently lost rows — the child datasets existed but

@@ -91,57 +91,319 @@ _WS_COLLAPSE = re.compile(r"\s*\n\s*\n\s*", re.MULTILINE)
 def _is_page_builtin(name: str) -> bool:
     return name.upper().replace(" ", "").replace("_", "") in _PAGE_BUILTINS
 
-# Canned values used to fill in &TOKEN substitutions and bound fields when no
-# real data source is available. These are FALLBACK placeholders only — when
-# the user runs against real data via the Live Data tab, those values win.
-_TOKEN_PREVIEW = {
-    # Common Oracle &TOKEN / column references -> neutral, domain-agnostic
-    # sample values. FALLBACK placeholders only; real values win on Live Data.
-    # Verified against Oracle frontend screenshots: values should look like
-    # what the user sees in Oracle Reports production output.
-    "PERM_TYPE":       "DEPARTMENT OF SAMPLE SERVICES\nSAMPLE FACILITY LICENSE",
-    "RENEWAL_YEAR":    "2026",
-    "PERMIT":          "SMPL-0170",
-    "SITE_NAME":       "Sample Site One",
-    "SITE_ADDR":       "100 Main St, Springfield, ST 00000",
-    "PERM_DATES":      "JANUARY 5, 2026 TO DECEMBER 31, 2026",
-    "EXP_DATE":        "12/31/2026",
-    "PERM_EFF_DATE":   "01/05/2026",
-    "PERM_EXP_DATE":   "12/31/2026",
-    "PERM_NUM":        "0170",
-    "SITE_ID":         "10042",
-    "COL_SORT":        "A-001",
-    # Master-detail child columns
-    "PERMITTEE_ADDR":  "Sample Org One\n100 Main St\nSample City, ST 00000",
-    "PERMITTEE":       "Sample Org One",
-    "SA_SITE_ID":      "10042",
-    "ORG_ID":          "20031",
-    # Placeholder / formula fallbacks (STRUCTURAL names only -- never a
-    # client-specific token; suffix keywords below cover the rest)
-    "CP_OPERATE_U":    "IS LICENSED TO OPERATE",
-    "CP_OPERATE_L":    "is licensed to operate",
-    "CP_SORT_DESCR":   "Permit",
-    "CP_PERMIT_DTL":   "Renewal Year = '2026'",
-    "CF_PERMITTEES":   "Sample Org One",
-    "CF_FILE":         "SAMPLE_REPORT-2026.RDL",
-    # Parameter-form-style references
-    "P_RENEWAL_YEAR":  "2026",
-    "P_ENVELOPE":      "SAMPLE_ENVELOPE.rep",
-    "P_PERM_NAME":     "ALL",
-    "P_REPORT_SERVER": "",
-    "P_SITE_NAME":     "ALL",
-    "P_STATUS_DT_BEGIN": "01/01/2026",
-    "P_STATUS_DT_END":   "12/31/2026",
-    "P_SUBTITLE":      "Renewal Year = '2026'\nStatus Date between 01/01/2026 and 12/31/2026",
-    "P_SORT":          "Permit",
-    "P_PERMITTEE":     "ALL",
-    "P_PERM_NUM":      "0170",
-    "P_DISTR_ABBR":    "DIST",
-    # Built-ins
-    "CURRENTDATE":     "01/05/2026",
-    "DATE":            "01/05/2026",
-    "SIGNATURE":       "",   # blob, omit
+# ---------------------------------------------------------------------------
+# Sample values for &TOKEN substitutions and bound fields, DERIVED FROM WHAT
+# THE SOURCE DECLARES.
+#
+# This used to be a 37-entry name->value table. A name table is the "written
+# beside one corpus" construct in its purest form: it fills a value because it
+# RECOGNISES a token, so it looks perfect on the reports it was written next to
+# and does the wrong thing on the next site's naming convention, silently.
+# (It also hid from the domain-vocabulary guard, whose scanner read only
+# tuple/list/set literals -- a dict's KEYS are a roster too.)
+#
+# Everything below reads a DECLARATION instead:
+#   * a parameter's own initialValue      -> the author's literal default;
+#   * display="no"                        -> an internal slot, prints nothing;
+#   * a BLOB/RAW column                   -> a binary, prints nothing;
+#   * the declared formatMask             -> the printed SHAPE of the value;
+#   * the declared datatype / precision / scale -> its magnitude.
+# Only when the source declares nothing usable does the structural keyword
+# fallback (_sample_for_source) run.
+#
+# These are FALLBACK placeholders for the preview only. They never reach the
+# RDL, and real values win on the Live Data tab.
+# ---------------------------------------------------------------------------
+
+# A neutral sample instant, used only to fill a date shape the source declared.
+_SAMPLE_DATE = {
+    "YEAR4": "2026", "YEAR2": "26", "MONTHNUM": "01", "DAYNUM": "05",
+    "MONTHFULL": "JANUARY", "MONTHABBR": "JAN",
+    "DAYFULL": "MONDAY", "DAYABBR": "MON",
+    "HOUR24": "13", "HOUR12": "01", "MINUTE": "30", "SECOND": "00",
+    "MERIDIEM": "PM", "QUARTER": "1", "JULIAN": "2461046",
 }
+
+# Oracle date-mask tokens, longest-first so MONTH is not eaten by MON and
+# HH24 is not eaten by HH. Fixed by Oracle's TO_CHAR mask grammar.
+_DATE_MASK_TOKENS = (
+    ("MONTH", "MONTHFULL"), ("MON", "MONTHABBR"),
+    ("DAY", "DAYFULL"), ("DY", "DAYABBR"),
+    ("YYYY", "YEAR4"), ("RRRR", "YEAR4"), ("YY", "YEAR2"), ("RR", "YEAR2"),
+    ("HH24", "HOUR24"), ("HH12", "HOUR12"), ("HH", "HOUR12"),
+    ("SSSSS", "SECOND"), ("MI", "MINUTE"), ("SS", "SECOND"),
+    ("A.M.", "MERIDIEM"), ("P.M.", "MERIDIEM"), ("AM", "MERIDIEM"),
+    ("PM", "MERIDIEM"), ("MM", "MONTHNUM"), ("DDD", "JULIAN"),
+    ("DD", "DAYNUM"), ("J", "JULIAN"), ("Q", "QUARTER"),
+)
+
+_DATE_TYPES = ("date", "datetime", "timestamp")
+_NUM_TYPES = ("number", "numeric", "decimal", "integer", "int", "float",
+              "real", "double", "binary_float", "binary_double", "money",
+              "currency", "long integer", "short integer")
+_BINARY_TYPES = ("blob", "clob", "bfile", "raw", "long raw", "longraw",
+                 "image", "binary", "graphic", "sound", "video", "ole2")
+
+
+def _tokenize_date_mask(mask):
+    """Split ``mask`` into (rendered-parts, matched-any, leftover-characters)
+    using Oracle's date-mask grammar, longest token first.
+
+    ONE tokenizer serves both "is this a date mask?" and "render it", so the
+    two can never disagree. They did: an earlier discriminator rejected any
+    mask containing 'N' as numeric, which is every mask spelling MON or
+    MONTH -- so DD-MON-RRRR silently fell through to the default shape.
+    """
+    up = (mask or "").upper()
+    # "fm" is Oracle's fill-mode prefix (suppress padding), not a shape token.
+    while up.startswith("FM"):
+        up = up[2:]
+    parts, leftover, matched = [], [], False
+    i = 0
+    while i < len(up):
+        for tok, slot in _DATE_MASK_TOKENS:
+            if up.startswith(tok, i):
+                parts.append(_SAMPLE_DATE[slot])
+                matched = True
+                i += len(tok)
+                break
+        else:
+            parts.append(up[i])
+            leftover.append(up[i])
+            i += 1
+    return parts, matched, leftover
+
+
+def _mask_is_date(mask):
+    """A mask declares a DATE shape when it spells date-mask tokens and the
+    characters those tokens did NOT consume hold no numeric digit slots --
+    Oracle's two mask grammars are disjoint."""
+    if not (mask or "").strip():
+        return False
+    _parts, matched, leftover = _tokenize_date_mask(mask)
+    if not matched:
+        return False
+    return not any(ch in "90N" for ch in leftover)
+
+
+def _sample_through_date_mask(mask):
+    """Render the neutral sample instant THROUGH the declared mask.
+
+    An Oracle formatMask literally describes the printed shape, so the sample
+    comes out looking like the real report's own output without anyone having
+    to recognise what the column is called.
+    """
+    parts, _matched, _leftover = _tokenize_date_mask(mask)
+    return "".join(parts)
+
+
+def _sample_through_number_mask(mask):
+    """Build a sample number with the digit/grouping/currency shape declared.
+
+    Oracle number masks spell digit slots as 9 / 0 / N, the group separator as
+    ',' or 'G', the decimal point as '.' or 'D', and currency as '$' or 'L'.
+    """
+    up = (mask or "").upper()
+    lead = "$" if ("$" in up or "L" in up) else ""
+    trail = "%" if "%" in up else ""
+    body = up.replace("$", "").replace("L", "").replace("%", "")
+    if "D" in body and "." not in body:
+        body = body.replace("D", ".")
+    int_part, _dot, dec_part = body.partition(".")
+    dec_slots = sum(1 for ch in dec_part if ch in "90N")
+    int_slots = sum(1 for ch in int_part if ch in "90N")
+    grouped = ("," in int_part) or ("G" in int_part)
+    # A neutral magnitude that FILLS the declared slots without inventing more
+    # digits than the mask reserves.
+    if int_slots >= 4:
+        digits = "1250"
+    elif int_slots == 3:
+        digits = "125"
+    else:
+        digits = "12"
+    if grouped and len(digits) > 3:
+        digits = "{:,}".format(int(digits))
+    text = lead + digits
+    if dec_slots:
+        text += "." + "0" * dec_slots
+    return text + trail
+
+
+def _sample_for_declared_type(datatype, mask, precision=None, scale=None):
+    """A sample value whose SHAPE comes from the declaration, not the name.
+
+    The declarations are read in RANK ORDER -- datatype first, mask second.
+    A mask is a formatting grammar WITHIN a type, not evidence of the type:
+    on a real report a character column carried a layout date mask, and
+    reading the mask first printed a person's name slot as "01/05/2026".
+    Returns "" when the declarations say nothing about the VALUE, so the
+    caller falls through to the structural fallback.
+    """
+    dt = (datatype or "").strip().lower()
+    is_date = dt in _DATE_TYPES
+    is_num = dt in _NUM_TYPES
+    if dt and not (is_date or is_num):
+        return ""            # declared character: the mask is not the content
+    if mask and _mask_is_date(mask) and (is_date or not dt):
+        shaped = _sample_through_date_mask(mask)
+        if shaped:
+            return shaped
+    if mask and not _mask_is_date(mask) and (is_num or not dt):
+        if any(ch in mask.upper() for ch in "90N") or "$" in mask:
+            return _sample_through_number_mask(mask)
+    if is_date:
+        return "{m}/{d}/{y}".format(m=_SAMPLE_DATE["MONTHNUM"],
+                                    d=_SAMPLE_DATE["DAYNUM"],
+                                    y=_SAMPLE_DATE["YEAR4"])
+    if is_num:
+        if scale:
+            return "1250." + "0" * min(int(scale), 4)
+        if precision and int(precision) <= 3:
+            return "125"
+        return "1250"
+    return ""
+
+
+def _walk_layout_groups(groups):
+    for g in groups or []:
+        yield g
+        for child in (getattr(g, "children", None) or []):
+            for sub in _walk_layout_groups([child]):
+                yield sub
+
+
+class _Declarations(object):
+    """What the SOURCE says about every name the preview may have to fill.
+
+    Built once per render. Holds no vocabulary of its own -- every entry is
+    something the report itself declared.
+    """
+
+    __slots__ = ("param_initial", "param_type",
+                 "item_type", "mask_by_source", "known")
+
+    def __init__(self, report):
+        self.param_initial = {}
+        self.param_type = {}
+        self.item_type = {}
+        self.mask_by_source = {}
+        self.known = set()
+        for p in (getattr(report, "parameters", None) or []):
+            key = (getattr(p, "name", "") or "").upper().strip()
+            if not key:
+                continue
+            self.known.add(key)
+            init = getattr(p, "initial_value", None)
+            if init is not None and str(init).strip():
+                self.param_initial[key] = str(init)
+            self.param_type[key] = (getattr(p, "datatype", "") or "",
+                                    getattr(p, "input_mask", "") or "",
+                                    None, None)
+        for q in (getattr(report, "queries", None) or []):
+            for it in (getattr(q, "items", None) or []):
+                key = (getattr(it, "name", "") or "").upper().strip()
+                if not key:
+                    continue
+                self.known.add(key)
+                # An UNDECLARED datatype is the parser's character default,
+                # not a statement by the source -- do not read a type out of
+                # it (DataItem.datatype_declared exists for exactly this).
+                if getattr(it, "datatype_declared", True):
+                    dt = getattr(it, "datatype", "") or ""
+                else:
+                    dt = ""
+                self.item_type[key] = (dt, "",
+                                       getattr(it, "precision", None),
+                                       getattr(it, "scale", None))
+        for g in _walk_layout_groups(getattr(report, "layout", None) or []):
+            for f in (getattr(g, "fields", None) or []):
+                mask = (getattr(f, "format_mask", "") or "").strip()
+                srcname = (getattr(f, "source", "") or "").upper().strip()
+                if mask and srcname:
+                    self.mask_by_source.setdefault(srcname, mask)
+
+
+def _declarations_for(report):
+    if report is None:
+        return None
+    cached = getattr(report, "_mockup_declarations", None)
+    if cached is None:
+        try:
+            cached = _Declarations(report)
+        except Exception:  # noqa: BLE001 -- the preview must never break
+            return None
+        try:
+            setattr(report, "_mockup_declarations", cached)
+        except Exception:  # noqa: BLE001 -- read-only model, still usable
+            pass
+    return cached
+
+
+def _declared_sample(token, report=None):
+    """A sample value for ``token`` read out of the report's DECLARATIONS.
+
+    Returns ``None`` when the source declares nothing usable, so the caller
+    falls through to the structural keyword fallback. Never consults a table
+    of known names.
+    """
+    decls = _declarations_for(report) if report is not None else _ACTIVE_DECLS
+    if decls is None:
+        return None
+    key = (token or "").upper().strip().lstrip("&")
+    if not key:
+        return None
+    # Boilerplate commonly references the FIELD OBJECT wrapping a parameter
+    # (&F_P_BEGIN_DATE); the declaration lives on the parameter.
+    candidates = [key]
+    if key.startswith("F_") and key[2:] in decls.known:
+        candidates.append(key[2:])
+    for cand in candidates:
+        # The author's OWN declared default is the most faithful value there
+        # is -- it is literally what Oracle shows when the user runs the
+        # report without changing anything.
+        if cand in decls.param_initial:
+            return decls.param_initial[cand]
+    declared_anything = False
+    for cand in candidates:
+        decl = decls.param_type.get(cand)
+        if decl is None:
+            decl = decls.item_type.get(cand)
+        if decl is None:
+            continue
+        datatype, mask, precision, scale = decl
+        if (datatype or "").strip().lower() in _BINARY_TYPES:
+            return ""        # a blob has no printable sample
+        if (datatype or "").strip():
+            declared_anything = True
+        mask = mask or decls.mask_by_source.get(cand, "")
+        sample = _sample_for_declared_type(datatype, mask, precision, scale)
+        if sample:
+            return sample
+        # NOTE: display="no" is deliberately NOT treated as "prints nothing".
+        # Oracle's display attribute governs the runtime parameter FORM, not
+        # the page: a hidden parameter whose value a trigger computes (a
+        # subtitle, a criteria line) is printed content. Blanking it here
+        # preempted the trigger reconstruction further down the caller and
+        # emptied real captions.
+    if declared_anything:
+        # The source DID declare this name and the declaration says nothing
+        # about the value (a character column). Stop here: reaching past it
+        # to a layout mask is how a character column became a date.
+        return None
+    # No parameter/column declaration, but the LAYOUT may still declare the
+    # printed shape for this source.
+    layout_mask = decls.mask_by_source.get(key, "")
+    if layout_mask:
+        sample = _sample_for_declared_type("", layout_mask)
+        if sample:
+            return sample
+    return None
+
+
+# The declarations of the report currently being rendered. Set (and restored)
+# by render_mockup, so the token resolvers deep in the page builders can reach
+# them without threading ``report`` through every call site.
+_ACTIVE_DECLS = None
 
 
 # Module-level rendering mode. "frontend" fills the preview with fictional
@@ -173,8 +435,9 @@ def _resolve_tokens(text: str, idx: int = 0) -> str:
 
     def _one(key):
         u = key.upper()
-        if u in _TOKEN_PREVIEW:
-            return _TOKEN_PREVIEW[u]
+        declared = _declared_sample(key)
+        if declared is not None:
+            return declared
         if "YEAR" in u:
             return "2026" if ("PREVIOUS" not in u and "PREV" not in u) else "2025"
         # CF_/CP_ formulas and any other unmatched token -> a neutral sample,
@@ -1031,22 +1294,23 @@ def _detail_field_pairs(group):
 def _sample_for_source(src, idx):
     """Return a fictional sample value for a column/source name.
 
-    In BACKEND mode the value is a visible placeholder (e.g. «F_PERM_NUM»)
+    In BACKEND mode the value is a visible placeholder (e.g. «F_COLUMN»)
     so the preview shows the Report Builder design view instead of sample-
     filled output.
 
-    Otherwise (frontend mode) checks _TOKEN_PREVIEW first (which has
-    domain-appropriate sample values for known Oracle columns), then falls
-    back to the structural keyword pools.
+    Otherwise (frontend mode) the SOURCE'S OWN DECLARATIONS answer first --
+    a parameter default, a declared datatype, a declared format mask -- and
+    only a name the source says nothing about reaches the structural keyword
+    pools below.
     """
     if _ACTIVE_MODE == "backend":
         return _placeholder_for_source(src)
-    # Check the curated TOKEN_PREVIEW map first — it has better sample
-    # values for known Oracle report columns (e.g. PERM_TYPE → department
-    # title, not "Type Alpha").
+    # What the report DECLARES about this name beats any guess made from how
+    # the name is spelled.
+    declared = _declared_sample(src)
+    if declared is not None:
+        return declared
     u = (src or "").upper().strip()
-    if u in _TOKEN_PREVIEW and _TOKEN_PREVIEW[u]:
-        return _TOKEN_PREVIEW[u]
     key = (src or "").lower().replace("_", " ").strip()
 
     # Structural keyword pools. Each pool holds THREE fictional alternatives.
@@ -3255,8 +3519,15 @@ def _render_grouped_tabular_subtotal_page(report, spec, page_num, total_pages):
     right-aligned group-footer TOTALS stack (FY-range subtotal, then the
     Junk/-Crushed/=In-Yards lines). Geometry-driven from _grouped_tabular_spec
     so it matches the generated RDL's grouped Tablix."""
+    # ``detail_cols`` entries are (x, width, source, ...): the generator keeps
+    # the field object as a 4th member for its own emitter. Read the first
+    # three POSITIONALLY so the preview cannot break when the generator adds
+    # another -- unpacking exactly three raised ValueError and crashed the
+    # Preview tab on every grouped-subtotal report in the corpus.
+    dcols = [(float(c[0] or 0.0), float(c[1] or 0.0), c[2])
+             for c in spec["detail_cols"]]
     total_w = 7.5
-    for _x, _w, _s in spec["detail_cols"]:
+    for _x, _w, _s in dcols:
         total_w = max(total_w, _x + (_w or 0.0) + 0.1)
 
     def pct(x):
@@ -3281,14 +3552,16 @@ def _render_grouped_tabular_subtotal_page(report, spec, page_num, total_pages):
     _hwrap = ("height:20px;background:#00008B;" if _themed
               else "height:20px;background:#ffffff;border-bottom:2px solid #444;")
     cols = spec["col_headers"]
-    dcols = spec["detail_cols"]
     ghdr = spec["group_header"]
     footers = spec["footers"]
 
     def _group_block(gi):
         # --- group header line: break-key caption (left) + Status (right) ---
         gh = ""
-        for k, val, x, _w in ghdr:
+        # (kind, source-or-text, x, width, ...) -- positional like dcols
+        # above, for the same reason: the generator owns this tuple and grows
+        # it, and the preview must not be the thing that breaks when it does.
+        for k, val, x, _w, *_rest in ghdr:
             if k == "text":
                 txt = _resolve_tokens(val, gi)
             else:
@@ -3301,7 +3574,7 @@ def _render_grouped_tabular_subtotal_page(report, spec, page_num, total_pages):
                  + gh + '</div>')
         # --- column header strip ---
         hdr = ""
-        for hi, (hx, label) in enumerate(cols):
+        for hi, (hx, label, *_hrest) in enumerate(cols):
             nxt = cols[hi + 1][0] if hi + 1 < len(cols) else total_w
             hdr += ('<div style="position:absolute;left:' + f"{pct(hx):.1f}" + '%;width:'
                     + f"{pct(nxt) - pct(hx):.1f}" + '%;color:' + _hfg + ';font-weight:bold;'
@@ -3334,9 +3607,9 @@ def _render_grouped_tabular_subtotal_page(report, spec, page_num, total_pages):
         for line in footers:
             if not line:
                 continue
-            vk, vval, vx, _vw = line[-1]   # rightmost field = the total VALUE
+            vk, vval, vx, _vw, *_vrest = line[-1]   # rightmost = the total VALUE
             ftr = ""
-            for k, val, x, _w in line[:-1]:
+            for k, val, x, _w, *_frest in line[:-1]:
                 txt = _resolve_tokens(val, gi) if k == "text" else _sample_for_source(val, gi)
                 ftr += ('<div style="position:absolute;left:' + f"{pct(x):.1f}" + '%;'
                         'font-size:11px;color:#000;white-space:nowrap;">' + _esc(txt) + '</div>')
@@ -3609,8 +3882,9 @@ def _doc_resolve_tokens(text, report):
 
     def _resolve_key(key):
         u = key.upper()
-        if u in _TOKEN_PREVIEW:
-            return _TOKEN_PREVIEW[u]
+        declared = _declared_sample(key, report)
+        if declared is not None:
+            return declared
         if "YEAR" in u:
             return "2026" if "PREVIOUS" not in u and "PREV" not in u else "2025"
         if u.startswith(("CF_", "CP_")):
@@ -5654,10 +5928,15 @@ def render_mockup(report, mode="frontend"):
     mode="backend": Report Builder design surface, 2 pages (section_header
         design + section_main design) with F_FIELD_NAME placeholders visible.
     """
-    global _ACTIVE_MODE, _ACTIVE_TITLE_FONT
+    global _ACTIVE_MODE, _ACTIVE_TITLE_FONT, _ACTIVE_DECLS
     prev = _ACTIVE_MODE
     prev_font = _ACTIVE_TITLE_FONT
+    prev_decls = _ACTIVE_DECLS
     _ACTIVE_MODE = "backend" if mode == "backend" else "frontend"
+    # Sample values come from THIS report's declarations; the page builders
+    # reach them through this module-level slot rather than threading the
+    # report through every token resolver.
+    _ACTIVE_DECLS = _declarations_for(report)
     try:
         _ACTIVE_TITLE_FONT = _title_font_css(report)
     except Exception:
@@ -5732,6 +6011,7 @@ def render_mockup(report, mode="frontend"):
     finally:
         _ACTIVE_MODE = prev
         _ACTIVE_TITLE_FONT = prev_font
+        _ACTIVE_DECLS = prev_decls
 
 
 _PCT_CELL_RE = re.compile(

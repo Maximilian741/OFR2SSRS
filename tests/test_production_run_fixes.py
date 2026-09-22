@@ -3049,20 +3049,96 @@ _CHAIN_XML = (
 ).encode()
 
 
-def test_two_hop_link_resolves_by_correlation_not_global_first():
+def test_two_hop_link_declines_instead_of_nesting_lookups():
     """A value from a linked child TWO hops away (applicant -> application
-    -> course) must be reached with NESTED correlated Lookups. A
-    dataset-scoped First() there returns the globally first row — another
-    record's data painted onto every record (agent-army verified P0). When
-    no correlation can be built the value must be blank, never a global
-    aggregate over a per-parent detail set."""
-    from converter import convert
+    -> course) has NO legal SSRS expression, so it must be DECLINED — left
+    blank and disclosed — never emitted.
 
-    rdl = convert(_CHAIN_XML)["rdl_xml"]
-    assert 'Lookup(Lookup(' in rdl.replace(" ", ""), rdl[:400]
-    assert 'Fields!CVAL.Value, "Q_FAR"' in rdl, rdl[:400]
-    # never the uncorrelated form
+    This replaces (and strictly tightens) the earlier expectation that the
+    chain be reached with NESTED correlated Lookups. That translation
+    renders fine in ReportViewer and is schema-valid, and Report Server
+    REFUSES it at publish: "Only one level of lookup is supported. A
+    source, destination, or result expression can't include a reference to
+    a lookup function." Shipping it is project-fatal error #1; the old
+    assertion was pinning the defect in place.
+
+    Every guarantee the old test made is kept and one is added:
+      * still never the uncorrelated ``First(..., "Q_FAR")`` — a global
+        aggregate over a per-parent detail set paints ANOTHER record's
+        data onto every record (agent-army verified P0);
+      * now also never a nested Lookup (the publish-fatal form);
+      * and the whole RDL must clear the publish-semantics gate.
+    """
+    from converter import convert
+    from converter.validators.publish_semantics import publish_violations
+
+    res = convert(_CHAIN_XML)
+    rdl = res["rdl_xml"]
+    assert "Lookup(Lookup(" not in rdl.replace(" ", ""), rdl[:400]
     assert 'First(Fields!CVAL.Value, "Q_FAR")' not in rdl
+    assert publish_violations(rdl) == []
+    # the decline is DISCLOSED, not silent: an operator must learn from the
+    # preflight why the cell is empty.
+    declined = [i for i in ((res.get("preflight") or {}).get("issues") or [])
+                if (i.get("rule") or "").startswith(
+                    "rdl.correlation_declined")]
+    assert declined, (res.get("preflight") or {}).get("issues")
+    assert "Q_FAR" in declined[0]["message"]
+
+
+_RELAY_XML = (
+    '<?xml version="1.0"?><report name="RELAY_T" DTDVersion="9.0.2.0.10">'
+    '<data>'
+    '<dataSource name="Q_TOP"><select><![CDATA[select org_id, nm '
+    'from orgs]]></select>'
+    '<group name="G_TOP"><dataItem name="Org_Id" datatype="number"/>'
+    '<dataItem name="NM" datatype="vchar2"/></group></dataSource>'
+    '<dataSource name="Q_MID"><select><![CDATA[select mid_key, app_id '
+    'from apps]]></select>'
+    '<group name="G_MID"><dataItem name="MID_KEY" datatype="number"/>'
+    '<dataItem name="APP_ID" datatype="number"/></group></dataSource>'
+    '<dataSource name="Q_FAR"><select><![CDATA[select far_key, cval '
+    'from courses]]></select>'
+    '<group name="G_FAR"><dataItem name="FAR_KEY" datatype="number"/>'
+    '<dataItem name="CVAL" datatype="vchar2"/>'
+    '<summary name="C_CVAL" source="CVAL" function="first"/>'
+    '</group></dataSource>'
+    '<link parentGroup="G_TOP" childQuery="Q_MID" parentColumn="Org_Id" '
+    'childColumn="MID_KEY" sqlClause="where"/>'
+    '<link parentGroup="G_MID" childQuery="Q_FAR" parentColumn="MID_KEY" '
+    'childColumn="FAR_KEY" sqlClause="where"/>'
+    '</data>'
+    '<layout><section name="main">'
+    '<frame name="M_B"><geometryInfo x="0" y="0" width="8" height="6"/>'
+    '<repeatingFrame name="R_TOP" source="G_TOP" printDirection="down">'
+    '<geometryInfo x="0.2" y="1.3" width="7.5" height="1.6"/>'
+    '<field name="F_NM" source="NM"><geometryInfo x="0.2" y="1.3" '
+    'width="3" height="0.2"/></field>'
+    '<field name="F_C" source="C_CVAL"><geometryInfo x="0.2" y="1.6" '
+    'width="3" height="0.2"/></field>'
+    '</repeatingFrame></frame></section></layout></report>'
+).encode()
+
+
+def test_relay_chain_still_collapses_to_one_legal_lookup():
+    """The chain that DOES collapse must still resolve — the decline is a
+    narrow, measured rule, not a blanket give-up.
+
+    Here the middle query only RELAYS a key: the column it is joined to its
+    master on (MID_KEY) is the very column the far child is joined on, so
+    the bound row's own key already IS the far child's key and ONE Lookup
+    is exactly equivalent to the (publish-fatal) nested pair. The direct
+    one-hop path cannot build this — Q_FAR's link names MID_KEY, which
+    Q_TOP does not declare — so a passing assertion here can only come
+    from the collapse branch of the chain resolver."""
+    from converter import convert
+    from converter.validators.publish_semantics import publish_violations
+
+    rdl = convert(_RELAY_XML)["rdl_xml"]
+    assert "Lookup(Lookup(" not in rdl.replace(" ", "")
+    assert 'Fields!CVAL.Value, "Q_FAR"' in rdl, rdl[:600]
+    assert 'First(Fields!CVAL.Value, "Q_FAR")' not in rdl
+    assert publish_violations(rdl) == []
 
 
 def test_stripped_link_predicate_preserves_join_keys():

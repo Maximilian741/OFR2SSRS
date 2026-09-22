@@ -70,11 +70,39 @@ NOT to fire on the legitimate shape it most resembles:
                         placeholder). NOT flagged: they are not starved, and
                         placeholder ink is a data region's ink by declaration.
 
+  hand-built word      the same two defects and the same closing block as
+  sheets, block,       RDL written by hand — no converter, whose archetype
+  record + trailer     choice for a static letter differs by script — and
+                       shaped so rule (B) cannot claim the reprinted word.
+                       The SPARSE COLUMN ITSELF (not the union with the blank
+                       column) names the ruined sheets in nine scripts at
+                       four row counts and keeps the block; the orphaned cell
+                       is named in nine scripts at four row counts; and the
+                       column a sheet lands in is the same in every script.
+  fullness sweep       the per-record defect behind record sheets of 2 and 16
+                       paragraphs (14x to 212x starved by script) names the
+                       same three sheets.
+  one-line closing     a letter closing on ONE short line of its own. KEPT in
+                       nine scripts — it found the last count in the rule: a
+                       token floor of three read the two-glyph Japanese
+                       closing as noise and condemned the sheet in CJK alone.
+  the judges' tail     a card whose tail box sits past the printable strip,
+  sheet, three forms   so every record spills a sheet carrying the tail
+                       alone: the report's own wording (KEPT), the document's
+                       only data cell (KEPT), the full sheet's wording
+                       reprinted behind a trailer (NAMED, one per record) —
+                       each verdict the same in nine scripts at four shapes,
+                       where the rule this replaced decided it by language,
+                       by row count and by the record sheet's fullness.
+
 Each leg is mutation-proven load-bearing against the fixture the OTHERS pass,
 so none is decoration; the data-ink floor, the expression-literal half of the
-declared-wording read, and the containment match are proven the same way, and
-the two script-shaped ones are proven to fail BY LANGUAGE, which is the
-failure mode they exist for.
+declared-wording read, the containment match and the punctuation rule are
+proven the same way, and the script-shaped ones are proven to fail BY
+LANGUAGE, which is the failure mode they exist for. The STARVED quantity is
+proven to be ink AREA for a measured reason: read in rows of ink — the unit
+that IS the same in every language — the orphaned-cell sheet walks in every
+script at every row count.
 
 Structural assertions always run. The render proofs run wherever the
 ReportViewer DLLs are present (tools/renderlab).
@@ -212,10 +240,9 @@ def test_a_sheet_carrying_one_mark_of_its_own_is_not_sparse():
     assert _measure(pages, ["content"] * 4) == [4]
 
 
-def test_a_mark_too_short_to_identify_is_not_evidence_either_way():
-    """A one- or two-token mark cannot be told from any other one- or two-token
-    mark, so it neither proves nor disproves that a sheet says something new —
-    the floor every containment test in the measure already stops at.
+def test_a_mark_of_bare_punctuation_is_not_evidence_either_way():
+    """Punctuation is not wording, in any script, so a mark of it neither
+    proves nor disproves that a sheet says something new.
 
     Measured on the engine, in Hangul: the extractor hands back one printed
     closing line as a single run on the sheet where it belongs and as that run
@@ -226,6 +253,68 @@ def test_a_mark_too_short_to_identify_is_not_evidence_either_way():
         [_line(_CLOSING, 300.0, 40.0), _line(",", 300.0, 3.0)],
         [_line(_CLOSING, 300.0, 40.0)])
     assert _measure(pages, ["content"] * 4) == [3, 4]
+
+
+def _two_glyph_word_pages():
+    """The letter, then a starved sheet whose only mark is a TWO-GLYPH word
+    of its own (the usual Japanese closing is two glyphs), then the reprint
+    sheet the rule must still name."""
+    return _letter_pages([_line("敬具", 300.0, 22.0)],
+                         [_line(_CLOSING, 300.0, 40.0)])
+
+
+def test_a_two_glyph_word_is_evidence_of_its_own_wording():
+    """THE COUNT THAT WAS HERE. A mark under three tokens used to be "not
+    evidence either way", and a token is a character in Latin and a word in
+    CJK: measured on the engine, a letter closing on one short line of its
+    own was kept in eight scripts and condemned in CJK, on one artifact whose
+    only difference was its language. A two-glyph word is a word; the sheet
+    that prints it, and no fuller sheet does, has said something."""
+    assert _measure(_two_glyph_word_pages(), ["content"] * 4) == [4]
+
+
+def test_the_verdict_on_a_two_glyph_word_is_the_same_when_it_does_not_decode():
+    """...and the same when those two glyphs come back as glyph ids instead
+    of characters, which is what CJK ink does (section (D)): the wording is
+    evidence by being ink the fuller sheets do not carry, not by decoding."""
+    pages = _two_glyph_word_pages()
+    ink = []
+    for i, p in enumerate(pages):
+        page = _sheet(p["lines"])
+        if i == 2:                       # the two-glyph sheet, undecoded
+            page["lines"] = []
+            page["undecodable"] = [{"bbox": ln["bbox"],
+                                    "sig": (("g", 4021, 4022),)}
+                                   for ln in p["lines"]]
+        ink.append(page)
+    texts = ["\n".join(ln["key"] for ln in p["lines"]) for p in pages]
+    texts[2] = ""
+    assert bm.sparse_sheets(texts, None, (), [[]] * 4, ink,
+                            ["content"] * 4) == [4]
+
+
+def test_mutation_a_token_floor_condemns_the_two_glyph_word(monkeypatch):
+    """PROVE THE GATE CAN FAIL, for the reason it exists: put the token floor
+    back — a mark under ``LINE_FLOOR`` tokens is not evidence — and the
+    two-glyph closing is thrown away as noise, the sheet "says nothing", and
+    it is condemned beside the reprint sheet. That is the CJK verdict the
+    floor produced on the engine, reproduced in arithmetic."""
+    monkeypatch.setattr(bm, "_wordless",
+                        lambda sig: len(bm._ink_tokens(sig)) < bm.LINE_FLOOR)
+    assert _measure(_two_glyph_word_pages(), ["content"] * 4) == [3, 4]
+
+
+def test_mutation_dropping_the_punctuation_rule_keeps_the_comma_sheet(
+        monkeypatch):
+    """...and the other direction, so the rule that replaced the floor is
+    shown load-bearing too: with NO wordless rule, the split-off comma counts
+    as something the sheet says of its own, and the reprint sheet carrying it
+    walks — the Hangul miss, in arithmetic."""
+    monkeypatch.setattr(bm, "_wordless", lambda sig: False)
+    pages = _letter_pages(
+        [_line(_CLOSING, 300.0, 40.0), _line(",", 300.0, 3.0)],
+        [_line(_CLOSING, 300.0, 40.0)])
+    assert _measure(pages, ["content"] * 4) == [4]
 
 
 def test_a_sheet_that_is_not_starved_is_not_sparse():
@@ -1411,7 +1500,7 @@ _ARMS = [("letter", 0), ("letter", 1), ("letter", 3), ("letter", 25),
 
 
 @_needs_engine
-@pytest.mark.parametrize("factor", [2, 3, 4, 6, 8, 10, 12, 16])
+@pytest.mark.parametrize("factor", [3, 4, 6, 8, 10, 12, 16])
 def test_the_decade_is_a_unit_not_a_tuned_threshold(engine, factor,
                                                     monkeypatch):
     """Every factor across the window this class has room in gives the SAME
@@ -1424,15 +1513,53 @@ def test_the_decade_is_a_unit_not_a_tuned_threshold(engine, factor,
     threshold was making. The legitimate cases are no longer decided by the
     ratio at all — see
     ``test_no_factor_at_all_decides_the_signature_block``, which keeps them at
-    every factor from 2x to 40x in all nine scripts — so the bottom is gone
-    and every factor from 2x up gives identical verdicts. What remains is the
-    top, where the defect itself stops being starved: measured just past 25x,
-    and shown below."""
+    every factor from 2x to 40x in all nine scripts — so the bottom is not a
+    verdict's any more: every factor from 3x up gives identical verdicts, and
+    the one bound under that is a FIXTURE'S OWN RATIO, measured and pinned in
+    ``test_the_bottom_of_the_window_is_the_ledgers_own_ratio`` (the ledger's
+    one-row last sheet is 2.97x starved beside its own first sheet, so 2x
+    names it). What remains is the top, where the defect itself stops being
+    starved: measured just past 25x, and shown below."""
     baseline = {(n, r): _measured(engine, n, r)["sparse"] for n, r in _ARMS}
     monkeypatch.setattr(bm, "SPARSE_DECADES", math.log10(factor))
     moved = {k: v for k, v in baseline.items()
              if _measured(engine, *k)["sparse"] != v}
     assert not moved, f"factor {factor} moved verdicts: {moved}"
+
+
+@_needs_engine
+def test_the_bottom_of_the_window_is_the_ledgers_own_ratio(engine,
+                                                           monkeypatch):
+    """The factor just under the identical window, and why it is a bound
+    the fixtures set rather than a threshold the rule tunes.
+
+    The ledger's last sheet carries one row under twelve-row sheets, and it
+    is 2.97x starved by DISTINCT ink beside its own first sheet — so at 2x
+    it is named, and it is the ONLY arm of the discrimination suite that
+    moves. It used to measure 1.0x: identical coverage on a twelve-row sheet
+    and a one-row sheet, because the sheet's caption row and every HOLDER
+    cell were furniture BY WORDING — the page band declares "Account Holder",
+    and the declared-wording rule deleted that wording from any line on the
+    sheet, a data cell included — until the blank measure made it a PLACE
+    rule (tests/test_declared_wording_by_place.py). Counted as the content
+    they are, the twelve-row sheets are fuller than the one-row sheet, which
+    is what a reader sees.
+
+    Pinned so a drift shows: the bound lies above 2x and under the decade,
+    the decade keeps the sheet (``test_engine_a_one_row_last_page_is_not_
+    flagged``), and 2x names exactly it."""
+    m = _measured(engine, "ledger", 25)
+    cover = m["coverage"]
+    ratio = max(cover) / cover[-1]
+    assert 2.0 < ratio < 10.0 ** bm.SPARSE_DECADES, (
+        f"the ledger's one-row sheet measures {ratio:.2f}x starved; the bound "
+        "this test pins has moved")
+    baseline = {(n, r): _measured(engine, n, r)["sparse"] for n, r in _ARMS}
+    monkeypatch.setattr(bm, "SPARSE_DECADES", math.log10(2))
+    moved = {k: _measured(engine, *k)["sparse"] for k, v in baseline.items()
+             if _measured(engine, *k)["sparse"] != v}
+    assert moved == {("ledger", 25): [m["pages"]]}, (
+        f"at 2x exactly the ledger's one-row last sheet moves — {moved}")
 
 
 @_needs_engine
@@ -1489,3 +1616,608 @@ def test_a_factor_above_the_window_lets_the_defect_through(engine, factor,
     assert _measured(engine, "letter_doctored", 3)["sparse"] == [], (
         f"a factor above the measured window ({factor}x) must start missing "
         "the defect; if it does not, the window is wider than recorded")
+
+
+# ---------------------------------------------------------------------------
+# THE SPARSE COLUMN ITSELF, WITH NO CONVERTER IN THE WAY — hand-built RDLs
+# ---------------------------------------------------------------------------
+#
+# Everything above renders what ``convert`` emits, and on those shapes the
+# ruined sheets are named by whichever column rule (B) leaves them to: where
+# the closing word EXTRACTS the same way on every sheet it is page furniture by
+# repetition and the BLANK gate names the word-only sheets; where the
+# extractor splits it differently between sheets (a run on one, the run plus
+# its comma on another) it is content and the SPARSE rule names them. The
+# union is the same in every script and at every row count — measured, nine
+# scripts x four row counts, zero deviations — but the column is a fact about
+# rule (B)'s text matching, and it means none of those fixtures can prove the
+# sparse rule's OWN script invariance: in three of the nine scripts it is
+# never asked.
+#
+# These fixtures are hand-built RDL. No converter — measured: the converter's
+# archetype choice for a static two-frame letter differs by script (a record
+# region in six languages, static frames in three), which confounds the very
+# comparison this section exists to make. And they are shaped so that rule (B)
+# CANNOT claim the reprinted word: it is absent from at least one sheet of
+# every document (a second prose sheet without it; a trailer sheet after the
+# records). Whatever names the ruined sheets here is the sparse rule, and it
+# must name them in the SPARSE column — not the union — in all nine scripts
+# and at all four row counts, while the blank column stays silent.
+#
+# Measured on the engine (starvation = fullest sheet / word sheet, as area):
+#
+#     word sheets behind a static letter    named 3 of 5 in 9 x 4 cells,
+#                                           26.7x (Thai) ... 116.6x (Arabic)
+#     word sheets per record + trailer      named one per record in 9 x 4,
+#                                           18.1x (Thai) ... 68.5x (CJK);
+#                                           and behind record sheets of 2, 6,
+#                                           12 and 16 paragraphs — 14x to
+#                                           212x — the same three sheets in
+#                                           every script
+#     closing block on a sheet of its own   nothing named in 9 x 4
+#     one data cell orphaned per record     named one per record in 9 x 4,
+#                                           34.9x ... 67.7x
+
+_HB_SHEET = 10.0     # printable height: 11in less two half-inch margins
+
+
+def _hb_textbox(name, top, left, w, h, val, face):
+    val = val.replace("&", "&amp;").replace("<", "&lt;")
+    return (f'<Textbox Name="{name}"><CanGrow>true</CanGrow><Paragraphs>'
+            f'<Paragraph><TextRuns><TextRun><Value>{val}</Value><Style>'
+            f'<FontSize>10pt</FontSize><FontFamily>{face}</FontFamily></Style>'
+            f'</TextRun></TextRuns></Paragraph></Paragraphs><Top>{top}in</Top>'
+            f'<Left>{left}in</Left><Width>{w}in</Width><Height>{h}in</Height>'
+            '<Style><Border><Style>None</Style></Border></Style></Textbox>')
+
+
+def _hb_report(items, body_h):
+    """A letter-sized report with one two-column dataset the record shapes
+    bind and the static shapes leave alone."""
+    return (f'<?xml version="1.0" encoding="utf-8"?><Report xmlns="{NS}">'
+            '<DataSources><DataSource Name="DS"><ConnectionProperties>'
+            '<DataProvider>SQL</DataProvider><ConnectString>x</ConnectString>'
+            '</ConnectionProperties></DataSource></DataSources>'
+            '<DataSets><DataSet Name="Q_MAIN"><Query><DataSourceName>DS'
+            '</DataSourceName><CommandText>SELECT 1</CommandText></Query>'
+            '<Fields><Field Name="ITEM_CODE"><DataField>ITEM_CODE</DataField>'
+            '</Field><Field Name="TAIL_NOTE"><DataField>TAIL_NOTE</DataField>'
+            '</Field></Fields></DataSet></DataSets>'
+            f'<Body><ReportItems>{items}</ReportItems><Height>{body_h}in'
+            '</Height><Style/></Body><Width>7.5in</Width>'
+            '<Page><PageHeight>11in</PageHeight><PageWidth>8.5in</PageWidth>'
+            '<TopMargin>0.5in</TopMargin><BottomMargin>0.5in</BottomMargin>'
+            '<LeftMargin>0.5in</LeftMargin><RightMargin>0.5in</RightMargin>'
+            '</Page></Report>')
+
+
+def _hb_record_region(name, cells, row_h, top):
+    """One record to a sheet: a tablix grouped on the record with a page
+    break at the end of each group."""
+    return (f'<Tablix Name="{name}"><TablixBody><TablixColumns><TablixColumn>'
+            '<Width>7.0in</Width></TablixColumn></TablixColumns><TablixRows>'
+            f'<TablixRow><Height>{row_h}in</Height><TablixCells><TablixCell>'
+            f'<CellContents><Rectangle Name="{name}_R"><ReportItems>{cells}'
+            f'</ReportItems><Top>0in</Top><Left>0in</Left><Width>7.0in</Width>'
+            f'<Height>{row_h}in</Height><Style><Border><Style>None</Style>'
+            '</Border></Style></Rectangle></CellContents></TablixCell>'
+            '</TablixCells></TablixRow></TablixRows></TablixBody>'
+            '<TablixColumnHierarchy><TablixMembers><TablixMember/>'
+            '</TablixMembers></TablixColumnHierarchy><TablixRowHierarchy>'
+            f'<TablixMembers><TablixMember><Group Name="{name}_G">'
+            '<GroupExpressions><GroupExpression>=Fields!ITEM_CODE.Value'
+            '</GroupExpression></GroupExpressions><PageBreak><BreakLocation>'
+            'End</BreakLocation></PageBreak></Group><TablixMembers>'
+            '<TablixMember/></TablixMembers></TablixMember></TablixMembers>'
+            f'</TablixRowHierarchy><DataSetName>Q_MAIN</DataSetName>'
+            f'<Top>{top}in</Top><Left>0in</Left><Width>7.0in</Width></Tablix>')
+
+
+def _hb_word_sheets(script, clones=3, n1=9, n2=6):
+    """THE DEFECT, sparse-column form: a static letter whose sheet 1 is
+    ``n1`` prose paragraphs and the sign-off, sheet 2 is ``n2`` enclosure
+    paragraphs WITHOUT it, then ``clones`` sheets carrying the sign-off and
+    nothing else. The word is not on every page, so rule (B) leaves it."""
+    w = SCRIPT_WORDING[script]
+    face = w["face"]
+    items = "".join(_hb_textbox(f"P{i}", 0.3 + i * 0.9, 0.2, 6.5, 0.8,
+                                f"{w['prose']} {i}", face) for i in range(n1))
+    items += _hb_textbox("SIGN", 0.3 + n1 * 0.9, 0.2, 2.5, 0.3, w["signoff"],
+                         face)
+    items += "".join(_hb_textbox(f"Q{i}", _HB_SHEET + 0.3 + i * 0.9, 0.2, 6.5,
+                                 0.8, f"{w['enc']} {i}", face)
+                     for i in range(n2))
+    for k in range(clones):
+        items += _hb_textbox(f"CLONE{k}", _HB_SHEET * (2 + k) + _HB_SHEET / 2,
+                             0.2, 2.5, 0.3, w["signoff"], face)
+    return _hb_report(items, _HB_SHEET * (2 + clones) - 0.3)
+
+
+def _hb_closing_block(script, n1=9):
+    """The legitimate short final page: sheet 1 is ``n1`` prose paragraphs,
+    sheet 2 the three-line closing block and nothing else."""
+    w = SCRIPT_WORDING[script]
+    face = w["face"]
+    items = "".join(_hb_textbox(f"P{i}", 0.3 + i * 0.9, 0.2, 6.5, 0.8,
+                                f"{w['prose']} {i}", face) for i in range(n1))
+    for k, line in enumerate(w["sig"]):
+        items += _hb_textbox(f"SIG{k}", _HB_SHEET + 1.0 + k * 0.35, 0.2, 4.0,
+                             0.3, line, face)
+    return _hb_report(items, _HB_SHEET * 2 - 0.3)
+
+
+def _hb_one_line_close(script, n1=9):
+    """A letter whose closing is ONE short line on a sheet of its own — the
+    usual Japanese closing is two glyphs. Same visual state in every script;
+    the verdict must be the same in all nine, and by the rule it is KEPT: the
+    line is the report's own wording and no fuller sheet carries it."""
+    w = SCRIPT_WORDING[script]
+    face = w["face"]
+    items = "".join(_hb_textbox(f"P{i}", 0.3 + i * 0.9, 0.2, 6.5, 0.8,
+                                f"{w['prose']} {i}", face) for i in range(n1))
+    items += _hb_textbox("SIG0", _HB_SHEET + 1.0, 0.2, 4.0, 0.3, w["signoff"],
+                         face)
+    return _hb_report(items, _HB_SHEET * 2 - 0.3)
+
+
+def _hb_tail_sheets(script, n=8, tail="literal", reprint=False):
+    """THE JUDGES' STATE: a per-record card whose row is ``n`` short register
+    lines and a tail box placed PAST the printable strip, so every record
+    spills a sheet carrying the tail and nothing else.
+
+    ``tail="literal"``  the tail is a line of the report's own wording that
+                        appears nowhere else — a short sheet, not an empty one
+    ``tail="data"``     the tail is a data value, and the only data cell the
+                        document prints — the sheet that received the data
+    ``reprint=True``    the literal is ALSO printed on the full sheet, and a
+                        static trailer sheet follows the records without it
+                        (so rule (B) cannot claim it): the tail sheets add
+                        nothing and are named, one per record"""
+    w = SCRIPT_WORDING[script]
+    face = w["face"]
+    lines = [f"{w['enc'][:16]} {i} ................ {41205 - i * 3500}"
+             for i in range(1, n + 1)]
+    cells = "".join(_hb_textbox(f"L{i}", 0.2 + 0.30 * i, 0.2, 6.5, 0.25, v,
+                                face) for i, v in enumerate(lines))
+    if reprint:
+        cells += _hb_textbox("SIGNFULL", 0.2 + 0.30 * n + 0.1, 0.2, 3.0, 0.25,
+                             w["sig"][0], face)
+    val = w["sig"][0] if tail == "literal" else "=Fields!TAIL_NOTE.Value"
+    cells += _hb_textbox("TAIL", 10.9, 0.2, 3.0, 0.22, val, face)
+    items = _hb_record_region("Tx", cells, 11.4, 0)
+    body_h = 11.4
+    if reprint:
+        items += _hb_textbox("TRAIL", 11.4 + 1.0, 0.2, 6.5, 0.3, w["enc"], face)
+        body_h = 11.4 + 1.5
+    return _hb_report(items, body_h)
+
+
+def _hb_record_letter(script, paragraphs=4, doctored=True):
+    """A per-record letter — one sheet per record carrying ``paragraphs``
+    paragraphs, two values and the sign-off — followed by a static trailer
+    sheet (one enclosure line). ``doctored`` adds the production defect: a
+    second per-record region whose row prints nothing but the sign-off. The
+    trailer is what keeps the word off at least one sheet."""
+    w = SCRIPT_WORDING[script]
+    face = w["face"]
+    cells = "".join(_hb_textbox(f"P{i}", 0.3 + i * 0.5, 0.2, 6.5, 0.45,
+                                f"{w['prose']} {i}", face)
+                    for i in range(paragraphs))
+    y = 0.4 + paragraphs * 0.5
+    cells += _hb_textbox("V1", y, 0.2, 4.0, 0.25, "=Fields!ITEM_CODE.Value",
+                         face)
+    cells += _hb_textbox("V2", y + 0.4, 0.2, 4.0, 0.25,
+                         "=Fields!TAIL_NOTE.Value", face)
+    cells += _hb_textbox("SIGN", y + 0.9, 0.2, 2.5, 0.3, w["signoff"], face)
+    row_h = _HB_SHEET - 0.2
+    items = _hb_record_region("Rec", cells, row_h, 0)
+    top = row_h
+    if doctored:
+        items += _hb_record_region(
+            "Word", _hb_textbox("W", row_h / 2, 0.2, 2.5, 0.3, w["signoff"],
+                                face), row_h, top)
+        top += row_h
+    items += _hb_textbox("TRAIL", top + 1.0, 0.2, 6.5, 0.3, w["enc"], face)
+    return _hb_report(items, top + 1.5)
+
+
+def _render_matrix(out, arms, shapes=SHAPES):
+    """``{(name, script, rows): measure}`` for ``arms`` = {name: builder}."""
+    built = {}
+    for name, builder in arms.items():
+        for script in SCRIPT_WORDING:
+            rdl = builder(script)
+            path = out / f"{name}-{script}.rdl"
+            path.write_text(rdl, encoding="utf-8")
+            for rows in shapes:
+                pdf = out / f"{name}-{script}-{rows}.pdf"
+                res = render_rdl(path, pdf, rows=rows)
+                assert res.get("ok"), (
+                    f"{name}/{script} rows={rows}: {res.get('log', '')[-300:]}")
+                built[(name, script, rows)] = {
+                    "m": bm.measure_pdf(pdf, rdl_xml=rdl, mode=res.get("mode")),
+                    "pdf": pdf, "rdl": rdl, "mode": res.get("mode")}
+    return built
+
+
+@pytest.fixture(scope="module")
+def hand_built(tmp_path_factory):
+    """The hand-built arms, nine scripts, four row counts."""
+    if not _LIB_OK:
+        pytest.skip("ReportViewer DLLs not present")
+    out = tmp_path_factory.mktemp("sparse-hand-built")
+    return _render_matrix(out, {
+        "word_sheets": _hb_word_sheets,
+        "closing_block": _hb_closing_block,
+        "one_line_close": _hb_one_line_close,
+        "record_word_sheets": _hb_record_letter,
+        "record_clean": lambda s: _hb_record_letter(s, doctored=False),
+        "tail_literal": _hb_tail_sheets,
+        "tail_data": lambda s: _hb_tail_sheets(s, tail="data"),
+        "tail_reprint": lambda s: _hb_tail_sheets(s, reprint=True),
+    })
+
+
+@pytest.fixture(scope="module")
+def card_scripts(tmp_path_factory):
+    """The orphaned-cell card (the data leg's fixture) in nine scripts —
+    converter-built, which is uniform for this shape (an explicit per-record
+    frame), measured at four row counts."""
+    if not _LIB_OK:
+        pytest.skip("ReportViewer DLLs not present")
+    out = tmp_path_factory.mktemp("sparse-card-scripts")
+
+    def _card(script):
+        w = SCRIPT_WORDING[script]
+        face = w["face"]
+        src = (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<report name="CARDRECX" DTDVersion="9.0.2.0.10">'
+            '<data><dataSource name="Q_CARD">'
+            '<select><![CDATA[select * from card_queue]]></select>'
+            '<group name="G_CARD">'
+            + "".join(f'<dataItem name="C{i:02d}" datatype="vchar2"/>'
+                      for i in range(1, 19))
+            + '</group></dataSource></data>'
+            '<layout><section name="main" width="8.50000">'
+            '<body width="7.50000" height="9.40000">'
+            '<repeatingFrame name="R_CARD" source="G_CARD" '
+            'printDirection="down" maxRecordsPerPage="1" minWidowRecords="1" '
+            'columnMode="no"><geometryInfo x="0.00000" y="0.00000" '
+            'width="7.50000" height="9.00000"/>'
+            '<generalLayout verticalElasticity="variable"/>'
+            + "".join(_txt(f"B_L{i}", f"{w['prose']} {i}", 0.3,
+                           round(0.4 + i * 0.4, 2), 6.0, 0.3, face)
+                      for i in range(3))
+            + "".join(_fld(f"F_C{i:02d}", f"C{i:02d}",
+                           round(0.3 + 1.2 * ((i - 1) % 6), 2),
+                           round(2.2 + 0.4 * ((i - 1) // 6), 2), 1.1, 0.2,
+                           face)
+                      for i in range(1, 19))
+            + '</repeatingFrame></body></section></layout></report>')
+        return _cell_block_per_record(
+            convert(src.encode(), f"card-{script}.xml")["rdl_xml"], copies=1)
+
+    return _render_matrix(out, {"card_orphan": _card})
+
+
+def _word_sheet_numbers(rows):
+    """Where the per-record word sheets land: one per record, after the
+    record sheets and before the trailer."""
+    return list(range(rows + 1, 2 * rows + 1))
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", sorted(SCRIPT_WORDING))
+@pytest.mark.parametrize("rows", SHAPES)
+def test_engine_the_sparse_column_names_the_word_sheets_in_every_script(
+        hand_built, script, rows):
+    """L-A for the miss direction, asked of the SPARSE column itself: three
+    sheets carrying the letter's own sign-off and nothing else, behind a
+    letter that also has a sheet without it — named by this rule, as sparse,
+    in every script and at every row count, with the blank column silent."""
+    m = hand_built[("word_sheets", script, rows)]["m"]
+    assert m["sparse"] == [3, 4, 5] and m["blank"] == [], (
+        f"{script} rows={rows}: sparse={m['sparse']} blank={m['blank']} "
+        f"classes={m['classes']} "
+        f"coverage={[round(c, 5) for c in m['coverage']]}")
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", sorted(SCRIPT_WORDING))
+@pytest.mark.parametrize("rows", SHAPES)
+def test_engine_the_sparse_column_tracks_the_records_in_every_script(
+        hand_built, script, rows):
+    """L-B and L-A together: the per-record defect behind a trailer sheet is
+    named as sparse once per record — none at zero rows, one at one, three at
+    three, twenty-five at twenty-five — in every script, and the undoctored
+    letter is clean at every one of those shapes."""
+    m = hand_built[("record_word_sheets", script, rows)]["m"]
+    assert m["sparse"] == _word_sheet_numbers(rows) and m["blank"] == [], (
+        f"{script} rows={rows}: sparse={m['sparse'][:8]} blank={m['blank'][:8]}"
+        f" of {m['pages']} sheets")
+    clean = hand_built[("record_clean", script, rows)]["m"]
+    assert clean["sparse"] == [] and clean["blank"] == [], (
+        f"{script} rows={rows}: the undoctored letter must be clean — "
+        f"sparse={clean['sparse']} blank={clean['blank']}")
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", sorted(SCRIPT_WORDING))
+@pytest.mark.parametrize("rows", SHAPES)
+def test_engine_a_hand_built_closing_block_is_kept_in_every_script(
+        hand_built, script, rows):
+    """L-A for the false-positive direction with no converter in the way: the
+    closing block on a sheet of its own is kept — by both columns — in every
+    script and at every row count."""
+    m = hand_built[("closing_block", script, rows)]["m"]
+    assert m["sparse"] == [] and m["blank"] == [], (
+        f"{script} rows={rows}: sparse={m['sparse']} blank={m['blank']} "
+        f"coverage={[round(c, 5) for c in m['coverage']]}")
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", sorted(SCRIPT_WORDING))
+@pytest.mark.parametrize("rows", SHAPES)
+def test_engine_the_orphaned_cell_is_named_in_every_script(card_scripts,
+                                                           script, rows):
+    """The data leg's verdict — one cell against eighteen — in every script
+    and at every row count: one orphaned-cell sheet per record, sparse, with
+    the blank column silent."""
+    m = card_scripts[("card_orphan", script, rows)]["m"]
+    assert len(m["sparse"]) == rows and m["blank"] == [], (
+        f"{script} rows={rows}: sparse={m['sparse'][:6]} blank={m['blank'][:6]}"
+        f" cells={m['data_cells'][:4]}")
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", sorted(SCRIPT_WORDING))
+@pytest.mark.parametrize("rows", SHAPES)
+def test_engine_a_one_line_closing_is_kept_in_every_script(hand_built, script,
+                                                           rows):
+    """L-A on the state that found the last count in the rule: a letter
+    closing on ONE short line of its own. Kept in all nine scripts — the
+    Japanese closing is two glyphs, and a token floor of three read it as
+    noise and condemned the sheet in CJK alone."""
+    m = hand_built[("one_line_close", script, rows)]["m"]
+    assert m["sparse"] == [] and m["blank"] == [], (
+        f"{script} rows={rows}: a one-line closing was called a ruined sheet "
+        f"— sparse={m['sparse']} blank={m['blank']}")
+
+
+@_needs_engine
+def test_mutation_the_token_floor_condemns_the_one_line_closing_by_language(
+        hand_built, monkeypatch):
+    """PROVE THE GATE CAN FAIL, on the engine, for the stated reason: put the
+    token floor back and the one-line closing is condemned in the script
+    whose closing is under three glyphs and kept in the others — a verdict
+    decided by the language, which is the disease the laws name."""
+    monkeypatch.setattr(bm, "_wordless",
+                        lambda sig: len(bm._ink_tokens(sig)) < bm.LINE_FLOOR)
+    verdicts = {}
+    for script in SCRIPT_WORDING:
+        cell = hand_built[("one_line_close", script, 3)]
+        verdicts[script] = bm.measure_pdf(cell["pdf"], rdl_xml=cell["rdl"],
+                                          mode=cell["mode"])["sparse"]
+    condemned = {k for k, v in verdicts.items() if v}
+    assert condemned, (
+        "with the floor back nothing is condemned, so this fixture no longer "
+        f"shows the floor was load-bearing: {verdicts}")
+    assert condemned != set(SCRIPT_WORDING), (
+        "with the floor back EVERY script is condemned, so the fixture no "
+        f"longer shows the verdict splitting by language: {sorted(condemned)}")
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", sorted(SCRIPT_WORDING))
+@pytest.mark.parametrize("rows", SHAPES)
+def test_engine_the_judges_tail_sheet_gets_one_verdict_in_every_script(
+        hand_built, script, rows):
+    """THE JUDGES' OWN STATE, at every shape and in every script: a card whose
+    tail box sits past the printable strip, so every record spills a sheet
+    carrying the tail alone. Measured on the rule this file replaced, the
+    verdict on that sheet was decided by the language (flagged at 13.9x in
+    ascii, kept at 9.1x in Greek), by the row count (excused at one record,
+    where nothing repeats), and by how full the record sheet was.
+
+    Now it is decided by what the document's own sheets carry, and by nothing
+    else — three forms, three verdicts, each the same in nine scripts and at
+    four row counts:
+
+      literal tail     the report's own wording, on no fuller sheet: a short
+                       sheet, KEPT
+      data tail        the only data cell the document prints — the sheet
+                       that received the data: KEPT
+      reprinted tail   the same wording the full sheet already carries, behind
+                       a trailer so rule (B) cannot claim it: NAMED, one sheet
+                       per record, in the sparse column"""
+    literal = hand_built[("tail_literal", script, rows)]["m"]
+    data = hand_built[("tail_data", script, rows)]["m"]
+    reprint = hand_built[("tail_reprint", script, rows)]["m"]
+    for name, m in (("literal", literal), ("data", data)):
+        assert m["sparse"] == [], (
+            f"{script} rows={rows}: {name} tail — sparse={m['sparse']}")
+        if rows:
+            assert m["blank"] == [], (
+                f"{script} rows={rows}: {name} tail — blank={m['blank']}")
+        else:
+            # The card declares no NoRowsMessage, so at zero rows the
+            # document prints nothing but its bands: ONE furniture-only
+            # sheet, the honest empty-report outcome, and the same one in
+            # every script. Not a sparse verdict.
+            assert m["printed_no_content"] and m["blank"] == [1], (
+                f"{script} rows=0: {name} tail — expected the empty-report "
+                f"outcome, got blank={m['blank']} sparse={m['sparse']}")
+    assert reprint["sparse"] == list(range(2, 2 * rows + 1, 2)), (
+        f"{script} rows={rows}: reprinted tail — sparse={reprint['sparse'][:8]}"
+        f" blank={reprint['blank'][:8]} of {reprint['pages']} sheets")
+    assert reprint["blank"] == [], (
+        f"{script} rows={rows}: the reprinted tail must be named by THIS rule, "
+        f"not the blank gate: blank={reprint['blank'][:8]}")
+
+
+@_needs_engine
+def test_engine_the_column_is_settled_by_the_artifact_not_the_script(
+        hand_built, card_scripts):
+    """Stricter than the union: for every hand-built arm and every row count,
+    the PAIR (sparse, blank) is identical across the nine scripts. A verdict
+    that moved between the two columns with the language would be the same
+    disease the union hides."""
+    moved = {}
+    for built in (hand_built, card_scripts):
+        for (name, script, rows), cell in built.items():
+            key = (name, rows)
+            pair = (tuple(cell["m"]["sparse"]), tuple(cell["m"]["blank"]))
+            moved.setdefault(key, {}).setdefault(pair, []).append(script)
+    split = {k: v for k, v in moved.items() if len(v) > 1}
+    assert not split, f"the column moved with the script: {split}"
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", ["ascii", "arabic", "cjk"])
+@pytest.mark.parametrize("paragraphs", [2, 16])
+def test_engine_the_verdict_does_not_move_with_the_siblings_fullness(
+        tmp_path, script, paragraphs):
+    """The judges' other axis: how FULL the sheets beside the ruined one are.
+    The same per-record defect behind a record sheet of two paragraphs and of
+    sixteen — measured 14x to 212x starved across nine scripts — names the
+    same three sheets. (Two and sixteen bracket the sweep; 6 and 12 were
+    measured too and sit between them.)"""
+    rdl = _hb_record_letter(script, paragraphs=paragraphs)
+    path = tmp_path / f"full-{script}-{paragraphs}.rdl"
+    path.write_text(rdl, encoding="utf-8")
+    pdf = tmp_path / f"full-{script}-{paragraphs}.pdf"
+    res = render_rdl(path, pdf, rows=3)
+    assert res.get("ok"), res.get("log", "")[-300:]
+    m = bm.measure_pdf(pdf, rdl_xml=rdl, mode=res.get("mode"))
+    assert m["sparse"] == [4, 5, 6] and m["blank"] == [], (
+        f"{script} paragraphs={paragraphs}: sparse={m['sparse']} "
+        f"blank={m['blank']} coverage={[round(c, 5) for c in m['coverage']]}")
+
+
+# ---------------------------------------------------------------------------
+# WHY THE STARVED QUANTITY IS INK AREA — the script-neutral alternative,
+# measured and shown to miss the sheet the data leg exists to name
+# ---------------------------------------------------------------------------
+
+def _rows_of_ink(marks, page):
+    """The fraction of the sheet's height its DISTINCT content ink occupies —
+    the union of the marks' vertical extents. A printed line is one row in
+    every language, which is what makes this the obvious script-neutral
+    quantity, and why it had to be measured rather than adopted."""
+    if not page or not marks:
+        return 0.0
+    distinct = {}
+    for mark in marks:
+        distinct.setdefault(mark["sig"], mark.get("bbox"))
+    spans = sorted((b[1], b[3]) for b in distinct.values() if b and b[3] > b[1])
+    merged = []
+    for y0, y1 in spans:
+        if merged and y0 <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], y1)
+        else:
+            merged.append([y0, y1])
+    return sum(y1 - y0 for y0, y1 in merged) / float(page["height"])
+
+
+def _sparse_starved_by_rows(m, rdl_xml, mode):
+    """The shipped rule with its STARVED leg read in rows of ink instead of
+    area — everything else identical."""
+    marks = _marks_of(m, rdl_xml, mode)
+    pages = m["ink"] or [None] * len(marks)
+    factor = 10.0 ** bm.SPARSE_DECADES
+    rows = [_rows_of_ink(page, pg) for page, pg in zip(marks, pages)]
+    top = max(rows, default=0.0)
+    starved = [top > 0 and r * factor <= top for r in rows]
+    elsewhere = {mk["sig"] for j, page in enumerate(marks)
+                 if not starved[j] for mk in page}
+    cells = [bm.sheet_data_cells(page) for page in marks]
+    most = max(cells, default=0)
+    out = []
+    for i, page in enumerate(marks):
+        if m["classes"][i] != "content" or not page or not starved[i]:
+            continue
+        if bm._says_something_of_its_own(page, elsewhere):
+            continue
+        if cells[i] * factor > most:
+            continue
+        out.append(i + 1)
+    return out
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", sorted(SCRIPT_WORDING))
+@pytest.mark.parametrize("rows", [1, 3, 25])
+def test_mutation_measuring_starvation_in_rows_of_ink_misses_the_orphaned_cell(
+        card_scripts, script, rows):
+    """Read the STARVED leg in rows of ink — the unit that is the same in
+    every language — and the agency summary's 29x sheet walks, in every
+    script and at every row count: a record card packs six cells to a row,
+    so its one-line orphan is four to seven rows below it, never an order of
+    magnitude, while as painted AREA it is thirty-five to sixty-eight times
+    starved. The unit's script neutrality (rows spreads 1.3x across the nine
+    scripts where area spreads up to 4.4x — measured, and recorded in section
+    (G)) is worth nothing on the sheet that does not clear it."""
+    cell = card_scripts[("card_orphan", script, rows)]
+    walked = _sparse_starved_by_rows(cell["m"], cell["rdl"], cell["mode"])
+    assert walked == [], (
+        f"{script} rows={rows}: rows of ink now name the orphaned cell "
+        f"({walked}), so this fixture no longer shows why the quantity is area")
+    assert len(cell["m"]["sparse"]) == rows, "the shipped rule must name them"
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", sorted(SCRIPT_WORDING))
+@pytest.mark.parametrize("rows", [1, 3, 25])
+def test_mutation_the_binary_data_exemption_walks_in_every_script(card_scripts,
+                                                                  script, rows):
+    """THE 29x HOLE, reproduced in every script and at every row count that
+    has rows: swap the cell count back for the exemption it replaced — one
+    mark a data region supplied excuses the sheet — and every orphaned-cell
+    sheet passes, whatever language the card is written in."""
+    cell = card_scripts[("card_orphan", script, rows)]
+    walked = _legs(cell["m"], cell["rdl"], cell["mode"], data="binary")
+    assert walked == [], (
+        f"{script} rows={rows}: the exemption no longer excuses these sheets, "
+        f"so this fixture stops reproducing the hole: {walked}")
+    assert len(cell["m"]["sparse"]) == rows, "the shipped rule must name them"
+
+
+@_needs_engine
+@pytest.mark.parametrize("script", sorted(SCRIPT_WORDING))
+def test_mutation_dropping_the_wording_leg_condemns_the_hand_built_block(
+        hand_built, script, monkeypatch):
+    """PROVE THE GATE CAN FAIL, on the hand-built block, and show WHAT decides
+    it once the wording leg is gone: delete "does this sheet say anything of
+    its own" and the closing block — no data, its wording on no fuller sheet
+    — is condemned wherever its ink ratio happens to clear the decade and
+    kept wherever it does not. Measured, the same block lands at 4.7x in Thai
+    and 16.5x in Arabic, so without the leg the verdict is the LANGUAGE's;
+    with it the block is kept in all nine. Asserted per script, so the guard
+    goes red for the stated reason in each one."""
+    cell = hand_built[("closing_block", script, 3)]
+    cover = cell["m"]["coverage"]
+    starved = cover[1] * (10.0 ** bm.SPARSE_DECADES) <= max(cover)
+    monkeypatch.setattr(bm, "_says_something_of_its_own",
+                        lambda page_marks, elsewhere: False)
+    condemned = bm.measure_pdf(cell["pdf"], rdl_xml=cell["rdl"],
+                               mode=cell["mode"])["sparse"]
+    assert condemned == ([2] if starved else []), (
+        f"{script}: without the wording leg the ratio ({max(cover) / cover[1]:.1f}x) "
+        f"should decide the block alone, but got {condemned}")
+    assert cell["m"]["sparse"] == [], "the shipped rule must keep it"
+
+
+@_needs_engine
+def test_mutation_the_hand_built_block_splits_by_language_without_the_leg(
+        hand_built):
+    """...and the split itself, stated once: without the wording leg some
+    scripts condemn the hand-built block and some keep it — the fixture must
+    straddle the decade across the nine, or it stops proving that the leg is
+    what removes the language from the verdict."""
+    ratios = {}
+    for script in SCRIPT_WORDING:
+        cover = hand_built[("closing_block", script, 3)]["m"]["coverage"]
+        ratios[script] = max(cover) / cover[1]
+    assert max(ratios.values()) > 10.0 > min(ratios.values()), (
+        f"the block no longer straddles the decade across scripts: {ratios}")

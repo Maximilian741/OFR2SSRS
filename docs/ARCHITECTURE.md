@@ -339,7 +339,16 @@ file-template formula columns, `distribution.xml` payloads) and produces:
 
 * A `burst_key_field` — the dataset column that uniquely identifies one
   recipient. Derived **name-agnostically** by walking the file template's
-  source columns; falls back to the first data item on the burst dataset.
+  source columns; when the template names none, it falls back to the
+  outermost declared `<group>`'s break column (Oracle bursts at a group
+  break) and finally to the first data item on the burst dataset.
+* A recipient column, read off the distribution instructions the source
+  **declares** — the `to` / `cc` / `bcc` attribute of a `<mail>` destination,
+  or Oracle's own `SRW.SET_MAILDESTINATION` — resolved through a formula to
+  the dataset column that actually carries the value. This is a real binding,
+  not a name match: a source that declares no mail destination gets a
+  labelled `<RecipientEmail>` placeholder instead of a guess, so an
+  address-shaped column name can never become an SMTP recipient by itself.
 * A `filename_pattern` — `<BurstKey>.pdf` by default, or the literal
   template from the source formula if present.
 * A T-SQL recipient query stub returning one row per recipient, with a

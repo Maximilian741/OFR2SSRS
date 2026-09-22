@@ -29,10 +29,20 @@ list of English words:
       ="Page " & Globals!PageNumber & " of " & Globals!TotalPages yields the
       fragments "Page " and " of " — and the Greek, Spanish or Arabic wording
       of the same expression yields that wording, because it is read out of
-      the report instead of assumed). A line the deletion empties WAS that
-      furniture; a line it leaves a REMAINDER on is settled by where the ink
-      lies whenever that was measured, and only by a length comparison when it
-      was not — see (E).
+      the report instead of assumed). WHERE THE INK'S PLACE IS KNOWN the
+      declaration is read the way (D) reads it — by the strip it RESERVES
+      (``band_resident_keys``), never by its wording turning up somewhere on
+      the sheet: a body line that repeats the running title is content where
+      the report printed it, in every script. The wording alone decides only
+      a line no geometry located (no PyMuPDF, or an extracted line the PDF's
+      own line boxes split differently): a line the deletion empties WAS that
+      furniture, and a line it leaves a REMAINDER on is settled by a length
+      comparison, because there that is the only evidence there is — see (E)
+      and ``_content_residual``. It was not always so: the wording was
+      deleted from ANY line, located or not, and one artifact rendered in
+      nine scripts had its title-repeating body sheet read blank in the two
+      scripts whose glyphs decode and content in the seven whose glyphs do
+      not — the same declaration judged by two standards.
   (B) REPEATED lines.  A line that appears on EVERY page of the document is
       furniture whatever language it is in — this catches page furniture
       emitted from the body flow, and any constant stamp, with no wordlist at
@@ -169,6 +179,7 @@ host can answer the question.
 from __future__ import annotations
 
 import re
+import unicodedata
 import xml.etree.ElementTree as ET
 from collections import Counter
 from functools import lru_cache
@@ -1381,7 +1392,36 @@ def _content_residual(text: str, fragments, repeated, in_band=frozenset(),
     reserves for a page band, and ``seated`` are ALL the keys whose ink was
     located on that sheet — both empty unless the artifact declares a band and
     the PDF could be measured, in which case the text heuristics below give
-    way to what was actually seen."""
+    way to what was actually seen.
+
+    ONE STANDARD FOR A DECLARATION, wherever the ink's place is known. Rule
+    (A) used to delete a band's declared wording from ANY line on the sheet
+    — case-folded, with no place test — while rule (D) judged the same
+    declaration by WHERE the ink lies. Two standards for one declaration,
+    and the difference was script-shaped in effect, because the wording
+    test only reaches ink that decodes: a body line that repeats the
+    running title is undecodable ink in Greek (so (D) placed it outside the
+    band and kept it) and decodable text in English (so (A) matched its
+    wording and deleted it). Measured on the engine, one hand-built
+    artifact, nine scripts x four row counts: the sheet whose body prints
+    the declared title verbatim — and the sheet printing a piece of it —
+    read ``chrome_only`` in ascii and accented Latin and ``content`` in the
+    other seven, at 0, 1, 3 and 25 rows alike
+    (tests/test_declared_wording_by_place.py). The same wording test had
+    also been deleting DATA: a ledger whose band declares "Account Holder"
+    had every HOLDER cell judged furniture as a piece of that phrase, so a
+    twelve-row sheet measured the same ink as a one-row sheet.
+
+    Now a line whose ink the geometry LOCATED is judged by place alone:
+    inside a strip the artifact reserves -> furniture (``in_band``); on a
+    line the document repeats -> furniture (``repeated``); anywhere else ->
+    content, whatever it says. The declared WORDING decides only a line the
+    geometry could not locate — a caller with no PyMuPDF, or an extracted
+    line the PDF's own line boxes split differently — where it is the only
+    evidence there is, exactly as the remainder comparison below already
+    was. That fallback is weaker by construction and it is stated as such:
+    it can call the body's copy of a band phrase furniture, which the
+    located path never does."""
     kept = []
     for ln in (text or "").splitlines():
         s = _squash(ln)
@@ -1392,19 +1432,28 @@ def _content_residual(text: str, fragments, repeated, in_band=frozenset(),
         if s in repeated:
             continue                                   # (B) repeated furniture
         if s in in_band:
-            continue                                   # (E) in a declared band
+            continue                    # (A)/(E) declared band, ink in its strip
+        if s in seated:
+            # LOCATED, and outside every strip the artifact reserves (a key
+            # that lies inside AND outside is not in ``in_band``, and the copy
+            # outside is the body's). PLACE decides: this is content whatever
+            # the wording says, and the declaration below is never consulted
+            # for it — the same test rule (D) makes of undecodable ink.
+            kept.append(ln)
+            continue
+        # NOT LOCATED: the declared wording is the only evidence there is.
         rest = _strip_all(s, fragments)                # (A) declared furniture
         if rest != s and not rest:
             continue        # the line WAS the declared wording, nothing left
-        if rest != s and s not in seated and len(rest) < LINE_FLOOR:
+        if rest != s and len(rest) < LINE_FLOOR:
             # A REMAINDER: the line says something the declaration does not.
             # Two readings, and the artifact picks between them — a page
             # counter's leftover digits are the band printing its own variable
             # part, while "<report title> 42" is the BODY printing a value
-            # beside a caption. Where the ink was located and the band's strip
-            # is not where it lies, that settles it; the length comparison is
-            # kept only for a caller with no geometry to consult, because
-            # there it is the only evidence there is.
+            # beside a caption. Where the ink was located that is settled
+            # above by place; the length comparison is kept only for a caller
+            # with no geometry to consult, because there it is the only
+            # evidence there is.
             #
             # Measured, one artifact, nine scripts, same sheet: judged by
             # LENGTH, "<title> 42" read blank in ascii and accented Latin and
@@ -1805,14 +1854,54 @@ def additivity_exceptions(texts, raw_texts=None, rdl_xml=None, invented=(),
 # and how many data cells its sheets received — neither of which changes when
 # the wording changes language.
 #
+# WHY THE STARVED QUANTITY IS STILL INK AREA, MEASURED AGAINST THE OBVIOUS
+# ALTERNATIVE — a quantity that scales identically across scripts would be
+# ROWS OF INK (the union of the distinct marks' vertical extents over the
+# sheet height: a printed line is one row in every language). It was
+# measured beside area on the same renders, hand-built RDLs with no converter
+# in the way so the page structure is identical in all nine scripts:
+#
+#     word sheets behind a static letter   area 26.7x (Thai) ... 116.6x
+#     (the defect, sparse column)          rows 10.6x ... 13.4x
+#     word sheets per record + trailer     area 18.1x ... 68.5x
+#                                          rows  7.6x ...  9.2x
+#     legitimate closing block             area  4.7x ... 16.5x
+#                                          rows  3.3x ...  4.1x
+#     one data cell orphaned per record    area 34.9x ... 67.7x
+#     (the agency summary's 29x sheet)     rows  3.7x ...  7.0x
+#
+# Rows spreads under 1.3x across scripts where area spreads 3.5x-4.4x — and
+# it is BLIND to the orphaned-cell sheet: a record card packs six cells to a
+# row, so its one-line orphan reads four to seven rows below it, never an
+# order of magnitude, and the sheet the whole data leg was rebuilt to name
+# would walk in every script. The per-record defect sits under the decade in
+# rows too (7.6x-9.2x behind a four-paragraph record sheet). A unit that is
+# the same in every language is worth nothing if the defect does not clear
+# it; area clears the decade on every judged defect state in every script,
+# and the legitimate states are settled by the two structural legs rather
+# than by where their ratio lands. The verdict is what the laws bind, and it
+# is measured invariant: nine scripts x four row counts x the judges' visual
+# states, zero deviations, sparse column and blank column both
+# (tests/test_sparse_sheets.py, the hand-built matrix).
+#
 # Two extractor facts the echo test must survive, both engine-measured and
 # both script-shaped: the SAME printed line comes back as one run on one sheet
 # and as that run plus its decoded comma on another (so marks are matched by
-# containment, not equality — see ``_same_ink``), and a mark of one or two
-# tokens cannot be told from any other (so it is not evidence either way — see
-# ``_says_something_of_its_own``). Without the first, the per-record defect
+# containment, not equality — see ``_same_ink``), and that split-off comma is
+# a mark of its own that says nothing (so bare punctuation is not evidence
+# either way — see ``_wordless``). Without the first, the per-record defect
 # went unflagged in Greek, Cyrillic, Thai and Hangul while being flagged in
 # ascii on the same artifact.
+#
+# The second used to be a TOKEN FLOOR — a mark under three tokens was not
+# evidence — and that was the campaign's disease in one more place: a token is
+# a character in Latin and a word in CJK, so a letter whose closing is one
+# short line on a sheet of its own (the usual Japanese closing is two glyphs)
+# was kept in eight scripts and condemned in CJK, on one artifact whose only
+# difference was its language. The floor is gone; what it absorbed is settled
+# by the Unicode category, which counts nothing (measured: nine scripts x four
+# row counts, the one-line closing kept everywhere, the per-record defect
+# still named everywhere — tests/test_sparse_sheets.py).
 #
 # NOT A BLANK SHEET, AND NEVER REPORTED AS ONE: a sparse sheet is ``content``
 # by construction, so ``blank`` and ``sparse`` are disjoint and a caller gates
@@ -2018,25 +2107,29 @@ def _is_data_ink(key: str, tokens, long_tokens=()) -> bool:
             or any(key in t for t in long_tokens))
 
 
-def _mark_is_furniture(key, repeated, in_band, fragments) -> bool:
-    """The furniture rules of ``_content_residual``, asked of ONE line key.
+def _mark_is_furniture(key, repeated, in_band) -> bool:
+    """The furniture rules of ``_content_residual``, asked of ONE line key —
+    and every key asked about here was LOCATED (it arrives with its box), so
+    this is the place standard and nothing else: inside a strip the artifact
+    reserves, or on a line the document repeats.
+
+    The declared WORDING is not consulted. It used to be — a located line
+    that matched a band's declared text, or a piece of it, was furniture
+    wherever on the sheet it lay — which was the wording-only standard
+    ``_content_residual`` has since dropped for located ink, in a second
+    place: a body line that repeats the running title was not a content
+    mark in the scripts that decode and was one in the scripts that do not,
+    so the same sheet had ink coverage in Greek and none in English.
 
     The legacy English literals are deliberately NOT among them: they are the
     fallback for a caller with no artifact, they have already had their say in
     the classification this rule only ever looks at CONTENT pages of, and
     re-applying a two-word English list to geometry would put a wordlist back
     into the one rule here that has none."""
-    if key in repeated or key in in_band:
-        return True
-    rest = _strip_all(key, fragments)
-    if rest != key and not rest:
-        return True                    # the line WAS the declared wording
-    if len(key) >= LINE_FLOOR and any(key in f for f in fragments):
-        return True                    # ...or a PIECE of it
-    return False
+    return key in repeated or key in in_band
 
 
-def _page_content_marks(page, sigs, rdl_xml, repeated, fragments,
+def _page_content_marks(page, sigs, rdl_xml, repeated,
                         furniture_ink, furniture_images, tokens) -> list:
     """One sheet's content marks: ``{"sig", "bbox", "data"}``.
 
@@ -2056,7 +2149,7 @@ def _page_content_marks(page, sigs, rdl_xml, repeated, fragments,
     out = []
     for line in page.get("lines") or ():
         key = line.get("key")
-        if not key or _mark_is_furniture(key, repeated, in_band, fragments):
+        if not key or _mark_is_furniture(key, repeated, in_band):
             continue
         out.append({"sig": ("t", key), "bbox": line["bbox"],
                     "data": _is_data_ink(key, tokens, long_tokens)})
@@ -2083,14 +2176,13 @@ def content_ink_marks(texts, rdl_xml=None, invented=(), image_marks=None,
     another sheet's and measured as area."""
     pages_ink = list(ink) if ink and len(ink) == len(texts) else [None] * len(texts)
     marks = image_marks if image_marks is not None else [[]] * len(texts)
-    fragments = declared_chrome_fragments(rdl_xml or "")
     repeated = repeated_line_chrome(texts, invented,
                                     declared_static_texts(rdl_xml or ""),
                                     declared_no_rows_texts(rdl_xml or ""))
     furniture_images = repeated_image_chrome(marks)
     furniture_ink = repeated_ink_chrome(pages_ink)
     tokens = data_region_texts(rdl_xml or "", invented)
-    return [_page_content_marks(page, sigs, rdl_xml, repeated, fragments,
+    return [_page_content_marks(page, sigs, rdl_xml, repeated,
                                 furniture_ink, furniture_images, tokens)
             for page, sigs in zip(pages_ink, marks)]
 
@@ -2198,6 +2290,34 @@ def _same_ink(a, b) -> bool:
     return len(x) >= LINE_FLOOR and bool(y) and _within_run(y, x)
 
 
+def _wordless(sig) -> bool:
+    """Is this mark ink that carries NO WORDING — bare punctuation, a
+    symbol, a dash — in whatever script the sheet is set?
+
+    THE COUNT THIS REPLACES. A mark of fewer than ``LINE_FLOOR`` tokens used
+    to be "not evidence either way" in ``_says_something_of_its_own``, and a
+    token is a character in one script and a whole word in another. Measured
+    on the engine, one artifact in nine languages: a letter whose closing is
+    ONE short line on a sheet of its own was kept in eight scripts and
+    condemned in CJK — because the usual Japanese closing IS two glyphs, the
+    floor threw the sheet's only wording away as noise, and what remained was
+    a starved sheet that "said nothing". A verdict decided by how many glyphs
+    a word happens to have is the disease the laws name, in one more place.
+
+    What the floor was absorbing is a script-shaped extractor fact: a closing
+    line whose letters do not decode comes back as its glyph run PLUS its
+    decoded comma as a mark of its own (measured in Hangul), and that comma
+    is not something the sheet says. Punctuation is not wording in any
+    script, and the Unicode category says so without counting anything: a
+    decodable mark that carries no letter, no digit and no combining mark is
+    wordless. An undecodable run is ink whose text is unknown, and unknown
+    text is not known to be wordless — it counts."""
+    kind, body = sig[0], sig[1]
+    if kind != "t":
+        return False
+    return not any(unicodedata.category(ch)[0] in "LMN" for ch in str(body))
+
+
 def _says_something_of_its_own(page_marks, elsewhere) -> bool:
     """Does this sheet paint any of the REPORT'S OWN wording that the reader
     has not already been handed on a sheet that is not itself starved?
@@ -2207,14 +2327,14 @@ def _says_something_of_its_own(page_marks, elsewhere) -> bool:
     record paints the same invented placeholder and "this value appeared
     elsewhere too" says nothing about the data.
 
-    A mark shorter than ``LINE_FLOOR`` is not evidence either way — one or
-    two tokens cannot be told from any other one or two tokens, which is the
-    floor every containment test in this module already stops at."""
+    A mark that carries no wording at all — bare punctuation the extractor
+    split off a line whose letters do not decode — is not evidence either
+    way (``_wordless``). Nothing here counts tokens: a two-glyph word is a
+    word, and the sheet that prints it has said something."""
     for mark in page_marks:
         if mark.get("data"):
             continue
-        if (mark["sig"][0] != "i"
-                and len(_ink_tokens(mark["sig"])) < LINE_FLOOR):
+        if mark["sig"][0] != "i" and _wordless(mark["sig"]):
             continue
         if mark["sig"] in elsewhere:
             continue

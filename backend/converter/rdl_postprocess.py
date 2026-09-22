@@ -314,3 +314,31 @@ __all__ = [
     "align_drillthrough_sort_default",
     "set_generate_all_link_text",
 ]
+
+
+def deploy_transforms(rdl_xml: str, server_url: str | None = "",
+                      gen_all_label: str = "") -> str:
+    """The link transforms EVERY downloaded artifact receives, in the order
+    the app applies them -- main RDL, sub-report RDLs, burst pack alike.
+
+    ONE function, so the app and the publish gate cannot drift: the file the
+    operator uploads is THIS output, not the RDL convert() returned. It
+    matters because ``set_drillthrough_hyperlinks`` inlines each
+    drill-through's row expressions into a single ``<Hyperlink>`` string --
+    so any field the drill-through could not legally reach becomes a
+    Hyperlink expression the server refuses at upload ("The Hyperlink
+    expression for the text box ... refers to the field ..."). Measured on
+    a customer's sub-report: the pre-download verdict audited the
+    un-transformed RDL, said nothing, and the server bounced the download.
+    The gate and the verdict now audit what this returns.
+
+    ``server_url`` empty -> the zero-config SSRS-globals hyperlink form (the
+    default the app ships); a literal base URL otherwise.
+    """
+    if not rdl_xml:
+        return rdl_xml
+    out = relax_generate_all_drillthroughs(rdl_xml)
+    out = set_drillthrough_hyperlinks(out, server_url or "")
+    out = set_generate_all_link_text(out, gen_all_label or "")
+    out = align_drillthrough_sort_default(out)
+    return out

@@ -30,13 +30,17 @@ your development environment, run the test suite, and submit a pull request.
    - Windows: `run.bat`
    - macOS / Linux: `./run.sh`
 
-   The launcher installs the dependencies from `requirements.txt` itself and
-   then starts the Flask app on `http://127.0.0.1:5057`. If you would rather
-   install manually (for example, to run the tests without starting the app):
+   The launcher only STARTS the Flask app on `http://127.0.0.1:5057`; it
+   never installs anything (locked-down machines must not see implicit
+   install activity). Install the dependencies once, before the first
+   launch — this is also all the tests need:
 
    ```bash
    pip install -r requirements.txt
    ```
+
+   If you skip it, the launcher stops and prints that exact command rather
+   than a `ModuleNotFoundError` traceback.
 
    The dependency surface is intentionally small: Flask, lxml, python-docx,
    the Anthropic SDK (for the optional Claude assist), and pytest + pypdf for

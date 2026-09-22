@@ -73,6 +73,12 @@ CORPORA = {
     "wild2": Path(os.environ.get(
         "O2S_WILD_CORPUS2",
         "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus2")),
+    "wild3": Path(os.environ.get(
+        "O2S_WILD_CORPUS3",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus3")),
+    "wild4": Path(os.environ.get(
+        "O2S_WILD_CORPUS4",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus4")),
 }
 
 

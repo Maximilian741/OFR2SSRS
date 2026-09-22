@@ -269,6 +269,54 @@ def test_two_spellings_of_one_bind_yield_one_query_parameter(two_spelling_rdl):
     assert {q.upper() for q in qnames} == {"P_BEGIN_DATE", "P_SITE_NAME"}
 
 
+@pytest.fixture(scope="module")
+def two_spelling_rdl_tsql():
+    """The SAME source translated to T-SQL.
+
+    The bind identities come from an ORACLE document, so they stay ONE bind
+    after translation. This fixture exists because the two emitter branches
+    drifted: the Oracle branch got the case-fold dedupe when this class was
+    first fixed and the T-SQL branch did not, and NO fast test covered the
+    T-SQL side -- only the 20-minute corpus leg, where it surfaced as 32
+    violations across 16 reports.
+    """
+    res = convert(TWO_SPELLING_XML, target_db="sqlserver")
+    rdl = (res or {}).get("rdl_xml") or ""
+    assert rdl.strip(), "convert() returned no RDL"
+    return rdl
+
+
+def test_two_spellings_yield_one_query_parameter_on_the_tsql_target(
+        two_spelling_rdl_tsql):
+    """Fatal error #2 is target-independent: handing the provider two
+    parameters for one bind fails at Refresh Fields whichever dialect the
+    statement was translated into."""
+    ds = _dataset(two_spelling_rdl_tsql, "Q_MAIN")
+    qnames = [(qp.get("Name") or "").lstrip(":@")
+              for qp in _iter_local(ds, "QueryParameter")]
+    folded = [q.upper() for q in qnames]
+    assert len(folded) == len(set(folded)), (
+        "two QueryParameters fold to one bind name on the T-SQL target "
+        f"({qnames}) - ORA-01036 at Refresh Fields")
+    assert set(folded) == {"P_BEGIN_DATE", "P_SITE_NAME"}, qnames
+
+
+def test_the_tsql_target_satisfies_the_whole_bind_contract(
+        two_spelling_rdl_tsql):
+    assert bind_contract_violations(two_spelling_rdl_tsql) == []
+
+
+def test_both_targets_agree_on_the_bind_contract(two_spelling_rdl,
+                                                 two_spelling_rdl_tsql):
+    """The two branches must not drift again: one source, one bind count,
+    whichever target it is emitted for."""
+    def qp_names(rdl):
+        ds = _dataset(rdl, "Q_MAIN")
+        return sorted((qp.get("Name") or "").lstrip(":@").upper()
+                      for qp in _iter_local(ds, "QueryParameter"))
+    assert qp_names(two_spelling_rdl) == qp_names(two_spelling_rdl_tsql)
+
+
 def test_the_sql_text_keeps_both_spellings(two_spelling_rdl):
     """Both spellings are valid Oracle for the one bind, so the statement is
     never rewritten to make the parameter contract work."""
@@ -426,6 +474,12 @@ CORPORA = {
     "wild2": Path(os.environ.get(
         "O2S_WILD_CORPUS2",
         "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus2")),
+    "wild3": Path(os.environ.get(
+        "O2S_WILD_CORPUS3",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus3")),
+    "wild4": Path(os.environ.get(
+        "O2S_WILD_CORPUS4",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus4")),
 }
 
 

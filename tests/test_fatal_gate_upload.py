@@ -17,15 +17,37 @@ available corpus is converted and the resulting RDL must survive four legs:
                   literal "&P_X" text, no unterminated string literal, and
                   never an expression-valued CommandText.
   L-C  ENGINE   — the RDL actually LOADS through Microsoft's LocalReport
-                  engine: LoadReportDefinition + GetParameters(), the
-                  definition compile that is the strongest local analog of
-                  publish-time validation. GetParameters() is essential:
-                  LoadReportDefinition alone defers validation and "loads"
-                  garbage. Inputs are staticized (ms_layout) because a live
-                  expression host cannot start under a PowerShell appbase /
-                  this machine's Application Control policy; expression
-                  compilation is L-D's job. Engine-gated: machines without
-                  the harness SKIP this leg — never a silent pass.
+                  engine: LoadReportDefinition + GetParameters().
+                  GetParameters() is essential: LoadReportDefinition alone
+                  defers validation and "loads" garbage.
+
+                  READ THIS BEFORE TRUSTING THIS LEG. It runs in LAYOUT
+                  MODE: tools/renderlab/ms_layout.py STATICIZES every
+                  expression to a placeholder before the engine sees the
+                  definition (a live expression host cannot start under
+                  this machine's Application Control policy). So this leg
+                  checks that the DOCUMENT STRUCTURE loads. It does NOT
+                  validate expression semantics — not dataset scope, not
+                  aggregate nesting, not field existence — because by the
+                  time the engine reads it there are no expressions left.
+                  It is NOT an analog of publish-time validation, and a
+                  claim in this docstring that it was is exactly how a
+                  publish-fatal RDL got past every gate here and was
+                  refused by the customer's server (project fatal error #1,
+                  third occurrence).
+
+                  Even with a live expression host it would not close the
+                  gap: ReportViewer is MORE FORGIVING than Report Server.
+                  It ignores a nested data region's own DataSetName, it
+                  evaluates an undeclared field as Nothing, and it
+                  evaluates a Lookup nested in another Lookup — all three
+                  are publish-fatal on the server.
+
+                  The rules the server enforces at publish are the job of
+                  tests/test_fatal_gate_publish_semantics.py (a pure rule
+                  engine over the RDL tree); VB.NET expression compilation
+                  is L-D's job. Engine-gated: machines without the harness
+                  SKIP this leg — never a silent pass.
   L-D  COMPILE  — every generated =expression (and the <Code> block) compiles
                   through the real VB.NET compiler (vb_expr_check rail), on a
                   DETERMINISTIC SHA-ROTATED SAMPLE per run: full corpus x
@@ -96,6 +118,12 @@ CORPORA = {
     "wild2": Path(os.environ.get(
         "O2S_WILD_CORPUS2",
         "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus2")),
+    "wild3": Path(os.environ.get(
+        "O2S_WILD_CORPUS3",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus3")),
+    "wild4": Path(os.environ.get(
+        "O2S_WILD_CORPUS4",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus4")),
 }
 
 

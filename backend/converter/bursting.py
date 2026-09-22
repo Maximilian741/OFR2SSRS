@@ -26,6 +26,7 @@ Public API (consumed by converter/__init__.py via the integration agent):
 """
 from __future__ import annotations
 
+import html as _html
 import re
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -93,9 +94,171 @@ _BURST_PARAM_NAMES = {
     "P_DESFORMAT",
 }
 
-_BURST_FORMULA_NAME_HINTS = ("CF_FILE", "CF_FILENAME", "CF_PATH", "CF_OUTFILE")
-
 _BURST_BODY_HINTS = ("P_AS_PATH", "P_DISTRIBUTE", "DESNAME")
+
+
+# ---------------------------------------------------------------------------
+# DECLARED distribution instructions
+#
+# Oracle Reports never guesses who receives which file: the report ships (or
+# writes at run time) a <destinations> document that names one <file>, <mail>
+# or <printer> destination per delivery, and each destination's attributes
+# point back at the report's own columns/formulas with Oracle's &<NAME>
+# reference syntax:
+#
+#     <foreach>
+#       <mail id="..." to="&<...>" subject="..."/>
+#       <file id="..." name="&<...>.pdf" instance="this"/>
+#     </foreach>
+#
+# Those references ARE the binding between a delivery slot and a report
+# column -- the only non-guessing answer to "which column is the recipient".
+# Every element and attribute name used below is Oracle Reports' OWN
+# distribution dialect (fixed by the product); none of it is a guess about
+# what a site might call a column.
+# ---------------------------------------------------------------------------
+
+# Oracle Reports distribution destination elements.
+_DEST_ELEMENTS = ("mail", "file", "printer")
+# Oracle Reports <mail> recipient attributes.
+_MAIL_RECIPIENT_ATTRS = ("to", "cc", "bcc")
+
+# An element's attribute region may itself contain "&<NAME>" (angle brackets
+# and all), so the scan allows that form explicitly instead of stopping at the
+# first '>'.
+_DEST_ELEMENT_RE = re.compile(
+    r"(?is)<\s*(" + "|".join(_DEST_ELEMENTS) + r")\b"
+    r"((?:&\s*<[A-Za-z_][A-Za-z0-9_]*>|[^<>])*)>")
+_ATTR_RE = re.compile(r"""(?is)\b([a-z_][a-z0-9_]*)\s*=\s*(['"])(.*?)\2""")
+# Oracle's reference syntax inside a distribution attribute: &<NAME> or &NAME.
+_ORACLE_REF_RE = re.compile(r"&\s*<?\s*([A-Za-z_][A-Za-z0-9_]*)\s*>?")
+# Oracle's own mail-destination built-in.
+_SET_MAIL_RE = re.compile(r"(?is)\bSRW\s*\.\s*SET_MAILDESTINATION\s*\((.*?)\)")
+
+
+def _merge_plsql_literals(text):
+    """Splice PL/SQL string concatenation back together.
+
+    A report BUILDS its distribution document with Text_IO writes, so a single
+    <file ...> element arrives as a dozen quoted literals joined by ``||``.
+    Dropping only the ``' || '`` glue reconstructs the markup exactly as the
+    report writes it. A literal interrupted by a VARIABLE stays interrupted,
+    which is correct: there is no static reference to read at that spot.
+    """
+    if not text:
+        return ""
+    return re.sub(r"'\s*\|\|\s*'", "", str(text))
+
+
+def _distribution_texts(report):
+    """Every text a report's distribution instructions can live in: the source
+    document itself (a shipped <destinations> block) and each program-unit
+    body, with PL/SQL concatenation spliced back together."""
+    out = []
+    raw = getattr(report, "raw_xml", "") or ""
+    if isinstance(raw, bytes):
+        raw = raw.decode("utf-8", "replace")
+    if raw:
+        raw = _html.unescape(raw)
+        out.append(raw)
+        merged = _merge_plsql_literals(raw)
+        if merged != raw:
+            out.append(merged)
+    for t in (getattr(report, "triggers", None) or []):
+        out.append(_merge_plsql_literals(
+            _html.unescape(getattr(t, "body", "") or "")))
+    for f in (getattr(report, "formulas", None) or []):
+        out.append(_merge_plsql_literals(
+            _html.unescape(getattr(f, "plsql_body", "") or "")))
+    return [t for t in out if t]
+
+
+def declared_distribution(report):
+    """Read the distribution instructions the SOURCE declares.
+
+    Returns::
+
+        {"declared": bool,          # the source declares any destination
+         "per_row": bool,           # a destination is per-ROW (instance="this")
+         "has_mail": bool,          # a <mail> destination is declared
+         "recipient_refs": [...],   # names referenced by to / cc / bcc slots
+         "file_refs": [...]}        # names referenced by a file NAME slot
+    """
+    cached = getattr(report, "_o2s_declared_distribution", None)
+    if cached is not None:
+        return cached
+    recipient_refs, file_refs = [], []
+    declared = per_row = has_mail = False
+    for text in _distribution_texts(report):
+        for m in _DEST_ELEMENT_RE.finditer(text):
+            element = m.group(1).lower()
+            attrs = {a.lower(): v for a, _quote, v in _ATTR_RE.findall(m.group(2))}
+            declared = True
+            if element == "mail":
+                has_mail = True
+            if (attrs.get("instance", "") or "").strip().lower() == "this":
+                per_row = True
+            for attr, value in attrs.items():
+                refs = [r.group(1) for r in _ORACLE_REF_RE.finditer(value)]
+                if not refs:
+                    continue
+                if attr in _MAIL_RECIPIENT_ATTRS:
+                    recipient_refs.extend(refs)
+                elif attr == "name":
+                    file_refs.extend(refs)
+        for m in _SET_MAIL_RE.finditer(text):
+            declared = True
+            has_mail = True
+            recipient_refs.extend(
+                r.group(1) for r in re.finditer(
+                    r"[:&]\s*<?\s*([A-Za-z_][A-Za-z0-9_]*)\s*>?", m.group(1)))
+
+    def _dedupe(seq):
+        seen, out = set(), []
+        for s in seq:
+            u = s.upper()
+            if u not in seen:
+                seen.add(u)
+                out.append(s)
+        return out
+
+    info = {"declared": declared, "per_row": per_row, "has_mail": has_mail,
+            "recipient_refs": _dedupe(recipient_refs),
+            "file_refs": _dedupe(file_refs)}
+    try:
+        setattr(report, "_o2s_declared_distribution", info)
+    except Exception:
+        pass
+    return info
+
+
+def _resolve_ref_to_columns(report, ref):
+    """Resolve one declared reference to the dataset column(s) carrying it.
+
+    A reference names either a query column (resolves to itself), a formula
+    column (resolves to the columns its PL/SQL body reads) or a parameter
+    (carries no per-row value -- resolves to nothing).
+    """
+    if not ref:
+        return []
+    target = ref.upper()
+    columns = {}
+    for _q, c in _all_query_columns(report):
+        if c:
+            columns.setdefault(c.upper(), c)
+    if target in columns:
+        return [columns[target]]
+    for f in (getattr(report, "formulas", None) or []):
+        if _norm(getattr(f, "name", "")) != target:
+            continue
+        body = _html.unescape(getattr(f, "plsql_body", "") or "")
+        out = []
+        for m in re.finditer(r":([A-Za-z_][A-Za-z0-9_]*)", body):
+            col = columns.get(m.group(1).upper())
+            if col and col not in out:
+                out.append(col)
+        return out
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -116,6 +279,27 @@ def _all_query_columns(report):
         for it in getattr(q, "items", []):
             out.append((getattr(q, "name", ""), getattr(it, "name", "")))
     return out
+
+
+def _outermost_break_column(query, allowed):
+    """The break column of the query's OUTERMOST declared <group>.
+
+    Oracle splits a bursting run at a group break, so the outermost group's
+    break column is the per-file key. ``allowed`` is the roster of columns that
+    may serve as a key (aggregates already excluded); a break column outside it
+    is ignored rather than trusted.
+    """
+    allowed_by_upper = {(c or "").upper(): c for c in (allowed or []) if c}
+    groups = list(getattr(query, "groups", None) or [])
+    while groups:
+        nxt = []
+        for g in groups:
+            col = (getattr(g, "break_col", "") or "").strip()
+            if col and col.upper() in allowed_by_upper:
+                return allowed_by_upper[col.upper()]
+            nxt.extend(getattr(g, "children", None) or [])
+        groups = nxt
+    return None
 
 
 def _bind_refs(plsql):
@@ -147,13 +331,26 @@ def detect_bursting(report):
                 is_bursting = True
 
     # ---- 2. Formula sniff ---------------------------------------------------
+    # The file-template formula is identified two ways, both declaration-driven:
+    # its body reads one of Oracle's OWN destination parameters, or the report's
+    # DECLARED distribution instructions name it in a destination slot. Neither
+    # asks what the formula is CALLED.
+    decl = declared_distribution(report)
+    declared_template_refs = {r.upper() for r in
+                              (decl["file_refs"] + decl["recipient_refs"])}
+    if decl["declared"]:
+        evidence.append("source declares distribution destinations"
+                        + (" (per row)" if decl["per_row"] else ""))
+    if decl["per_row"]:
+        is_bursting = True
+
     burst_formula = None
     for f in getattr(report, "formulas", []):
         fname = _norm(getattr(f, "name", ""))
         body = getattr(f, "plsql_body", "") or ""
         body_u = body.upper()
 
-        name_hit = any(h in fname for h in _BURST_FORMULA_NAME_HINTS)
+        declared_hit = fname in declared_template_refs
         body_hit = any(h in body_u for h in _BURST_BODY_HINTS)
 
         if body_hit:
@@ -162,8 +359,10 @@ def detect_bursting(report):
             is_bursting = True
             if burst_formula is None:
                 burst_formula = f
-        elif name_hit:
-            evidence.append("formula " + str(f.name) + " matches naming convention")
+        elif declared_hit:
+            evidence.append("formula " + str(f.name)
+                            + " is bound to a declared destination slot")
+            is_bursting = True
             if burst_formula is None:
                 burst_formula = f
 
@@ -238,21 +437,16 @@ def detect_bursting(report):
                     if getattr(it, "name", "")]
             # A burst key is a per-recipient IDENTIFIER -- never an Oracle
             # summary/formula/placeholder column (CS_/CF_/CP_), which is an
-            # aggregate, not a row key. Prefer an id/number/key column, then a
-            # name/recipient column, else the first remaining real column.
+            # aggregate, not a row key.
             real = [c for c in cols if not re.match(r"(?i)^(cs|cf|cp)_", c)]
-
-            def _first_with(cands, keys):
-                for c in cands:
-                    if any(k in c.upper() for k in keys):
-                        return c
-                return None
-
-            burst_key_field = (
-                _first_with(real, ("_ID", "_NUM", "_KEY", "_NO", "ID", "NUM", "KEY"))
-                or _first_with(real, ("NAME", "RECIP", "CONTACT"))
-                or (real[0] if real else (cols[0] if cols else None))
-            )
+            # Oracle bursts at a GROUP BREAK -- one output per value of the
+            # outermost <group>'s break column -- so that column IS the per-file
+            # key. Read it off the declared group tree; a query that declares no
+            # group yields one row per delivery anyway, so its first data item
+            # is the key. Nothing here reads a column NAME.
+            burst_key_field = _outermost_break_column(main_q, real)
+            if not burst_key_field:
+                burst_key_field = real[0] if real else (cols[0] if cols else None)
 
     if is_bursting and not filename_pattern and burst_key_field:
         filename_pattern = "<" + burst_key_field + ">.pdf"
@@ -269,23 +463,64 @@ def detect_bursting(report):
 # build_burst_query
 # ---------------------------------------------------------------------------
 
-def _pick_recipient_columns(report):
-    # Derive recipient column from generic name conventions only — never
-    # report-domain-specific terms. "RECIPIENT" stays as the canonical
-    # neutral term; the rest are common cross-system header conventions
-    # (CONTACT, NAME), and email is matched via EMAIL / TO_EMAIL / SEND_TO
-    # / ADDRESS / ADDR.
-    name_like = ("RECIPIENT", "CONTACT", "NAME")
-    email_like = ("EMAIL", "TO_EMAIL", "SEND_TO", "ADDRESS", "ADDR")
+def _pick_recipient_columns(report, exclude=None):
+    """``[recipient-label column, recipient-destination column]``.
+
+    Both come from the DECLARED distribution slots: the destination column is
+    whatever the source's <mail> recipient attribute (or SRW.SET_MAILDESTINATION)
+    references, and the label column is whatever its per-row file-name template
+    references. A source that declares neither keeps the neutral placeholders,
+    so the generated query still shows the user exactly where to edit.
+
+    It does NOT look at column names. Matching a column because it is spelled
+    like an address is how a postal-address column reaches an SMTP To: header.
+    """
+    email_hit = _detect_email_column(report)
+    # The label column must add something the row does not already carry, so
+    # the burst key itself (and the destination column) are excluded.
+    taken = {(c or "").upper() for c in
+             ([email_hit] + list(exclude or [])) if c}
     name_hit = None
-    email_hit = None
-    for _q, c in _all_query_columns(report):
-        cu = c.upper()
-        if not name_hit and any(k in cu for k in name_like):
-            name_hit = c
-        if not email_hit and any(k in cu for k in email_like):
-            email_hit = c
+    for ref in declared_distribution(report)["file_refs"]:
+        for c in _resolve_ref_to_columns(report, ref):
+            if (c or "").upper() not in taken:
+                name_hit = c
+                break
+        if name_hit:
+            break
     return [name_hit or "Recipient_Name", email_hit or "Email_Or_Path"]
+
+
+def _filename_replace_chain(pattern, key):
+    """T-SQL that rebuilds the per-row output filename from the SOURCE's own
+    file template.
+
+    ``pattern`` carries one ``<REF>`` placeholder per reference the source's
+    file-name template used, so the REPLACE chain is generated FROM those
+    references: the burst key resolves to the row's key column, every other
+    reference to the same-named report parameter. Nothing is hardcoded, so a
+    template built from three references produces three REPLACEs and a
+    template built from none produces a plain literal.
+    """
+    refs = []
+    for m in re.finditer(r"<([A-Za-z_][A-Za-z0-9_]*)>", str(pattern or "")):
+        name = m.group(1)
+        if name not in refs:
+            refs.append(name)
+    literal = "        '" + _sql_str(pattern) + "'"
+    if not refs:
+        return "    " + literal.strip() + "\n"
+    lines = ["    " + ("REPLACE(" * len(refs)) + "\n", literal + ",\n"]
+    for name in refs:
+        safe = _sql_ident(name)
+        if safe.upper() == (key or "").upper():
+            value = "CAST(p." + safe + " AS NVARCHAR(64))"
+        else:
+            value = "ISNULL(CAST(@" + safe + " AS NVARCHAR(64)), '')"
+        lines.append("        '<" + safe + ">', " + value + "),\n")
+    # The final REPLACE closes the expression; drop its trailing comma.
+    lines[-1] = lines[-1].rstrip(",\n") + "\n"
+    return "".join(lines)
 
 
 def build_burst_query(report, info):
@@ -293,8 +528,11 @@ def build_burst_query(report, info):
     Returns a T-SQL stub that yields ONE row per delivery target.
     """
     # All of these flow into generated T-SQL -- sanitize (the report is untrusted).
-    key = _sql_ident(info.get("burst_key_field") or "Perm_Num")
-    name_col, email_col = _pick_recipient_columns(report)
+    # Every fallback below is a NEUTRAL placeholder the user is told to edit --
+    # never a column/table name borrowed from some other report's schema.
+    key = _sql_ident(info.get("burst_key_field") or "Burst_Key")
+    name_col, email_col = _pick_recipient_columns(
+        report, exclude=[info.get("burst_key_field"), key])
     name_col = _sql_ident(name_col)
     email_col = _sql_ident(email_col)
     pattern = info.get("filename_pattern") or ("<" + key + ">.pdf")
@@ -306,7 +544,8 @@ def build_burst_query(report, info):
         first_q = getattr(qs[0], "name", "") or ""
 
     evidence_str = _sql_comment(", ".join(info.get("evidence", []) or []) or "(none)")
-    table = _sql_ident(first_q or "Permits")
+    table = _sql_ident(first_q or "MainTable")
+    recipient_table = _sql_ident("RecipientTable")
 
     sql = (
         "-- Data-Driven Subscription / bursting source for " + rname + "\n"
@@ -323,15 +562,11 @@ def build_burst_query(report, info):
         "    COALESCE(r." + email_col + ", '\\\\fileshare\\reports\\out')\n"
         "                                              AS Email_Or_Path,\n"
         "    'PDF'                                     AS Render_Format,\n"
-        "    -- Per-row filename built to match the original CF_File_F pattern.\n"
-        "    REPLACE(REPLACE(REPLACE(\n"
-        "        '" + _sql_str(pattern) + "',\n"
-        "        '<" + key + ">',         CAST(p." + key + " AS NVARCHAR(64))),\n"
-        "        '<P_Distr_Abbr>',  ISNULL(@P_Distr_Abbr, '')),\n"
-        "        '<Renewal_Year>',  ISNULL(CAST(@Renewal_Year AS NVARCHAR(8)), ''))\n"
+        "    -- Per-row filename rebuilt from the source's own file template.\n"
+        + _filename_replace_chain(pattern, key) +
         "                                              AS Output_File\n"
         "FROM dbo." + table + " AS p\n"
-        "LEFT JOIN dbo.Distribution_Recipients AS r\n"
+        "LEFT JOIN dbo." + recipient_table + " AS r\n"
         "       ON r." + key + " = p." + key + "\n"
         "WHERE p." + key + " IS NOT NULL\n"
         "ORDER BY p." + key + ";\n"
@@ -460,7 +695,7 @@ def build_powershell_dds_script(report, info, rdl_path):
     on SSRS Standard edition.
     """
     rname = getattr(report, "name", "REPORT") or "REPORT"
-    key = info.get("burst_key_field") or "Perm_Num"
+    key = info.get("burst_key_field") or "Burst_Key"
     pattern = info.get("filename_pattern") or ("<" + key + ">.pdf")
     evidence_str = ", ".join(info.get("evidence", []) or []) or "(none)"
 
@@ -505,13 +740,6 @@ __all__ = [
 # These replace the earlier stub versions (later defs win in Python).
 # ---------------------------------------------------------------------------
 
-_EMAIL_COL_PATTERNS = (
-    "RECIPIENT_EMAIL", "PRI_EMAIL", "PRIMARY_EMAIL",
-    "EMAIL_ADDR", "EMAIL_ADDRESS", "EMAIL",
-    "CONTACT_EMAIL", "MAIL_ADDR",
-)
-
-
 def _detect_main_table(report):
     """Inspect the parsed report's queries and try to pick the primary table
     the report binds against. Strategy: look at every dataset's tsql/sql,
@@ -541,16 +769,22 @@ def _detect_main_table(report):
 
 
 def _detect_email_column(report):
-    """Walk every dataset's columns and return the first that looks like an
-    email address (matches a pattern in _EMAIL_COL_PATTERNS, longest-first
-    so 'EMAIL_ADDR' beats 'EMAIL'). Returns the original casing or None.
+    """The dataset column bound to the source's DECLARED mail-recipient slot.
+
+    Structural: a <mail> destination's to/cc/bcc attribute (or Oracle's
+    SRW.SET_MAILDESTINATION) names a column or a formula, and that reference IS
+    the binding. Returns the column in its original casing.
+
+    FAIL CLOSED: a source that declares no mail destination has no recipient
+    column to find, and this returns None so the caller keeps its labelled
+    <RecipientEmail> placeholder. Picking a column because its NAME resembles
+    an address is how a postal-address column (or a column merely containing
+    'MAIL') ends up addressing real outbound e-mail.
     """
-    patterns = sorted(_EMAIL_COL_PATTERNS, key=len, reverse=True)
-    for _q, c in _all_query_columns(report):
-        cu = (c or "").upper()
-        for p in patterns:
-            if p in cu:
-                return c
+    for ref in declared_distribution(report)["recipient_refs"]:
+        cols = _resolve_ref_to_columns(report, ref)
+        if cols:
+            return cols[0]
     return None
 
 
@@ -570,7 +804,7 @@ def build_email_burst_query(report, info):
     edit. A header comment shows exactly what was substituted.
     """
     # Untrusted report-derived names flow into this generated T-SQL -- sanitize.
-    burst_key = _sql_ident((info or {}).get("burst_key_field") or "Perm_Num")
+    burst_key = _sql_ident((info or {}).get("burst_key_field") or "Burst_Key")
     rname = _sql_comment((report.name if hasattr(report, "name") else "") or "report")
 
     detected_main = _detect_main_table(report)

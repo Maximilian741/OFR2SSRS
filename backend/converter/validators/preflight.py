@@ -20,6 +20,85 @@ import xml.etree.ElementTree as ET
 from typing import List, Dict, Tuple
 
 
+# Aggregate functions whose LAST argument may name a dataset scope. A bare
+# Fields!X.Value of THAT dataset inside such a call is legal in any report
+# item ("...or, if inside an aggregate, the specified dataset scope").
+_DS_SCOPE_AGG_FUNCS = ("First", "Last", "Sum", "Avg", "Min", "Max", "Count",
+                       "CountDistinct", "CountRows", "StDev", "StDevP",
+                       "Var", "VarP", "RunningValue", "Aggregate",
+                       # Lookup/LookupSet: the destination-key and result
+                       # arguments resolve against the named dataset; the
+                       # FIRST (source key) argument is evaluated in the
+                       # current scope and is NOT covered (see below).
+                       "Lookup", "LookupSet")
+_DS_SCOPE_AGG_OPEN_RE = re.compile(
+    r"\b(?:" + "|".join(_DS_SCOPE_AGG_FUNCS) + r")\s*\(")
+
+
+def _dataset_scoped_call_spans(expr: str):
+    """``(start, end)`` spans of every aggregate call in ``expr`` whose LAST
+    top-level argument is a "<scope>" string literal. Balanced-paren scan,
+    not a regex over the argument text: the operand may itself be
+    parenthesized arithmetic — Sum((((F!A.Value + F!B.Value) + ...)),
+    "Q_1") — or a per-row conditional — Sum(IIf(Fields!X.Value = "M", 0,
+    1), "DS"), the row-grain variant-band trigger. String literals are
+    skipped so parens or commas inside them never skew the depth.
+
+    A Lookup/LookupSet call is scoped the way the engine scopes it: its
+    span starts AFTER the first top-level comma, so a bare Fields! ref in
+    the source-key argument is judged against the current scope (where a
+    ref of another dataset is exactly the server's rejection)."""
+    expr = expr or ""
+    n = len(expr)
+    covered = []
+    for m in _DS_SCOPE_AGG_OPEN_RE.finditer(expr):
+        start = m.end()           # position just past the '('
+        depth, i = 1, start
+        first_top_comma = -1
+        last_top_comma = -1
+        while i < n and depth:
+            c = expr[i]
+            if c == '"':
+                j = expr.find('"', i + 1)
+                i = (j if j >= 0 else n) + 1
+                continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if depth == 0:
+                    break
+            elif c == "," and depth == 1:
+                if first_top_comma < 0:
+                    first_top_comma = i
+                last_top_comma = i
+            i += 1
+        if depth:                  # unbalanced — not a judgeable call
+            continue
+        if last_top_comma < 0:
+            continue               # single-argument call: no scope
+        tail = expr[last_top_comma + 1:i].strip()
+        if not re.fullmatch(r"\"[^\"]+\"", tail):
+            continue
+        if m.group(0).lstrip().startswith("Lookup"):
+            covered.append((first_top_comma + 1, i))
+        else:
+            covered.append((start, i))
+    return covered
+
+
+def _every_ref_inside_scoped_aggregate(expr: str, field_name: str) -> bool:
+    """True when EVERY occurrence of Fields!<field_name>.Value in ``expr``
+    sits inside a dataset-scoped aggregate call (see
+    _dataset_scoped_call_spans)."""
+    target = "Fields!" + field_name + ".Value"
+    covered = _dataset_scoped_call_spans(expr)
+    for r in re.finditer(re.escape(target), expr or ""):
+        if not any(a <= r.start() and r.end() <= b for a, b in covered):
+            return False
+    return True
+
+
 RDL_NS_2008 = "http://schemas.microsoft.com/sqlserver/reporting/2008/01/reportdefinition"
 RDL_NS_2010 = "http://schemas.microsoft.com/sqlserver/reporting/2010/01/reportdefinition"
 RDL_NS_2016 = "http://schemas.microsoft.com/sqlserver/reporting/2016/01/reportdefinition"
@@ -418,7 +497,12 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
 
     def _hidden_scope_walk(el, region_ds):
         tag = el.tag.split("}")[-1]
-        if tag == "Tablix":
+        # The OUTERMOST region's dataset is the scope: a nested region
+        # inherits it and its own DataSetName is ignored by the engine
+        # (and rejected at publish when it differs — see the nested-region
+        # rule below), so a nested declaration must never widen the scope
+        # this rule judges a Hidden against.
+        if tag == "Tablix" and not region_ds:
             for _c in el:
                 if _c.tag.split("}")[-1] == "DataSetName":
                     region_ds = _c.text or region_ds
@@ -436,6 +520,12 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
                     if re.search(rf"Fields!{re.escape(_ref)}\.Value\s*,"
                                  rf"\s*\"[^\"]+\"", _expr):
                         continue
+                    # ...or every occurrence sits inside a dataset-scoped
+                    # aggregate whose operand is a per-row expression:
+                    # Sum(IIf(Fields!X.Value = "M", 0, 1), "DS") — the
+                    # row-grain trigger of a nested variant band.
+                    if _every_ref_inside_scoped_aggregate(_expr, _ref):
+                        continue
                     issues.append((
                         "BLOCKER",
                         "rdl.hidden_scope",
@@ -451,6 +541,50 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
             _hidden_scope_walk(_c, region_ds)
 
     _hidden_scope_walk(tree, None)
+
+    # NESTED DATA REGIONS INHERIT THEIR CONTAINER'S DATASET. A data region
+    # nested inside another data region cannot bind to a different dataset:
+    # the engine ignores the nested <DataSetName> at render time (so every
+    # local render rail is blind to it) and the SERVER refuses the report
+    # at publish time the moment an expression inside the nested region
+    # references a column of the dataset it declared — "Report item
+    # expressions can only refer to fields within the current dataset
+    # scope". Customer-verified: a report server rejected a multi-section
+    # invoice whose two payment-variant bands (one-row nested tablixes)
+    # had been bound to the trigger's dataset inside a record region bound
+    # to another query, while every local gate said clean. Measured over
+    # the converter's corpora before this rule was promoted: exactly that
+    # report and nothing else carried the shape.
+    _region_tags = {"Tablix", "Chart", "GaugePanel", "CustomReportItem",
+                    "List", "Table", "Matrix", "Map"}
+
+    def _nested_region_walk(el, outer_name, outer_ds):
+        tag = el.tag.split("}")[-1]
+        if tag in _region_tags:
+            own = ""
+            for _c in el:
+                if _c.tag.split("}")[-1] == "DataSetName":
+                    own = (_c.text or "").strip()
+            if outer_name is not None and own and outer_ds and own != outer_ds:
+                issues.append((
+                    "BLOCKER",
+                    "rdl.nested_region_dataset",
+                    f"Data region {el.get('Name') or '?'!r} declares "
+                    f"DataSetName {own!r} but is nested inside data region "
+                    f"{outer_name!r} bound to {outer_ds!r}. A nested data "
+                    f"region inherits its container's dataset scope; the "
+                    f"report server REFUSES this RDL at publish "
+                    f"('Report item expressions can only refer to fields "
+                    f"within the current dataset scope'). Bind the nested "
+                    f"region to {outer_ds!r} and reach the other dataset "
+                    f"through a dataset-scoped aggregate or Lookup.",
+                ))
+            if outer_name is None:
+                outer_name, outer_ds = (el.get("Name") or "?"), own
+        for _c in el:
+            _nested_region_walk(_c, outer_name, outer_ds)
+
+    _nested_region_walk(tree, None, "")
 
     # A report with NO content item anywhere prints blank pages, whatever
     # its datasets look like. This is strictly stronger than the
@@ -1133,46 +1267,10 @@ def preflight_audit(rdl_xml: str, target_db: str = "oracle") -> Dict:
     def _is_scoped(expr: str, field_name: str) -> bool:
         # True when EVERY occurrence of Fields!<X>.Value sits inside an
         # aggregate call whose LAST top-level argument is a "<scope>"
-        # string literal. Balanced-paren scan, not a regex over the
-        # argument text: the operand may itself be parenthesized
-        # arithmetic — Sum((((F!A.Value + F!B.Value) + ...)), "Q_1") is a
-        # correctly scoped expression the previous [^()]* pattern could
-        # never match, flagging valid grand totals as false BLOCKERs
-        # (wild-corpus verified). String literals are skipped so parens
-        # or commas inside them never skew the depth.
-        target = "Fields!" + field_name + ".Value"
-        n = len(expr)
-        covered = []
-        for m in _agg_open_re.finditer(expr):
-            start = m.end()           # position just past the '('
-            depth, i = 1, start
-            last_top_comma = -1
-            while i < n and depth:
-                c = expr[i]
-                if c == '"':
-                    j = expr.find('"', i + 1)
-                    i = (j if j >= 0 else n) + 1
-                    continue
-                if c == "(":
-                    depth += 1
-                elif c == ")":
-                    depth -= 1
-                    if depth == 0:
-                        break
-                elif c == "," and depth == 1:
-                    last_top_comma = i
-                i += 1
-            if depth:                  # unbalanced — not a judgeable call
-                continue
-            if last_top_comma < 0:
-                continue               # single-argument call: no scope
-            tail = expr[last_top_comma + 1:i].strip()
-            if re.fullmatch(r"\"[^\"]+\"", tail):
-                covered.append((start, i))
-        for r in re.finditer(re.escape(target), expr):
-            if not any(a <= r.start() and r.end() <= b for a, b in covered):
-                return False
-        return True
+        # string literal — the module-level balanced-paren scan (a regex
+        # over the argument text flagged valid parenthesized grand totals
+        # as false BLOCKERs, wild-corpus verified).
+        return _every_ref_inside_scoped_aggregate(expr, field_name)
 
     # Pre-compute "is this element inside a Tablix?" by walking down
     # from each Tablix and collecting id()'s of descendants.

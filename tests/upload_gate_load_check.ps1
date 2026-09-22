@@ -4,15 +4,31 @@
 # engine (the signed ReportViewer DLLs under tools/renderlab/lib) and forces
 # the definition compile with GetParameters(). LoadReportDefinition alone
 # DEFERS validation — a garbage file "loads" fine; GetParameters() is what
-# actually compiles the definition, which makes this the strongest local
-# analog of the SSRS server's publish-time validation.
+# actually compiles the definition.
 #
-# The inputs are expected to be STATICIZED RDLs (tools/renderlab/ms_layout
-# staticize): a live =expression makes the engine build its expression-host
-# assembly inside a sandbox AppDomain, which cannot resolve the ReportViewer
-# DLLs from a PowerShell host (and crashes CLR outright under this machine's
-# Application Control policy). Definition-level validation is unaffected;
-# expression compilation is proven by the separate VB-compile leg.
+# WHAT THIS DOES NOT CHECK. The inputs are STATICIZED RDLs
+# (tools/renderlab/ms_layout staticize): every =expression has been replaced
+# by a literal placeholder before the engine sees the file, because a live
+# =expression makes the engine build its expression-host assembly inside a
+# sandbox AppDomain, which cannot resolve the ReportViewer DLLs from a
+# PowerShell host (and crashes CLR outright under this machine's Application
+# Control policy). So this leg validates the DOCUMENT STRUCTURE and nothing
+# about EXPRESSION SEMANTICS — not dataset scope, not aggregate nesting, not
+# field existence: by the time the engine reads the file there are no
+# expressions left to be wrong.
+#
+# It is therefore NOT an analog of the SSRS server's publish-time
+# validation, and calling it one here is exactly how a publish-fatal RDL
+# passed every local gate and was refused by a customer's Report Server.
+# Even a LIVE expression host would not close the gap: ReportViewer is more
+# forgiving than the server (it ignores a nested data region's own
+# DataSetName, evaluates an undeclared field as Nothing, and evaluates a
+# Lookup nested inside another Lookup — all three publish-fatal).
+#
+# The server's publish rules are checked by the pure rule engine in
+# backend/converter/validators/publish_semantics.py (gate:
+# tests/test_fatal_gate_publish_semantics.py); VB.NET expression
+# compilation is proven by the separate VB-compile leg.
 #
 #   powershell -NoProfile -ExecutionPolicy Bypass -File upload_gate_load_check.ps1 `
 #       -ListFile rdl_paths.txt -LibDir ..\tools\renderlab\lib

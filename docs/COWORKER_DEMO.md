@@ -32,10 +32,13 @@ script — just hit each beat.
 
 ```bash
 cd HackathonOracle2SSRS
+python -m pip install -r requirements.txt   # ONE-TIME on a fresh clone; the launcher never installs
 ./run.sh        # or run.bat on Windows
 ```
 
 Browser opens at `http://127.0.0.1:5057`. Show the empty drag-drop zone.
+(If the launcher prints "a required Python package is not installed", the
+one-time line above was skipped — run it, then launch again.)
 
 > "This runs locally. No data leaves the machine. No accounts, no API keys
 > required."
@@ -108,8 +111,10 @@ If the sample triggered bursting detection:
 If the sample didn't trigger bursting, just say:
 
 > "When the source report has per-recipient distribution, this tab fills
-> in. The detection is name-agnostic — no hardcoded column names. The
-> Burst Pack is downloadable as a separate zip."
+> in. The detection is name-agnostic — it reads the distribution
+> instructions the source declares, not a list of column names we hope to
+> recognise. When the source declares no recipient, the query says so
+> instead of guessing. The Burst Pack is downloadable as a separate zip."
 
 ### Beat 6: the Sub-Reports tab (30 seconds)
 

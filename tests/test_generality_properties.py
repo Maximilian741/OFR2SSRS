@@ -74,6 +74,12 @@ CORPORA = {
     "wild2": Path(os.environ.get(
         "O2S_WILD_CORPUS2",
         "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus2")),
+    "wild3": Path(os.environ.get(
+        "O2S_WILD_CORPUS3",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus3")),
+    "wild4": Path(os.environ.get(
+        "O2S_WILD_CORPUS4",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus4")),
 }
 
 
@@ -244,6 +250,36 @@ def _fallback_violation(a: dict) -> Optional[str]:
     return None
 
 
+_PREVIEW_FALLBACK_MARK = "Preview unavailable"
+
+def _preview_error_text(html: str) -> str:
+    """The exception text the fallback card carries, for a useful message."""
+    m = re.search(r"<pre[^>]*>(.*?)</pre>", html, re.S)
+    text = m.group(1).strip() if m else "preview fallback card"
+    return (text.replace("&lt;", "<").replace("&gt;", ">")
+                .replace("&amp;", "&"))
+
+
+
+def _preview_violation(a: dict) -> Optional[str]:
+    """P-A gate, PREVIEW arm. The reason string when a convertible source
+    degraded to the "Preview unavailable" card, else None.
+
+    convert() wraps BOTH render_mockup calls in try/except and substitutes a
+    friendly error card, so a preview that crashes is INVISIBLE to every
+    other rail -- the RDL is fine and nothing goes red. Three agency reports
+    sat in that state (the generator widened its grouped-tabular column
+    tuples; the preview still unpacked the old arity) and the Preview tab
+    showed an error card on each. A silent degradation needs a gate that
+    asserts it did not happen, or it is not measured at all.
+    """
+    for mode in ("frontend", "backend"):
+        err = a.get("preview_error_" + mode)
+        if err:
+            return mode + ": " + err
+    return None
+
+
 def _named_rejection(result: dict) -> Optional[str]:
     """P-E gate. The NAMED reason a rejected source carries, or None when the
     rejection is unnamed (which is a failure: a reject must always explain
@@ -293,6 +329,14 @@ def _analysis(path: Path) -> dict:
         a["rdl_wellformed"] = False
         a["rdl_parse_error"] = f"{type(e).__name__}: {e}"
     a["conversion_error"] = r1.get("conversion_error")
+    # The preview is a SEPARATE surface with its own swallowed failure mode
+    # (see _preview_violation). Record it per mode so P-A can gate on it.
+    for _mode, _key in (("frontend", "mockup_html"),
+                        ("backend", "mockup_backend_html")):
+        _html = r1.get(_key) or ""
+        a["preview_error_" + _mode] = (
+            _preview_error_text(_html) if _PREVIEW_FALLBACK_MARK in _html
+            else "")
     a["surface_diffs"] = _surface_diffs(r1, r2)
     a["rejected"] = _is_rejected(r1)
     a["named_rejection"] = _named_rejection(r1)
@@ -452,6 +496,17 @@ def test_pa_convert_never_raises_and_yields_wellformed_rdl(path: Path):
         f"{path.name}: classified CONVERTIBLE yet degraded to the fallback "
         f"RDL ({v}) — the fallback is legal only for declared-unsupported "
         f"kinds")
+    # PREVIEW arm: the same principle on the other surface. A convertible
+    # report must RENDER a preview, not degrade to the "Preview unavailable"
+    # card -- convert() swallows that failure, so without this leg a broken
+    # Preview tab is green everywhere. Measured 0/464 corpus sources before
+    # this became an assertion.
+    if not a.get("rejected"):
+        pv = _preview_violation(a)
+        assert pv is None, (
+            f"{path.name}: RDL generated but the PREVIEW crashed and fell "
+            f"back to the error card ({pv}) — convert() hides this, so it "
+            f"must be gated here")
 
 
 # ===========================================================================
@@ -606,6 +661,50 @@ def test_mutation_pb_gate_goes_red_on_a_silent_drop():
     disclosed = bad_disclosure + f' {{"dropped": ["{victim}"]}}'
     assert not _silent_drop_offenders(parsed, bad_rdl, disclosed), \
         "P-B gate must accept a drop that IS disclosed by name"
+
+
+def test_mutation_pa_preview_arm_goes_red_on_a_crashing_renderer():
+    """The PREVIEW arm must fire when the renderer actually breaks.
+
+    convert() catches render_mockup and substitutes the error card, so the
+    only way to know this leg is alive is to break the renderer on purpose
+    and watch a real conversion degrade. Without this proof the arm could
+    be permanently inert and every run would still read green.
+    """
+    from converter.preview import html_mockup as _mockup
+    import converter as _conv
+
+    src = SYNTH_A
+    honest = _conv.convert(src, target_db="oracle")
+    assert _PREVIEW_FALLBACK_MARK not in (honest.get("mockup_html") or ""),         "the synthetic source must preview cleanly, or the proof proves nothing"
+
+    real = _mockup.render_mockup
+
+    def _boom(report, mode="frontend"):
+        raise ValueError("zzqx doctored renderer")
+
+    _mockup.render_mockup = _boom
+    try:
+        # convert() imported the name directly; patch it where it is LOOKED UP.
+        real_ref = _conv.render_mockup
+        _conv.render_mockup = _boom
+        try:
+            broken = _conv.convert(src, target_db="oracle")
+        finally:
+            _conv.render_mockup = real_ref
+    finally:
+        _mockup.render_mockup = real
+
+    a = {"rejected": False}
+    for mode, key in (("frontend", "mockup_html"),
+                      ("backend", "mockup_backend_html")):
+        html = broken.get(key) or ""
+        a["preview_error_" + mode] = (
+            _preview_error_text(html) if _PREVIEW_FALLBACK_MARK in html else "")
+    violation = _preview_violation(a)
+    assert violation and "zzqx doctored renderer" in violation, (
+        "P-A PREVIEW arm FAILED TO GO RED on a deliberately crashing "
+        "renderer: " + repr(violation))
 
 
 def test_mutation_pc_gate_goes_red_on_injected_foreign_literal():
