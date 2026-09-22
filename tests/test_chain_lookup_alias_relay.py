@@ -1,19 +1,18 @@
 """A two-hop Oracle <link> chain collapses to ONE legal Lookup only on proof.
 
-Oracle chains links (permit -> permittee -> contact). SSRS forbids nesting a
+Oracle chains links (record -> middle -> far). SSRS forbids nesting a
 Lookup inside another's key -- "Only one level of lookup is supported" is a
 publish-time refusal the local engine never shows -- so a value two hops
 away used to be declined and printed blank (disclosed, but blank). On a
-customer's permit letter that blank was the contact org id the envelope
-link forwards, so every envelope opened unfiltered by organisation.
+production report that blank was a key a drill-through link forwards, so
+every linked report opened unfiltered.
 
 The chain collapses when the far child's keys are values the MIDDLE query
 merely relays from the bound row. That is now PROVEN from the middle
 query's own SQL, two ways (rdl._declared_alias_relays):
 
-    SAME EXPRESSION   ``SA.Site_Id AS Site_Id`` and ``SA.Site_Id AS
-                      Permittee_Site_Id`` are the same column, so equal on
-                      every row by SQL semantics;
+    SAME EXPRESSION   ``T.K AS K`` and ``T.K AS Mid_K`` are the same
+                      column, so equal on every row by SQL semantics;
     BIND EQUALITY     ``SELECT T.C AS Alias ... WHERE T.C = :k`` (or the
                       generator's own relaxed ``(:k IS NULL OR T.C = :k)``)
                       at the top level of the WHERE, where k is a key the
@@ -21,8 +20,8 @@ query's own SQL, two ways (rdl._declared_alias_relays):
 
 Nothing looser: a wrong relay would paint ANOTHER record's value on every
 record, which is worse than the blank it replaces. So the file also pins
-the refusals -- a middle query contributing a key of its OWN (an
-application id between an applicant and its courses) must still decline --
+the refusals -- a middle query contributing a key of its OWN (an id the
+middle rows introduce, one-to-many to the far rows) must still decline --
 and the ownership rule the fix exposed: a grandchild may never be joined by
 _lookup_for_child on whichever of its binds happens to name a grandparent
 column (a partial key = the first grandchild row on every record).
@@ -54,7 +53,7 @@ from converter.validators.publish_semantics import publish_violations  # noqa: E
 def _chain_xml(mid_select: str, mid_where: str, far_where: str) -> bytes:
     """root (prog, site) -> mid -> far. The far child's ``<summary>`` is
     declared in the MIDDLE query's group tree but sources a FAR column --
-    the exact declared shape of the customer's report. A root-bound
+    the declared shape measured on a production report. A root-bound
     repeating frame prints that summary, so the resolver must reach two
     hops from the root scope."""
     return (
@@ -80,15 +79,15 @@ def _chain_xml(mid_select: str, mid_where: str, far_where: str) -> bytes:
     ).encode("utf-8")
 
 
-# The customer's shape: the middle query RELAYS the root's site under a new
+# The measured shape: the middle query RELAYS the root's site under a new
 # alias, and the far child keys on that alias.
 RELAY_XML = _chain_xml(
     "SELECT sa.site mid_site, sa.org mid_org FROM sa",
     "WHERE sa.prog = :prog AND sa.site = :site",
     "WHERE c.prog = :prog AND c.site = :mid_site")
 
-# A REAL two-hop chain: the middle query contributes its OWN id (an
-# application id) and the far child keys on it. Nothing relays; must decline.
+# A REAL two-hop chain: the middle query contributes its OWN id (one it
+# introduces) and the far child keys on it. Nothing relays; must decline.
 OWN_KEY_XML = _chain_xml(
     "SELECT sa.app_id mid_site, sa.org mid_org FROM sa",
     "WHERE sa.prog = :prog AND sa.owner = :site",

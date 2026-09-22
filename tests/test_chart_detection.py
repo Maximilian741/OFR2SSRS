@@ -740,6 +740,28 @@ _CORPORA = (
     Path(os.environ.get(
         "O2S_WILD_CORPUS2",
         "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus2")),
+    # Every harvested corpus, not just the first two: a graph in a later
+    # harvest was otherwise never proven to plot. Spelled out one per line
+    # on purpose -- tests/test_every_corpus_is_gated.py reads these names
+    # from this file's text and fails if a folder on disk is missing.
+    Path(os.environ.get(
+        "O2S_WILD_CORPUS3",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus3")),
+    Path(os.environ.get(
+        "O2S_WILD_CORPUS4",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus4")),
+    Path(os.environ.get(
+        "O2S_WILD_CORPUS5",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus5")),
+    Path(os.environ.get(
+        "O2S_WILD_CORPUS6",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus6")),
+    Path(os.environ.get(
+        "O2S_WILD_CORPUS7",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus7")),
+    Path(os.environ.get(
+        "O2S_WILD_CORPUS8",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus8")),
 )
 
 

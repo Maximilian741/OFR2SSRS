@@ -97,15 +97,30 @@ def test_subquery_order_by_is_never_rewritten():
 
 
 def test_recorded_expression_pairing_requires_two_way_uniqueness():
-    """Two select items with the SAME expression text can never pair — an
-    ambiguous claim must leave both items on the derived-name path (an
-    honest miss beats silently swapped columns)."""
+    """Two-way uniqueness still governs DIFFERENT expressions: when the
+    record cannot say which of two different select items an item came
+    from, nothing is renamed (an honest miss beats silently swapped
+    columns). See test_identical_expression_copies_pair_to_their_fields for
+    the one case where a tie is not a real ambiguity."""
+    sql = "select sum(t.amt), sum(t.qty) from bills t"
+    names = ["amt_sum_a", "amt_sum_b"]
+    exprs = ["t.amt", "t.amt"]           # both records point at ONE column
+    out = _alias_select_items(sql, names, exprs)
+    assert "amt_sum_a" not in out, out
+    assert "amt_sum_b" not in out, out
+
+
+def test_identical_expression_copies_pair_to_their_fields():
+    """REVISED (was: identical copies must never pair). Select items with
+    IDENTICAL expression text return IDENTICAL values on every row, so which
+    copy feeds which field is unobservable -- there is nothing to swap. The
+    old refusal left both fields on the derived-name path, i.e. both printed
+    blank through the NULL-stub wrap. Each copy now carries its field."""
     sql = "select sum(t.amt), sum(t.amt) from bills t"
     names = ["amt_sum_a", "amt_sum_b"]
     exprs = ["sum ( t.amt )", "sum ( t.amt )"]
     out = _alias_select_items(sql, names, exprs)
-    assert "amt_sum_a" not in out, out
-    assert "amt_sum_b" not in out, out
+    assert "amt_sum_a" in out and "amt_sum_b" in out, out
 
 
 def test_pairing_never_steals_a_select_item_that_yields_a_declared_name():
@@ -337,15 +352,21 @@ def test_duplicate_column_across_tables_realiases_renamed_item():
     assert re.search(r"a\.zone_id\s*,", out), out
 
 
-def test_duplicate_same_expression_never_pairs():
-    """Two occurrences of the SAME expression are an ambiguous claim — the
-    two-way-uniqueness guard must refuse both (an honest stub beats a
-    guessed rename)."""
+def test_duplicate_same_expression_pairs_and_keeps_the_original_name():
+    """REVISED (was: never pairs). Leaving ``amt1`` unpaired was not an
+    honest stub: the emitter then wrapped the query as
+    ``SELECT O.*, NULL AS amt1 FROM (select t.amt, t.amt ...) O`` and
+    ``O.*`` over two columns named AMT is ORA-00918 at Refresh Fields --
+    fatal error #2 -- while amt1 printed blank. The copies are identical, so
+    the pairing cannot swap anything: one copy becomes amt1, and one copy
+    keeps AMT because the declared field amt binds to that name."""
     sql = "select t.amt, t.amt from bills t"
     names = ["amt", "amt1"]
     exprs = ["t.amt", "t.amt"]
     out = _alias_select_items(sql, names, exprs)
-    assert "amt1" not in out, out
+    assert "AS amt1" in out, out
+    assert out.count("t.amt AS amt1") == 1, out
+    assert re.search(r"t\.amt\s*(,|\s+from)", out, re.I),         "one copy must keep yielding AMT for the declared field amt: " + out
 
 
 _DUPCOL_XML = b"""<?xml version="1.0" encoding="UTF-8" ?>

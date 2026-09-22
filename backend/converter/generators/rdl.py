@@ -790,7 +790,15 @@ def _alias_select_items(sql: str, item_names, item_exprs=None) -> str:
                         1 for _s2 in _sel_info
                         if _s2 is not None
                         and _s2[2].upper() == _oraw.upper()) > 1
-                    if not (_dup and _kf == _ne):
+                    # The record may hold the column UNQUALIFIED ("X") while
+                    # the select list qualifies it ("T.X"): an output-name
+                    # match is then the only available evidence. It is safe
+                    # here because a duplicate can only be RENAMED by the
+                    # identical-expression tie-break below, which refuses
+                    # whenever the candidates differ (A.X vs B.X) -- so the
+                    # looser match can widen the candidate set, never pick
+                    # the wrong column.
+                    if not (_dup and (_kf == _ne or _kf == _no)):
                         continue
                 if (_kf == _ne or _kf == _no
                         or (_kt and _kt != _kf and _kt == _ne)):
@@ -807,6 +815,63 @@ def _alias_select_items(sql: str, item_names, item_exprs=None) -> str:
                    for _k, _si in enumerate(_sel_info)):
                 continue              # would collide with another output name
             _pair_target[_i] = _nm
+
+        # IDENTICAL-EXPRESSION DUPLICATES. A query may select the very same
+        # expression more than once ("SELECT T.X, ..., T.X"); the report
+        # tool gives the extra copies suffixed names (X -> X1) and records
+        # the SAME source expression for every one of them, so the two-way
+        # uniqueness above can never pair them -- each renamed item has
+        # several equally-matching select items. The emitter then fell back
+        # to the NULL-stub wrap, and ``SELECT O.*`` over an inline view with
+        # two columns called X is ORA-00918 at Refresh Fields (fatal error
+        # #2), while the renamed field silently read NULL.
+        #
+        # The tie is SAFE to break, because it is not really a choice: select
+        # items with IDENTICAL expression text return IDENTICAL values on
+        # every row, so any assignment of copies to items prints the same
+        # data. Only uniqueness of the output names matters. Guards:
+        #   * every candidate carries the same normalised expression (else
+        #     the ambiguity is real and nothing is renamed);
+        #   * a candidate is used once, and at least one copy is always left
+        #     yielding its ORIGINAL output name, so the declared field that
+        #     name supplies keeps its column;
+        #   * the target must not collide with another select item's output.
+        # The declared <dataDescriptor order> is deliberately NOT relied on:
+        # measured over 15,872 corpus items it disagrees with the actual
+        # select position 7% of the time (stale after SQL edits), and with
+        # identical expressions it could not change a value anyway.
+        _claimed = {t.upper() for t in _pair_target if t}
+        _out_left = {}
+        for _si in _sel_info:
+            if _si is not None:
+                _out_left[_si[2].upper()] = _out_left.get(_si[2].upper(), 0) + 1
+        for _i, _t in enumerate(_pair_target):
+            if _t and _sel_info[_i] is not None:
+                _out_left[_sel_info[_i][2].upper()] -= 1
+        for _j in sorted(_rev):
+            _nm = _names[_j]
+            _cands = sorted(_rev[_j])
+            if (len(_cands) < 2 or _nm.upper() in _claimed
+                    or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", _nm or "")):
+                continue
+            if len({_sel_info[_i][0] for _i in _cands if _sel_info[_i]}) != 1:
+                continue              # candidates differ: a real ambiguity
+            if any(_si and _si[1] == _norm_sqltext(_nm) for _si in _sel_info):
+                continue              # the target name is already an output
+            for _i in _cands:
+                _si = _sel_info[_i]
+                if _pair_target[_i] is not None or _si is None:
+                    continue
+                if (_si[2].upper() in _names_upper
+                        and _out_left.get(_si[2].upper(), 0) < 2):
+                    # The last copy keeps its own name ONLY when a declared
+                    # field binds to that name; a derived name nothing binds
+                    # to has no claim on a copy.
+                    continue
+                _pair_target[_i] = _nm
+                _claimed.add(_nm.upper())
+                _out_left[_si[2].upper()] -= 1
+                break
 
     def _stem_target(name, idx):
         """Declared dataItem this select item's output name should map to
@@ -4018,7 +4083,7 @@ def _non_filter_parameters(report) -> Set[str]:
 #
 # Full coverage only arrives once the scope is wide enough to include the
 # whole source document, at which point it hides every real filter in the
-# corpus (P_BEGIN_DATE, P_SITE_NAME, P_INSPECTOR ...). The slots simply are
+# corpus (date ranges, name filters, selection criteria ...). The slots simply are
 # not referenced inside the destination declarations: they are consumed by
 # the deployment wrapper, which the report document does not describe.
 # So this list stays until a DIFFERENT declared signal is found -- do not
@@ -6939,7 +7004,7 @@ def _build_token_resolver(report: ParsedReport):
         """Correlated lookup into a linked child that is TWO hops away,
         WHEN AND ONLY WHEN the chain collapses to one legal hop.
 
-        Oracle chains <link>s (applicant -> application -> course). SSRS has
+        Oracle chains <link>s (record -> middle -> far). SSRS has
         no notion of that chain, and the obvious translation -- nesting one
         Lookup inside another's source key -- is PUBLISH-FATAL:
 
@@ -6971,7 +7036,7 @@ def _build_token_resolver(report: ParsedReport):
         child's declared key order, the same way _lookup_for_child does.
         A far key that no relay accounts for means the middle row is
         contributing a key of its OWN (a real one-to-many chain, e.g. an
-        application id between an applicant and its courses): that value
+        id the middle rows introduce, fanning out to the far rows): that value
         is genuinely unexpressible in one SSRS expression, and the honest
         answer is None so the caller reaches its blank + disclosure path.
         The alternative it must NOT fall back to is a dataset-scoped
@@ -6980,13 +7045,12 @@ def _build_token_resolver(report: ParsedReport):
         verified, P0). Blank-and-disclosed beats both a wrong value and a
         report the server refuses.
 
-        Measured on the customer's own permit letter: the contact org id
-        the envelope link needs sits two hops from the permit row (permit
-        -> permittee -> contact); the permittee query selects
-        ``SA.Site_Id AS Permittee_Site_Id`` and filters ``SA.Site_Id =
-        :Site_Id``, so the contact's ``:Permittee_Site_Id`` key is the
-        permit's own Site_Id and the chain collapses. Before this relay
-        rule the link carried an empty org id (a disclosed blank)."""
+        Measured on a production report: a value a drill-through link
+        forwards sat two hops from the record row (record -> middle ->
+        far); the middle query selects ``T.K AS Mid_K`` and filters
+        ``T.K = :K``, so the far query's ``:Mid_K`` key is the record's own
+        K and the chain collapses. Before this relay rule the link carried
+        an empty value (a disclosed blank)."""
         child_q = query_by_name.get((child_ds or "").upper())
         if child_q is None or not getattr(child_q, "parent_group", ""):
             return None
@@ -7252,13 +7316,13 @@ def _build_token_resolver(report: ParsedReport):
         if u in group_summaries and _depth == 0:
             _gsrc, _gfn, _gq = group_summaries[u]
             # An Oracle <summary> is declared in ONE query's group tree, but
-            # its source column may belong to a DEEPER linked child (the
-            # permittee group summarises the contact query's org id). The
+            # its source column may belong to a DEEPER linked child (a
+            # middle group summarising a far query's column). The
             # value lives where the column is DECLARED, so the correlation
             # is resolved against that dataset -- the declaring group only
             # says where the total resets. Measured: keeping the declared
             # query here made the lookup below decline at its scope check
-            # and the envelope link shipped an empty org id.
+            # and a drill-through link shipped an empty parameter value.
             if (_gq and _gsrc
                     and not _scope_declares(_gq, _gsrc)
                     and _gsrc.upper() in all_field_owner):
@@ -15555,8 +15619,8 @@ def _declared_alias_relays(sql: str, carriers, bind_carriers=None) -> dict:
       SAME EXPRESSION  the alias selects the identical column reference as
                        a column in ``carriers`` -- ``{MID_COL_UPPER:
                        root_col}``, the middle query's columns already known
-                       to carry a bound key (``SA.Site_Id AS Site_Id`` and
-                       ``SA.Site_Id AS Permittee_Site_Id``): equal by SQL
+                       to carry a bound key (``T.K AS K`` and
+                       ``T.K AS Mid_K``): equal by SQL
                        semantics on every row, no data assumption at all;
       BIND EQUALITY    the alias selects ``T.C`` and a top-level WHERE
                        conjunct equates ``T.C`` to ``:k`` where k is in

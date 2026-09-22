@@ -192,6 +192,18 @@ CORPORA = {
     "wild4": Path(os.environ.get(
         "O2S_WILD_CORPUS4",
         "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus4")),
+    "wild5": Path(os.environ.get(
+        "O2S_WILD_CORPUS5",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus5")),
+    "wild6": Path(os.environ.get(
+        "O2S_WILD_CORPUS6",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus6")),
+    "wild7": Path(os.environ.get(
+        "O2S_WILD_CORPUS7",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus7")),
+    "wild8": Path(os.environ.get(
+        "O2S_WILD_CORPUS8",
+        "C:/Users/maxca/Downloads/_o2s_scratch11/wild_corpus8")),
 }
 
 
